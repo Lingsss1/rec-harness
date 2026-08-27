@@ -1,0 +1,53 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AtP*｜高效 Activation Patching 精讲</title><style>
+:root{--ink:#17211f;--muted:#64706d;--bg:#f4f1ea;--card:#fffdf8;--accent:#087f6d;--accent2:#f07b52;--line:#d9ddd8;--code:#10201d}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.7 system-ui,-apple-system,"PingFang SC",sans-serif}.wrap{max-width:1080px;margin:auto;padding:42px 24px 90px}header{padding:36px;border-radius:24px;background:linear-gradient(135deg,#10201d,#18483f);color:white}h1{margin:0 0 8px;font-size:38px;line-height:1.2}h2{margin-top:42px;border-left:5px solid var(--accent);padding-left:14px}h3{margin-top:24px}.tag{display:inline-block;padding:3px 10px;border:1px solid #ffffff55;border-radius:99px;margin:8px 6px 0 0}.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:24px;margin:18px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}.formula{overflow:auto;background:var(--code);color:#d9f4ed;border-radius:14px;padding:18px;font:17px/1.8 ui-monospace,SFMono-Regular,monospace}.warn{background:#fff1e9;border-color:#f3b99e}.ok{background:#eaf6f2}table{width:100%;border-collapse:collapse}th,td{padding:11px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted)}pre{white-space:pre-wrap;background:#10201d;color:#d9f4ed;padding:18px;border-radius:14px;overflow:auto}details{background:white;border:1px solid var(--line);border-radius:14px;padding:14px 18px;margin:10px 0}summary{cursor:pointer;font-weight:700}a{color:var(--accent)}.small{color:var(--muted);font-size:14px}.flow{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.flow b{padding:8px 11px;background:#e6f3ef;border-radius:9px}.arrow{color:var(--accent2)}@media(max-width:650px){h1{font-size:30px}header{padding:26px}.wrap{padding:22px 14px}}
+</style></head><body><main class="wrap"><header><div class="small" style="color:#bfe2d9">论文精讲 · 梯度筛选 + 因果干预</div><h1>AtP*: Efficient and Scalable Localization</h1><p>Kramár et al.，Google DeepMind，2024｜用 2 次前向 + 1 次反向近似全量 Activation Patching，并专门修复 softmax 饱和与路径抵消造成的漏检。</p><span class="tag">Activation Patching</span><span class="tag">Attribution Patching</span><span class="tag">QK fix + GradDrop</span></header>
+
+<h2>1. 三层方法关系</h2><div class="card"><div class="flow"><b>Activation Patching：可信但 O(N)</b><span class="arrow">→</span><b>AtP：一阶近似、O(1) passes</b><span class="arrow">→</span><b>AtP*：修两类假阴性</b></div><p>这里的“因果”是模型内部干预意义：固定输入和其余计算，把某节点激活替换为 counterfactual 值，看目标 metric 改变多少。它不等于现实世界业务因果。</p></div>
+
+<h2>2. 核心公式</h2><div class="card"><p>准备成对输入 x<sub>clean</sub> 与 x<sub>noise</sub>，其目标行为不同。节点 n 的 clean/noise 激活分别为 n<sub>c</sub>,n<sub>n</sub>。</p><p><b>真实 Activation Patching：</b></p><div class="formula">I<sub>AP</sub>(n) = L(M(x<sub>clean</sub> | do(n←n<sub>noise</sub>))) − L(M(x<sub>clean</sub>))</div><p>每个节点都要重新跑下游，N 个节点约 N 次前向。</p><p><b>Attribution Patching（AtP）：</b></p><div class="formula">Î<sub>AtP</sub>(n) = (n<sub>noise</sub>−n<sub>clean</sub>)ᵀ · ∇<sub>n</sub>L(M(x<sub>clean</sub>))</div><p>这就是 patch 方向 δn 与 metric 梯度的点积，即一阶 Taylor。一次 noise forward 缓存 counterfactual，一次 clean forward + backward 得到所有节点分数。</p></div>
+
+<h2>3. Vanilla AtP 的两类致命漏检</h2><div class="grid"><div class="card warn"><h3>① Q/K softmax 饱和</h3><p>Attention 概率接近 0/1 时，对 Q/K 的局部梯度接近 0，但把 Q/K 换成 noise 值可能让注意力模式大变。AtP 给低分，真实 patch 影响很大。</p></div><div class="card warn"><h3>② 直接/间接路径抵消</h3><p>同一节点到输出有多条路径，反传梯度可能正负相抵，最终点积接近 0；真实非线性 patch 却仍有显著作用，形成假阴性。</p></div></div>
+
+<h2>4. AtP* 的两个修复</h2><div class="card"><h3>QK fix：softmax 这一步不再线性化</h3><p>对 Q/K patch，显式重算 patch 前后的 attention pattern 差 ΔA，然后只对更下游部分使用梯度：</p><div class="formula">Î<sub>QK-fix</sub>(n) = [A<sub>patched(n)</sub> − A<sub>clean</sub>]ᵀ · ∂L/∂A</div><p>它越过 softmax 饱和区，论文称额外计算低于约两次完整 Transformer forward（只重算注意力相关部分）。</p><h3>GradDrop：逐层切断梯度路径，暴露被抵消贡献</h3><p>对每层 ℓ，把该层残差贡献处的梯度置零，再为所有上游节点算一份 AtP。不同 drop 破坏不同抵消组合，最后按多个估计的幅值聚合：</p><div class="formula">Î<sub>GD</sub>(n) = aggregate<sub>ℓ</sub> | (n<sub>n</sub>−n<sub>c</sub>)ᵀ · ∇<sub>n</sub><sup>(drop ℓ)</sup>L |</div><p>代价约 L 次 backward（可复用前向激活），所以保留“与节点数无关”的扩展性，但并非免费。</p></div>
+
+<h2>5. 证据与论文主张</h2><div class="grid"><div class="card"><h3>系统校准</h3><p>论文不是只展示漂亮 circuit，而是把 AtP/AtP* 排名与真实 Activation Patching 效果逐节点比较，重点测“召回真正高影响节点所需验证成本”。</p></div><div class="card"><h3>跨规模实验</h3><p>包含 Pythia 410M、1B、2.8B、12B 等规模及多类成对 prompt/行为设置。QK fix 显著减少 query/key 漏检，GradDrop 能找回因路径抵消而漏掉的 attention/MLP 节点。</p></div><div class="card"><h3>漏检风险估计</h3><p>论文还提出随机子集 patch/统计检验思路，用于估计残余误差并约束仍有假阴性的概率；前提包括组合效应近似等，不能视为无条件保证。</p></div></div>
+<div class="card ok"><b>最重要的工程结论：</b>AtP* 仍被定位为 Activation Patching 的高召回预筛器，而不是替代真实 patch 的最终证据。</div>
+
+<h2>6. 实现骨架</h2><pre><code># paired clean/noise batches; model frozen, deterministic eval mode
+noise_cache = forward_and_cache(model, x_noise, nodes)
+metric_clean, clean_cache = forward_and_cache(model, x_clean, nodes)
+grads = backward_to_all_nodes(metric_clean)
+
+for n in nodes:
+    delta = noise_cache[n] - clean_cache[n]
+    score_atp[n] = dot(delta, grads[n])
+
+# QK fix: exact change through attention softmax
+for q_or_k in attention_qk_nodes:
+    A_patch = recompute_attention_with_one_qk_patched(q_or_k)
+    score_qk[q_or_k] = dot(A_patch - A_clean, grad_A)
+
+# GradDrop: re-backward while blocking each layer's residual contribution
+for layer in layers:
+    grads_drop = backward(metric_clean, stop_grad_at_residual(layer))
+    score_drop[layer] = dot_all(noise_cache-clean_cache, grads_drop)
+score_star = combine_abs(score_qk_or_atp, score_drop)
+
+# Top candidates only: exact patch and compare actual metric delta
+</code></pre>
+
+<h2>7. 迁移到当前 Kai Base</h2><table><tr><th>AtP* 元素</th><th>Kai 对应</th><th>建议</th></tr><tr><td>clean/noise prompt pair</td><td>同一曝光样本的有信息/破坏信息版本</td><td>优先使用真实配对：正确历史 vs 同桶错误历史、真 item vs 同类难负例；别用随意随机噪声。</td></tr><tr><td>node</td><td>Share-bottom channel、Cross group、TokenMix token、HSTU block、task tower</td><td>先模块/组级 patch，控制评估成本与 OOD。</td></tr><tr><td>metric</td><td>单任务 logit/loss、总 loss、pairwise score margin</td><td>多任务分别打分，避免加权总 loss 隐藏路径抵消。</td></tr><tr><td>AtP</td><td>δactivation × activation-gradient</td><td>比单纯 z×grad 更贴合“从成熟/正确状态换到 counterfactual”的明确方向。</td></tr><tr><td>QK fix</td><td>HSTU/attention 的 QK-softmax</td><td>若可 hook attention pattern，可对 Q/K 候选重算；普通 MLP 不适用。</td></tr><tr><td>GradDrop</td><td>残差、多分支、共享底座→任务塔</td><td>逐分支 stop-gradient 复算，检查直接/间接任务路径抵消。</td></tr></table>
+
+<h2>8. 边界/失败模式</h2><ul><li>论文聚焦 Transformer LLM 节点；推荐稀疏特征、Cross、SENET 并非原验证对象。</li><li>结论高度依赖 clean/noise 配对与 metric；counterfactual 不合理会得到无意义 circuit。</li><li>AtP/AtP* 仍是一阶近似，QK fix 只精确处理 softmax 这一步；下游非线性仍近似。</li><li>GradDrop 约 L 次 backward，层数或分支很多时成本明显。</li><li>单节点方法可能漏掉只有联合 patch 才出现的冗余、自修复和交互。</li><li>内部 patch 往往落在联合分布外，需要同桶配对、整组 patch 与实际指标验证。</li></ul>
+
+<h2>9. Leader 尖锐问答</h2>
+<details open><summary>Q1：这和我们的 Shuffle 有什么本质区别？</summary><p>Shuffle 用随机错误样本替换 activation；AtP 使用明确 clean/noise 成对 counterfactual，并先用 δ·grad 估计该 patch 的效果。AtP 更定向，Shuffle 更像总体依赖检验。</p></details>
+<details><summary>Q2：AtP 为什么比 Activation×Gradient 更适合冷启对比？</summary><p>Activation×Gradient 默认方向常是 z→0；AtP 的方向可设为成熟 Base 激活与冷启/破坏激活的差，直接近似“把成熟内部状态换成冷启状态”的 metric 变化。</p></details>
+<details><summary>Q3：AtP* 是否已经解决梯度法不可靠？</summary><p>没有。它针对 Q/K 饱和和路径抵消两类已知假阴性；大扰动下的其他非线性、交互与 OOD 仍存在，所以论文仍要求 Top 候选做真实 patch。</p></details>
+<details><summary>Q4：为什么不直接全量真实 patch？</summary><p>N 个节点需约 N 次前向；复杂 Base 很快不可承受。AtP 用常数次 pass 扫全量，GradDrop 与层数相关，再把真实 patch 限定到 Top-K。</p></details>
+<details><summary>Q5：QK fix 能用于 HSTU 吗？</summary><p>前提是 HSTU 内部确有可访问的 Q/K→attention pattern 计算，并能重算被 patch 的 pattern。如果实现是融合算子且 hook 不到，先对 attention 输出或 block 输出做普通 patch。</p></details>
+<details><summary>Q6：GradDrop 和多任务梯度冲突是一回事吗？</summary><p>不是。GradDrop 处理同一 metric 的多路径梯度抵消；多任务冲突是不同 loss 梯度方向不同。Kai 上两者都可能发生，应分别报“分任务梯度”和“逐路径 drop”。</p></details>
+<details><summary>Q7：怎样选 clean/noise 才可信？</summary><p>控制除目标因素外尽量相同：同用户/同场景难负例、相邻时间、同类 item；同时报告 activation 距离、特征分布与 baseline metric 差，避免 counterfactual 过远。</p></details>
+<details><summary>Q8：它能直接给出优化方案吗？</summary><p>不能。它定位“哪条内部通路承载某行为”。后续才根据通路类型选择蒸馏、初始化、容量、归一化、特征或损失方案，并用训练实验归因。</p></details>
+
+<h2>10. 官方来源</h2><div class="card"><p><a href="https://deepmind.google/research/publications/68553/">Google DeepMind 论文页</a> · <a href="https://arxiv.org/abs/2403.00745">arXiv</a> · <a href="https://arxiv.org/pdf/2403.00745">PDF</a></p><p class="small">作者：János Kramár, Tom Lieberum, Rohin Shah, Neel Nanda。</p></div></main></body></html>

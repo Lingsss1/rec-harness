@@ -1,0 +1,50 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Integrated Gradients｜ICML 2017 精讲</title><style>
+:root{--ink:#17211f;--muted:#64706d;--bg:#f4f1ea;--card:#fffdf8;--accent:#087f6d;--accent2:#f07b52;--line:#d9ddd8;--code:#10201d}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.7 system-ui,-apple-system,"PingFang SC",sans-serif}.wrap{max-width:1080px;margin:auto;padding:42px 24px 90px}header{padding:36px;border-radius:24px;background:linear-gradient(135deg,#10201d,#18483f);color:white}h1{margin:0 0 8px;font-size:38px;line-height:1.2}h2{margin-top:42px;border-left:5px solid var(--accent);padding-left:14px}h3{margin-top:24px}.tag{display:inline-block;padding:3px 10px;border:1px solid #ffffff55;border-radius:99px;margin:8px 6px 0 0}.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:24px;margin:18px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}.formula{overflow:auto;background:var(--code);color:#d9f4ed;border-radius:14px;padding:18px;font:17px/1.8 ui-monospace,SFMono-Regular,monospace}.step{border-left:3px solid #8ac7bc;padding-left:16px;margin:14px 0}.warn{background:#fff1e9;border-color:#f3b99e}.ok{background:#eaf6f2}table{width:100%;border-collapse:collapse}th,td{padding:11px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted)}pre{white-space:pre-wrap;background:#10201d;color:#d9f4ed;padding:18px;border-radius:14px;overflow:auto}details{background:white;border:1px solid var(--line);border-radius:14px;padding:14px 18px;margin:10px 0}summary{cursor:pointer;font-weight:700}a{color:var(--accent)}.small{color:var(--muted);font-size:14px}.metric{font-size:28px;font-weight:800;color:var(--accent)}@media(max-width:650px){h1{font-size:30px}header{padding:26px}.wrap{padding:22px 14px}}
+</style></head><body><main class="wrap">
+<header><div class="small" style="color:#bfe2d9">论文精讲 · 理论基础 04</div><h1>Axiomatic Attribution for Deep Networks</h1><p>Sundararajan, Taly &amp; Yan，ICML 2017｜一句话：单点梯度会饱和，于是从“无信息 baseline”走到真实输入，沿路径累计梯度。</p><span class="tag">Integrated Gradients</span><span class="tag">Sensitivity</span><span class="tag">Implementation Invariance</span></header>
+
+<h2>1. 为什么普通梯度不够</h2><div class="card"><p>考虑 F(x)=1−ReLU(1−x)。当 x≥1 时输出已经饱和，局部梯度为 0；但从 baseline x′=0 到 x=2，显然输入变化使输出从 0 变成 1。单点梯度只看终点切线，因此会把“已经发挥完作用的特征”误判为不重要。</p><div class="formula">Gradient × Input：只在 x 处看 ∂F/∂x
+Integrated Gradients：沿 x′ → x 的整条路径看 ∂F/∂x</div></div>
+
+<h2>2. 两条核心公理</h2><div class="grid"><div class="card"><h3>Sensitivity</h3><p>如果输入与 baseline 只在一个特征上不同，且输出不同，这个特征必须得到非零归因；若函数完全不依赖某特征，其归因应为零。</p></div><div class="card"><h3>Implementation Invariance</h3><p>两个网络即使内部实现不同，只要对所有输入实现同一函数，其归因结果应一致。归因应解释函数，而不是计算图写法。</p></div></div>
+
+<h2>3. 核心公式逐步拆解</h2><div class="card">
+<div class="step"><b>选 baseline x′。</b>它代表“缺少待解释信息”的参照，例如图像黑底、embedding 零向量，或推荐里的合理背景样本。</div>
+<div class="step"><b>构造直线路径。</b><div class="formula">x(α) = x′ + α(x−x′),   α∈[0,1]</div><p>α=0 是 baseline，α=1 是真实输入。</p></div>
+<div class="step"><b>沿路径积分局部梯度。</b><div class="formula">IGᵢ(x) = (xᵢ−x′ᵢ) · ∫₀¹ ∂F(x′+α(x−x′))/∂xᵢ dα</div><p>前一项是该特征实际走了多远；积分是沿途平均斜率。两者乘积是从 baseline 到输入的累计贡献。</p></div>
+<div class="step"><b>Completeness 检查。</b><div class="formula">∑ᵢ IGᵢ(x) = F(x) − F(x′)</div><p>归因总和等于输出差。这来自微积分基本定理，也是实现是否足够收敛的直接 QA 指标。</p></div>
+</div>
+
+<h2>4. 数值实现</h2><pre><code>def integrated_gradients(model, x, baseline, target_fn, steps=32):
+    total_grad = 0
+    for k in range(1, steps + 1):
+        alpha = k / steps
+        xk = baseline + alpha * (x - baseline)
+        xk.requires_grad_(True)
+        target = target_fn(model(xk))     # logit、loss 或某任务输出
+        grad = autograd.grad(target.sum(), xk)[0]
+        total_grad += grad
+    return (x - baseline) * total_grad / steps
+
+ig = integrated_gradients(model, activation, activation_baseline,
+                          target_fn=multitask_loss, steps=32)
+relative_error = abs(ig.sum() - (F(x)-F(baseline))) / abs(F(x)-F(baseline))
+</code></pre><table><tr><th>超参</th><th>建议</th></tr><tr><td>steps</td><td>先 16/32，检查 completeness error；不收敛再升 64/128，而不是固定迷信一个值。</td></tr><tr><td>target</td><td>解释业务 logit、单任务 loss 与加权总 loss 得到的结论不同，必须明确。</td></tr><tr><td>baseline</td><td>至少比较零向量、数据均值/中位数、多个背景样本；推荐离散 embedding 尤其不能默认“零=无信息”。</td></tr><tr><td>层</td><td>对隐藏激活做 IG 时，是解释从 activation baseline 到真实 activation 的下游函数；不再满足“只解释原始输入”的语义。</td></tr></table>
+
+<h2>5. 论文证据</h2><div class="grid"><div class="card"><h3>公理证据</h3><p>论文证明 IG 满足 Sensitivity 与 Implementation Invariance，并讨论 completeness、linearity、symmetry-preserving 等性质；核心优势首先是形式规范。</p></div><div class="card"><h3>跨模态案例</h3><p>在图像模型、文本模型和化学模型上展示归因，用于模型调试、规则提取和理解预测。</p></div><div class="card warn"><h3>证据边界</h3><p>归因图更合理不等于下游优化一定涨点；IG 也不是因果识别方法。baseline 与路径是额外建模选择。</p></div></div>
+
+<h2>6. 与当前“梯度 + Shuffle”诊断的关系</h2><div class="card"><table><tr><th>方法</th><th>测什么</th><th>成本</th><th>主要风险</th></tr><tr><td>Activation×Gradient</td><td>当前点置零干预的一阶近似</td><td>约 1 次反传</td><td>饱和、非线性</td></tr><tr><td>Integrated Gradients</td><td>从 baseline 到当前表示的路径累计归因</td><td>K 次梯度</td><td>baseline/路径选择</td></tr><tr><td>Activation Shuffle</td><td>实际破坏样本对齐后的性能变化</td><td>候选数×前向评估</td><td>联合分布外</td></tr></table><p><b>合理组合：</b>普通梯度扫全量 → IG 复核“低梯度但可能饱和”的关键模块 → global/conditional shuffle 做实际干预。IG 是梯度近似的增强验证，不替代 shuffle。</p></div>
+
+<h2>7. 局限与失败模式</h2><ul><li><b>Baseline 决定问题：</b>IG 解释的是“相对谁”的贡献，baseline 不合理时结果虽满足公理却业务无意义。</li><li><b>路径分布外：</b>embedding 线性插值通常不是合法离散 ID 表示；中间点可能远离训练流形。</li><li><b>相关与交互：</b>单特征 attribution 仍难表达替代关系与高阶交互。</li><li><b>计算成本：</b>32 步意味着约 32 倍梯度计算，适合候选复核而非全量日常扫描。</li><li><b>目标依赖：</b>对概率、logit、loss 求 IG 会不同；softmax 饱和时通常解释 logit更稳，但诊断优化应对齐训练 loss。</li></ul>
+
+<h2>8. Leader 尖锐问答</h2>
+<details open><summary>Q1：为什么不直接全部用 IG，跳过普通梯度？</summary><p>IG 成本约为 K 次反传。对全模型每层扫描太贵；普通梯度用一次反传筛出少量不确定模块，IG 用来处理饱和/非线性候选，成本更合理。</p></details>
+<details><summary>Q2：IG 满足公理，就代表归因正确吗？</summary><p>不代表唯一的业务真相。公理排除一部分明显不合理方法，但 baseline、路径和目标仍决定解释问题；正确性仍需删除/插入或 shuffle 干预测试。</p></details>
+<details><summary>Q3：推荐离散特征的 baseline 怎么选？</summary><p>不要盲用不存在的 ID。可在 embedding 层用零/均值背景，或从同场景背景样本采样多个 baseline 做 Expected-IG，并报告对 baseline 的敏感性。</p></details>
+<details><summary>Q4：线性路径本身会不会 OOD？</summary><p>会。IG 的路径有数学简洁性，不保证都落在数据流形上。可以用多背景平均、合法样本路径或只在连续隐藏表示上复核，但语义要相应收窄。</p></details>
+<details><summary>Q5：IG 与 Activation×Gradient 什么关系？</summary><p>后者是在终点取一次局部梯度并乘位移；IG 是沿完整路径取平均梯度再乘位移。若函数沿路径近似线性，两者接近。</p></details>
+<details><summary>Q6：IG 高、Shuffle 不掉点怎么解释？</summary><p>可能 baseline 选择造成高归因、模块存在冗余替代、shuffle 保留了某些统计量，或业务指标对 loss 变化不敏感。应补充置零、成组 shuffle 与条件 shuffle。</p></details>
+<details><summary>Q7：怎么验证实现没写错？</summary><p>检查 completeness residual；增加 steps 后误差应下降。再用线性模型测试 IG 是否等于 wᵢ(xᵢ−x′ᵢ)，并核对不同 batch 分块结果。</p></details>
+
+<h2>9. 原始来源</h2><div class="card"><p><a href="https://proceedings.mlr.press/v70/sundararajan17a.html">PMLR 官方论文页</a> · <a href="https://proceedings.mlr.press/v70/sundararajan17a/sundararajan17a.pdf">官方 PDF</a> · <a href="https://arxiv.org/abs/1703.01365">arXiv</a></p></div>
+</main></body></html>

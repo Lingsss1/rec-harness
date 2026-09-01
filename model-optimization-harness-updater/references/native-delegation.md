@@ -12,7 +12,13 @@ Keep work in the root when it updates the Research Graph, posterior, selection r
 
 Give each task only its objective, typed lineage, verified local facts, explicitly unverified diagnoses, information gap, allowed tools/sources, forbidden actions, write scope, output schema, and stop condition. Do not pass the full research history. A pack is temporary unless it was actually dispatched and influenced a decision; persist its hash when retained.
 
-Planning and dispatch are distinct. Previewing packs is read-only. Dispatch freezes the exact context hash and changes the advisory lifecycle from `planned` to `dispatched`; only dispatched work requires reconciliation. Unused or unsuitable plans should be cancelled. A non-parallel plan must never block local Hypothesis formation.
+Planning and dispatch are distinct. Previewing packs is read-only. Every plan
+has an immutable delegation ID and monotonic version. Never overwrite a planned
+or dispatched advisory; root must explicitly cancel before creating a new
+version. Dispatch freezes the exact context hash and changes the advisory
+lifecycle from `planned` to `dispatched`; only dispatched work requires
+reconciliation. A parallel plan requires an explicit root dispatch/cancel
+decision. A non-parallel plan must never block local Hypothesis formation.
 
 ## Artifact contract
 
@@ -47,7 +53,11 @@ Compute `artifact_hash` over the canonical artifact content excluding the hash f
 
 The root Codex verifies source identity, local applicability, code claims, contradictions, and protocol compliance. Every accepted claim names its `source_task_id` and `source_claim_id`; accepted evidence must be a non-empty subset of that source claim's evidence. It records accepted and rejected claims, conflicts, resolutions, evidence references, and the root decision in one reconciliation receipt. Persist the full receipt in an append-only event log and keep only its hashes, paths, accepted summaries, and lineage in the scheduling projection. Only accepted, attributable claims may enter Investigation evidence. Register a formal Hypothesis only after this gate.
 
-Use the Harness `next` projection before deciding the next workflow transition. It is deterministic and read-only; use its state hash as an optimistic-concurrency guard on subsequent root mutations.
+Use the Harness `next` projection before deciding the next workflow transition.
+It is deterministic and read-only with respect to policy state; persist its
+receipt in the append-only decision log. Its state hash is mandatory on every
+subsequent root mutation, whose load/check/transition/save must share one state
+lock.
 
 ## Code worktrees
 

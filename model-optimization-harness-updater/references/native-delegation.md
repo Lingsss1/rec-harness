@@ -12,6 +12,8 @@ Keep work in the root when it updates the Research Graph, posterior, selection r
 
 Give each task only its objective, typed lineage, verified local facts, explicitly unverified diagnoses, information gap, allowed tools/sources, forbidden actions, write scope, output schema, and stop condition. Do not pass the full research history. A pack is temporary unless it was actually dispatched and influenced a decision; persist its hash when retained.
 
+Planning and dispatch are distinct. Previewing packs is read-only. Dispatch freezes the exact context hash and changes the advisory lifecycle from `planned` to `dispatched`; only dispatched work requires reconciliation. Unused or unsuitable plans should be cancelled. A non-parallel plan must never block local Hypothesis formation.
+
 ## Artifact contract
 
 A delegated artifact reports:
@@ -19,8 +21,13 @@ A delegated artifact reports:
 ```json
 {
   "task_id": "...",
+  "context_hash": "...",
+  "artifact_hash": "...",
+  "artifact_path": "...",
   "status": "complete|abstained|blocked",
-  "claims": [],
+  "claims": [
+    {"claim_id": "...", "claim": "...", "evidence_refs": ["..."]}
+  ],
   "evidence_refs": [],
   "counterevidence": [],
   "competing_explanations": [],
@@ -34,9 +41,13 @@ A delegated artifact reports:
 
 Missing provenance keeps a claim at brainstorming status. Multiple agents repeating a claim does not strengthen its scientific weight.
 
+Compute `artifact_hash` over the canonical artifact content excluding the hash field itself. Reject artifacts whose task ID is unknown, context hash is stale, artifact hash does not verify, or schema is incomplete.
+
 ## Root reconciliation
 
-The root Codex verifies source identity, local applicability, code claims, contradictions, and protocol compliance. It records accepted and rejected claims, conflicts, resolutions, evidence references, and the root decision in one reconciliation receipt. Only accepted, attributable claims may enter Investigation evidence. Register a formal Hypothesis only after this gate.
+The root Codex verifies source identity, local applicability, code claims, contradictions, and protocol compliance. Every accepted claim names its `source_task_id` and `source_claim_id`; accepted evidence must be a non-empty subset of that source claim's evidence. It records accepted and rejected claims, conflicts, resolutions, evidence references, and the root decision in one reconciliation receipt. Persist the full receipt in an append-only event log and keep only its hashes, paths, accepted summaries, and lineage in the scheduling projection. Only accepted, attributable claims may enter Investigation evidence. Register a formal Hypothesis only after this gate.
+
+Use the Harness `next` projection before deciding the next workflow transition. It is deterministic and read-only; use its state hash as an optimistic-concurrency guard on subsequent root mutations.
 
 ## Code worktrees
 

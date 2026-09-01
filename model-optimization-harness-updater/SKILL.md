@@ -114,6 +114,8 @@ The Harness is not an agent runtime. When an investigation divides into independ
 
 Delegation is optional and capability-dependent. Do not create permanent roles or require subagents for coupled, small, destructive, or state-mutating work. Agent agreement is review signal, never independent scientific evidence. For the context-pack, artifact, reconciliation, and isolated-worktree contracts, read [references/native-delegation.md](references/native-delegation.md) only when delegation is actually being considered.
 
+When the target Harness exposes a deterministic `next` action, use it before open-ended routing. Treat it as a read-only workflow gate, preserve its decision receipt, and use its state hash to reject stale mutations. Planning delegation does not mean dispatching it: only explicitly dispatched tasks require root reconciliation.
+
 ## Acceptance rules
 
 - Choose one primary validation metric and explicit guardrails before the run.

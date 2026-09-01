@@ -108,6 +108,12 @@ Before proposing the next experiment, load only:
 
 Do not load full training logs or the entire historical memory into context. Use paths and stable IDs to recover details when needed.
 
+## Conditional native delegation
+
+The Harness is not an agent runtime. When an investigation divides into independent, context-bounded workstreams, Codex may use its available native subagent capability. The root Codex remains the only research-state writer: it creates minimal context packs, validates returned evidence and sources, resolves conflicts, and performs one reconciled Harness update. Subagents may return candidate evidence or isolated implementation artifacts; they must not update posteriors, select an incumbent, modify the protocol, or launch training.
+
+Delegation is optional and capability-dependent. Do not create permanent roles or require subagents for coupled, small, destructive, or state-mutating work. Agent agreement is review signal, never independent scientific evidence. For the context-pack, artifact, reconciliation, and isolated-worktree contracts, read [references/native-delegation.md](references/native-delegation.md) only when delegation is actually being considered.
+
 ## Acceptance rules
 
 - Choose one primary validation metric and explicit guardrails before the run.

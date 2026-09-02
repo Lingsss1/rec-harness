@@ -28,7 +28,7 @@ test("server-renders the learning workspace", async () => {
 });
 
 test("ships the curated HTML lesson library", async () => {
-  const [harness, hot100, defenseScript, defenseManual, lrBestStructures, paperMap, misoPrimitives, agentResearchMap, autoResearchFramework, paperGuides, agentResearchGuides] = await Promise.all([
+  const [harness, hot100, defenseScript, defenseManual, lrBestStructures, paperMap, misoPrimitives, agentResearchMap, autoResearchFramework, qformer, paperGuides, agentResearchGuides] = await Promise.all([
     readFile(new URL("../public/lessons/harness-opd-evi.html", import.meta.url), "utf8"),
     readFile(new URL("../public/lessons/hot100-14days.html", import.meta.url), "utf8"),
     readFile(new URL("../public/lessons/defense-script-qa.html", import.meta.url), "utf8"),
@@ -38,6 +38,7 @@ test("ships the curated HTML lesson library", async () => {
     readFile(new URL("../public/lessons/miso-primitives.html", import.meta.url), "utf8"),
     readFile(new URL("../public/lessons/agent-mle-auto-research.html", import.meta.url), "utf8"),
     readFile(new URL("../public/lessons/auto-research-framework.html", import.meta.url), "utf8"),
+    readFile(new URL("../public/lessons/qformer-guide.html", import.meta.url), "utf8"),
     readdir(new URL("../public/lessons/paper-guides/", import.meta.url)),
     readdir(new URL("../public/lessons/agent-research-guides/", import.meta.url)),
   ]);
@@ -55,7 +56,12 @@ test("ships the curated HTML lesson library", async () => {
   assert.match(misoPrimitives, /Ranking：哪些神经元重要/);
   assert.match(agentResearchMap, /Agent-as-MLE × Auto Research/);
   assert.match(agentResearchMap, /三层 Memory 设计/);
-  assert.match(autoResearchFramework, /Typed Research Graph/);
+  assert.match(autoResearchFramework, /Arm：宽而稳定的方向/);
+  assert.match(qformer, /Q-Former：用/);
+  assert.match(qformer, /32 个可学习 Query/);
+  assert.match(qformer, /Image-Text Contrastive/);
+  assert.match(qformer, /三种 Attention Mask/);
+  assert.match(qformer, /Salesforce LAVIS/);
   assert.ok(paperGuides.filter((name) => name.endsWith(".html")).length >= 12);
   assert.equal(agentResearchGuides.filter((name) => name.endsWith(".html")).length, 7);
 });

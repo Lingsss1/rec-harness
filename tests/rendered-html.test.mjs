@@ -66,6 +66,8 @@ test("ships the curated HTML lesson library", async () => {
   assert.match(qformerCross11, /QFormerCross11/);
   assert.match(qformerCross11, /CrossValue/);
   assert.match(qformerCross11, /Original-X/);
+  assert.match(qformerCross11, /Multi-Head Self-Attention/);
+  assert.match(qformerCross11, /Original X 是只读证据源/);
   assert.match(qformerCross11, /2048 → 256 → 128 → 1/);
   assert.ok(paperGuides.filter((name) => name.endsWith(".html")).length >= 12);
   assert.equal(agentResearchGuides.filter((name) => name.endsWith(".html")).length, 7);

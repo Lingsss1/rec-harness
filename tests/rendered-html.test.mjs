@@ -28,7 +28,7 @@ test("server-renders the learning workspace", async () => {
 });
 
 test("ships the curated HTML lesson library", async () => {
-  const [harness, hot100, defenseScript, defenseManual, lrBestStructures, paperMap, misoPrimitives, agentResearchMap, autoResearchFramework, qformer, paperGuides, agentResearchGuides] = await Promise.all([
+  const [harness, hot100, defenseScript, defenseManual, lrBestStructures, paperMap, misoPrimitives, agentResearchMap, autoResearchFramework, qformer, qformerCross11, paperGuides, agentResearchGuides] = await Promise.all([
     readFile(new URL("../public/lessons/harness-opd-evi.html", import.meta.url), "utf8"),
     readFile(new URL("../public/lessons/hot100-14days.html", import.meta.url), "utf8"),
     readFile(new URL("../public/lessons/defense-script-qa.html", import.meta.url), "utf8"),
@@ -39,6 +39,7 @@ test("ships the curated HTML lesson library", async () => {
     readFile(new URL("../public/lessons/agent-mle-auto-research.html", import.meta.url), "utf8"),
     readFile(new URL("../public/lessons/auto-research-framework.html", import.meta.url), "utf8"),
     readFile(new URL("../public/lessons/qformer-guide.html", import.meta.url), "utf8"),
+    readFile(new URL("../public/lessons/qformer-cross11-code-guide.html", import.meta.url), "utf8"),
     readdir(new URL("../public/lessons/paper-guides/", import.meta.url)),
     readdir(new URL("../public/lessons/agent-research-guides/", import.meta.url)),
   ]);
@@ -62,6 +63,10 @@ test("ships the curated HTML lesson library", async () => {
   assert.match(qformer, /Image-Text Contrastive/);
   assert.match(qformer, /三种 Attention Mask/);
   assert.match(qformer, /Salesforce LAVIS/);
+  assert.match(qformerCross11, /QFormerCross11/);
+  assert.match(qformerCross11, /CrossValue/);
+  assert.match(qformerCross11, /Original-X/);
+  assert.match(qformerCross11, /2048 → 256 → 128 → 1/);
   assert.ok(paperGuides.filter((name) => name.endsWith(".html")).length >= 12);
   assert.equal(agentResearchGuides.filter((name) => name.endsWith(".html")).length, 7);
 });

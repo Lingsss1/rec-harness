@@ -155,6 +155,7 @@ const categories = rawCategories.map((group) => ({
 const seedProblems: Problem[] = categories.flatMap((group) => group.problems);
 
 const lessonLibrary: Lesson[] = [
+  { id:"qformer-cross11-code", title:"QFormerCross11：源码与模型结构", category:"推荐模型", description:"沿 KuaiRec auc41 Incumbent 的真实 forward 路径，拆解双阶段 latent queries、CrossValue 乘性交互、Original-X、Query 路由与预测塔。", href:"/lessons/qformer-cross11-code-guide.html", depth:"源码级结构精讲", source:"rec-harness commit 4b6aa92" },
   { id:"qformer", title:"Q-Former：从 Query Token 到视觉前缀", category:"多模态", description:"拆解 BLIP-2 的 32 个可学习 Query、Cross-Attention、三种 Mask、两阶段预训练、张量流与代码映射。", href:"/lessons/qformer-guide.html", depth:"结构与公式精讲", source:"BLIP-2 论文与 Salesforce LAVIS" },
   { id:"baidu-recsys-interview", title:"百度推荐策略部：定制面试作战室", category:"面试表达", description:"基于简历与转正答辩材料整理的预测题库、项目风险审计、自我介绍、项目讲稿与 12 题计时模拟面试。", href:"/lessons/baidu-recsys-interview.html", depth:"定制模拟面试", source:"简历、转正答辩与公开业务资料" },
   { id:"defense-script-qa", title:"转正答辩：逐页讲稿与 40 个追问", category:"面试表达", description:"对应 29 页答辩 PPT 的逐页话术、自然转场、时间分配、评委高概率追问、建议回答与五条表达红线。", href:"/lessons/defense-script-qa.html", depth:"18 分钟逐页演练", source:"凌浩然转正答辩 PPT" },

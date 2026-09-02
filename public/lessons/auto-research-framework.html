@@ -12,6 +12,9 @@
 <style>
 .bandit-map{display:grid;grid-template-columns:1fr 56px 1.2fr 56px 1fr;align-items:stretch;gap:10px}.bandit-map article{padding:22px}.bandit-map h3{margin:5px 0 10px;font:800 25px var(--serif)}.bandit-map p{margin:0;color:var(--muted);font-size:13px;line-height:1.7}.bigarr{display:grid;place-items:center;color:var(--c);font-size:30px;font-weight:900}.slotgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:15px}.slot{padding:17px;border:1px solid var(--line);background:white}.slot small{color:var(--c);font-weight:900}.slot b{display:block;margin:7px 0;font:800 17px var(--serif)}.slot p{margin:0;color:var(--muted);font-size:12px}.relation{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:18px}.relation>div{padding:20px;border:1px solid var(--line);background:var(--paper)}.relation b{font:800 20px var(--serif)}.relation p{margin:8px 0 0;color:var(--muted);font-size:13px}@media(max-width:900px){.bandit-map{grid-template-columns:1fr}.bigarr{transform:rotate(90deg);min-height:35px}.slotgrid,.relation{grid-template-columns:1fr 1fr}}@media(max-width:600px){.slotgrid,.relation{grid-template-columns:1fr}}
 </style>
+<style>
+.posterior-demo{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:16px}.posterior-card{padding:20px;border:1px solid var(--line);background:white}.posterior-card h4{margin:0 0 12px;font:800 21px var(--serif)}.posterior-value{font:800 28px/1.2 Consolas,monospace;color:var(--navy)}.posterior-bar{height:10px;margin:12px 0;border-radius:99px;background:#dde1dd;overflow:hidden}.posterior-bar i{display:block;height:100%;background:var(--c);transition:width .25s}.demo-actions{display:flex;flex-wrap:wrap;gap:9px;margin-top:14px}.demo-actions button{padding:10px 14px;border:1px solid var(--navy);background:white;color:var(--navy);font-weight:800;cursor:pointer}.demo-actions button:hover{background:var(--navy);color:white}.bandit-table{width:100%;margin-top:16px;border-collapse:collapse;background:white}.bandit-table th,.bandit-table td{padding:13px 12px;border:1px solid var(--line);text-align:left;vertical-align:top}.bandit-table th{background:var(--navy);color:white;font-size:12px}.bandit-table td{color:var(--muted);font-size:12px;line-height:1.55}.bandit-table td:first-child{color:var(--ink);font-weight:800}.round-list{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:16px;counter-reset:round}.round-item{padding:17px;border:1px solid var(--line);background:white}.round-item:before{counter-increment:round;content:counter(round,decimal-leading-zero);display:block;margin-bottom:7px;color:var(--c);font-weight:900}.round-item b{font:800 17px var(--serif)}.round-item p{margin:7px 0 0;color:var(--muted);font-size:12px;line-height:1.6}@media(max-width:800px){.posterior-demo,.round-list{grid-template-columns:1fr}}
+</style>
 </head>
 <body>
 <header class="top"><a class="brand" href="/"><i>L</i>Ling's Lab</a><nav class="nav"><a href="#basics">概念</a><a href="#why">问题</a><a href="#overview">架构</a><a href="#loops">双循环</a><a href="#bandit">Bandit</a><a href="#modules">模块</a><a href="#example">案例</a></nav></header>
@@ -66,11 +69,46 @@
   <div class="slot"><small>SLOT 03</small><b>Explore</b><p>选择不确定性或信息价值高、成本可控的新机制。</p></div>
   <div class="slot"><small>SLOT 04</small><b>Diagnose</b><p>用一次实验解决关键歧义，为后续多轮减少错误选择。</p></div>
 </div>
-<div class="algo"><h4>层次化后验怎样更新</h4><div class="formula">一次 Candidate 结果：
-Idea posterior  ← 强更新（直接检验该机制）
-Arm posterior   ← 弱更新（只提供方向级部分证据）
-Crash / OOM     ← 更新成本与执行风险，不把科学假设记为失败
-Invalid run     ← 不更新收益后验</div><p>弱更新 Arm 的原因是：一个具体实现失败，不等于整个宽方向错误；强更新 Idea 则能快速淘汰局部机制。多场景收益通常取较保守的一侧，避免只在单个数据集刷分。</p></div>
+<div class="algo"><h4>第一步：先定义“成功”，否则后验没有含义</h4><div class="formula">对场景 s，预先冻结：
+yᵢ,ₛ = 1  当 Δprimary ≥ promotion_threshold 且所有 guardrail 通过
+yᵢ,ₛ = 0  当运行有效、完整，但未通过上述门槛
+Crash / OOM：不更新成功率，只更新 cost / execution-risk
+Invalid：任何收益后验都不更新</div><p>每个 Idea、每个场景维护一个 Beta 成功率后验。多场景分别更新，选臂时再取保守聚合；这样不会把“一个数据集成功、另一个失败”压成含糊的平均值。</p></div>
+<div class="algo"><h4>第二步：Beta–Bernoulli 共轭更新，Idea 强、Arm 弱</h4><div class="formula">Idea i 在场景 s：θᵢ,ₛ ~ Beta(αᵢ,ₛ, βᵢ,ₛ)
+Arm  a 在场景 s：θₐ,ₛ ~ Beta(αₐ,ₛ, βₐ,ₛ)
+
+有效结果 y ∈ {0,1}：
+αᵢ,ₛ ← αᵢ,ₛ + w·y            βᵢ,ₛ ← βᵢ,ₛ + w·(1-y)
+αₐ,ₛ ← αₐ,ₛ + ηw·y           βₐ,ₛ ← βₐ,ₛ + ηw·(1-y)
+
+w = 证据权重（完整同协议实验通常为 1）
+η ∈ (0,1)，例如 0.25，表示 Arm 只接收四分之一证据</div><p>Idea 是被直接检验的机制，所以强更新；Arm 是宽方向，一次局部实现失败只能提供弱证据。新 Idea 的先验可从父 Arm 回退：用 Arm 的后验均值作为中心，但给较小的先验强度，既继承方向经验，又保留探索空间。</p></div>
+<div class="posterior-demo">
+  <div class="posterior-card"><h4>Idea 后验（强更新）</h4><div class="posterior-value" id="idea-beta">Beta(2.00, 2.00)</div><div class="posterior-bar"><i id="idea-bar" style="width:50%"></i></div><p>后验均值：<b id="idea-mean">0.500</b></p></div>
+  <div class="posterior-card"><h4>父 Arm 后验（η = 0.25）</h4><div class="posterior-value" id="arm-beta">Beta(4.00, 3.00)</div><div class="posterior-bar"><i id="arm-bar" style="width:57.14%"></i></div><p>后验均值：<b id="arm-mean">0.571</b></p></div>
+</div>
+<div class="demo-actions"><button id="posterior-success">加入一次成功 y=1</button><button id="posterior-failure">加入一次失败 y=0</button><button id="posterior-reset">重置示例</button></div>
+<div class="algo copper"><h4>第三步：每轮到底怎样选臂与 Candidate</h4><div class="round-list">
+  <div class="round-item"><b>摄取上一轮</b><p>只对 valid/completed 结果更新成功率；同步更新收益幅度、成本、风险和承诺状态。</p></div>
+  <div class="round-item"><b>构造候选</b><p>每个活跃 Idea 产生可运行 Candidate；先过滤超预算、协议冲突、重复和未完成调查。</p></div>
+  <div class="round-item"><b>分层采样</b><p>逐场景采样 θ̃ᵢ,ₛ 与 θ̃ₐ,ₛ；样本少的后验更宽，因此即使均值不高也偶尔抽到高值。</p></div>
+  <div class="round-item"><b>合并层级</b><p>p̃ᵢ,ₛ = ρᵢθ̃ᵢ,ₛ +(1−ρᵢ)θ̃ₐ,ₛ；Idea 证据越多，ρᵢ 越大。</p></div>
+  <div class="round-item"><b>跨场景保守化</b><p>p̃ᵢ = minₛ p̃ᵢ,ₛ，gain_cons = minₛ predicted_gainᵢ,ₛ；防止单数据集刷分。</p></div>
+  <div class="round-item"><b>依槽位选组合</b><p>先 Commit，再从剩余候选选 Exploit、Explore、Diagnose；每选一个就施加预算与多样性约束。</p></div>
+</div></div>
+<div class="algo"><h4>第四步：Exploit 与 Explore 使用不同的排序目标</h4><div class="formula">ExploitScore(c) = E[p_success(c)] × gain_cons − μ·cost − ν·risk
+ExploreScore(c) = sampled_p_success(c) × gain_cons + λ·information_value
+                  − μ·cost − ν·risk
+DiagnoseScore(c)= expected_decision_change × reuse_scope − cost
+
+information_value 可由后验方差、熵下降或“实验后会淘汰多少候选”的估计构成。</div><p>利用槽看后验均值，偏向当前最有把握的收益；探索槽看一次后验样本并奖励信息价值，不确定但有上限的方向会被选中；诊断槽不要求立即涨点，只要求显著改变后续选择。Commit 槽防止系统每轮被新奇 Idea 吸走。</p></div>
+<table class="bandit-table"><thead><tr><th>候选</th><th>后验均值</th><th>本轮 TS 样本</th><th>信息价值</th><th>成本/风险</th><th>进入哪个槽</th></tr></thead><tbody>
+<tr><td>交互结构 / Idea A</td><td>0.72（证据多）</td><td>0.70</td><td>低</td><td>中</td><td><b>Exploit</b>：均值与保守收益最高</td></tr>
+<tr><td>表征几何 / Idea B</td><td>0.50（证据少）</td><td>0.84</td><td>高</td><td>低</td><td><b>Explore</b>：不确定性带来高样本与高信息价值</td></tr>
+<tr><td>监督目标 / Idea C</td><td>0.61</td><td>0.59</td><td>中</td><td>高</td><td>暂不选：效用被成本/风险扣减</td></tr>
+<tr><td>样本充分性 / Idea D</td><td>不评价涨点</td><td>—</td><td>可改变多个候选判断</td><td>很低</td><td><b>Diagnose</b>：先验证共同前提</td></tr>
+</tbody></table>
+<div class="algo green"><h4>探索与利用为什么能同时存在</h4><p><b>概率匹配：</b>Beta 后验越宽，TS 越可能偶尔给它高样本；证据积累后分布收窄，探索自然减少。<b>显式槽位：</b>即使 Exploit 长期领先，也不能吃掉 Explore/Diagnose 的预算。<b>信息价值：</b>奖励能够改变未来多次决策的实验。<b>成本与风险：</b>避免“最不确定”自动等于“最值得探索”。四者一起比固定 ε-greedy 更适合昂贵、异质的 GPU 实验。</p></div>
 <div class="relation">
   <div><b>Bandit 研究线解决“选哪个”</b><p>把历史结果、不确定性、收益上限、信息价值和成本压缩为有限预算下的序贯选择；适合候选已经结构化、奖励可比较的阶段。</p></div>
   <div><b>当前 RSI 尝试解决“凭什么选、以后会不会更会选”</b><p>Diagnostic Toolkit 提供内部证据，Memory 保存长期规律，Tool Evolver 补齐测量盲区。它们可以反过来给 Bandit 更好的特征、先验和信息价值估计。</p></div>
@@ -130,4 +168,9 @@ const data=[
 ["STEP 06 · CONSOLIDATE","把结果变成有边界的经验","追加 Episode；有独立同机制证据时才更新 Lesson，并保留反证和证伪条件。","新旧 Episode、Failure 与 Strategy。","Lesson、Plateau 和下一假设队列。","一次结果通常只进 Episode，重复证据才进 Lesson。"],
 ["STEP 07 · EVOLVE","把反复歧义变成工具候选","定义决策合同，检索原始论文，隔离实现并走六级验证。","重复信息缺口、基线与预算。","accepted / rejected / synthetic-pass。","工具必须证明增量决策价值，不只是复现论文。"]];
 const btn=[...document.querySelectorAll(".tabs button")];btn.forEach((b,i)=>b.onclick=()=>{btn.forEach(x=>x.classList.remove("active"));b.classList.add("active");const d=data[i];["stage","title","desc","input","output"].forEach((id,j)=>document.getElementById(id).textContent=d[j]);document.querySelector("#rule p").textContent=d[5]});
+let ideaA=2,ideaB=2,armA=4,armB=3;const eta=.25;
+function renderPosterior(){const im=ideaA/(ideaA+ideaB),am=armA/(armA+armB);document.getElementById("idea-beta").textContent=`Beta(${ideaA.toFixed(2)}, ${ideaB.toFixed(2)})`;document.getElementById("arm-beta").textContent=`Beta(${armA.toFixed(2)}, ${armB.toFixed(2)})`;document.getElementById("idea-mean").textContent=im.toFixed(3);document.getElementById("arm-mean").textContent=am.toFixed(3);document.getElementById("idea-bar").style.width=`${im*100}%`;document.getElementById("arm-bar").style.width=`${am*100}%`}
+document.getElementById("posterior-success").onclick=()=>{ideaA+=1;armA+=eta;renderPosterior()};
+document.getElementById("posterior-failure").onclick=()=>{ideaB+=1;armB+=eta;renderPosterior()};
+document.getElementById("posterior-reset").onclick=()=>{ideaA=2;ideaB=2;armA=4;armB=3;renderPosterior()};
 </script></body></html>

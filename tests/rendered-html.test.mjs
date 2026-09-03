@@ -28,7 +28,7 @@ test("server-renders the learning workspace", async () => {
 });
 
 test("ships the curated HTML lesson library", async () => {
-  const [harness, hot100, defenseScript, defenseManual, lrBestStructures, paperMap, misoPrimitives, agentResearchMap, autoResearchFramework, qformer, qformerCross11, paperGuides, agentResearchGuides] = await Promise.all([
+  const [harness, hot100, defenseScript, defenseManual, lrBestStructures, paperMap, misoPrimitives, agentResearchMap, autoResearchFramework, qformer, qformerCross11, baiduInterviewSummary, paperGuides, agentResearchGuides] = await Promise.all([
     readFile(new URL("../public/lessons/harness-opd-evi.html", import.meta.url), "utf8"),
     readFile(new URL("../public/lessons/hot100-14days.html", import.meta.url), "utf8"),
     readFile(new URL("../public/lessons/defense-script-qa.html", import.meta.url), "utf8"),
@@ -40,6 +40,7 @@ test("ships the curated HTML lesson library", async () => {
     readFile(new URL("../public/lessons/auto-research-framework.html", import.meta.url), "utf8"),
     readFile(new URL("../public/lessons/qformer-guide.html", import.meta.url), "utf8"),
     readFile(new URL("../public/lessons/qformer-cross11-code-guide.html", import.meta.url), "utf8"),
+    readFile(new URL("../public/lessons/baidu-interview-summary.html", import.meta.url), "utf8"),
     readdir(new URL("../public/lessons/paper-guides/", import.meta.url)),
     readdir(new URL("../public/lessons/agent-research-guides/", import.meta.url)),
   ]);
@@ -63,6 +64,7 @@ test("ships the curated HTML lesson library", async () => {
   assert.match(qformer, /Image-Text Contrastive/);
   assert.match(qformer, /三种 Attention Mask/);
   assert.match(qformer, /Salesforce LAVIS/);
+  assert.match(qformer, /含 Cross-Attention 的 Q-Former Block/);
   assert.match(qformerCross11, /QFormerCross11/);
   assert.match(qformerCross11, /CrossValue/);
   assert.match(qformerCross11, /Original-X/);
@@ -72,6 +74,11 @@ test("ships the curated HTML lesson library", async () => {
   assert.match(qformerCross11, /QFormerCross11_Taobao_Action/);
   assert.match(qformerCross11, /当前未接 QFormerCross11/);
   assert.match(qformerCross11, /2048 → 256 → 128 → 1/);
+  assert.match(baiduInterviewSummary, /百度 · 推荐算法面试复盘/);
+  assert.match(baiduInterviewSummary, /多目标任务中，梯度冲突怎么解决/);
+  assert.match(baiduInterviewSummary, /OneRec 如何处理用户序列/);
+  assert.match(baiduInterviewSummary, /RQ-Kmeans/);
+  assert.match(baiduInterviewSummary, /BatchNorm 和 LayerNorm/);
   assert.ok(paperGuides.filter((name) => name.endsWith(".html")).length >= 12);
   assert.equal(agentResearchGuides.filter((name) => name.endsWith(".html")).length, 7);
 });

@@ -106,3 +106,7 @@ rec-harness/
 ## License
 
 This project is released under the [MIT License](./LICENSE).
+
+## Codex 多 Agent 控制台
+
+新增独立 [RSI Console](rsi-console/README.md)，通过五角色 Codex 会话展示和执行推荐模型与研究方法的双层进化。参见[架构与当前边界](rsi-console/ARCHITECTURE.md)。当前采用串行调度，独立真实任务效用未验证的 RSI 候选不会自动启用。

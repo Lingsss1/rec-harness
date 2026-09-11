@@ -1,0 +1,7 @@
+# Round12: full shared block order
+
+Frozen before training. Parent r7_small_attention_first, seed20262027 only, eight configurations in configs.json. Same kuairec-loop-v1 inputs, one epoch/1240 updates, AdamW1e-4/Adagrad.05, BF16, batch8192, clip1, all8 Queries. Cross8 primary, Cross11 allQ optimized reference. No test evaluation.
+
+Parent graph N(all37) S(history) extraA N(context30) S(history), one shared field and one shared history block, all 8,115,473 parameters. Internal parent order acf: self-attention, CrossValue, FFN. Each branch retains its residual and LayerNorm. No added parameters, no weight reinitialization. caf reads cross-source values before Query interaction; afc moves the source read last. Scope repeat changes only second calls; both changes first and repeated calls. Six caf combinations (field/history/both x repeat/both) and two repeat-only afc controls (field/history). Code configs and tests frozen before launch.
+
+Select by full validation AUC with logloss, UAUC and NDCG guardrails; retain near baseline and cost/ranking tradeoffs. Fixed subset diagnostics do not select winners. Compare current best and single-cycle low-cost reference with same-card BF16 B1024 timing. Preserve failed and null outcomes. Hypothesis: moving source information before Query mixing may improve how shared blocks update repeated representations; no assumption that reordering is function-preserving, only original acf wrapper is exact-compatible.

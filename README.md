@@ -14,6 +14,10 @@
 
 `rec-harness` 是一组面向推荐与排序模型研究的 Codex Skills。它不包含训练平台、业务模型源码、内部数据、实验 checkpoint 或具体模型参考实现；用户需要在自己的训练 workspace 中提供实验入口与评估协议。
 
+## 实验记录
+
+[KuaiRec 与淘宝完整实验归档](docs/experiments/README.md)：497 条实验／诊断记录，361 次完整训练，包含各轮结果、失败恢复、协议与聚合证据。最新快照为 2026-09-11。
+
 ## RSI loop
 
 ```mermaid

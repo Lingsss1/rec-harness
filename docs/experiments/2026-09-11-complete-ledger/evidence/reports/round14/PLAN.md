@@ -1,0 +1,11 @@
+# Round14: gated FFN transformations at matched parameter budget
+
+Frozen before training. Eight variants, existing seed20262027 only, one epoch/1240 updates, batch8192, BF16, AdamW1e-4/Adagrad.05, clip1, all8 Queries, frozen kuairec-loop-v1. No test evaluation. Cross8 primary; Cross11 allQ optimized reference.
+
+Keep parent r7_small_attention_first N S A N S graph, two shared cycles, immutable field/history sources and every residual norm. Replace field/history/both shared block FFNs with SwiGLU or GEGLU (six variants). Two dense SiLU controls replace only GELU activation in history/both FFNs. Gated output is down(up(x)*activation(gate(x))); original dense output is fc2(GELU(fc1(x))). Dropout stays at original location.
+
+Original FFN width1024: 525568 parameters. Gated width680: 523856 parameters, delta -1712 per replacement; full model 8113761 for one replaced stage or8112049 for both. Dense SiLU keeps8115473. Width chooses closest lower multiple8 under original budget. Up/down clone corresponding parent row/column slices with Xavier fan-size rescaling. Gate uses Xavier-uniform initialization with zero bias. Both stage candidates built in restored CPU RNG context without reseeding, preserving stage initialization across scope and activation comparisons and preserving all unchanged parameters. These are from-scratch architecture screens, not function-preserving gated conversions. No new training seed.
+
+Optimizer removes old FFN parameter objects and registers replacements exactly once in the same dense group, before training. CPU/GPU five tests: default compatibility/unaffected parameters/RNG, same gated initial weights across scope and activation, parameter budget and gate formulas, actual optimizer updates including BF16, shared calls/masks/immutable sources/final hook, invalid contracts. GPU test uses physicalGPU1. Training GPUs1-7, GPU0 reserved.
+
+Select using full validation AUC plus logloss/UAUC/NDCG guardrails; retain baseline-near and cost/quality tradeoffs. Benchmark current best/single-cycle/Cross8/Cross11 and new models on same GPU. Diagnose best gated and best dense-SiLU full-validation candidates using unchanged rec-harness exports; no subset selection. Preserve negative outcomes. Do not infer a universally better activation from one existing seed.

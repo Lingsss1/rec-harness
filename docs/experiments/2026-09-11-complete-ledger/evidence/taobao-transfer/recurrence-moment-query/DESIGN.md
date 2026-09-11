@@ -1,0 +1,13 @@
+# First-read moments → second-query addressing
+
+Hypothesis: a weighted mean can hide disagreement between retrieved events. Supply first-read per-channel variance to the second projected query, then compare weighted mean, uniform-history variance and a fixed nonzero constant. Same raw low-rank A/B shapes, same initialization and first-read moment arithmetic in all four. This is an independent architectural hypothesis; the rejected call-gradient diagnostic does not motivate or authorize it.
+
+Preserve two shared work calls, `(e+z1)/2` state, original second w_qi/residual/K/V and prediction chain. Add the projected moment to w_q output before q_norm only. No prediction feedback. Auxiliary moments use FP32 softmax of first-read normalized Q/K and projected V, without claiming exact fused BF16 attention weights. Variance is diagonal, not full covariance or calibrated uncertainty. It may contain redundant or unhelpful information; improvement is unproven.
+
+A/B rank16 add12,288 dense parameters at width384, initialized with A Xavier normal and B gain.01 under a CPU RNG fork. No new training seed. All four cells share original parameter values and new parameter layout; native PSGDKron clipping/update trajectories need not match the parent. No optimizer repair. Empty-history query supplement is zero. Masked history content is removed before moments.
+
+Four meaningful model comparisons use four GPUs in parallel after preparation/smoke gates; do not fill spare cards with duplicate constants or already-negative differences. Retain mature_r2 and matched Cross8 reference fits. Fixed native2193 updates/seed20262027/PSGDKron every step/LR1e-4/clip1/BF16; input maturity and labels unchanged. No test evaluation.
+
+Offline implementation checks passed once (reports/model-offline.json). This covers small native models, independent moment oracle, same-mean/different-variance example, padding/empty/single-event histories, gradients, zero-supplement identity, prediction nonfeedback and exception cleanup. It does not validate actual width384 GPU runtime/optimizer dynamics or AUC. Runner, source/admission freeze, four two-update native smokes and review remain required before formal training.
+
+All11 prespecified paired effects must be reported with task/cost outcomes. Weighted variance must beat mean, uniform variance and constant before attributing a dispersion/first-query effect; it must also pass mature_r2 quality/cost policy to become an optimization candidate. Cross8 comparison alone or an internal win is insufficient. Retention policy copied from the previous round, not retuned after results.

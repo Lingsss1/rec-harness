@@ -1,0 +1,9 @@
+# Round17: phase order with matching depth counts
+
+Six new runs, existing seed20262027 only, no replication. Parents r7_small_attention_first and r15_w512_field. Curriculum132:310 updates at1,310 at3,620 at2; curriculum312:310 at3,310 at1,620 at2; curriculum123:310 at1,620 at2,310 at3. Each has depths1/2/3 counts310/620/310 and total2480 cycle calls. Validation fixed2. This compares phase order and ending depth together; it is not a pure last-step-only causal intervention.
+
+Frozen kuairec-loop-v1, epoch1/1240 updates, batch8192, BF16, AdamW1e-4/Adagrad.05, clip1, all8 Queries. Cross8 primary, Cross11 allQ optimized reference; no test evaluation or extra training seeds. Preserve full backprop, first-only extra attention, original/field512 FFN, parameter count and initialization. Fixed2 parents and previous variable-depth candidates are existing references, not retrained.
+
+Depth is set only during train_step and restored even after failure. Fresh compute ledger separates raw seq_len sums, actual truncated mask valid tokens and padded positions, with depth-weighted totals. These count exposure rather than exact FLOPs; per-phase actual examples can differ because batches are unequal. No changes to previous frozen models or previous results. CPU/GPU five tests: parent initialization/eval/RNG, exact phase boundaries/counts, raw/valid/padded ledger distinction, actual optimizer/BF16/attention updates and eval isolation, exception restoration and invalid contracts.
+
+Use GPUs1-6; reserveGPU0. Automatic postprocess after successful training: compare each model to its fixed2 parent and matched previous mixed1232; benchmark all references/new candidates onGPU7 at eval2; diagnose best AUC candidate per parent. If a materially distinct full-validation ranking result appears, record a bounded diagnostic amendment before additional read-only analysis. No subset-based model selection.

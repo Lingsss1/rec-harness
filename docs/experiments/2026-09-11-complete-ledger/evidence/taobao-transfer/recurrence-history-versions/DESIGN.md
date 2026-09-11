@@ -1,0 +1,17 @@
+# History representation versions under matched availability
+
+Three q4 two-round models read H2/H2, H1/H2 or H2/H1. A single bottleneck128, four-head history encoder computes H1=G(H0), H2=G(H1), in the same order before work reads. Entry always reads H0. G attends only among valid historical items, retains an explicit residual delta, and masks invalid states. This is a new controlled recommendation structure inspired by the information-flow review, not an implementation claimed identical to ITT or LoopCTR.
+
+The shared A control is the newly trained `recurrence-maturity-depth/mature_r2`, not a duplicate run. A fourth C job trains the current width384 q8 single-stage Cross8 architecture under the identical mature input protocol. Together with four B maturity/depth cells these are eight meaningful jobs on eight GPUs, one training seed20262027, no test. Existing original17-class AUCs do not substitute for the new controls or support cross-protocol promotion.
+
+The first comparison holds history-encoder parameters/call counts fixed and changes the first memory version; the second changes the second version; the order comparison changes both. Because history encoding is independent of work, H1/H2 can be precomputed: no work-conditioned history writeback is claimed. No H1/H1 cell means no complete version-by-position interaction. Same initialization/layout is required among the three history variants, not between added-encoder and original/reference models. Optimization trajectories need not match.
+
+All four C jobs use the unchanged B mature loader: strict earlier history, whole same-second token exclusion, no refill, and common19 action IDs. Immature cart/fav/buy values, including zero values, become explicit unknown17/18 depending on the assumed available click bit. Raw17-class metadata remains unchanged; observed target labels remain unchanged. This is a conservative availability experiment, not proof of actual event or ingestion times.
+
+Keep q4 two-round native work/prediction updates, no prediction-to-work feedback, original final post and four towers. G adds231296 dense parameters by calculation; actual construction must confirm. The q8 Cross8 reference has no G and one original full sequence stage, not the no-feedback R1 topology. No router, MoE, extra loss, training-seed scan or learning-rate change.
+
+The protocol freezes ten C paired comparisons, the original three B effects, and all21 metrics per effect. One common500-user-draw stream can compute the eight-model metrics once and derive273 intervals. B mature_r2 predictions and latency must be reused, not rerun. Each of eight unique latency models uses10 warmups plus40 timed forwards on the same1024 raw validation rows and one device, with input hashes proving agreement within each maturity mode.
+
+CPU semantic tests and exactly two native updates per job precede full2193-update fits. Native route observers must verify H0 entry, the assigned H versions, unchanged query/interaction/residual arguments, one post, four complete towers, finite gradients and actual G updates. A native full-data optimizer initializer is not established by CPU fixtures. Existing successful B CPU suites will not be repeated.
+
+Source preparation alone does not start execution. Root records source/input/resource identities and launches within the user's existing research authorization after those checks. No author/title ambiguity or new permission request remains. No supported lesson or improved model exists until measured results warrant it.

@@ -106,3 +106,13 @@ rec-harness/
 ## License
 
 This project is released under the [MIT License](./LICENSE).
+
+## 最新方案设计
+
+[Auto Research 方案 v5](docs/auto-research-plan.md)：能力缺口驱动的模型改造、图结构长期记忆、诊断工具自进化、独立 Harness 外部优化器，以及 Dream-RSI 式实验保留与回放契约。
+
+[实验保留与回放契约](docs/dream-rsi-replay-contract.md) · [系统架构 SVG](docs/auto-research-2026-09-22/architecture.svg) · [Mermaid 源文件](docs/auto-research-2026-09-22/architecture.mmd) · [HTML 阅读版](docs/auto-research-2026-09-22/index.html)
+
+![Auto Research 架构](docs/auto-research-2026-09-22/architecture.png)
+
+该目录是设计文档，新增图知识库、工具进化闭环、外部优化器与回放适配尚待实现和验收；原有实验记录保留。HTML 需下载后在浏览器打开，GitHub 文件页不执行 HTML。

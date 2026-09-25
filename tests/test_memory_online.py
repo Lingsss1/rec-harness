@@ -23,6 +23,9 @@ class MemoryOnlineTests(unittest.TestCase):
             first=next(p for p in row['input_audit']['pairs'] if p['role']=='evidence')
             self.assertTrue(first['equal_visible_information'])
             self.assertFalse(row['input_audit']['all_inputs_equal'])
+            for outcome in row['input_audit']['outcomes'].values():
+                self.assertTrue(outcome['all_candidate_attempts_valid'])
+                self.assertEqual(outcome['incomplete_roles'],[])
             def no_calls(*args):raise AssertionError('resume called agent factory')
             # Factory itself may be created on resume; its run must not execute.
             class NoCalls:
@@ -47,3 +50,16 @@ class MemoryOnlineTests(unittest.TestCase):
         finally:research.store.close()
         with self.assertRaisesRegex(ContractError,'unsettled'):fork_baseline(baseline,self.root/'unsafe','flat')
         self.assertFalse((self.root/'unsafe').exists())
+
+    def test_failed_candidates_are_exposed_even_when_terminal_scores_match(self):
+        freeze_suite(self.root/'spec.json',self.root/'suite')
+        def invalid(model,output,seed,*args):
+            if 'attempt-1' in str(output):raise ContractError('fixture launcher failure')
+            return self.evaluate(model,output,seed,*args)
+        with patch('rec_harness.toy_isolated.evaluate',side_effect=invalid):
+            report=run_validation(self.root/'suite/suite.json',self.root/'report.json','development',131072,agent_factory=lambda *_:PairedAgent())
+        row=report['rows'][0];self.assertEqual(row['delta_graph_minus_flat'],0)
+        for outcome in row['input_audit']['outcomes'].values():
+            self.assertFalse(outcome['all_candidate_attempts_valid'])
+            self.assertEqual(outcome['attempts'][0]['selection'],'invalid')
+            self.assertEqual(outcome['attempts'][0]['run_statuses'][0]['error'],'fixture launcher failure')

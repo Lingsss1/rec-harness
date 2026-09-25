@@ -358,6 +358,11 @@ python3 -m rec_harness.memory_comparison graph-campaign flat-campaign audit.json
 即使为 true，也不代表决策质量或在线指标改善。该命令只审计已有记录，
 不启动研究或补跑角色。
 
+`outcomes` 从已提交事件和 CAS 评估归档读取每轮有效性、分数、选择及逐 seed
+失败原因，同时列出提交后未完成的角色和中断预留。两组终态分数相等不代表
+候选都得到有效评估；这些执行差异必须与指标一起解释。审计期间事件头变化
+会拒绝输出混合时刻的结果。
+
 ## 共享基线的在线记忆对照
 
 ```bash

@@ -7,6 +7,34 @@ from .decision_traces import collect_traces
 from .memory_view import restore
 
 
+def campaign_outcomes(root):
+    """Explain terminal scores using committed evaluations, including failed attempts."""
+    from .runtime import Research
+    research=Research(root,agent=object())
+    try:
+        integrity=research.verify();events=research.store.events();archives={};attempts=[]
+        submitted={};completed=set();interrupted=[]
+        for event in events:
+            value=event['payload'];kind=event['kind']
+            if kind=='agent_submitted':submitted[value['task_id']]=value['role']
+            if kind=='agent_completed':completed.add(value['task_id'])
+            if kind=='budget_settled' and value['status']=='interrupted':interrupted.append(value)
+            if kind=='attempt_archived':archives[value['node_id']]=value['archive']
+            if kind!='round_completed':continue
+            ref=archives.get(value['attempt'],{}).get('observations.json')
+            if ref is None:raise ContractError('completed round lacks committed evaluation archive')
+            evaluation=read_json(research.artifacts.verify(ref))
+            attempts.append({'attempt':value['attempt'],'selection':value['decision']['selection'],
+                'valid':evaluation['valid'],'score':evaluation['score'],
+                'run_statuses':[{'seed':r['seed'],'valid':r['valid'],'status':r['status'],
+                    'failure_kind':r.get('failure_kind'),'error':r.get('error')} for r in evaluation['runs']]})
+        return {'attempts':attempts,'all_candidate_attempts_valid':bool(attempts) and all(a['valid'] for a in attempts),
+            'incomplete_roles':[{'task_id':key,'role':submitted[key]} for key in sorted(set(submitted)-completed)],
+            'interrupted_reservations':interrupted,'event_head':integrity['head'],
+            'qualification':'Committed candidate evaluations and execution failures; equal terminal incumbent scores alone do not establish a valid candidate comparison or memory utility.'}
+    finally:research.store.close()
+
+
 def compare_traces(left,right,limit):
     if type(limit) is not int or limit<=0:raise ContractError('positive shared context limit required')
     groups=[]
@@ -48,6 +76,9 @@ def audit_pair(graph_campaign,flat_campaign):
     traces=[collect_traces(root) for root in roots]
     result=compare_traces(*(trace['decision_traces'] for trace in traces),configs[0]['context_byte_limit'])
     result.update(condition_hash=digest(conditions[0]),sources=[trace['source'] for trace in traces])
+    result['outcomes']={mode:campaign_outcomes(root) for mode,root in zip(['graph','flat'],roots)}
+    if any(result['outcomes'][mode]['event_head']!=trace['source']['event_head'] for mode,trace in zip(['graph','flat'],traces)):
+        raise ContractError('campaign changed during memory audit')
     return result
 
 

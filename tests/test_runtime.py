@@ -270,6 +270,24 @@ class RuntimeTests(Temporary):
         config["source"] = str(ROOT / "examples/toy")
         return config
 
+    def test_knowledge_interruption_preserves_committed_decision_without_retraining(self):
+        class InterruptKnowledge(ScriptedAgent):
+            def run(self,role,context,directory):
+                if role=='knowledge':raise KeyboardInterrupt('controller lost')
+                return super().run(role,context,directory)
+        campaign=self.path/'campaign';Research.init(campaign,self.config())
+        research=Research(campaign,InterruptKnowledge());self.addCleanup(research.store.close)
+        with self.assertRaises(KeyboardInterrupt):research.run()
+        count=sum(e['kind']=='evaluation_completed' for e in research.store.events())
+        research.agent=object()  # Recovery may not call any agent.
+        recovered=research.run()
+        self.assertEqual(recovered['state']['incumbent'],'attempt-1')
+        self.assertGreater(recovered['state']['baseline']['score'],0.98)
+        self.assertEqual(count,sum(e['kind']=='evaluation_completed' for e in research.store.events()))
+        self.assertEqual(recovered['budget']['charged_or_reserved'],10)
+        self.assertEqual(read_json(campaign/'research_archive/attempts/attempt-1/decision.json')['selection'],'keep')
+        self.assertEqual(research.run(),recovered)
+
     def test_actual_cpu_loop_archive_budget_and_resume(self):
         campaign = self.path / "campaign"
         Research.init(campaign, self.config())

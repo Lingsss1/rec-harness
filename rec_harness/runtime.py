@@ -400,6 +400,7 @@ class Research:
                 return self._finish(state,state['stop_reason'])
             events = self.store.events()
             completed = {e["payload"]["attempt"] for e in events if e["kind"] == "round_completed"}
+            checkpoints = {e['payload']['attempt']: e['payload']['checkpoint'] for e in events if e['kind']=='decision_checkpointed'}
             for event in events:
                 if event["kind"] == "round_completed" and "state" in event["payload"]:
                     saved = event["payload"]["state"]
@@ -410,6 +411,12 @@ class Research:
                     old = event["payload"]["state"]
                     attempt = event["payload"]["attempt"]
                     archived = self.root / "research_archive" / "attempts" / attempt
+                    if attempt in checkpoints:
+                        saved=read_json(self.artifacts.verify(checkpoints[attempt]))
+                        if saved['attempt']!=attempt or saved['state']!=old:
+                            raise ContractError('decision checkpoint does not match started round')
+                        self._record_attempt(attempt,old,saved['before'],saved['after'],saved['evaluation'],saved['decision'],saved['dependencies'])
+                        self.store.event('knowledge_deferred',{'attempt':attempt,'reason':'controller interrupted after committed decision; use consolidate to retry knowledge'})
                     if all((archived / name).exists() for name in ("node.json", "decision.json", "observations.json")):
                         decision = read_json(archived / "decision.json")
                         if decision["selection"] == "keep":
@@ -515,6 +522,11 @@ class Research:
                         "decision": selection, "evidence_dependency_ids": [attempt]}, self.task, self.protocol_hash)], "edges": [
                         edge(attempt + "-derived", attempt, state["incumbent"], "DERIVED_FROM", [], self.task, self.store.version + 1)]})
                     knowledge_context = {**eval_context, **self.context('knowledge', state), "decision": decision}
+                    # Commit the authoritative result before a fallible external knowledge call.
+                    checkpoint=self.root/'research_archive'/'attempts'/attempt/'decision-checkpoint.json'
+                    write_json(checkpoint,{'attempt':attempt,'state':state,'before':before,'after':after,
+                        'evaluation':evaluation,'decision':decision,'dependencies':dependencies})
+                    self.store.event('decision_checkpointed',{'attempt':attempt,'checkpoint':self.artifacts.put(checkpoint)})
                     self._knowledge(attempt,knowledge_context)
                 except MeasurementDeferred as error:
                     decision={'selection':'provisional','conclusion_status':'unknown','rationale':str(error),

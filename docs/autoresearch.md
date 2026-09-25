@@ -100,6 +100,12 @@ python3 -m rec_harness amazon-memory-export /path/to/amazon-campaign /path/to/de
 
 通用模型入口使用 `initial_memory_files`。初始化将经验证的记忆包复制至当前 CAS，在第一次模型评估前导入独立目标图；来源结论保留为待目标验证的类比。重复恢复不重复导入，也不把来源证据当作目标实验。
 
+当前通用导出格式为 `memory-policy-v3`，读取端兼容 v2。v3 将公开 Proposal
+节点及 `USES` 关系纳入证据闭包，避免实际研究中 Claim 引用 Proposal、Proposal
+连接 Gap/Method 时被整组排除。字段白名单仍排除源码、权重和原始用户数据；
+目标图中的 Proposal 降为 Source，不能直接执行或作为已证实的目标证据。
+容量不足时仍整组舍弃支持与反证，不能单独保留成功结论。
+
 ## 项目总调度
 
 `adapter: research-project-v1` 将模型、工具和 Harness 的入口连接为连续项目。配置含 `task_id`、`max_model_episodes`、`model_config`，以及可选 `tool_config`、`harness_config`（均是配置文件路径）。`max_tool_updates`、`max_harness_updates` 默认各为 1；工具更新还需 `tool_runtime`，其字段为 execution、cost、timeout，与 diagnostic_registry 的执行配置一致。两者的 execution 都可用 recipe_file 读取 JSON；相对路径以所属配置文件目录为准，不得同时提供 recipe 和 recipe_file。各子配置继续使用前述冻结协议和验证计划，项目调度器不能降低验收门槛。

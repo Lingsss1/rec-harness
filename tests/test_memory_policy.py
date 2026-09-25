@@ -88,6 +88,34 @@ class MemoryPolicyTests(unittest.TestCase):
         self.assertEqual(package['nodes'], [])
         self.assertGreater(package['omitted_roots']['ineligible_or_incomplete'], 0)
 
+    def test_runtime_proposal_closure_keeps_gap_method_claim_and_counterevidence(self):
+        self.source.patch({'base_version':1,'nodes':[
+            node('gap','GapHypothesis',{'observation_refs':['support']},'A','p'),
+            node('method','Method',{'mechanism':'explicit feature interaction'},'A','p'),
+            node('proposal','Proposal',{'mechanism':'add an interaction','source_code':'DO_NOT_EXPORT'},'A','p'),
+            node('claim','Claim',{'status':'provisional','scope':'A only','statement':'Conditional benefit',
+                'evidence_refs':['support','proposal']},'A','p')],
+            'edges':[edge('targets','proposal','gap','TARGETS',[],'A',2),
+                     edge('uses','proposal','method','USES',[],'A',2)]})
+        package=self.export();validate_package(package)
+        self.assertEqual({n['id'] for n in package['nodes']},{'support','counter','claim','gap','method','proposal'})
+        self.assertNotIn('DO_NOT_EXPORT',canonical(package))
+        self.assertIn('USES',{e['relation'] for e in package['edges']})
+        import_memory(self.target,self.package,'B','q')
+        transferred=next(n for n in self.target.snapshot()['nodes'] if n['attrs']['source_node']['id']=='proposal')
+        self.assertEqual(transferred['type'],'Source')
+        self.assertEqual(transferred['attrs']['transfer_status'],'analogy_requires_target_validation')
+        self.assertEqual(self.export(limit=5)['nodes'],[])
+        package['schema']='memory-policy-v2'
+        package['hash']=digest({k:v for k,v in package.items() if k!='hash'})
+        with self.assertRaisesRegex(ContractError,'requires memory-policy-v3'):validate_package(package)
+
+    def test_legacy_v2_packages_remain_readable(self):
+        package=self.export();package['schema']='memory-policy-v2'
+        package['hash']=digest({k:v for k,v in package.items() if k!='hash'})
+        validate_package(package);write_json(self.package,package)
+        self.assertEqual(import_memory(self.target,self.package,'B','q')['imported'],3)
+
     def test_tampered_cutoff_extra_payload_rejected(self):
         package = self.export()
         package['source_cutoff']['raw_users'] = [1, 2]

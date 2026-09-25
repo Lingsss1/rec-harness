@@ -5,9 +5,9 @@ import fcntl
 from .core import ContractError, canonical, digest, identifier, public_only, read_json, write_json
 from .runtime import node, edge
 
-SCHEMA = 'memory-policy-v2'
+SCHEMA = 'memory-policy-v3'
 ROOT_TYPES = {'Claim', 'GapHypothesis', 'Method', 'Source'}
-ALLOWED_TYPES = ROOT_TYPES | {'Experiment', 'Observation', 'Failure', 'Component', 'Context', 'ModelVersion'}
+ALLOWED_TYPES = ROOT_TYPES | {'Experiment', 'Observation', 'Failure', 'Component', 'Context', 'ModelVersion', 'Proposal'}
 TEXT_FIELDS = set('task_id protocol_hash origin status statement mechanism cost title url citation '
                   'independent_run_id dataset model_version failure_kind suspected_capability '
                   'cheapest_discriminating_test insertion_contract component_role shape_contract code_hash'.split())
@@ -15,7 +15,7 @@ LIST_FIELDS = set('evidence_refs observation_refs evidence_dependency_ids prereq
                   'sources alternative_explanations predicted_observations limitations'.split())
 SCALAR_FIELDS = {'seed', 'valid', 'effect_gate_passed', 'mechanism_control', 'counterevidence'}
 SCOPE_FIELDS = {'task_id', 'model_version', 'dataset', 'protocol_hash', 'condition', 'split'}
-RELATIONS = {'SUPPORTS', 'CONTRADICTS', 'ALTERNATIVE_TO', 'SUPPORTED_BY', 'BASED_ON', 'LOCATED_AT', 'TARGETS'}
+RELATIONS = {'SUPPORTS', 'CONTRADICTS', 'ALTERNATIVE_TO', 'SUPPORTED_BY', 'BASED_ON', 'LOCATED_AT', 'TARGETS', 'USES'}
 
 
 def project_node(original):
@@ -139,7 +139,7 @@ def validate_package(package):
               'source_cutoff', 'capacity', 'nodes', 'edges', 'omitted_roots', 'policy', 'hash'}
     if set(package) != fields:
         raise ContractError('unexpected memory package fields')
-    if package.get('schema') != SCHEMA:
+    if package.get('schema') not in {'memory-policy-v2', SCHEMA}:
         raise ContractError('unsupported memory schema; re-export with current policy')
     if digest({k: v for k, v in package.items() if k != 'hash'}) != package['hash']:
         raise ContractError('memory package hash mismatch')
@@ -160,6 +160,8 @@ def validate_package(package):
     by_id = {n['id']: n for n in nodes}
     if len(by_id) != len(nodes): raise ContractError('duplicate source identity')
     for item in nodes:
+        if package['schema']=='memory-policy-v2' and item['type']=='Proposal':
+            raise ContractError('Proposal requires memory-policy-v3')
         if project_node(item) != item:
             raise ContractError('unapproved transfer field')
         attrs = item['attrs']
@@ -168,6 +170,8 @@ def validate_package(package):
         if not (set(attrs.get('evidence_refs', [])) | set(attrs.get('observation_refs', []))).issubset(by_id):
             raise ContractError('package evidence closure incomplete')
     for relation in edges:
+        if package['schema']=='memory-policy-v2' and relation['relation']=='USES':
+            raise ContractError('USES requires memory-policy-v3')
         if set(relation) != {'id', 'source', 'target', 'relation', 'evidence_refs'}:
             raise ContractError('unexpected memory relation fields')
         if relation['relation'] not in RELATIONS or not ({relation['source'], relation['target']} | set(relation['evidence_refs'])).issubset(by_id):

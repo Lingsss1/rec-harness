@@ -30,7 +30,7 @@ def freeze_suite(specification,directory):
         if config.get('agent_backend',{}).get('kind')!='jailed_codex':raise ContractError('online validation requires isolated Codex roles')
         if not isinstance(config.get('codex',{}).get('model'),str) or not config['codex']['model'].strip():
             raise ContractError('online validation must freeze an explicit codex.model, not a mutable service default')
-        if any(key in config for key in ['harness_registry','research_policy','diagnostic_registry','diagnostic_tool','measurement_requirements']):
+        if any(key in config for key in ['harness_registry','research_policy','diagnostic_registry','diagnostic_tool','measurement_requirements','initial_memory_files','initial_memory']):
             raise ContractError('validation cases must freeze an unmodified reference Harness with fixed built-in tools')
         for seed in config['protocol']['seeds']:
             # The toy host generator uses seed for training and seed+10000 for

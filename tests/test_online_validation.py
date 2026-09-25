@@ -59,3 +59,11 @@ class OnlineValidationTests(unittest.TestCase):
     def test_new_suite_cannot_depend_on_mutable_default_model(self):
         cfg=read_json(self.root/'development.json');cfg['codex'].pop('model');write_json(self.root/'development.json',cfg)
         with self.assertRaisesRegex(ContractError,'explicit codex.model'):freeze_suite(self.root/'spec.json',self.root/'suite')
+
+    def test_reference_suite_cannot_claim_empty_graph_with_external_memory(self):
+        for key in ['initial_memory_files','initial_memory']:
+            cfg=read_json(self.root/'development.json');cfg[key]=['mutable-memory.json']
+            write_json(self.root/'development.json',cfg)
+            with self.assertRaisesRegex(ContractError,'unmodified reference'):
+                freeze_suite(self.root/'spec.json',self.root/key)
+            cfg.pop(key);write_json(self.root/'development.json',cfg)

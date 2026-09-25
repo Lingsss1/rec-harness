@@ -5,7 +5,7 @@ presentation with information availability. This does not equalize token cost.
 """
 import copy
 
-from .core import ContractError, digest, public_only
+from .core import ContractError, canonical, digest, public_only
 
 
 def present(bundle, mode='graph'):
@@ -51,3 +51,21 @@ def paired_views(bundle):
     return {'graph': graph, 'flat': flat, 'information_hash': digest(bundle),
             'qualification': 'same selected evidence; presentation control only',
             'online_utility_evidence': False}
+
+
+def paired_contexts(context, max_bytes):
+    """Freeze equal information under one serialized-context cap, not equal tokens."""
+    if type(max_bytes) is not int or max_bytes<=0:
+        raise ContractError('positive memory context byte limit required')
+    original=copy.deepcopy(context)
+    if 'evidence' not in original:raise ContractError('memory comparison requires visible evidence')
+    view=original['evidence']
+    bundle=restore(view) if 'presentation' in view else view
+    pair=paired_views(bundle)
+    contexts={mode:{**copy.deepcopy(original),'evidence':pair[mode]} for mode in ['graph','flat']}
+    sizes={mode:len(canonical(value).encode('utf-8')) for mode,value in contexts.items()}
+    if max(sizes.values())>max_bytes:raise ContractError('paired memory context exceeds common byte limit')
+    original['evidence']=bundle
+    return {'contexts':contexts,'audit':{'normalized_context_hash':digest(original),
+        'information_hash':pair['information_hash'],'context_bytes':sizes,'max_context_bytes':max_bytes,
+        'qualification':'identical facts, relations and other context; common byte cap, not equal token usage'}}

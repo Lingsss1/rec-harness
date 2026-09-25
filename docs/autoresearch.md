@@ -320,3 +320,23 @@ Amazon campaign 可选配置 `activation_diagnostic`，字段为 `settings`、`e
 这项配置会让外部 Codex 角色读取模型内部响应的聚合量，应由操作者明确
 授权相应出站范围；仅需本地诊断时使用 `activation-probe` 命令。当前真实
 角色发送验收因自动审批拒绝而等待用户补充授权，本地生成和恢复已通过。
+
+## 同信息图/平面前缀对照
+
+已冻结的历史前缀 suite 可通过同一入口运行呈现对照：
+
+```bash
+python3 -m rec_harness.harness_prefix run --suite prefix/suite.json \
+  --candidate unchanged-policy --output memory-comparison/report.json \
+  --memory-context-bytes 131072
+```
+
+`unchanged-policy/policy.json` 必须与 suite.baseline_policy 完全一致。每个历史
+上下文仅切换 evidence 的 graph/flat 呈现，其余输入、源码及提示策略相同，
+外部搜索关闭。两侧规范 JSON 均须在同一字节上限内；超限或策略变化在任何
+调用前拒绝。报告提供完整上下文的归一化哈希、证据信息哈希、两侧大小、
+具体输入归档和恢复账本。baseline 对应 graph，candidate 对应 flat。
+
+该报告的 gain 是合同通过率差，不是模型指标收益；online 始终为 false。
+统一字节上限不等于 token 消耗相等，实际 token 用量保留在调用收据中。
+要主张图组织提高研究效率，仍需独立在线决策/模型评估与完整成本对照。

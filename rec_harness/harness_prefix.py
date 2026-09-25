@@ -105,12 +105,17 @@ def freeze_suite(specification,directory):
     body['hash']=digest(body);write_json(root/'suite.json',body);return body
 
 
-def run_validation(suite_path,candidate,output,*,agent_factory=None):
+def run_validation(suite_path,candidate,output,*,agent_factory=None,memory_context_bytes=None):
     path=Path(suite_path).resolve();suite=read_json(path)
     if suite.get('schema')!='harness-prefix-suite-v1' or suite['hash']!=digest({k:v for k,v in suite.items() if k!='hash'}):
         raise ContractError('prefix suite changed')
     policy=read_json(Path(candidate)/'policy.json');validate_policy(policy)
     baseline=suite['baseline_policy'];roles={c['role'] for c in suite['cases']}
+    memory_pairs={}
+    if memory_context_bytes is not None:
+        from .memory_view import paired_contexts
+        if policy!=baseline:raise ContractError('memory presentation comparison requires identical policies')
+        memory_pairs={case['id']:paired_contexts(case['context'],memory_context_bytes) for case in suite['cases']}
     changed={r for r in set(baseline.get('prompts',{}))|set(policy.get('prompts',{})) if baseline.get('prompts',{}).get(r)!=policy.get('prompts',{}).get(r)}
     if not changed.issubset(roles):raise ContractError('patch roles lack frozen prefix coverage')
     for key in ['routing']:
@@ -121,7 +126,7 @@ def run_validation(suite_path,candidate,output,*,agent_factory=None):
         if case['role'] not in ROLES or digest(case['context'])!=case['input_hash']:raise ContractError('prefix input changed')
         for ref in case['source'].values():inputs.verify(ref)
         replay_context(case,policy,baseline)
-    root=Path(output).resolve().parent/'prefix-replay';root.mkdir(parents=True,exist_ok=True)
+    root=Path(output).resolve().parent/('memory-prefix-replay' if memory_context_bytes is not None else 'prefix-replay');root.mkdir(parents=True,exist_ok=True)
     with (root/'controller.lock').open('a') as lock:
         try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError as error:raise ContractError('prefix replay already running') from error
@@ -130,12 +135,16 @@ def run_validation(suite_path,candidate,output,*,agent_factory=None):
             binding={'suite_hash':suite['hash'],'policy_hash':digest(policy),'validator_hash':file_hash(__file__),
                 'transport_hashes':{name:file_hash(Path(__file__).with_name(name)) for name in ['agents.py','jailed_agent.py']},
                 'web_search':'disabled'}
+            if memory_context_bytes is not None:
+                binding.update(memory_context_bytes=memory_context_bytes,memory_view_hash=file_hash(Path(__file__).with_name('memory_view.py')))
             if (root/'binding.json').exists() and read_json(root/'binding.json')!=binding:raise ContractError('prefix replay binding changed')
             write_json(root/'binding.json',binding);store.configure_budget(suite['budget']);store.recover();rows=[]
             for case in suite['cases']:
                 pair={}
                 for group,patch in [('baseline',baseline),('candidate',policy)]:
                     context=replay_context(case,patch,baseline)
+                    if memory_context_bytes is not None:
+                        context=memory_pairs[case['id']]['contexts']['graph' if group=='baseline' else 'flat']
                     key=case['id']+'-'+group
                     records=[e['payload'] for e in store.events() if e['kind']=='prefix_replay_completed' and e['payload']['key']==key]
                     if records:
@@ -155,7 +164,8 @@ def run_validation(suite_path,candidate,output,*,agent_factory=None):
                             result['passed']=True
                         except (ContractError,OSError,ValueError,KeyError,TypeError) as error:result['error']=str(error)
                         finally:store.settle(task,suite['call_cost'],'accepted' if result['passed'] else 'rejected')
-                        names=[name for name in ['replay-response.json','request.json','resources.json','literature-search.json','stdout.jsonl'] if (job/name).is_file()]
+                        write_json(job/'replay-context.json',context)
+                        names=[name for name in ['replay-context.json','replay-response.json','request.json','resources.json','literature-search.json','stdout.jsonl'] if (job/name).is_file()]
                         result['artifacts']=objects.snapshot(job,names);store.event('prefix_replay_completed',result)
                     pair[group]=result
                 rows.append({'evaluation_id':case['id'],**pair})
@@ -166,6 +176,10 @@ def run_validation(suite_path,candidate,output,*,agent_factory=None):
                 'total_cost':store.budget()['charged_or_reserved'],'evaluation_ids':[r['evaluation_id'] for r in rows],
                 'identity':suite['identity'],'comparison_groups':['baseline','candidate'],'online':False,'rows':rows,
                 'binding':binding,'integrity':store.verify(),'qualification':'Paired prompt replay and contract checks only; not semantic truth, scientific utility, or counterfactual model results'}
+            if memory_context_bytes is not None:
+                report.update(memory_controls={key:value['audit'] for key,value in memory_pairs.items()},
+                    presentation_groups={'baseline':'graph','candidate':'flat'},
+                    qualification='Same historical information and policy with a common context byte cap; presentation contract replay only, not online utility or equal token usage')
             report['regression']=max(0,report['regression']);write_json(output,report);return report
         finally:store.close()
 
@@ -174,9 +188,10 @@ def main():
     parser=argparse.ArgumentParser();sub=parser.add_subparsers(dest='action',required=True)
     freeze=sub.add_parser('freeze');freeze.add_argument('specification');freeze.add_argument('directory')
     run=sub.add_parser('run');run.add_argument('--suite',required=True);run.add_argument('--candidate',required=True);run.add_argument('--output',required=True)
+    run.add_argument('--memory-context-bytes',type=int)
     args=parser.parse_args()
     if args.action=='freeze':freeze_suite(args.specification,args.directory)
-    else:run_validation(args.suite,args.candidate,args.output)
+    else:run_validation(args.suite,args.candidate,args.output,memory_context_bytes=args.memory_context_bytes)
 
 
 if __name__=='__main__':main()

@@ -12,7 +12,7 @@ class PrefixTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name)
         campaign=self.root/'campaign';write_json(campaign/'campaign.json',{'research_policy':{}})
         (campaign/'model.py').write_text('old_source = True\n');objects=Artifacts(campaign/'artifacts/objects')
-        self.context={'model_version':'root','protocol_hash':'protocol','evidence':{'nodes':[{'id':'observed'}]},'baseline':{'runs':[]}}
+        self.context={'model_version':'root','protocol_hash':'protocol','evidence':{'nodes':[{'id':'observed'}],'edges':[]},'baseline':{'runs':[]}}
         trace={'trace_id':'trace-one','role':'evidence','visible_state':self.context,'input_hash':digest(self.context),
             'visible_source_snapshot':objects.snapshot(campaign,['model.py']),'submitted_event':'event',
             'role_output':{'later_answer':'DO_NOT_SEND'}}
@@ -98,3 +98,33 @@ class PrefixTests(unittest.TestCase):
             self.assertEqual(call.kwargs['web_search'],'disabled')
         self.assertEqual(result['binding']['web_search'],'disabled')
         self.assertIn('agents.py',result['binding']['transport_hashes'])
+
+    def test_memory_pair_replays_equal_information_and_resumes(self):
+        from rec_harness.memory_view import restore
+        calls=[];outer=self
+        write_json(self.root/'candidate/policy.json',{})
+        class Agent:
+            def run(self,role,context,directory):
+                calls.append(context)
+                return copy.deepcopy(outer.response)
+        kwargs={'agent_factory':lambda *_:Agent(),'memory_context_bytes':10000}
+        report=run_validation(self.root/'suite/suite.json',self.root/'candidate',self.root/'result.json',**kwargs)
+        self.assertEqual(report['presentation_groups'],{'baseline':'graph','candidate':'flat'})
+        normalized=[]
+        for context in calls:
+            normalized.append({**context,'evidence':restore(context['evidence'])})
+        self.assertEqual(normalized,[self.context,self.context])
+        self.assertEqual(len(report['memory_controls']),1)
+        self.assertFalse(report['online'])
+        self.assertEqual(run_validation(self.root/'suite/suite.json',self.root/'candidate',self.root/'result.json',**kwargs),report)
+        self.assertEqual(len(calls),2)
+        with self.assertRaisesRegex(ContractError,'binding changed'):
+            run_validation(self.root/'suite/suite.json',self.root/'candidate',self.root/'result.json',agent_factory=lambda *_:Agent(),memory_context_bytes=10001)
+
+    def test_memory_pair_rejects_policy_changes_and_oversize_before_call(self):
+        with self.assertRaisesRegex(ContractError,'identical policies'):
+            run_validation(self.root/'suite/suite.json',self.root/'candidate',self.root/'result.json',memory_context_bytes=10000)
+        write_json(self.root/'candidate/policy.json',{})
+        with self.assertRaisesRegex(ContractError,'byte limit'):
+            run_validation(self.root/'suite/suite.json',self.root/'candidate',self.root/'result.json',memory_context_bytes=1)
+        self.assertFalse((self.root/'memory-prefix-replay').exists())

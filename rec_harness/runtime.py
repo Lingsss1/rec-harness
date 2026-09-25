@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .agents import CodexAgent, run_process
-from .core import Artifacts, ContractError, digest, file_hash, identifier, number, public_only, read_json, required, safe_file, validate_card, write_json
+from .core import Artifacts, ContractError, canonical, digest, file_hash, identifier, number, public_only, read_json, required, safe_file, validate_card, write_json
 from .store import Store
 from .evolution import validate_policy
 from .measurement_gaps import MeasurementDeferred
@@ -82,6 +82,8 @@ class Research:
             config['harness_activation'] = provenance
         if config.get('memory_presentation', 'graph') not in {'graph', 'flat'}:
             raise ContractError('memory_presentation must be graph or flat')
+        if 'context_byte_limit' in config and (type(config['context_byte_limit']) is not int or config['context_byte_limit']<=0):
+            raise ContractError('positive context_byte_limit required')
         protocol = config["protocol"]
         required(protocol, ["seeds", "metric", "direction", "minimum_effect", "evaluate_command", "check_command", "timeout_seconds", "evaluation_cost", "agent_cost", "data_version", "split", "guardrails"])
         if protocol["direction"] not in {"maximize", "minimize"}:
@@ -189,6 +191,8 @@ class Research:
         if 'evidence' in context:
             context = {**context, 'evidence': present(context['evidence'],
                        self.config.get('memory_presentation', 'graph'))}
+        if 'context_byte_limit' in self.config and len(canonical(context).encode('utf-8'))>self.config['context_byte_limit']:
+            raise ContractError('role context exceeds frozen byte limit')
         count = len(list((self.root / "tasks").glob("*"))) if (self.root / "tasks").exists() else 0
         task_id = f"{attempt}-{role}-{count}"
         directory = self.root / "tasks" / task_id

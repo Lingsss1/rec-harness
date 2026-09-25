@@ -340,3 +340,20 @@ python3 -m rec_harness.harness_prefix run --suite prefix/suite.json \
 该报告的 gain 是合同通过率差，不是模型指标收益；online 始终为 false。
 统一字节上限不等于 token 消耗相等，实际 token 用量保留在调用收据中。
 要主张图组织提高研究效率，仍需独立在线决策/模型评估与完整成本对照。
+
+研究配置可设置正整数 `context_byte_limit`，限制每次角色实际接收的规范
+JSON 上下文字节数。检查发生在 graph/flat 转换之后、费用预留和启动 Codex
+之前；不裁剪证据，不将字节数当作 token 数。
+
+独立 campaign 的输入可用以下命令审计：
+
+```bash
+python3 -m rec_harness.memory_comparison graph-campaign flat-campaign audit.json
+```
+
+两侧配置除 `memory_presentation` 外必须完全相同，并声明同一
+`context_byte_limit`。审计验证事件链和归档输入，按角色及出现次序配对，
+还原 evidence 后比较完整上下文和源码快照。运行收据、源码或角色数量差异
+均保留；`all_inputs_equal=false` 表示不能将该配对视为同信息呈现证据。
+即使为 true，也不代表决策质量或在线指标改善。该命令只审计已有记录，
+不启动研究或补跑角色。

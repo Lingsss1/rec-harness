@@ -27,9 +27,13 @@ Harness 三阶段统一验证入口已实现：绑定前缀/在线 suite、隔�
 
 环境归档已接入 Amazon 调度的 GPU 预留前 CPU 预检；真实子进程发现本机 Python 映射身份不一致并停止，GPU 账本未增加。结果见 runtime-preflight-acceptance-v1/acceptance.json。这不证明冻结环境下成功运行，原 GPU 验收缺口仍保留。
 
-当前主项目 wheel 已通过离线构建、独立 Python 3.12 环境安装及仓库外真实 CPU
+此前主项目 wheel 已通过离线构建、独立 Python 3.12 环境安装及仓库外真实 CPU
 诊断验收；92 个 Python 文件与 wheel/安装目录逐一一致，原生源码已打包。
 结果见 package-install-acceptance-v2/acceptance.json。使用显式外部 PyTorch 环境，
 不替代完整运行环境锁或真实 GPU 隔离验收。
+
+决策检查点版本另经 package-install-acceptance-v3 离线构建和全新环境安装：
+94 个 Python 文件及原生源码与 wheel/安装目录逐字节一致，主 CLI、在线记忆
+对照和输入审计入口均在仓库外通过启动检查；本次安装检查未重复训练。
 
 同信息图/平面前缀对照已完成 8 次真实 Codex 调用，实际输入、提示和源码逐对核验一致，合同检查全部通过并精确恢复。统一的是规范上下文字节上限，实际 token 成本不同；尚不构成在线研究效率或模型收益证据。

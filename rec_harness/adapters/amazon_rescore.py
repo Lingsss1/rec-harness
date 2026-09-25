@@ -8,12 +8,14 @@ from .amazon_report import audit_job
 from .independent_scoring import prepare_request, score_response
 
 
-def rescore_job(root, model_version, dataset, seed, output, recipe, uid_registry):
+def rescore_job(root, model_version, dataset, seed, output, recipe, uid_registry, *, bypass_block=None):
     root,output=Path(root),Path(output)
     output.mkdir(parents=True,exist_ok=False);output.chmod(0o700)
     config=load_config(root)
     if dataset not in config['datasets'] or seed not in config['development_seeds']+config['confirmation_seeds']:
         raise ContractError('rescore outside frozen study')
+    if bypass_block is not None and (type(bypass_block) is not int or bypass_block<0 or seed not in config['development_seeds']):
+        raise ContractError('block intervention requires a nonnegative index and development seed')
     result,_=audit_job(root,config,model_version,dataset,seed)
     job=root/'jobs'/f'{model_version}-{dataset}-{seed}'
     training=Path(config['data'])/(dataset+'_train.txt');expected=config['data_hashes'][training.name]
@@ -36,6 +38,7 @@ def rescore_job(root, model_version, dataset, seed, output, recipe, uid_registry
                '--checkpoint','/inputs/checkpoint.pt','--checkpoint-hash',files['checkpoint.pt']['sha256'],
                '--request','/inputs/request.json','--request-hash',files['request.json']['sha256'],
                '--output','/output/scores.json']
+    if bypass_block is not None:arguments+=['--bypass-block',str(bypass_block)]
     receipt=run_cpu_job(output/'inference',recipe,files,'worker.py',arguments,python=config['python'],
                         uid_registry=uid_registry,artifacts=Artifacts(root/'artifacts/objects'),timeout=180)
     if receipt['process']['status']!='success':raise ContractError('isolated checkpoint inference failed')
@@ -52,5 +55,8 @@ def rescore_job(root, model_version, dataset, seed, output, recipe, uid_registry
              'positive_tied_users':report['tied_user_count'],'host_report_hash':report['hash'],
              'inference_wall_seconds':receipt['wall_seconds'],
              'qualification':'independent CPU rescore on existing validation users; not new training or final test'}
+    if bypass_block is not None:
+        summary.update(bypass_block=bypass_block,
+            qualification='Fixed-weight block identity intervention on frozen development candidates; host-computed ranking changes, not retrained deletion benefit or causal mechanism confirmation.')
     summary['hash']=digest(summary);write_json(output/'acceptance.json',summary)
     return summary

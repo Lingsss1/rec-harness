@@ -1,5 +1,6 @@
 """Label-free model inference entry. The host computes all rankings and metrics."""
 import argparse
+from contextlib import contextmanager
 import importlib.util
 import os
 from pathlib import Path
@@ -7,11 +8,26 @@ from pathlib import Path
 from rec_harness.core import ContractError, digest, file_hash, read_json, write_json
 
 
+@contextmanager
+def bypass_block(model,index):
+    """A fixed-weight intervention; always remove only the hook installed here."""
+    if index is None:
+        yield
+        return
+    blocks=getattr(model,'blocks',())
+    if type(index) is not int or not 0<=index<len(blocks):
+        raise ContractError('bypass block index outside model')
+    handle=blocks[index].register_forward_hook(lambda module,inputs,output:inputs[0])
+    try:yield
+    finally:handle.remove()
+
+
 def main():
     import torch
     parser = argparse.ArgumentParser()
     for name in ('source', 'source-hash', 'checkpoint', 'checkpoint-hash', 'request', 'request-hash', 'output'):
         parser.add_argument('--' + name, required=True)
+    parser.add_argument('--bypass-block',type=int)
     args = parser.parse_args()
     for path, expected in [(args.source,args.source_hash),(args.checkpoint,args.checkpoint_hash),(args.request,args.request_hash)]:
         if file_hash(path) != expected: raise ContractError('inference input hash mismatch')
@@ -32,7 +48,7 @@ def main():
                                  kernel_size=module.KERNEL_SIZE, dropout_rate=module.DROPOUT_RATE, maxlen=module.MAXLEN)
     model.load_state_dict(weights,strict=True); model.eval()
     outputs = []
-    with torch.inference_mode():
+    with torch.inference_mode(),bypass_block(model,args.bypass_block):
         for start in range(0,len(request['rows']),64):
             rows = request['rows'][start:start+64]
             sequence = torch.zeros((len(rows),module.MAXLEN),dtype=torch.long)

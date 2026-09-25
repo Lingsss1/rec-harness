@@ -419,3 +419,20 @@ Experienced 仅增加冻结经验包，在第一次目标评估前导入；两�
 来源阶段可以复用已有研究，不代表冻结时重新消耗了这笔费用；重复运行同一
 终态不会重新调用角色或训练。注入测试 agent 或来源缺少真实 Codex 请求时，
 报告不标为在线证据。目前仅支持单一合成任务族，跨业务迁移另需验证。
+
+## 固定权重的开发集块旁路评分
+
+```bash
+python3 -m rec_harness amazon-block-score /path/to/study legacy_incumbent \
+  Industrial_and_Scientific 42 /path/to/new-output \
+  --execution /path/to/cpu-execution.json --bypass-block 6
+```
+
+execution 文件提供 `recipe` 和 `uid_registry`。省略 `--bypass-block` 得到参考
+重评分；指定从 0 开始的块号时，以该块输入替换输出。入口只允许 development
+seed，先审计已登记源码和 checkpoint，再在隔离 CPU 进程推理。主机保留正例
+位置密钥，计算排名、指标及与原记录的差异。旁路钩子结束时移除，不改权重。
+
+每次输出使用新目录，并记录推理墙钟时间。正式诊断需先验证参考排名一致，
+再完整报告计划内条件及费用。这是固定权重的开发集敏感性，不能当作删除后
+重训收益、机制确认或最终测试。示例四类全块验收另用独立账本计 36 BCU。

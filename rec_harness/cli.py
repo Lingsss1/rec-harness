@@ -76,6 +76,9 @@ def main(argv=None):
     p.add_argument('directory'); p.add_argument('output')
     p = commands.add_parser('amazon-history-diagnostic', help='aggregate paired validation gains by training-history length')
     p.add_argument('directory'); p.add_argument('output')
+    p = commands.add_parser('amazon-block-score', help='host-score a reference or single-block bypass on development data')
+    p.add_argument('directory');p.add_argument('model_version');p.add_argument('dataset');p.add_argument('seed',type=int);p.add_argument('output')
+    p.add_argument('--execution',required=True);p.add_argument('--bypass-block',type=int)
     p = commands.add_parser("world-build")
     p.add_argument("nodes"); p.add_argument("output"); p.add_argument("--workers", type=int, default=1)
     p = commands.add_parser("replay")
@@ -185,6 +188,14 @@ def main(argv=None):
             from .adapters.amazon_plan import register_plan
             handoff = read_json(args.handoff)
             result = register_plan(args.directory, handoff['cards'], handoff['versions'])
+        elif args.command == 'amazon-block-score':
+            from .adapters.amazon_controls import load_config
+            from .adapters.amazon_rescore import rescore_job
+            if args.seed not in load_config(args.directory)['development_seeds']:
+                raise ContractError('block score diagnostics are development-only')
+            execution=read_json(args.execution)
+            result=rescore_job(args.directory,args.model_version,args.dataset,args.seed,args.output,
+                execution['recipe'],execution['uid_registry'],bypass_block=args.bypass_block)
         elif args.command == 'amazon-summary':
             from .adapters.amazon_summary import build_summary
             report = build_summary(args.directory, args.output)

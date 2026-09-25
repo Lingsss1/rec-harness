@@ -357,3 +357,24 @@ python3 -m rec_harness.memory_comparison graph-campaign flat-campaign audit.json
 均保留；`all_inputs_equal=false` 表示不能将该配对视为同信息呈现证据。
 即使为 true，也不代表决策质量或在线指标改善。该命令只审计已有记录，
 不启动研究或补跑角色。
+
+## 共享基线的在线记忆对照
+
+```bash
+python3 -m rec_harness.memory_online --suite online/suite.json \
+  --output memory-online/report.json --stage development \
+  --context-byte-limit 262144
+```
+
+入口使用已冻结的 isolated toy suite，先完成一次基线评估，在任何角色调用
+之前锁定并验证其事件链、源码和收据。随后通过 SQLite backup 创建 graph/
+flat 两个独立账本，保留共同历史，并追加分叉来源事件；不复制临时 jail。
+两组使用相同提示、模型、工具、字节上限且关闭外部搜索，首个 evidence
+输入必须通过精确同信息审计。后续研究允许产生不同提案、结果和知识，
+报告保留这些差异，不要求所有后续输入仍相同。
+
+每组预算保留共享历史费用；总执行成本只计一次共享基线，再加两组新增
+费用。报告列出每组终态分数、图组减平面组的指标差、运行次序和完整输入
+审计。不同 case 交替执行顺序；单个 case 仍不足以控制服务时序与随机性。
+实现源码哈希与 suite 一起绑定，改变实现必须使用新的验收目录。重复执行
+同一终态入口只验证既有结果。注入测试 agent 的结果始终 `online=false`。

@@ -395,3 +395,27 @@ flat 两个独立账本，保留共同历史，并追加分叉来源事件；不
 训练；未完成的知识回写记为 deferred，可用 `consolidate` 单独重试。
 归档实现用于恢复时必须保留完整的 `rec_harness/` 包目录及原生资源，确保
 清理环境后的 CPU 子进程也能从包父目录导入启动器。
+
+## 来源经验与 Fresh 的目标任务对照
+
+```bash
+python3 -m rec_harness.memory_transfer freeze source-campaign target/suite.json transfer-study
+python3 -m rec_harness.memory_transfer run --study transfer-study/study.json \
+  --output transfer-result/report.json --stage development
+```
+
+来源必须是已结束的 isolated toy 研究，使用固定基础工具且没有导入其他任务
+经验。冻结入口锁定来源事件截止点、公开经验包及源阶段成本，并复制目标
+suite 的输入对象。来源与目标任务 ID、生成数据条件（seed 及 seed+10000）
+不能重叠；基础 Codex 配置、工具和 Harness 策略保持一致。
+
+Fresh 和 Experienced 各自初始化、评估同一目标模型并在独立图中研究。
+Experienced 仅增加冻结经验包，在第一次目标评估前导入；两组使用相同
+上下文字节上限并关闭外部搜索。报告核对首个证据角色实际可见的来源节点，
+同时列出候选有效性、未完成角色、目标指标差和负迁移比例。初始信息本来
+不同，不能将该实验称为图/平面的同信息对照。
+
+`source_cost` 与 `target_cost` 分列，`total_attributable_cost` 为二者之和。
+来源阶段可以复用已有研究，不代表冻结时重新消耗了这笔费用；重复运行同一
+终态不会重新调用角色或训练。注入测试 agent 或来源缺少真实 Codex 请求时，
+报告不标为在线证据。目前仅支持单一合成任务族，跨业务迁移另需验证。

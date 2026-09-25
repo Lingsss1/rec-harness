@@ -73,15 +73,22 @@ def load_suite(path):
     return suite,artifacts
 
 
-def episode(case,policy,root,inputs,*,agent=None,validation_tool=None):
+def episode(case,policy,root,inputs,*,agent=None,validation_tool=None,memory_package=None):
     root=Path(root);config=copy.deepcopy(case['config'])
     config['research_policy']=policy
+    if memory_package is not None:
+        from .memory_policy import validate_package
+        validate_package(read_json(memory_package))
+        config['initial_memory_files']=[str(memory_package)]
     source=root.parent/(root.name+'-inputs');inputs.restore(case['inputs'],source)
     config['source']=str(source)
     if not (root/'campaign.json').exists():Research.init(root,config,_validation_tool=validation_tool)
     research=Research(root,agent=agent)
     try:
         frozen=research.config
+        expected_memory=[research.artifacts.put(memory_package)] if memory_package is not None else []
+        if frozen.get('initial_memory',[])!=expected_memory:
+            raise ContractError('paired source memory changed')
         if validation_tool is not None:
             from .diagnostics import freeze_validation_tool
             expected=freeze_validation_tool(validation_tool,research.artifacts)
@@ -96,7 +103,7 @@ def episode(case,policy,root,inputs,*,agent=None,validation_tool=None):
             raise ContractError('paired execution backend changed')
         # Reconstruct initialization changes through the persisted config/manifest.
         for key,value in config.items():
-            if key in {'source','protocol','execution','evaluator_files'}:continue
+            if key in {'source','protocol','execution','evaluator_files','initial_memory_files'}:continue
             if frozen.get(key)!=value:raise ContractError('paired episode configuration changed: '+key)
         if frozen['protocol']['evaluator_snapshot']!={name:case['inputs'][name] for name in config.get('evaluator_files',[])}:
             raise ContractError('paired evaluator changed')

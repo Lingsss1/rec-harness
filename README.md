@@ -16,7 +16,21 @@
 
 `rec-harness` 面向推荐与排序模型的长程自动研究：结合当前模型、诊断证据和历史实验，持续修正能力缺口假设，从论文、已有方法与自主变异中提出结构或方法改造，并将实验结果沉淀为可复用知识。
 
-**当前仓库提供三组 Codex Skills、诊断脚本、工具候选管理脚本及设计文档。** 最新方案进一步定义了多 Agent 研究闭环、图知识库、诊断工具自进化、独立 Harness 外部优化器与 Dream-RSI 式回放；新增系统能力仍待实现和验收。
+**当前仓库提供 Python 研究运行时、三组 Codex Skills 和设计文档。** 运行时直接调用 `codex exec`，实现顺序角色交付、SQLite 事件与图知识、冻结公开评估、预算、产物归档、受限历史回放，以及工具/Harness 候选验证和版本回退。已完成 CPU 小型示例、Amazon NextItNet 配对实验及工具/Harness 的部分真实在线验收。运行成功不等于候选有效；完整覆盖与未完成项见[实现清单](docs/implementation/completion-matrix.md)。
+
+## 快速运行
+
+连续多轮、隔离评估及 NextItNet 自动研究使用 [`autoresearch` 单入口](docs/autoresearch.md)，已有[真实两轮验收](docs/autoresearch-acceptance.md)。
+
+需要 Python 3.11+ 和已登录的 Codex CLI。Python 运行时无第三方依赖。
+
+```bash
+python3 -m rec_harness init examples/toy/campaign.json /tmp/rec-harness-demo
+python3 -m rec_harness run /tmp/rec-harness-demo --rounds 1
+python3 -m rec_harness verify /tmp/rec-harness-demo
+```
+
+这会实际调用 Codex，运行两个 seed 的独立 CPU 训练，并保留所有调用与失败成本。默认使用本机 Codex 模型配置，可在 campaign JSON 的 `codex.model` 指定模型。`examples/toy` 是合成交互回归的框架验收用例，不是推荐效果 benchmark。详细配置、回放、演化验收与部署边界见 [运行指南](docs/runtime.md)，测试和真实 Codex 小型运行结果见 [验收记录](docs/runtime-acceptance.md)。
 
 ## 整体架构
 
@@ -113,7 +127,7 @@ Harness 候选与旧版使用相同基础模型、工具、起点、图快照和
 
 修改生成提示、新算法或新工具会产生未知结果，必须真实执行。旧档案缺少关键字段时标记 `audit_only` 或 `partial_replay`，不补造历史；`replay_ready` 需要经过结构、前缀隔离、依赖、产物和成本检查。
 
-这是一份面向 Dream-RSI 机制的数据契约，**尚未完成官方代码格式适配或回放器实现**。详见[实验保留与回放契约](docs/dream-rsi-replay-contract.md)。
+已提供本地发现树构建与前缀回放器，**尚未完成 Dream-RSI 官方代码格式适配**。详见[实验保留与回放契约](docs/dream-rsi-replay-contract.md)。
 
 ## 当前可用内容与实施状态
 
@@ -122,11 +136,11 @@ Harness 候选与旧版使用相同基础模型、工具、起点、图快照和
 | Diagnostic Toolkit | 已有表征、激活/梯度和配对干预分析脚本及 Skill |
 | Harness Updater | 已有追加式实验、失败、条件性经验和工作状态的文件记忆契约 |
 | Diagnostic Tool Evolver | 已有隔离候选管理脚本与分级验证流程 |
-| 多 Agent 任务与交付协议 | 最新方案定义，完整调度与隔离闭环待实现验收 |
-| 图知识库、双图检索与迁移 | schema 与迁移设计已定义，图存储和接口待实现 |
-| 自动工具进化闭环 | 已有基础脚本/流程，端到端自主运行和决策效用待验证 |
-| Harness 外部优化器 | 轨迹与补丁验证流程已定义，优化器待实现 |
-| Dream-RSI 式发现树与回放 | 记录保留契约已定义，记录器扩展、回放器和适配待实现 |
+| 多 Agent 任务与交付协议 | 已实现顺序角色、独立目录、结构化结果和身份校验；不含分布式调度 |
+| 图知识库、双图检索与迁移 | 已实现 SQLite 属性图、事件重建、版本回退、词项/两跳检索与保守迁移 |
+| 自动工具进化闭环 | 已实现 Codex 候选开发、冻结验证阶梯和晋升；真实决策效用待验证 |
+| Harness 外部优化器 | 已实现独立候选目录、Codex 补丁、验证/晋升/回退；在线效用待验证 |
+| Dream-RSI 式发现树与回放 | 已实现归档转换、根/前沿、同步批次、依赖门控和成本；一般 DAG 仅审计 |
 
 现有 Skills：
 
@@ -134,7 +148,7 @@ Harness 候选与旧版使用相同基础模型、工具、起点、图快照和
 - [`model-optimization-harness-updater`](model-optimization-harness-updater/SKILL.md)：从多轮证据更新研究记忆。
 - [`model-diagnostic-tool-evolver`](model-diagnostic-tool-evolver/SKILL.md)：开发并验证候选诊断工具。
 
-用户在自己的训练 workspace 提供模型、数据、实验入口与评估协议，再按各 Skill 的输入输出契约衔接。最新设计不代表仓库已提供完整训练平台或一键运行的端到端系统。
+用户在自己的公开研究执行环境中提供模型文件白名单、独立检查器与评估命令、seeds 和预算，运行时按冻结合同执行。Hidden 必须由独立身份或隔离服务保管，不能放在研究执行账户可读取的文件系统中。
 
 ## 验证与实施顺序
 
@@ -148,7 +162,7 @@ Harness 候选与旧版使用相同基础模型、工具、起点、图快照和
 bash scripts/validate-core.sh
 ```
 
-该命令检查核心 Python 文件语法与已跟踪文件的公开边界，不代表新架构或真实 GPU 实验已完成验收。贡献要求见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+该命令检查核心 Python 语法、已跟踪及未忽略新文件的公开边界，并运行合同、故障、回放与 CPU 闭环测试；不代表真实 GPU 实验已完成验收。贡献要求见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 文档与实验归档
 

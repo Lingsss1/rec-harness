@@ -1,0 +1,48 @@
+"""Export only development research memory for subsequent autonomous campaigns."""
+from pathlib import Path
+from rec_harness.core import ContractError,digest,read_json,write_json
+
+
+def validate_memory(pack,protocol,development_seeds=None):
+    if set(pack)!={'schema','protocol_hash','entries','hash'} or pack['schema']!='amazon-development-memory-v1':
+        raise ContractError('invalid development memory schema')
+    if pack['protocol_hash']!=protocol or pack['hash']!=digest({k:v for k,v in pack.items() if k!='hash'}):
+        raise ContractError('development memory identity mismatch')
+    if not isinstance(pack['entries'],list):raise ContractError('development memory entries required')
+    allowed={'round','design','development','development_decision','provisional_knowledge','execution_failure'}
+    for entry in pack['entries']:
+        if not isinstance(entry,dict) or not set(entry)<=allowed or 'round' not in entry:
+            raise ContractError('non-development field in research memory')
+        if 'development' in entry:validate_readout(entry['development'],protocol,development_seeds)
+    return pack
+
+
+def validate_readout(value,protocol,development_seeds=None):
+    if value.get('schema')!='amazon-development-selection-v1' or value.get('protocol_hash')!=protocol or value.get('hash')!=digest({k:v for k,v in value.items() if k!='hash'}):
+        raise ContractError('development readout identity mismatch')
+    if not isinstance(value.get('rows'),list):raise ContractError('development rows required')
+    if development_seeds is not None and any(row.get('seed') not in development_seeds for row in value['rows']):
+        raise ContractError('non-development seed in memory')
+    return value
+
+
+def export_development_memory(campaign,output):
+    campaign=Path(campaign);config=read_json(campaign/'amazon-auto.json')
+    study=read_json(Path(config['study'])/'study.json');entries=[]
+    if digest(study)!=config['study_config_hash']:raise ContractError('bound study changed')
+    for folder in sorted((campaign/'rounds').glob('round-*')):
+        entry={'round':config['task_id']+'/'+folder.name}
+        for name,key in [('handoff.json','design'),('lead/response.json','development_decision'),('knowledge/response.json','provisional_knowledge')]:
+            if (folder/name).exists():
+                value=read_json(folder/name);entry[key]=value['cards'] if key=='design' else value
+        path=folder/'development-readout.json'
+        if path.exists():
+            value=read_json(path)
+            validate_readout(value,config['protocol_hash'],study['development_seeds'])
+            entry['development']=value
+        if (folder/'failure.json').exists() and not (folder/'private-confirmation-started.json').exists():
+            entry['execution_failure']={'reason':read_json(folder/'failure.json')['reason'],
+                                        'scope':'execution failure; no mechanism refutation'}
+        if len(entry)>1:entries.append(entry)
+    pack={'schema':'amazon-development-memory-v1','protocol_hash':config['protocol_hash'],'entries':entries}
+    pack['hash']=digest(pack);validate_memory(pack,config['protocol_hash']);write_json(output,pack);return pack

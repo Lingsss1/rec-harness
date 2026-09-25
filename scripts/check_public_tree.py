@@ -35,7 +35,7 @@ TEXT_SUFFIXES = {".md", ".py", ".sh", ".json", ".yaml", ".yml", ".html", ".svg",
 
 def tracked_files(root: Path) -> list[str]:
     result = subprocess.run(
-        ["git", "ls-files", "-z"],
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
         cwd=root,
         check=True,
         capture_output=True,

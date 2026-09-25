@@ -15,4 +15,7 @@ PYTHONPYCACHEPREFIX="${PYTHON_CACHE}" "${PYTHON_BIN}" -m py_compile \
 
 "${PYTHON_BIN}" "${REPO_ROOT}/scripts/check_public_tree.py" "${REPO_ROOT}"
 
+PYTHONPYCACHEPREFIX="${PYTHON_CACHE}" "${PYTHON_BIN}" -m compileall -q "${REPO_ROOT}/rec_harness" "${REPO_ROOT}/examples/toy"
+(cd "${REPO_ROOT}" && PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN}" -m unittest discover -s tests -p 'test_*.py')
+
 echo "rec-harness public core validation passed"

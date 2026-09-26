@@ -21,7 +21,10 @@ from rec_harness.process_identity import assert_stopped
 DATASETS = ['Movies_and_TV', 'Industrial_and_Scientific', 'Electronics', 'CDs_and_Vinyl']
 
 
-def init_study(root, project, *, budget=14400, predecessor=None, continuation_required=False):
+def init_study(root, project, *, budget=14400, predecessor=None, continuation_required=False, gpu_ids=None):
+    gpu_ids=[0,1,2,3] if gpu_ids is None else list(gpu_ids)
+    if not gpu_ids or any(type(device) is not int or device<0 for device in gpu_ids) or len(set(gpu_ids))!=len(gpu_ids):
+        raise ContractError('distinct nonnegative GPU IDs required')
     root, project = Path(root).resolve(), Path(project).resolve()
     root.mkdir(parents=True, exist_ok=False)
     sources = {
@@ -43,7 +46,7 @@ def init_study(root, project, *, budget=14400, predecessor=None, continuation_re
                      'metric': 'HR@10', 'aggregation': 'unweighted_mean_four_categories', 'minimum_effect': 0.005,
                      'checkpoint_selection': 'public_validation_only', 'ranking': 'positive_plus_99_unique_negatives',
                      'loss': 'numerically_stable_pairwise_BPR', 'cudnn_deterministic': False, 'initialization': 'independent_per_category_and_seed'},
-        'budget_gpu_seconds': budget, 'job_timeout_seconds': 1800, 'gpu_ids': [0, 1, 2, 3],
+        'budget_gpu_seconds': budget, 'job_timeout_seconds': 1800, 'gpu_ids': gpu_ids,
         'trusted_baselines_only': True, 'hidden_evaluation': 'not_available_to_worker',
     }
     if predecessor:
@@ -169,7 +172,7 @@ def execute_job(config, root, model_version, dataset, seed, gpu, task_id=None):
     return result
 
 
-def run_study(root, model_versions=None, seeds=None, *, arms=None, execution_id=None):
+def run_study(root, model_versions=None, seeds=None, *, arms=None, execution_id=None, datasets=None):
     # Compatibility for old launch scripts; new API names model versions explicitly.
     if arms is not None:
         if model_versions is not None: raise ContractError("use model_versions only")
@@ -194,11 +197,14 @@ def run_study(root, model_versions=None, seeds=None, *, arms=None, execution_id=
             allowed_seeds = config['development_seeds'] + config['confirmation_seeds']
             if any(seed not in allowed_seeds for seed in (seeds or [])):
                 raise ContractError('seed outside frozen study')
+            selected_datasets=config['datasets'] if datasets is None else list(datasets)
+            if not selected_datasets or len(set(selected_datasets))!=len(selected_datasets) or any(ds not in config['datasets'] for ds in selected_datasets):
+                raise ContractError('distinct datasets from frozen study required')
             from .amazon_prefix_candidate import plan_guard, plan_remaining
             active_plan = plan_guard(store, list(model_versions or config['model_versions']),
                                      seeds or config['development_seeds'], config['confirmation_seeds'])
             recover_study(root, store)
-            jobs = [(v, ds, seed) for v in (model_versions or config['model_versions']) for seed in (seeds or config['development_seeds']) for ds in config['datasets']]
+            jobs = [(v, ds, seed) for v in (model_versions or config['model_versions']) for seed in (seeds or config['development_seeds']) for ds in selected_datasets]
             requested = list(jobs)
             def successful(job):
                 path = root / 'jobs' / '-'.join(map(str, job)) / 'completed.json'
@@ -267,8 +273,8 @@ def run_study(root, model_versions=None, seeds=None, *, arms=None, execution_id=
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest='action', required=True)
-    p = sub.add_parser('init'); p.add_argument('directory'); p.add_argument('--project', required=True)
-    p = sub.add_parser('run'); p.add_argument('directory'); p.add_argument('--model-version', action='append'); p.add_argument('--seed', type=int, action='append'); p.add_argument('--execution')
+    p = sub.add_parser('init'); p.add_argument('directory'); p.add_argument('--project', required=True); p.add_argument('--gpu',type=int,action='append')
+    p = sub.add_parser('run'); p.add_argument('directory'); p.add_argument('--model-version', action='append'); p.add_argument('--seed', type=int, action='append'); p.add_argument('--execution');p.add_argument('--dataset',action='append')
     p = sub.add_parser('register-execution'); p.add_argument('directory'); p.add_argument('recipe'); p.add_argument('--runtime-template')
     args = parser.parse_args()
     if args.action == 'register-execution':
@@ -277,7 +283,7 @@ def main():
         try: result = register_execution(store, read_json(args.recipe), runtime_template=args.runtime_template)
         finally: store.close()
     else:
-        result = init_study(args.directory, args.project) if args.action == 'init' else run_study(args.directory, model_versions=args.model_version, seeds=args.seed, execution_id=args.execution)
+        result = init_study(args.directory, args.project,gpu_ids=args.gpu) if args.action == 'init' else run_study(args.directory, model_versions=args.model_version, seeds=args.seed, execution_id=args.execution,datasets=args.dataset)
     print(json.dumps(result, indent=2))
 
 

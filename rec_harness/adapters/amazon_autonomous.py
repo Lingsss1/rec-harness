@@ -288,7 +288,9 @@ class AmazonAutoresearch:
         report=development_readout(self.study,pid);write_json(folder/'development-readout.json',report)
         graph_path=self.study/'research-readouts'/(pid+'-graph.json')
         graph=read_json(graph_path) if graph_path.exists() else ingest_development(self.study,pid)
-        review={**context,'handoff':{'cards':cards,'versions':versions},'development':report,
+        review={**context,'model_version':binding['candidate_model_version'],
+                'visible_model_source':None,
+                'handoff':{'cards':cards,'versions':versions},'development':report,
                 'instructions':['Evaluate the actual complete development readout. Include its exact hash in evidence_refs: '+report['hash'],
                                 'Keep only if eligible_for_confirmation is true. No confirmation results are supplied; conclusion unknown/provisional.']}
         def decision_check(value,_):
@@ -296,7 +298,9 @@ class AmazonAutoresearch:
             if report['hash'] not in value['evidence_refs']:raise ContractError('exact development readout hash required')
             if value['conclusion_status'] not in ['unknown','provisional']:raise ContractError('development cannot establish scientific confirmation')
         evaluation=self._role(folder,'evaluation',review,validator=decision_check)
-        lead=self._role(folder,'lead',{**review,'evaluation':evaluation},candidate,decision_check)
+        lead=self._role(folder,'lead',{**review,'evaluation':evaluation,
+            'visible_model_source':{'path':'model/model.py','model_version':binding['candidate_model_version'],
+                                    'sha256':file_hash(candidate)}},candidate,decision_check)
         knowledge_context={'graph':graph,'development':report,'decision':lead,
             'patch_contract':{'base_version':graph['graph_version'],'fields':['base_version','nodes','edges'],
                 'allowed_node_types':['Claim','GapHypothesis','MeasurementGap'],'origin':'agent_hypothesis',

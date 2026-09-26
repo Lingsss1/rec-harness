@@ -55,7 +55,7 @@ def verify_campaign(controller):
     if digest(read_json(controller.study/'study.json'))!=config['study_config_hash']:raise ContractError('bound study changed')
     integrity=controller.store.verify();events=controller.store.events()
     ledger=Store(controller.study/'memory');artifacts=Artifacts(controller.study/'artifacts/objects')
-    role_count=0;local_only=0;partial=0;checked=set();cycles=0
+    role_count=0;local_only=0;partial=0;checked=set();cycles=0;measurement_bindings=0;legacy_measurements=0
     try:
         study_integrity=ledger.verify()
         cost=audit_cost(controller.store,config['role_call_limit'])
@@ -65,6 +65,9 @@ def verify_campaign(controller):
             role=marker.parent.name
             if role not in {'evidence','measurement','hypothesis','experiment','evaluation','lead','knowledge'}:continue
             accepted=read_json(marker);response=read_json(marker.parent/'response.json');validate_schema(response,schema_for(role))
+            if role=='measurement':
+                from rec_harness.measurement_discovery import validate_review
+                validate_review(read_json(marker.parent/'context.json'),response)
             if digest(response)!=accepted['response_hash'] or digest(read_json(marker.parent/'context.json'))!=accepted['context_hash']:
                 raise ContractError('accepted role content changed')
             if 'source_hash' in accepted and file_hash(marker.parent/'model/model.py')!=accepted['source_hash']:
@@ -87,6 +90,9 @@ def verify_campaign(controller):
             if not cycle or cycle['readout_hash']!=result['development_hash']:raise ContractError('round lacks its committed development cycle')
             folder=root/'rounds'/('round-'+str(event['payload']['state']['round']))
             if read_json(folder/'cycle.json')!=cycle:raise ContractError('cycle projection differs from committed study event')
+            if (folder/'measurement/accepted.json').exists():
+                if 'measurement' in cycle['roles']:measurement_bindings+=1
+                else:legacy_measurements+=1
             for role,receipt in cycle['roles'].items():
                 for name,ref in receipt['artifacts'].items():
                     artifacts.verify(ref);checked.add(ref['sha256'])
@@ -103,5 +109,6 @@ def verify_campaign(controller):
             'verified_source_reopenings':reopened,'role_costs':cost,
             'roles_without_completion_event':local_only,'verified_cycles':cycles,'verified_artifacts':len(checked),
             'roles_with_legacy_partial_event_binding':partial,
+            'measurement_cycle_bindings':measurement_bindings,'measurement_roles_without_cycle_binding':legacy_measurements,
             'qualification':'controller, role bindings and completed development cycle integrity; not a GPU job or private-confirmation re-audit'}
     finally:ledger.close()

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from rec_harness.agents import validate_schema,schema_for
-from rec_harness.core import Artifacts,ContractError,digest,read_json,write_json
+from rec_harness.core import Artifacts,ContractError,digest,file_hash,read_json,write_json
 from rec_harness.runtime import node
 from rec_harness.store import Store
 from .amazon_selection import development_readout
@@ -19,6 +19,9 @@ def finalize_cycle(root, proposal_id, directory):
     knowledge=read_json(directory/'knowledge/response.json');validate_schema(knowledge,schema_for('knowledge'))
     graph=read_json(root/'research-readouts'/(proposal_id+'-graph.json'))
     patch=json.loads(knowledge['patch_json']);validate_knowledge_patch(patch,graph)
+    if (directory/'measurement').exists():
+        from rec_harness.measurement_discovery import validate_review
+        validate_review(read_json(directory/'measurement/context.json'),read_json(directory/'measurement/response.json'))
     with (root/'controller.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         store=Store(root/'memory')
@@ -34,6 +37,9 @@ def finalize_cycle(root, proposal_id, directory):
             prior=[e['payload'] for e in store.events() if e['kind']=='amazon_research_cycle_completed' and e['payload']['proposal_id']==proposal_id]
             if prior:
                 if prior[0]['identity']!=identity:raise ContractError('completed research cycle cannot be rewritten')
+                for name,ref in prior[0]['roles'].get('measurement',{}).get('artifacts',{}).items():
+                    if file_hash(directory/'measurement'/name)!=ref['sha256']:
+                        raise ContractError('committed measurement archive changed')
                 write_json(directory/'cycle.json',prior[0]);return prior[0]
             current=store.snapshot()
             if {n['id'] for n in patch['nodes']} & {n['id'] for n in current['nodes']} or {e['id'] for e in patch['edges']} & {e['id'] for e in current['edges']}:
@@ -41,6 +47,7 @@ def finalize_cycle(root, proposal_id, directory):
             if store.version!=patch['base_version']:raise ContractError('knowledge graph became stale')
             artifacts=Artifacts(root/'artifacts/objects');roles={}
             role_names=['evidence','hypothesis','experiment','evaluation','lead','knowledge']
+            if (directory/'measurement').exists():role_names.insert(1,'measurement')
             if (directory/'evidence-corrected').exists(): role_names.insert(1,'evidence-corrected')
             rejected=[folder.name for folder in sorted(directory.glob('*-rejected-*')) if folder.is_dir()]
             role_names.extend(rejected)

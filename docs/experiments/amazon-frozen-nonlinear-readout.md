@@ -51,3 +51,5 @@
 - `development-memory.json`、`ready-next-development-memory.json`、`memory-acceptance.json`：已审计的本轮开发记忆及合并后的 5 条历史记录，不包含确认或最终测试结果。
 
 旧控制器将隔离运行库逐项展开到图证据，导致导入开销较大。当前开发工作树已改为保留完整 runtime lock 的紧凑引用并逐字节验证；此次运行的冻结代码未中途替换。
+
+补充审计边界：该轮使用的旧冻结代码将 measurement 请求/响应绑定在角色完成事件中，但未放入周期的 roles 归档。measurement-binding-audit.json 已独立核验其语义及角色事件字节绑定，结果通过。当前实现已补齐新周期归档并显式报告旧周期缺口；历史周期收据未重写。

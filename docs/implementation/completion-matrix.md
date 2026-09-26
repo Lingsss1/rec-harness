@@ -18,7 +18,7 @@
 | 固定预算主评价与消融 | 已局部执行：同信息图/平面前缀 8 次角色调用；在线对照 12 次角色调用，收益差 0；Fresh/Experienced 单条件对照收益差 0；工具及 Harness 开发候选未达晋升门槛 | 更多独立条件、确认评估、真实推荐任务及分别归因的收益检验，不能以这些局部结果宣布整体完成 |
 | 独立最终评估 | seal/run CLI、checkpoint 与评分代码冻结、共享私有候选、主机评分及恢复实现；源码和安装包均完成 4 个真实 CPU 隔离合成任务 | 真实研究最终选型后的测试集比较及最终报告；当前没有读取真实最终测试集 |
 
-当前以完整实现和集成验收为主，不以增加模型实验次数替代工程闭环。真实验收细节见 [autoresearch-acceptance](../autoresearch-acceptance.md)。最近完整测试为 282 项，266 通过、16 项环境相关跳过。工具/Harness外循环单元测试中的固定validator输出不构成在线收益证据。未取得证据的项始终未完成。
+当前以完整实现和集成验收为主，不以增加模型实验次数替代工程闭环。真实验收细节见 [autoresearch-acceptance](../autoresearch-acceptance.md)。最近完整测试为 284 项，268 通过、16 项环境相关跳过。工具/Harness外循环单元测试中的固定validator输出不构成在线收益证据。未取得证据的项始终未完成。
 
 以下保留分阶段验收记录；后续明确完成的步骤替代早期同项“待完成”状态，完整范围仍以上表为准。
 
@@ -74,3 +74,5 @@ Electronics、seed 42 的冻结隔离真实训练现已完整验收：HR@10 0.44
 紧凑归档恢复入口 `amazon-restore-archive` 已实现，兼容旧平面映射并验证间接运行环境引用、收据绑定、冲突和缺失对象。真实任务还原 67,967 个文件（67,909 个 runtime 文件），全部运行环境字节/权限和 checkpoint/排名归档验证一致，源图未变，65.2891 秒。证据为 compact-evidence-acceptance-v1/restore-acceptance.json；仅文件恢复，不恢复设备节点或自动授予执行资格。完整测试 281 项（265 通过、16 跳过），CLI 帮助及针对性恢复测试通过。
 
 已确认的旧 episode 规范包含 `parent_experiment_id`；迁移器现为每条已报告父关系保留 `legacy_source_record_ids`，可追溯到精确归档原文。不同文件对同一关系的来源合并，冲突父关系并存；追加来源产生新关系修订，重复导入不改变图/事件链，始终为 legacy_unverified，不推断权重继承、指标可比性或独立证据。完整测试 282 项，266 通过、16 跳过。尚未定位独立实验血缘图文件格式，已请求具体路径；这项未知不能视为已完成。
+
+可选 measurement 角色已纳入新周期的 CAS 归档，提交前验证其请求/响应语义，终态恢复校验已提交文件。角色审计原本已覆盖 measurement 的 schema 和事件哈希，现在进一步验证引用/测量契约，并分列 measurement_cycle_bindings 与 measurement_roles_without_cycle_binding。旧周期保持不可变；首轮真实旧记录的独立补充审计证明角色事件绑定与语义有效，但周期内绑定缺失，见 amazon-frozen-autoresearch-acceptance-v1/measurement-binding-audit.json。新七角色恢复、篡改拒绝与旧周期缺口计数测试通过；全套 284 项（268 通过、16 跳过）。在途冻结控制器未更换实现。

@@ -129,7 +129,13 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
     def test_confirmation_uses_same_frozen_execution_and_resumes_without_calls(self):
         self.run_pipeline(True)
 
-    def run_pipeline(self,confirmation):
+    def test_measurement_is_committed_to_cycle_and_checked_on_recovery(self):
+        self.run_pipeline(False,measurement=True)
+
+    def test_legacy_measurement_cycle_coverage_is_reported_without_rewriting(self):
+        self.run_pipeline(False,measurement=True,legacy_measurement=True)
+
+    def run_pipeline(self,confirmation,measurement=False,legacy_measurement=False):
         import json
         from contextlib import ExitStack
         from rec_harness.autonomous import autoresearch
@@ -138,6 +144,13 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
         from test_amazon_plan import sample
         from test_model_source_contract import SOURCE
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            if legacy_measurement:
+                original_patch=Store.patch
+                def legacy_patch(store,patch,**kwargs):
+                    for kind,payload in kwargs.get('accompanying_events',[]):
+                        if kind=='amazon_research_cycle_completed':payload['roles'].pop('measurement',None)
+                    return original_patch(store,patch,**kwargs)
+                stack.enter_context(patch.object(Store,'patch',legacy_patch))
             root=Path(tmp);study=root/'study';study.mkdir();source=study/'base.py';source.write_text(SOURCE)
             cfg={'model_versions':{'legacy_incumbent':{'path':str(source),'sha256':file_hash(source)}},
                  'protocol_hash':'protocol','protocol':{'metric':'HR@10','minimum_effect':0.005},
@@ -148,11 +161,15 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                     'execution_id':'execution-test',
                     'role_call_limit':12,'rescore_recipe':{'fixture':True},'uid_registry':'fixture',
                     'agent_backend':{'template':'unused','runtime_root':'unused'}}
+            if measurement:config['measurement_discovery']={'development_budget':10}
             write_json(root/'config.json',config);campaign=root/'campaign';calls=[];fits=[]
             class Agent:
                 def run(self,role,context,target):
                     calls.append(role);response=sample(schema_for(role))
                     if role=='evidence':response.update(gap_id='gap',model_version='legacy_incumbent',protocol_hash='protocol')
+                    if role=='measurement':
+                        response.update(assessment='sufficient',requirements=[],evidence_refs=context['allowed_evidence_refs'],rationale='Existing development aggregates suffice.')
+                        response['prerequisites']={key:{'status':'satisfied','rationale':'Audited baseline supplied.'} for key in ['invocation','implementation','data','applicability']}
                     if role=='hypothesis':
                         response['method']['method_id']='method'
                         response['proposal'].update({k:v for k,v in context['bindings'].items() if k!='candidate_model_version'})
@@ -187,20 +204,30 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                 stack.enter_context(patch('rec_harness.adapters.'+module+'.development_readout',return_value=report))
             with patch.object(AmazonAutoresearch,'_rescore',side_effect=KeyboardInterrupt()):
                 with self.assertRaises(KeyboardInterrupt):autoresearch(campaign,root/'config.json',agent=Agent())
-            self.assertEqual(fits,['development']);self.assertEqual(calls,['evidence','hypothesis','experiment'])
+            self.assertEqual(fits,['development']);self.assertEqual(calls,['evidence']+(['measurement'] if measurement else [])+['hypothesis','experiment'])
             self.assertEqual(resolver.call_args.args[1],'execution-test')
             with patch.object(AmazonAutoresearch,'_rescore',return_value=[]):
                 result=autoresearch(campaign,agent=Agent())
                 again=autoresearch(campaign,agent=Agent())
-            self.assertEqual(fits,['development','confirmation'] if confirmation else ['development']);self.assertEqual(len(calls),6)
+            expected_roles=7 if measurement else 6
+            self.assertEqual(fits,['development','confirmation'] if confirmation else ['development']);self.assertEqual(len(calls),expected_roles)
             self.assertEqual(result,again);self.assertEqual(result['state']['round'],1)
-            self.assertEqual(result['role_calls']['charged_or_reserved'],6)
+            self.assertEqual(result['role_calls']['charged_or_reserved'],expected_roles)
             self.assertEqual((campaign/'rounds/round-1/private-confirmation.json').exists(),confirmation)
             with patch('rec_harness.adapters.amazon_autonomous.JailedCodexAgent',side_effect=AssertionError('audit must not initialize service')):
                 audit=AmazonAutoresearch(campaign,load_agent=False)
                 try:
                     verified=audit.verify()
-                    self.assertEqual(verified['verified_roles'],6);self.assertEqual(verified['verified_cycles'],1)
+                    self.assertEqual(verified['verified_roles'],expected_roles);self.assertEqual(verified['verified_cycles'],1)
+                    self.assertEqual(verified['measurement_cycle_bindings'],int(measurement and not legacy_measurement))
+                    self.assertEqual(verified['measurement_roles_without_cycle_binding'],int(legacy_measurement))
+                    if measurement and not legacy_measurement:
+                        from rec_harness.adapters.amazon_cycle import finalize_cycle
+                        folder=campaign/'rounds/round-1';original=read_json(folder/'measurement/context.json')
+                        write_json(folder/'measurement/context.json',{**original,'note':'changed'})
+                        with self.assertRaisesRegex(ContractError,'measurement archive changed'):
+                            finalize_cycle(study,'auto-round-1',folder)
+                        write_json(folder/'measurement/context.json',original)
                     self.assertEqual(verified['roles_with_legacy_partial_event_binding'],0)
                     with audit.lock():
                         other=AmazonAutoresearch(campaign,load_agent=False)

@@ -16,8 +16,14 @@ RELATIONS = set("HAS_COMPONENT FLOWS_TO DERIVED_FROM EVALUATES COMPARED_WITH PRO
 
 
 class Store:
-    def __init__(self, root):
+    def __init__(self, root, *, read_only=False):
         self.root = Path(root)
+        self.read_only=read_only
+        if read_only:
+            path=(self.root/'memory.sqlite').resolve()
+            self.db=sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,timeout=30,isolation_level=None)
+            self.db.row_factory=sqlite3.Row
+            return
         self.root.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.root / "memory.sqlite", timeout=30, isolation_level=None)
         self.db.row_factory = sqlite3.Row
@@ -43,6 +49,7 @@ class Store:
 
     @contextmanager
     def transaction(self):
+        if self.read_only:raise ContractError('read-only store cannot mutate events or projections')
         self.db.execute("BEGIN IMMEDIATE")
         try:
             yield
@@ -70,6 +77,7 @@ class Store:
         return [{**dict(r), "payload": json.loads(r["payload"])} for r in self.db.execute("SELECT * FROM events ORDER BY seq")]
 
     def export_events(self):
+        if self.read_only:raise ContractError('read-only store cannot export projections')
         # Hold a database write lock while projecting, so concurrent writers cannot regress the view.
         self.db.execute("BEGIN IMMEDIATE")
         try:
@@ -82,16 +90,25 @@ class Store:
             self.db.execute("COMMIT")
 
     def verify(self):
+        if self.db.in_transaction:return self._verify_snapshot()
+        self.db.execute('BEGIN')
+        try:return self._verify_snapshot()
+        finally:self.db.execute('ROLLBACK')
+
+    def _verify_snapshot(self):
         previous = "0" * 64
-        for seq, event in enumerate(self.events(), 1):
+        count=0
+        for seq, row in enumerate(self.db.execute('SELECT * FROM events ORDER BY seq'), 1):
+            event={**dict(row),'payload':json.loads(row['payload'])}
             sha = event.pop("hash")
             if event["seq"] != seq or event["previous_hash"] != previous or digest(event) != sha:
                 raise ContractError("event chain is corrupt")
             previous = sha
+            count=seq
         for row in self.db.execute("SELECT * FROM snapshots"):
             if digest(json.loads(row["body"])) != row["hash"]:
                 raise ContractError("graph snapshot is corrupt")
-        return {"events": len(self.events()), "head": previous, "graph_version": self.version}
+        return {"events": count, "head": previous, "graph_version": self.version}
 
     @property
     def version(self):

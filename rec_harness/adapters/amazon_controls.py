@@ -28,8 +28,10 @@ def load_config(root, store=None):
         raise ContractError('study configuration changed')
     config['model_versions'] = dict(model_sources(config))
     config.pop('arms', None)
+    # Before the first registration there is no event ledger to replay.
+    if store is None and not (root/'memory/memory.sqlite').exists():return config
     own_store = store is None
-    store = store or Store(root / 'memory')
+    store = store or Store(root / 'memory',read_only=True)
     try:
         store.verify()
         for event in store.events():

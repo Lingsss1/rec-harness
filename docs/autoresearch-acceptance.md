@@ -469,3 +469,25 @@ Amazon 第四轮 `source-recovery-v1` 已实际追加重开事件，原 experime
 18 项合成机制检查证明显式掩码改变了填充计算路径，实际训练结果却未达到
 排名晋升门槛。二者分别留档，不把计算正确性或某一类别的小幅改善解释为
 整体推荐收益或机制确认。
+
+
+### 运行环境映射身份：真实 CPU 预检通过
+
+原生 stat/statx 探针确认本机存在映射身份与路径 stat 身份的不同呈现，连
+设备号也不一致；直接访问 map_files 被宿主权限拒绝。`audit_loaded_runtime`
+现打开文件描述符，从该 FD 建立短暂私有映射，比较两份内核 maps 的设备号和
+inode，再从同一 FD 哈希整个文件。仍核对读取前后 FD 与路径元数据，拒绝
+文件替换、已删除映射、未归档文件和字节变化。没有忽略设备/inode 检查。
+
+`runtime-fd-acceptance-v1/acceptance.json` 在真实 Python 3.12/PyTorch 进程
+核验 43 个已加载原生文件。旧归档另缺少 `usr/lib/locale/C.utf8/LC_CTYPE`，
+该文件进入独立新归档，其 hash 为
+`ff44ac658e7fa033e2c8ea6adbd76646299c3e3765374151b048832c3256c93e`。
+没有修改旧研究环境锁。随后实际 Amazon `preflight_execution` 成功，收据
+见 `runtime-fd-acceptance-v1/amazon-preflight/acceptance.json`，GPU 预算不变，
+无 GPU 作业或 Codex 调用。本验收只覆盖 CPU 启动映射，CUDA 预热后检查、
+完整 GPU 隔离及运行期动态加载仍需独立验证。
+
+测试不再为 maps 人工归一化设备号；新增身份确认后以相同字节替换路径的
+竞态用例，仍被拒绝。全套 267 项测试：251 通过、16 跳过，日志
+`/tmp/rec-harness-runtime-fd-validation.log`。

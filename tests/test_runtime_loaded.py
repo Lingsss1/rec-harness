@@ -1,12 +1,12 @@
 import mmap
-import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from rec_harness.core import Artifacts, ContractError, digest
 from rec_harness.runtime_archive import host_identity
-from rec_harness.runtime_loaded import audit_loaded_runtime, mapped_files
+from rec_harness.runtime_loaded import audit_loaded_runtime, mapped_files, mapped_fd_identity
 
 
 class LoadedRuntimeTests(unittest.TestCase):
@@ -21,15 +21,6 @@ class LoadedRuntimeTests(unittest.TestCase):
                 maps = '\n'.join(line for line in Path('/proc/self/maps').read_text().splitlines()
                                  if str(source) in line)
                 self.assertTrue(maps)
-                # Sandboxed stat may virtualize st_dev while proc exposes the
-                # host device. Normalize this fixture only; production rejects it.
-                device = source.stat().st_dev
-                normalized = []
-                for line in maps.splitlines():
-                    fields = line.split(None, 5)
-                    fields[3] = f'{os.major(device):x}:{os.minor(device):x}'
-                    normalized.append(' '.join(fields))
-                maps = '\n'.join(normalized)
                 result = audit_loaded_runtime(report, maps=maps)
                 self.assertEqual(list(result['files']), [str(source)])
                 fields = maps.splitlines()[0].split(None, 5)
@@ -51,3 +42,20 @@ class LoadedRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, 'deleted'):
             mapped_files('1000-2000 r-xp 0 08:01 5 /a (deleted)')
         self.assertEqual(mapped_files('1000-2000 rw-p 0 00:00 0 [heap]'), {})
+
+    def test_path_replacement_after_descriptor_identity_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source=Path(directory)/'runtime';source.write_bytes(b'unchanged bytes')
+            artifacts=Artifacts(Path(directory)/'objects')
+            body={'schema':'gpu-runtime-bytes-v1','host_identity':host_identity(),
+                  'files':{str(source).lstrip('/'):artifacts.put(source)}}
+            report={**body,'hash':digest(body)}
+            with source.open('rb') as handle,mmap.mmap(handle.fileno(),0,access=mmap.ACCESS_READ):
+                maps='\n'.join(line for line in Path('/proc/self/maps').read_text().splitlines() if str(source) in line)
+                def replace_after_identity(fd):
+                    result=mapped_fd_identity(fd)
+                    source.unlink();source.write_bytes(b'unchanged bytes')
+                    return result
+                with patch('rec_harness.runtime_loaded.mapped_fd_identity',side_effect=replace_after_identity):
+                    with self.assertRaisesRegex(ContractError,'changed during audit'):
+                        audit_loaded_runtime(report,maps=maps)

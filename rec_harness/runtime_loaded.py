@@ -4,10 +4,13 @@ This is a snapshot of loaded files, not a guarantee about future lazy loads or
 kernel/driver memory. Run in the process being audited before entering a jail.
 """
 import os
+import ctypes
+import hashlib
+import mmap
 from pathlib import Path
 import re
 
-from .core import ContractError, digest, file_hash
+from .core import ContractError, digest
 from .runtime_archive import host_identity
 
 
@@ -27,6 +30,22 @@ def mapped_files(maps):
     return files
 
 
+def mapped_fd_identity(handle):
+    """Ask the kernel which file this open descriptor maps, without stat aliases."""
+    with mmap.mmap(handle.fileno(),1,access=mmap.ACCESS_COPY) as probe:
+        byte=ctypes.c_char.from_buffer(probe)
+        address=ctypes.addressof(byte)
+        del byte
+        for line in Path('/proc/self/maps').read_text().splitlines():
+            fields=line.split(None,5)
+            start,end=(int(value,16) for value in fields[0].split('-'))
+            if start<=address<end:
+                if len(fields)!=6 or not fields[5].startswith('/') or fields[5].endswith(' (deleted)'):
+                    raise ContractError('runtime descriptor lacks a named live mapping')
+                return fields[3],int(fields[4])
+        raise ContractError('runtime descriptor mapping is not observable')
+
+
 def audit_loaded_runtime(report, *, maps=None):
     if report.get('schema') != 'gpu-runtime-bytes-v1' or report.get('hash') != digest({k: v for k, v in report.items() if k != 'hash'}):
         raise ContractError('runtime archive identity mismatch')
@@ -43,19 +62,24 @@ def audit_loaded_runtime(report, *, maps=None):
         if ref is None:
             raise ContractError('mapped runtime file is not archived: ' + name)
         path = Path(name)
-        before = path.stat()
-        major, minor = (int(part, 16) for part in device.split(':'))
-        if before.st_ino != inode or (os.major(before.st_dev), os.minor(before.st_dev)) != (major, minor):
-            raise ContractError('mapped runtime file inode changed: ' + name)
-        sha = file_hash(path)
-        after = path.stat()
-        if (before.st_ino, before.st_dev, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_ino, after.st_dev, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
-            raise ContractError('mapped runtime file changed during audit: ' + name)
+        with path.open('rb') as handle:
+            before=os.fstat(handle.fileno())
+            # stat can expose an overlay identity while maps exposes its backing
+            # inode. Compare two kernel mapping identities, then hash that same FD.
+            if mapped_fd_identity(handle)!=(device,inode):
+                raise ContractError('mapped runtime file inode changed: '+name)
+            hasher=hashlib.sha256()
+            for chunk in iter(lambda:handle.read(1024*1024),b''):hasher.update(chunk)
+            sha=hasher.hexdigest()
+            stamp=lambda value:(value.st_ino,value.st_dev,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+            if stamp(before)!=stamp(os.fstat(handle.fileno())) or stamp(before)!=stamp(path.stat()):
+                raise ContractError('mapped runtime file changed during audit: '+name)
         if sha != ref['sha256'] or before.st_size != ref['size']:
             raise ContractError('mapped runtime bytes differ from archive: ' + name)
         verified[name] = {'sha256': sha, 'size': before.st_size}
     body = {'schema': 'loaded-runtime-audit-v1', 'runtime_archive_hash': report['hash'],
-            'files': verified, 'scope': 'current file mappings only; excludes future loads, Python source, kernel and driver memory'}
+            'files': verified, 'identity_method':'kernel mapping of the same open descriptor used for hashing',
+            'scope': 'current file mappings only; excludes future loads, Python source, kernel and driver memory'}
     return {**body, 'hash': digest(body)}
 
 

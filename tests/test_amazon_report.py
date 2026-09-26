@@ -3,11 +3,17 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from rec_harness.adapters.amazon_report import paired_report
+from rec_harness.adapters.amazon_report import audit_job, paired_report
 from rec_harness.core import ContractError, digest, file_hash, read_json, write_json
 
 
 class PairedReportTests(unittest.TestCase):
+    def test_failed_training_rejected_before_reading_success_artifacts(self):
+        directory = self.root / 'jobs/failed-tiny-42'
+        write_json(directory / 'completed.json', {'status': 'crash', 'process': {'status': 'crash'}})
+        with self.assertRaisesRegex(ContractError, 'failed-tiny-42: unsuccessful process'):
+            audit_job(self.root, self.config, 'failed', 'tiny', 42)
+
     def test_pair_cannot_mix_execution_versions(self):
         directory = self.root / 'jobs/legacy_incumbent-tiny-42'
         result = read_json(directory / 'completed.json')

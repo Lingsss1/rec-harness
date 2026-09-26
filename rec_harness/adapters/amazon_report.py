@@ -12,14 +12,14 @@ from rec_harness.core import ContractError, digest, file_hash, read_json, write_
 def audit_job(root, config, model_version, dataset, seed):
     directory = root / 'jobs' / f'{model_version}-{dataset}-{seed}'
     result = read_json(directory / 'completed.json')
-    manifest = read_json(directory / 'manifest.json')
-    checks = read_json(directory / 'correctness.json')
-    ranks = read_json(directory / 'validation_ranks.json')
-    candidates = read_json(directory / 'validation_candidates.json')
     def require(condition, message):
         if not condition:
             raise ContractError(f'{directory.name}: {message}')
     require(result['status'] == 'success' and result['process']['status'] == 'success', 'unsuccessful process')
+    manifest = read_json(directory / 'manifest.json')
+    checks = read_json(directory / 'correctness.json')
+    ranks = read_json(directory / 'validation_ranks.json')
+    candidates = read_json(directory / 'validation_candidates.json')
     request = read_json(directory / 'request.json') if (directory / 'request.json').exists() else {}
     require(request.get('execution_id', 'direct-reviewed-v1') == result.get('execution_id', 'direct-reviewed-v1'), 'execution receipt identity')
     if request.get('contract_gate') == 'pre-and-post-v1':

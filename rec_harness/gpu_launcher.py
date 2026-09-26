@@ -16,6 +16,15 @@ from .gpu_descriptors import inventory, select_descriptors
 from .policy_sandbox import restrict_syscalls
 
 
+def warm_cpu_threads(torch):
+    """Create the CPU parallel pool before TSYNC prohibits new threads.
+
+    CUDA warmup alone does not exercise parallel CPU initialization used by
+    model constructors. Use deterministic storage, leaving the RNG untouched.
+    """
+    torch.zeros((65536, 48), device='cpu')
+
+
 def validate_launch(root, script, expected_hash, device, uid):
     root = Path(root).resolve()
     if root == Path('/') or type(uid) is not int or uid <= 0:
@@ -58,6 +67,7 @@ def launch(root, script, expected_hash, arguments, *, device=0, uid=65534, runti
                       MKL_NUM_THREADS='2', OPENBLAS_NUM_THREADS='2', PYTHONHASHSEED='0')
     import torch
     torch.set_num_threads(2)
+    warm_cpu_threads(torch)
     warmup = torch.ones((32, 32), device='cuda', requires_grad=True)
     (warmup @ warmup).sum().backward()
     torch.cuda.synchronize()

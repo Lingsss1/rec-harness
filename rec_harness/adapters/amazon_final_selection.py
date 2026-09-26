@@ -56,8 +56,11 @@ def seal_selection(study,output,models,test_directory,*,eval_seed,eval_users=100
                 'research_event_head':store.verify()['head'],'protocol_hash':cfg['protocol_hash'],
                 'datasets':cfg['datasets'],'seeds':cfg['confirmation_seeds'],'data':cfg['data'],'data_hashes':cfg['data_hashes'],
                 'jobs':jobs,'execution_id':next(iter(identities)),
+                'evaluation_code':{name:file_hash(Path(__file__).with_name(name)) for name in ['amazon_final_data.py','independent_scoring.py','score_worker.py']},
                 'final_protocol':{'histories':'train followed by validation interactions','positive':'first test interaction',
                     'candidates':'positive plus 99 unique negatives excluding known history','unknown_items':'reject, do not silently drop users',
+                    'users':'sorted test users, seeded uniform sample up to eval_users; missing train/validation history rejects the population',
+                    'ties':'strictly greater negatives; report optimistic-tie counts',
                     'aggregation':'unweighted category mean per initialization; report all frozen initializations',
                     'checkpoint_selection':'frozen validation-selected checkpoints; no retraining or test-based selection'},
                 'scope':'Host-only final evaluation plan; test data not opened during sealing. No return to model optimization in this study.'}
@@ -85,4 +88,6 @@ def load_selection(output):
     for job in plan['jobs']:
         for key in ['source','checkpoint']:
             if file_hash(job[key]['path'])!=job[key]['sha256']:raise ContractError('frozen final model bytes changed')
+    for name,expected in plan['evaluation_code'].items():
+        if file_hash(Path(__file__).with_name(name))!=expected:raise ContractError('frozen final evaluator changed')
     return plan

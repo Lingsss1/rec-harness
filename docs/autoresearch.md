@@ -34,7 +34,7 @@ python3 -m rec_harness autoresearch /path/to/amazon-campaign
 
 控制器自动冻结研究提案、注册候选、检查模型源码、运行 CPU 数值契约及隔离的三步合成梯度检查，再调度完整开发集训练和独立 CPU 复评分。梯度检查要求学习后仍满足因果性、padding、尾部表示读出，以及 forward 与编码表示一致性；它不改变真实训练的优化器、协议或 checkpoint。只有通过开发集门槛并获 lead 保留建议才释放确认 seed。确认结果只在主机侧判定晋升，不发送至 Codex。当前确认仍使用相同验证用户的新初始化，不是最终测试。
 
-源码修改范围是 `NextItNetModel` / `NextItNetBlock` 内已声明方法，允许的张量算子和模块可在 `model_source_contract.py` 查看。训练、数据处理、导入和方法签名冻结。新增模型结构不需要修改逐候选字符串模板；超出能力范围的代码被拒绝。这个受限源码契约不是任意 Python 的安全证明。现有 Amazon 训练仍使用与历史 comparator 匹配的 reviewed-source 执行路径，不应把此适配器作为通用不可信 GPU 代码执行器。
+源码修改范围是 `NextItNetModel` / `NextItNetBlock` 内已声明方法，允许的张量算子和模块可在 `model_source_contract.py` 查看。训练、数据处理、导入和方法签名冻结。新增模型结构不需要修改逐候选字符串模板；超出能力范围的代码被拒绝。这个受限源码契约不是任意 Python 的安全证明。Amazon 配置可通过 `execution_id` 绑定已注册的冻结隔离运行环境；基线、候选和确认阶段必须使用相同执行版本。未指定时仍沿用 reviewed-source 路径。隔离路径已通过实际基线训练与独立复评分，不代表任意 GPU 代码或驱动层安全证明。
 
 每轮复用已审计 incumbent 作为唯一配对对照。另设机制消融仍需扩展适配器；不能据此声称已完成任意多对照研究。角色调用上限和 study GPU 秒分别计账；失败计费、历史成本接续及每个训练任务的预算检查保持生效。`minimum_round_gpu_seconds` 是启动下限，不是整轮成本预测；每个提案仍受自己的冻结预算和 study 总预算限制。
 
@@ -43,6 +43,24 @@ Amazon 角色有终态响应时恢复会复用，候选源码和上下文有哈�
 Amazon 也支持下述 `diagnostic_registry` 与 `measurement_requirements`。诊断只接收已审计开发 seed 的品类聚合指标，包含 dataset 标签；不传入原始交互、checkpoint 或确认结果。启用工具时须指定独立 `diagnostic_budget`，费用记录在 diagnostic-budget，不能混算为 Codex 调用次数。必需测量缺失会生成 MeasurementGap，以 measurement_required 停止，保留 incumbent；此时不会生成模型提案或启动训练。工具外循环的 measurement_source 可直接引用该 Amazon campaign。新研究回合可冻结晋升后的工具并复测；项目总调度可自动创建 Amazon 后继回合，继续使用同一冻结 study 和共享 GPU 账本。
 
 `verify` 和 `recover` 已识别 Amazon campaign，无需初始化 Codex 服务。verify 核对控制器/绑定 study 事件链、角色内容与绑定、已提交开发周期及 CAS，并单列旧角色记录缺少完整事件绑定的情况；它不替代逐 GPU 作业或私有确认结果审计。恢复在控制器锁下检查角色和诊断工作进程，保留未知实际成本的预留费用。
+
+## 独立最终评估
+
+研究结束后，先封存比较模型和验证集选出的 checkpoint，再执行最终测试。第一个 `--model` 是报告中的 comparator。每个模型必须已有全部类别、全部确认初始化的可审计 checkpoint，且执行版本和类别词表一致。
+
+```bash
+python3 -m rec_harness amazon-final-seal /path/to/study /path/to/private-final \
+  --model legacy_incumbent --model selected-candidate \
+  --test-directory /path/to/test --eval-seed 20260926 --eval-users 1000
+python3 -m rec_harness amazon-final-run /path/to/private-final \
+  --recipe /path/to/cpu-recipe.json --uid-registry /path/to/final-uids
+```
+
+`amazon-final-seal` 不读取测试集；它冻结源码、checkpoint、评估代码和评分口径，并关闭该 study 的后续研究及预算接续。输出目录必须在 study 之外。`amazon-final-run` 首次打开 `<category>_test.txt`，用训练加验证历史预测第一条测试交互；固定采样至多 `eval_users` 个用户，每个用户使用一个正例和 99 个唯一负例。所有模型及初始化共用同一类别请求。缺失历史、未知物品或负例不足会拒绝，不能静默筛除用户。评分沿用严格大于正例分数的负例计数，并报告平分用户数。
+
+私有用户与正例键保留在最终评估目录，隔离进程只收到模型、checkpoint、匿名历史和打乱的候选集。主机将每个初始化的完整类别均值与配对差值写入 `final-report.json`，结果不写回研究记忆，也不用于自动选择新模型。这是采样候选排名测试，不是全物品排名。恢复会重新验证数据、评分产物和报告，已完成推理不重跑；遗留的未完成推理目录需先审计，当前入口不会自动丢弃后重试。
+
+已有两模型×两初始化、4 个真实隔离 CPU 进程的合成验收，精确恢复通过。模型和验证准入收据是合成夹具，因此该验收只证明最终执行链路，不证明真实模型收益或真实最终测试已完成。
 
 ## 工具与 Harness 外循环
 

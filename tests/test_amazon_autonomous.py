@@ -74,7 +74,7 @@ class RoleRecoveryTests(unittest.TestCase):
         from rec_harness.core import Artifacts
         r=self.runner;r.root=self.root;r.artifacts=Artifacts(self.root/'artifacts/objects')
         r.study=self.root/'study';ledger=Store(r.study/'memory');ledger.configure_budget(10000);ledger.close()
-        r.config={'max_rounds':1};r.lock=lambda:nullcontext()
+        r.config={'max_rounds':1,'role_call_limit':12};r.lock=lambda:nullcontext()
         self.folder=self.root/'rounds/round-1';self.folder.mkdir(parents=True)
         def reject(*args):raise ContractError('host capability omission')
         with self.assertRaises(ContractError):r._role(self.folder,'lead',{},validator=reject)
@@ -94,6 +94,19 @@ class RoleRecoveryTests(unittest.TestCase):
         self.assertEqual(result['state']['round'],1)
         before=r.store.verify();self.assertEqual(r.run(),result);self.assertEqual(r.store.verify(),before)
         with self.assertRaisesRegex(ContractError,'not a source failure'):r.reopen_source_failure('no')
+        from rec_harness.adapters.amazon_auto_audit import verify_reopen_history
+        self.assertEqual(verify_reopen_history(r),1)
+        altered=r.store.events()
+        recovery=next(e for e in altered if e['kind']=='auto_round_reopened')
+        recovery['payload']['retained_role_cost']=0
+        with patch.object(r.store,'events',return_value=altered),patch.object(r.store,'verify',return_value=before):
+            with self.assertRaisesRegex(ContractError,'amount changed'):verify_reopen_history(r)
+        # Alter the archived response reference while keeping it a valid CAS object.
+        write_json(self.root/'other.json',{'different':'output'})
+        altered=r.store.events();recovery=next(e for e in altered if e['kind']=='auto_round_reopened')
+        recovery['payload']['prior_artifacts']['lead/response.json']=r.artifacts.put(self.root/'other.json')
+        with patch.object(r.store,'events',return_value=altered),patch.object(r.store,'verify',return_value=before):
+            with self.assertRaisesRegex(ContractError,'pre-repair archive'):verify_reopen_history(r)
 
     def test_reopen_rejects_post_admission_and_running_work(self):
         from contextlib import nullcontext

@@ -28,6 +28,12 @@ class EvidenceArchiveTests(unittest.TestCase):
             self.assertEqual(archive_job(job,artifacts),refs)
             runtime.write_bytes(b'mutated library')
             with self.assertRaisesRegex(ContractError,'runtime bytes differ'):archive_job(job,artifacts)
+            runtime.write_bytes(b'frozen library')
+            write_json(job/'isolated/completed.json',{'runtime_archive_hash':'another archive'})
+            with self.assertRaisesRegex(ContractError,'binding changed'):archive_job(job,artifacts)
+            write_json(job/'isolated/completed.json',{'runtime_archive_hash':archive['hash']})
+            artifacts.verify(ref).unlink()
+            with self.assertRaisesRegex(ContractError,'unavailable/corrupt'):archive_job(job,artifacts)
 
     def test_legacy_job_remains_fully_archived(self):
         with tempfile.TemporaryDirectory() as tmp:

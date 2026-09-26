@@ -69,6 +69,29 @@ class LegacyMigrationTests(unittest.TestCase):
         self.assertEqual(archive.verify(manifest['files']['lessons.json']).read_bytes(), original)
         self.assertEqual(sum(n['type'] == 'Claim' for n in self.store.snapshot()['nodes']), 1)
 
+    def test_reported_parent_sources_and_conflicts_survive_incremental_import(self):
+        episodes=[{'experiment_id':'parent-a'},{'experiment_id':'parent-b'},
+                  {'experiment_id':'child','parent_experiment_id':'parent-a'}]
+        (self.source/'episodes.jsonl').write_text(''.join(canonical(row)+'\n' for row in episodes))
+        self.import_all()
+        def parents():
+            graph=self.store.snapshot();nodes={n['id']:n for n in graph['nodes']}
+            return nodes,[e for e in graph['edges'] if e['relation']=='DERIVED_FROM' and nodes[e['source']]['type']=='Experiment']
+        nodes,relations=parents();self.assertEqual(len(relations),1)
+        self.assertEqual(len(relations[0]['attrs']['legacy_source_record_ids']),1)
+        (self.source/'results.tsv').write_text('experiment_id\tparent_experiment_id\nchild\tparent-a\nchild\tparent-b\n')
+        result=self.import_all();self.assertEqual(result['relations_updated'],1)
+        nodes,relations=parents();self.assertEqual(len(relations),2)
+        self.assertEqual(sorted(len(e['attrs']['legacy_source_record_ids']) for e in relations),[1,2])
+        for relation in relations:
+            self.assertEqual(relation['attrs']['status'],'legacy_unverified')
+            self.assertEqual(relation['attrs']['evidence_refs'],[])
+            for reference in relation['attrs']['legacy_source_record_ids']:
+                self.assertEqual(nodes[reference]['type'],'LegacyRecord')
+                self.assertEqual(nodes[reference]['attrs']['original']['experiment_id'],'child')
+        before=self.store.verify();again=self.import_all()
+        self.assertEqual(again['relations_updated'],0);self.assertEqual(self.store.verify(),before)
+
     def test_late_references_resolve_without_fabricated_experiments(self):
         write_json(self.source / 'lessons.json', [{'lesson': 'tentative', 'supporting_episode_ids': ['later']}])
         self.import_all()

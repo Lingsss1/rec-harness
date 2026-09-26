@@ -44,7 +44,8 @@ def import_legacy(store, source, task_id, protocol_hash='unknown'):
     if not source.is_dir(): raise ContractError('legacy source directory does not exist')
     snapshot = store.snapshot()
     known = {n['id']: n for n in snapshot['nodes']}
-    known_edges = {e['id'] for e in snapshot['edges']}
+    known_edge_records = {e['id']:e for e in snapshot['edges']}
+    known_edges = set(known_edge_records)
     archive = Artifacts(store.root.parent / 'artifacts/objects')
     records, source_refs = [], {}
     for name in FILES:
@@ -87,11 +88,21 @@ def import_legacy(store, source, task_id, protocol_hash='unknown'):
             # bytes and earlier graph snapshot, and never upgrade scientific status.
             fresh[key] = candidate
         return key
-    def link(source_id, target_id, kind, suffix):
+    def link(source_id, target_id, kind, suffix, source_record=None):
         key = 'legacy-edge-' + digest([task_id, protocol_hash, source_id, target_id, suffix])[:32]
-        if key in known_edges: return
+        existing=relations.get(key) or known_edge_records.get(key)
+        if existing:
+            if source_record and source_record not in existing['attrs'].get('legacy_source_record_ids',[]):
+                relations[key]={**existing,'attrs':{**existing['attrs'],
+                    'legacy_source_record_ids':sorted(set(existing['attrs'].get('legacy_source_record_ids',[])+[source_record])),
+                    'revision_id':str(store.version+1),
+                    'qualification':'reported parent relation; no weight transfer or metric comparability asserted'}}
+            return
         item = edge(key, source_id, target_id, kind, [], task_id, store.version + 1)
         item['attrs'].update(origin='legacy_unverified', status='legacy_unverified')
+        if source_record:
+            item['attrs'].update(legacy_source_record_ids=[source_record],
+                qualification='reported parent relation; no weight transfer or metric comparability asserted')
         relations[key] = item
     def external_identity(value):
         supplied = value.get('experiment_id') or value.get('run_id')
@@ -129,7 +140,7 @@ def import_legacy(store, source, task_id, protocol_hash='unknown'):
             if anchor: link(anchor, key, 'PRODUCES', 'summary')
             parent = value.get('parent_experiment_id', value.get('parent_id'))
             if parent is not None and str(parent) in anchors and anchors[str(parent)] != anchor:
-                link(anchor, anchors[str(parent)], 'DERIVED_FROM', 'reported-parent')
+                link(anchor, anchors[str(parent)], 'DERIVED_FROM', 'reported-parent',raw_id)
         elif name == 'failures.jsonl':
             add(key, 'Failure', {'source_record_id': raw_id,
                 'failure_kind': value.get('kind', 'unknown'), 'signature': value.get('signature'),
@@ -164,4 +175,5 @@ def import_legacy(store, source, task_id, protocol_hash='unknown'):
     return {'imported': len(raw_ids & fresh.keys()), 'already_present': len(raw_ids - fresh.keys()),
             'typed_nodes_added': sum(n['type'] != 'LegacyRecord' and k not in known for k, n in fresh.items()),
             'typed_nodes_updated': sum(k in known for k in fresh),
-            'relations_added': len(relations), 'source_manifest_hash': manifest_hash}
+            'relations_added': sum(key not in known_edges for key in relations),
+            'relations_updated': sum(key in known_edges for key in relations), 'source_manifest_hash': manifest_hash}

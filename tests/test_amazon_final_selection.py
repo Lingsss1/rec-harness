@@ -12,7 +12,7 @@ class FinalSelectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);study=root/'study';study.mkdir();source=root/'model.py';source.write_text('frozen source')
             cfg={'model_versions':{m:{'path':str(source),'sha256':file_hash(source)} for m in ['base','candidate']},
-                 'datasets':['tiny'],'confirmation_seeds':[17,83],'protocol_hash':'p','data':'not-opened','data_hashes':{}}
+                 'datasets':['tiny'],'confirmation_seeds':[17,83],'protocol_hash':'p','data':'not-opened','data_hashes':{},'python':'/usr/bin/python3'}
             write_json(study/'study.json',cfg)
             store=Store(study/'memory');store.configure_budget(100);store.close();calls=[]
             def audit(root,config,model,dataset,seed):

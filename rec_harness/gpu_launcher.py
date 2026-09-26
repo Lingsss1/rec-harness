@@ -62,14 +62,16 @@ def launch(root, script, expected_hash, arguments, *, device=0, uid=65534, runti
     (warmup @ warmup).sum().backward()
     torch.cuda.synchronize()
     del warmup
-    if archive is not None:
-        from .runtime_loaded import audit_loaded_runtime
-        loaded = audit_loaded_runtime(archive,devices=[device])
-        print(json.dumps({'loaded_runtime_audit': loaded}), flush=True)
     policy = select_descriptors(before, inventory(), [device])
     for fd in policy['close']:
         os.close(fd)
     restrict_syscalls(sync_threads=True)
+    # Include the security library itself, loaded by restrict_syscalls, in the
+    # native-byte audit. Read-only hashing needs no denied network/fork syscall.
+    if archive is not None:
+        from .runtime_loaded import audit_loaded_runtime
+        loaded = audit_loaded_runtime(archive,devices=[device])
+        print(json.dumps({'loaded_runtime_audit': loaded}), flush=True)
     if ctypes.CDLL(None).prctl(38, 1, 0, 0, 0) != 0:
         raise ContractError('cannot set no_new_privs')
     # No exec: it would invalidate the preinitialized CUDA runtime and its pipes.

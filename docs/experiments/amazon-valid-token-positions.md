@@ -1,6 +1,6 @@
 # Amazon NextItNet：有效 token 位置编号
 
-开发集结果未达到确认门槛：四类别平均 HR@10 从 0.5535 降至 0.5435，差值 −0.0100。四次独立 CPU 复评分的主机分数重算、来源绑定与开发读出核对已通过，4,000 个排名无差异。控制器已正常结束，7 次 Codex 调用、无失败回合；候选淘汰，incumbent 不变，未执行确认或最终测试。独立终态审计尚在进行，本文不构成该审计通过或已发布研究记忆的证明。
+开发集结果未达到确认门槛：四类别平均 HR@10 从 0.5535 降至 0.5435，差值 −0.0100。四次独立 CPU 复评分的主机分数重算、来源绑定与开发读出核对已通过，4,000 个排名无差异。控制器已正常结束，7 次 Codex 调用、无失败回合；候选淘汰，incumbent 不变，未执行确认或最终测试。独立终态审计及精确恢复均已通过，开发记忆已发布；这不证明候选收益或完整项目所有阶段完成。
 
 ## 干预与比较条件
 
@@ -60,4 +60,8 @@ CDs_and_Vinyl 的整体净损失为 34 次命中，其中该分箱净损失 32 �
 - `research/rounds/round-1/independent-rescores/*/acceptance.json`：四类别各 1,000 用户的独立排名核对。
 - `development-preliminary-audit.py`、`development-preliminary-audit.json`：使用原冻结评分器重新计算分数并核验上述绑定，仅输出聚合结果，无新训练、推理或 Codex 调用。
 
-费用终态对账、全部角色、周期完整性和精确恢复以随后产生的 `research-acceptance.json` 为准。在该文件通过前，不将本报告当作完整自主研究验收，也不将候选记忆自动发布到下一轮。
+`research-acceptance.json` 与 `audit-watch-result.json` 均已通过：七角色、四个开发任务及独立复评分、周期完整性和终态恢复全部核验，无新增调用、训练、事件或费用。候选费用为 1,065.706920593977 GPU 槽位秒；原 study 的 3,911.3455233946443 秒完整继承，累计 4,977.052443988621 秒。未执行确认和真实最终测试。
+
+开发记忆与原有五条记录合并为六条，`ready-next-development-memory.json` 的 hash 为 `fedd1d84eb01dbfaf8f333d854ea59663a0e00630b786f5847a1674abf0f6012`，`memory-acceptance.json` 绑定终态审计文件哈希。发布时使用新增的角色/周期事件绑定检查，未发送新的 Codex 请求。
+
+历史控制器仍存在已知归档边界：measurement 在角色完成事件中绑定，但未包含在旧周期 roles 内。补充文件 `measurement-binding-audit.json` 已核验语义、事件及 CAS 字节；历史周期未修改。当前实现已补齐新周期的 measurement 与检索轨迹归档。

@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
+import rec_harness
 from rec_harness.core import Artifacts,ContractError,canonical,digest,file_hash,read_json,write_json
 from rec_harness.store import Store
 from rec_harness.adapters.independent_scoring import prepare_request,score_response
@@ -14,7 +15,7 @@ class InteractionContextTests(unittest.TestCase):
     def test_freeze_projection_cost_reuse_and_confirmation_rejection(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);study=root/'study';objects=Artifacts(study/'artifacts/objects');directories=[]
-            worker=Path(__file__).resolve().parents[1]/'rec_harness/adapters/score_worker.py'
+            worker=Path(rec_harness.__file__).parent/'adapters/score_worker.py'
             cfg={'protocol_hash':'p','datasets':['tiny'],'development_seeds':[42],'data_hashes':{},
                  'model_versions':{'model':{'sha256':'source'}}}
             baseline={'source_hash':'source','checkpoint_sha256':'weights','candidates_hash':'candidates'}

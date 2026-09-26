@@ -39,15 +39,19 @@ def summarize(left, right, lengths):
     return result
 
 
-def diagnose(root, output, baseline='legacy_no_prefix', candidate='legacy_incumbent'):
+def diagnose(root, output, baseline='legacy_no_prefix', candidate='legacy_incumbent', *, partitions=('development','confirmation')):
+    partitions=list(partitions)
+    if not partitions or len(set(partitions))!=len(partitions) or any(p not in {'development','confirmation'} for p in partitions):
+        raise ContractError('diagnostic partitions must be unique development/confirmation phases')
+    if baseline==candidate:raise ContractError('diagnostic requires distinct model versions')
     root, output = Path(root), Path(output)
     output.mkdir(parents=True, exist_ok=False)
     config = load_config(root)
     plan = {'schema': 'paired-history-diagnostic-v1', 'baseline': baseline, 'candidate': candidate,
-            'bins': BINS, 'metric_cutoff': 10, 'protocol_hash': config['protocol_hash'],
+            'bins': BINS, 'partitions':partitions, 'metric_cutoff': 10, 'protocol_hash': config['protocol_hash'],
             'prior_exposure': 'aggregate validation results already inspected; exploratory, not preregistered confirmation',
-            'hypothesis': 'prefix mixing benefit varies with available training-history length',
-            'limitation': 'observational slices do not identify causal length effects; seeds share validation users'}
+            'hypothesis': 'candidate-minus-baseline ranking differences vary with training-history length',
+            'limitation': 'observational slices do not identify causal length effects; seeds share validation users; bins use total training history, not truncated model input length'}
     write_json(output / 'plan.json', plan)
     rows, dependencies, input_hashes = [], [], {}
     for dataset in config['datasets']:
@@ -61,12 +65,14 @@ def diagnose(root, output, baseline='legacy_no_prefix', candidate='legacy_incumb
                 lengths[user] += 1
         if file_hash(path) != expected: raise ContractError('training data changed during diagnostic')
         input_hashes[path.name] = expected
-        for partition in ('development', 'confirmation'):
+        for partition in partitions:
             for seed in config[partition + '_seeds']:
                 a, am = audit_job(root, config, baseline, dataset, seed)
                 b, bm = audit_job(root, config, candidate, dataset, seed)
                 if am['candidates_hash'] != bm['candidates_hash'] or am['data_hashes'] != bm['data_hashes']:
                     raise ContractError('unpaired diagnostic inputs')
+                if a.get('execution_id','direct-reviewed-v1')!=b.get('execution_id','direct-reviewed-v1'):
+                    raise ContractError('unpaired diagnostic execution versions')
                 ranks = []
                 for version, receipt in [(baseline, a), (candidate, b)]:
                     p = root / 'jobs' / f'{version}-{dataset}-{seed}' / 'validation_ranks.json'

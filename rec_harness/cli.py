@@ -86,6 +86,8 @@ def main(argv=None):
     p.add_argument('directory'); p.add_argument('output')
     p = commands.add_parser('amazon-history-diagnostic', help='aggregate paired validation gains by training-history length')
     p.add_argument('directory'); p.add_argument('output')
+    p.add_argument('--baseline',default='legacy_no_prefix');p.add_argument('--candidate',default='legacy_incumbent')
+    p.add_argument('--partition',action='append',choices=['development','confirmation'])
     p = commands.add_parser('amazon-block-score', help='host-score a reference or single-block bypass on development data')
     p.add_argument('directory');p.add_argument('model_version');p.add_argument('dataset');p.add_argument('seed',type=int);p.add_argument('output')
     p.add_argument('--execution',required=True);p.add_argument('--bypass-block',type=int)
@@ -229,7 +231,8 @@ def main(argv=None):
             result = {'hash': report['hash'], 'qualification': report['qualification'], 'output': args.output}
         elif args.command == 'amazon-history-diagnostic':
             from .adapters.history_diagnostic import diagnose
-            report = diagnose(args.directory, args.output)
+            report = diagnose(args.directory, args.output,args.baseline,args.candidate,
+                              partitions=args.partition if args.partition is not None else ('development','confirmation'))
             result = {'hash': report['hash'], 'rows': len(report['rows']), 'scope': report['scope']}
         elif args.command == 'amazon-archive':
             from .adapters.amazon_archive import archive_study

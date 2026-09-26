@@ -317,3 +317,12 @@ evidence/experiment 使用已明确标记的原调用；hypothesis/evaluation/le
 重复 finalize_cycle 返回同一记录，实际 confirmation 入口仍拒绝。
 cycle identity：6e8d8ba7567465194814ebed4a686fdc6a1c1c3639a2b4b125b5a1393054e5a5。
 详见 amazon-codex-research-v4/cycle.json 和 final-integrity.json。整体方案及进一步模型优化仍未完成。
+
+历史长度诊断现可显式选择候选与阶段，例如：
+
+```bash
+python3 -m rec_harness amazon-history-diagnostic STUDY OUTPUT_DIR \
+  --baseline legacy_incumbent --candidate CANDIDATE_ID --partition development
+```
+
+该模式只审计开发初始化，不要求候选拥有确认训练，适用于开发阶段淘汰的候选。省略 `--partition` 保留原有开发和确认两阶段行为；包含确认阶段的报告必须留在主机，不传给研究角色。两个模型须使用一致的执行版本和配对评价输入。分箱使用完整训练历史长度，并非截断后的模型输入长度；观察到的差异不能单独证明长度的因果作用。

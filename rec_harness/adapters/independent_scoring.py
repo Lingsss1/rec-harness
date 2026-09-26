@@ -6,8 +6,22 @@ controller. This does not itself isolate the model process or admit its code.
 import math
 import random
 import secrets
+import platform
+import sys
 
-from rec_harness.core import ContractError, digest
+from rec_harness.core import ContractError, digest, file_hash
+
+
+def scoring_runtime():
+    """Python and math-extension identity; not a full host OS environment lock."""
+    return {'implementation':sys.implementation.name,'version':sys.version,'machine':platform.machine(),
+            'executable_sha256':file_hash(sys.executable),
+            'math_module_sha256':file_hash(math.__file__) if getattr(math,'__file__',None) else None}
+
+
+def require_scoring_runtime(expected):
+    if expected!=scoring_runtime():
+        raise ContractError('host scoring runtime changed or absent; replay with the original scoring interpreter')
 
 
 def prepare_request(rows, *, seed=None):

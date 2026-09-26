@@ -26,6 +26,8 @@ class FinalSelectionTests(unittest.TestCase):
                 self.assertEqual(len(calls),4)
                 with self.assertRaisesRegex(ContractError,'differs'):seal_selection(study,root/'final',['candidate','base'],root/'nonexistent-test',eval_seed=99)
             self.assertEqual(load_selection(root/'final'),plan)
+            with patch('rec_harness.adapters.independent_scoring.scoring_runtime',return_value={'version':'different'}):
+                with self.assertRaisesRegex(ContractError,'scoring runtime changed'):load_selection(root/'final')
             self.assertIn('cpu_job.py',plan['package_code'])
             changed_code={**plan['package_code'],'cpu_job.py':'changed-recovery-code'}
             with patch('rec_harness.adapters.amazon_final_selection.package_code_hashes',return_value=changed_code):

@@ -1,7 +1,7 @@
 """Host-recomputed four-condition fixed-checkpoint block interaction contrast."""
 from pathlib import Path
 from rec_harness.core import ContractError,digest,read_json
-from .independent_scoring import score_response
+from .independent_scoring import score_response,require_scoring_runtime
 
 
 def summarize_interaction(directories):
@@ -14,6 +14,9 @@ def summarize_interaction(directories):
         if value.get('hash')!=digest({k:v for k,v in value.items() if k!='hash'}):
             raise ContractError('intervention receipt changed')
         identity={key:value[key] for key in keys}
+        if 'host_scoring_runtime' in value:
+            require_scoring_runtime(value['host_scoring_runtime'])
+            identity['host_scoring_runtime']=value['host_scoring_runtime']
         if bindings is not None and identity!=bindings:raise ContractError('unpaired block intervention bindings')
         bindings=identity
         if 'bypass_block' in value and 'bypass_blocks' in value:raise ContractError('ambiguous block intervention')
@@ -31,7 +34,7 @@ def summarize_interaction(directories):
             raise ContractError('unpaired block histories or candidate sets')
         paired_inputs=input_identity
         if report['hash']!=value['host_report_hash'] or report['metrics']!=value['host_metrics']:
-            raise ContractError('intervention scores differ from host receipt')
+            raise ContractError('intervention scores differ from host receipt; use the original scoring interpreter')
         if value['users']!=len(report['ranks']):raise ContractError('intervention user count changed')
         if report['tied_user_count']:raise ContractError('unresolved ties in block interaction')
         conditions[indices]=(value,report);reports.append(value['hash'])

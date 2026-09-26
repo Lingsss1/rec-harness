@@ -41,6 +41,9 @@ class RescoreRecoveryTests(unittest.TestCase):
                 self.assertEqual(accepted['inference_process_wall_seconds'],0.1)
                 self.assertEqual(rescore_job(study,'model','tiny',42,output,{},root/'uids',bypass_blocks=[1,0],resume=True),accepted)
                 self.assertEqual(len(calls),1)
+                with patch('rec_harness.adapters.independent_scoring.scoring_runtime',return_value={'version':'different'}):
+                    with self.assertRaisesRegex(ContractError,'scoring runtime changed'):
+                        rescore_job(study,'model','tiny',42,output,{},root/'uids',bypass_blocks=[0,1],resume=True)
                 with self.assertRaisesRegex(ContractError,'plan changed'):
                     rescore_job(study,'model','tiny',42,output,{},root/'uids',bypass_blocks=[0,2],resume=True)
                 write_json(output/'host-ranking.json',{'edited':True})

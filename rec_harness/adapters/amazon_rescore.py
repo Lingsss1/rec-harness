@@ -7,7 +7,7 @@ from rec_harness.cpu_job import run_cpu_job,recover_completed_cpu_job
 from rec_harness.process_identity import assert_stopped
 from .amazon_controls import load_config
 from .amazon_report import audit_job
-from .independent_scoring import prepare_request, score_response
+from .independent_scoring import prepare_request, score_response,scoring_runtime,require_scoring_runtime
 
 
 def rescore_job(root, model_version, dataset, seed, output, recipe, uid_registry, *, bypass_block=None,bypass_blocks=None,resume=False):
@@ -36,10 +36,12 @@ def _rescore_job(root,model_version,dataset,seed,output,recipe,uid_registry,bypa
           'bypass_block':bypass_block,'bypass_blocks':blocks if bypass_block is None else None,
           'training_receipt_hash':digest(result),'protocol_hash':config['protocol_hash'],
           'recipe':recipe,'uid_registry':str(Path(uid_registry).resolve()),'python':config['python'],
+          'host_scoring_runtime':scoring_runtime(),
           'worker_hash':file_hash(worker),'host_hash':file_hash(__file__),
           'scorer_hash':file_hash(Path(__file__).with_name('independent_scoring.py'))}
     plan_path=output/'rescore-plan.json'
     if plan_path.exists():
+        require_scoring_runtime(read_json(plan_path).get('host_scoring_runtime'))
         if read_json(plan_path)!=plan:raise ContractError('frozen rescore plan changed')
     elif (output/'inference').exists() or (output/'inference-request.json').exists():
         raise ContractError('legacy rescore requires its original recovery procedure')
@@ -80,6 +82,7 @@ def _rescore_job(root,model_version,dataset,seed,output,recipe,uid_registry,bypa
     if report['user_ids']!=archived['user_ids']:raise ContractError('rescore user alignment changed')
     summary={'dataset':dataset,'model_version':model_version,'seed':seed,'users':len(rows),
              'protocol_hash':config['protocol_hash'],
+             'host_scoring_runtime':plan['host_scoring_runtime'],
              'source_hash':files['model.py']['sha256'],'checkpoint_hash':files['checkpoint.pt']['sha256'],
              'candidates_hash':result['candidates_hash'],
              'score_worker_hash':files['worker.py']['sha256'],

@@ -6,6 +6,7 @@ from rec_harness.process_identity import assert_stopped
 from rec_harness.store import Store
 from .amazon_controls import load_config
 from .amazon_report import audit_job
+from .independent_scoring import scoring_runtime,require_scoring_runtime
 
 
 def package_code_hashes():
@@ -63,6 +64,7 @@ def seal_selection(study,output,models,test_directory,*,eval_seed,eval_users=100
                 'jobs':jobs,'execution_id':next(iter(identities)),
                 'python':cfg['python'],
                 'package_code':package_code_hashes(),
+                'host_scoring_runtime':scoring_runtime(),
                 'evaluation_code':{name:file_hash(Path(__file__).with_name(name)) for name in ['amazon_final.py','amazon_final_data.py','independent_scoring.py','score_worker.py']},
                 'final_protocol':{'histories':'train followed by validation interactions','positive':'first test interaction',
                     'candidates':'positive plus 99 unique negatives excluding known history','unknown_items':'reject, do not silently drop users',
@@ -84,6 +86,7 @@ def load_selection(output):
     plan=read_json(Path(output)/'selection.json')
     if plan.get('schema')!='amazon-final-selection-v1' or plan.get('hash')!=digest({k:v for k,v in plan.items() if k!='hash'}):
         raise ContractError('final selection hash changed')
+    require_scoring_runtime(plan.get('host_scoring_runtime'))
     study=Path(plan['request']['study'])
     if digest(read_json(study/'study.json'))!=plan['study_config_hash']:raise ContractError('final study configuration changed')
     store=Store(study/'memory')

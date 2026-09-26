@@ -52,6 +52,11 @@ class InteractionContextTests(unittest.TestCase):
                     self.assertEqual([e['relation'] for e in store.snapshot()['edges']],['MEASURED_BY'])
                     self.assertEqual(block_context(controller,'model',cfg),context);self.assertEqual(store.verify(),before)
                     self.assertEqual(cost_summary({'block_interaction_diagnostics':records*2})['retained_interaction_cpu_seconds'],4)
+                    receipt_ref=records[0]['source_archives'][0]['inference/receipt.json']
+                    receipt_path=artifacts.verify(receipt_ref);original_bytes=receipt_path.read_bytes();receipt_path.write_text('{}')
+                    with self.assertRaises(ContractError):block_context(controller,'model',cfg)
+                    receipt_path.write_bytes(original_bytes)
+                    self.assertEqual(block_context(controller,'model',cfg),context)
                 finally:store.close()
                 path=Path(directories[-1])/'inference/request.json';request=read_json(path);request['arguments']=['--bypass-block','0'];write_json(path,request)
                 with self.assertRaisesRegex(ContractError,'execution arguments'):freeze_interactions([group],cfg,artifacts)

@@ -33,7 +33,7 @@ def freeze_interactions(groups,study,artifacts):
         if (baseline['source_hash'],baseline['checkpoint_sha256'],baseline['candidates_hash'])!=(binding['source_hash'],binding['checkpoint_hash'],binding['candidates_hash']):
             raise ContractError('interaction checkpoint or candidates differ from audited baseline')
         baseline_ranks=read_json(source_root/'jobs'/f'{model}-{dataset}-{seed}'/'validation_ranks.json')
-        objects=Artifacts(source_root/'artifacts/objects');costs={};condition_refs=[]
+        objects=Artifacts(source_root/'artifacts/objects');costs={};condition_refs=[];source_archives=[]
         for directory in map(Path,group['directories']):
             value=read_json(directory/'acceptance.json');receipt=read_json(directory/'inference/receipt.json')
             submitted=read_json(directory/'inference/request.json')
@@ -57,6 +57,8 @@ def freeze_interactions(groups,study,artifacts):
             if receipt['wall_seconds'] is not None:number(receipt['wall_seconds'],'interaction inference time',0)
             costs[digest(receipt)]=receipt['wall_seconds']
             condition_refs.append(artifacts.put(directory/'acceptance.json'))
+            source_archives.append({name:artifacts.put(directory/name) for name in [
+                'acceptance.json','inference/receipt.json','inference/request.json']})
         measurements={dataset+'.users':binding['users']}
         prefix=dataset+'.blocks-'+'-'.join(map(str,report['blocks']))+'.'
         for metric,values in report['metrics'].items():
@@ -68,6 +70,7 @@ def freeze_interactions(groups,study,artifacts):
         path=artifacts.root.parent/'block-interactions'/(digest(public)+'.json');write_json(path,public)
         records.append({'model_version':model,'protocol_hash':study['protocol_hash'],'source_hash':binding['source_hash'],
                         'public_ref':artifacts.put(path),'source_receipts':condition_refs,'inference_costs':costs,
+                        'source_archives':source_archives,
                         'diagnostic_kind':'block_interaction','implementation_hash':digest({
                             'worker':binding['score_worker_hash'],'scorer':binding['host_scorer_hash'],
                             'contrast':file_hash(block_interaction.__file__),'projection':file_hash(__file__)}),

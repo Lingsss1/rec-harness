@@ -102,6 +102,16 @@ def block_context(controller,base,study):
         if public['model_version']!=record['model_version']:raise ContractError('frozen block score model differs')
         if public['model_version']!=base:continue
         if record['source_hash']!=study['model_versions'][base]['sha256']:raise ContractError('frozen block score source differs')
+        if record.get('diagnostic_kind')=='block_interaction':
+            for ref in record['source_receipts']:controller.artifacts.verify(ref)
+            if 'source_archives' in record:
+                costs={};receipts=[]
+                for archive in record['source_archives']:
+                    for ref in archive.values():controller.artifacts.verify(ref)
+                    receipt=read_json(controller.artifacts.verify(archive['inference/receipt.json']))
+                    costs[digest(receipt)]=receipt['wall_seconds'];receipts.append(archive['acceptance.json'])
+                if costs!=record['inference_costs'] or receipts!=record['source_receipts']:
+                    raise ContractError('frozen interaction cost or condition archive differs')
         observation=public['observation_id']
         value=node(observation,'Observation',{**public,'summary_ref':record['public_ref'],'valid':True},controller.task,controller.protocol_hash)
         if observation in known and known[observation]!=value:raise ContractError('committed block score observation differs')

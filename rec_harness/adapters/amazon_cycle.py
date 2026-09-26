@@ -37,9 +37,11 @@ def finalize_cycle(root, proposal_id, directory):
             prior=[e['payload'] for e in store.events() if e['kind']=='amazon_research_cycle_completed' and e['payload']['proposal_id']==proposal_id]
             if prior:
                 if prior[0]['identity']!=identity:raise ContractError('completed research cycle cannot be rewritten')
-                for name,ref in prior[0]['roles'].get('measurement',{}).get('artifacts',{}).items():
-                    if file_hash(directory/'measurement'/name)!=ref['sha256']:
-                        raise ContractError('committed measurement archive changed')
+                for role,record in prior[0]['roles'].items():
+                    for name,ref in record.get('artifacts',{}).items():
+                        path=directory/role/name
+                        if not path.is_file() or file_hash(path)!=ref['sha256']:
+                            raise ContractError('committed '+role+' archive changed')
                 write_json(directory/'cycle.json',prior[0]);return prior[0]
             current=store.snapshot()
             if {n['id'] for n in patch['nodes']} & {n['id'] for n in current['nodes']} or {e['id'] for e in patch['edges']} & {e['id'] for e in current['edges']}:
@@ -54,12 +56,13 @@ def finalize_cycle(root, proposal_id, directory):
             for role in role_names:
                 folder=directory/role
                 if role in rejected:
-                    files=[name for name in ['context.json','request.json','response.json','resources.json','schema.json','rejection.json'] if (folder/name).is_file()]
+                    files=[name for name in ['context.json','request.json','response.json','resources.json','schema.json','rejection.json','literature-search.json','stdout.jsonl','process.json','launch.json'] if (folder/name).is_file()]
                     roles[role]={'artifacts':artifacts.snapshot(folder,files),'response_validation':{'status':'rejected'},'scope':'preserved failed attempt; not accepted evidence'}
                     continue
                 resources=read_json(folder/'resources.json')
                 if resources['status']!='success':raise ContractError('role has no successful terminal receipt')
                 files=['context.json','request.json','response.json','resources.json','schema.json']
+                files.extend(name for name in ['literature-search.json','stdout.jsonl','process.json','launch.json'] if (folder/name).is_file())
                 rejection=read_json(folder/'rejection.json') if (folder/'rejection.json').exists() else None
                 if rejection:files.append('rejection.json')
                 reuse=None

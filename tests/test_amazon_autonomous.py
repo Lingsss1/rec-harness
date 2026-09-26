@@ -180,6 +180,10 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                     if role in ('evaluation','lead'):response.update(selection='keep' if confirmation else 'discard',conclusion_status='unknown',evidence_refs=['report'])
                     if role=='knowledge':response['patch_json']=json.dumps({'base_version':context['graph']['graph_version'],'nodes':[],'edges':[]})
                     for name,value in [('request.json',{'role':role}),('schema.json',schema_for(role)),('context.json',context),('response.json',response),('resources.json',{'status':'success'})]:write_json(target/name,value)
+                    if role=='hypothesis':
+                        write_json(target/'literature-search.json',{'search_observed':False,'qualification':'fixture; no source verification'})
+                        (target/'stdout.jsonl').write_text('{"type":"fixture"}\n')
+                        write_json(target/'process.json',{'status':'success','qualification':'fixture'})
                     return response
             def gate(python,source,model_id,directory,env,timeout):
                 write_json(directory/'report.json',{'checks':{'parameter_gradients':{'w':{'finite':True}}}})
@@ -221,6 +225,17 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                     self.assertEqual(verified['verified_roles'],expected_roles);self.assertEqual(verified['verified_cycles'],1)
                     self.assertEqual(verified['measurement_cycle_bindings'],int(measurement and not legacy_measurement))
                     self.assertEqual(verified['measurement_roles_without_cycle_binding'],int(legacy_measurement))
+                    from rec_harness.adapters.amazon_cycle import finalize_cycle
+                    folder=campaign/'rounds/round-1'
+                    cycle=read_json(folder/'cycle.json')
+                    for name in ['literature-search.json','stdout.jsonl']:
+                        self.assertIn(name,cycle['roles']['hypothesis']['artifacts'])
+                        path=folder/'hypothesis'/name;original_bytes=path.read_bytes()
+                        path.write_bytes(original_bytes+b' ')
+                        with self.assertRaisesRegex(ContractError,'hypothesis archive changed'):
+                            finalize_cycle(study,'auto-round-1',folder)
+                        path.write_bytes(original_bytes)
+                    self.assertEqual(finalize_cycle(study,'auto-round-1',folder),cycle)
                     if measurement and not legacy_measurement:
                         from rec_harness.adapters.amazon_cycle import finalize_cycle
                         folder=campaign/'rounds/round-1';original=read_json(folder/'measurement/context.json')

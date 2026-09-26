@@ -307,7 +307,18 @@ padding、零/一个前驱的等价性、未来扰动与填充输出。此证明
 python -m rec_harness amazon-run-phase STUDY_ROOT PROPOSAL_ID development
 ```
 
-该入口先检查所有候选已准入、源码匹配，并审计既有基准/对照在该阶段的全部配对
+已经登记执行版本并完成源码准入的方案，可用一个命令串起配对开发训练和独立评分：
+
+```bash
+python -m rec_harness amazon-run-development STUDY_ROOT PROPOSAL_ID OUTPUT_DIR \
+  --execution EXECUTION_ID --recipe RUNTIME_RECIPE_JSON --uid-registry UID_REGISTRY
+```
+
+该入口先运行或复用同执行版本的对照，再运行候选开发阶段，对每个模型、类别和开发 seed 独立 CPU 复评分，排名完全一致后才写出 development-readout.json 和 acceptance.json。重复执行复用评分收据；中断的训练由已有作业账本恢复并保留成本。成功终态再次执行只核验，不调用训练入口；缺失推理档案会拒绝，不自动补跑。输出目录冻结 study、方案、模型源、执行身份、评分解释器及配方；任何绑定变化都需要独立输出。该命令不调用 Codex，不释放确认阶段，也不访问最终测试。
+
+执行器修复后应先创建继承成本的新 study，并在该 study 注册新执行版本、原方案和源码准入；旧执行版本的成功对照不能直接与新候选配对。`amazon-run-development` 是已登记方案的执行/恢复入口，不替代自主研究中的方案生成、结果评审与知识写入。正在执行的旧快照不应中途替换。
+
+`amazon-run-phase` 先检查所有候选已准入、源码匹配，并审计既有基准/对照在该阶段的全部配对
 结果；执行版本不一致时拒绝复用。只调度新模型版本，因此既有基准兼对照不会
 重复训练。使用 confirmation 参数仍须先通过冻结选择释放；入口不会自动解锁。
 

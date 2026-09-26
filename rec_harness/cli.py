@@ -67,6 +67,9 @@ def main(argv=None):
     p.add_argument("directory"); p.add_argument("output"); p.add_argument("--workers", type=int, default=1)
     p = commands.add_parser('amazon-run-phase', help='run a registered phase and reuse audited existing comparators')
     p.add_argument('directory'); p.add_argument('proposal'); p.add_argument('phase', choices=['development','confirmation']); p.add_argument('--execution')
+    p = commands.add_parser('amazon-run-development',help='run or resume admitted matched development, including controls and independent scoring; no Codex calls')
+    p.add_argument('directory');p.add_argument('proposal');p.add_argument('output')
+    p.add_argument('--execution',required=True);p.add_argument('--recipe',required=True);p.add_argument('--uid-registry',required=True)
     p = commands.add_parser('amazon-continue', help='create an authorized successor campaign with inherited costs')
     p.add_argument('directory'); p.add_argument('predecessor'); p.add_argument('project')
     p.add_argument('--additional-budget',type=float,required=True); p.add_argument('--authorization-file',required=True)
@@ -206,6 +209,10 @@ def main(argv=None):
         elif args.command == 'amazon-run-phase':
             from .adapters.amazon_phases import run_phase
             result = run_phase(args.directory, args.proposal, args.phase, args.execution)
+        elif args.command == 'amazon-run-development':
+            from .adapters.amazon_matched import run_matched_development
+            result=run_matched_development(args.directory,args.proposal,args.output,
+                execution_id=args.execution,recipe=read_json(args.recipe),uid_registry=args.uid_registry)
         elif args.command == 'amazon-memory-export':
             from .adapters.amazon_memory import export_development_memory
             result=export_development_memory(args.directory,args.output)

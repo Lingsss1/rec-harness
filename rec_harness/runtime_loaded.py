@@ -9,6 +9,7 @@ import hashlib
 import mmap
 from pathlib import Path
 import re
+import stat
 
 from .core import ContractError, digest
 from .runtime_archive import host_identity
@@ -30,29 +31,57 @@ def mapped_files(maps):
     return files
 
 
+def mapping_region(probe):
+    byte=ctypes.c_char.from_buffer(probe);address=ctypes.addressof(byte);del byte
+    for line in Path('/proc/self/maps').read_text().splitlines():
+        fields=line.split(None,5)
+        start,end=(int(value,16) for value in fields[0].split('-'))
+        if start<=address<end:return fields
+    raise ContractError('runtime descriptor mapping is not observable')
+
+
 def mapped_fd_identity(handle):
     """Ask the kernel which file this open descriptor maps, without stat aliases."""
     with mmap.mmap(handle.fileno(),1,access=mmap.ACCESS_COPY) as probe:
-        byte=ctypes.c_char.from_buffer(probe)
-        address=ctypes.addressof(byte)
-        del byte
-        for line in Path('/proc/self/maps').read_text().splitlines():
-            fields=line.split(None,5)
-            start,end=(int(value,16) for value in fields[0].split('-'))
-            if start<=address<end:
-                if len(fields)!=6 or not fields[5].startswith('/') or fields[5].endswith(' (deleted)'):
-                    raise ContractError('runtime descriptor lacks a named live mapping')
-                return fields[3],int(fields[4])
-        raise ContractError('runtime descriptor mapping is not observable')
+        fields=mapping_region(probe)
+        if len(fields)!=6 or not fields[5].startswith('/') or fields[5].endswith(' (deleted)'):
+            raise ContractError('runtime descriptor lacks a named live mapping')
+        return fields[3],int(fields[4])
 
 
-def audit_loaded_runtime(report, *, maps=None):
+def userspace_mappings(maps,devices):
+    """Explicit GPU mode separates non-executable driver/anonymous data mappings."""
+    if not devices:return maps,{}
+    from .isolation import gpu_device_paths
+    allowed=set(gpu_device_paths(devices));kept=[];excluded={}
+    with mmap.mmap(-1,1) as anonymous:
+        reference=mapping_region(anonymous)
+    for line in maps.splitlines():
+        fields=line.split(None,5)
+        if len(fields)!=6:kept.append(line);continue
+        name=fields[5];kind=None
+        if name=='/dev/zero (deleted)' and len(reference)==6 and reference[5]==name and fields[3]==reference[3]:
+            kind='anonymous shared data'
+        elif name in allowed:
+            if not stat.S_ISCHR(Path(name).stat().st_mode):raise ContractError('GPU mapping path is not a character device')
+            kind='driver device memory'
+        if kind is None:kept.append(line);continue
+        if 'x' in fields[1] or not fields[1].endswith('s'):
+            raise ContractError('GPU data mapping has unexpected protection')
+        start,end=(int(v,16) for v in fields[0].split('-'))
+        row=excluded.setdefault(name,{'kind':kind,'regions':0,'bytes':0})
+        row['regions']+=1;row['bytes']+=end-start
+    return '\n'.join(kept),excluded
+
+
+def audit_loaded_runtime(report, *, maps=None, devices=()):
     if report.get('schema') != 'gpu-runtime-bytes-v1' or report.get('hash') != digest({k: v for k, v in report.items() if k != 'hash'}):
         raise ContractError('runtime archive identity mismatch')
     if report['host_identity'] != host_identity():
         raise ContractError('runtime host kernel or driver identity changed')
     if maps is None:
         maps = Path('/proc/self/maps').read_text()
+    maps,excluded=userspace_mappings(maps,devices)
     paths = mapped_files(maps)
     if not paths:
         raise ContractError('runtime has no mapped files to audit')
@@ -79,6 +108,7 @@ def audit_loaded_runtime(report, *, maps=None):
         verified[name] = {'sha256': sha, 'size': before.st_size}
     body = {'schema': 'loaded-runtime-audit-v1', 'runtime_archive_hash': report['hash'],
             'files': verified, 'identity_method':'kernel mapping of the same open descriptor used for hashing',
+            'excluded_data_mappings':excluded,
             'scope': 'current file mappings only; excludes future loads, Python source, kernel and driver memory'}
     return {**body, 'hash': digest(body)}
 

@@ -64,7 +64,7 @@ def launch(root, script, expected_hash, arguments, *, device=0, uid=65534, runti
     del warmup
     if archive is not None:
         from .runtime_loaded import audit_loaded_runtime
-        loaded = audit_loaded_runtime(archive)
+        loaded = audit_loaded_runtime(archive,devices=[device])
         print(json.dumps({'loaded_runtime_audit': loaded}), flush=True)
     policy = select_descriptors(before, inventory(), [device])
     for fd in policy['close']:

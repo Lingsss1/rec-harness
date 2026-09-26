@@ -1,4 +1,5 @@
 import mmap
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,10 +7,30 @@ from unittest.mock import patch
 
 from rec_harness.core import Artifacts, ContractError, digest
 from rec_harness.runtime_archive import host_identity
-from rec_harness.runtime_loaded import audit_loaded_runtime, mapped_files, mapped_fd_identity
+from rec_harness.runtime_loaded import audit_loaded_runtime, mapped_files, mapped_fd_identity, userspace_mappings, mapping_region
 
 
 class LoadedRuntimeTests(unittest.TestCase):
+    def test_gpu_data_mapping_classification_keeps_code_and_other_devices_strict(self):
+        from types import SimpleNamespace
+        with mmap.mmap(-1,1) as anonymous:
+            fields=mapping_region(anonymous)
+            maps=' '.join(fields)
+            kept,excluded=userspace_mappings(maps,[4])
+            self.assertEqual(kept,'');self.assertIn('/dev/zero (deleted)',excluded)
+            with self.assertRaisesRegex(ContractError,'deleted'):mapped_files(maps)
+            fields[1]='r-xs'
+            with self.assertRaisesRegex(ContractError,'protection'):userspace_mappings(' '.join(fields),[4])
+        device='1000-2000 rw-s 0 00:06 7 /dev/nvidia4'
+        with patch('pathlib.Path.stat',return_value=SimpleNamespace(st_mode=stat.S_IFCHR)):
+            kept,excluded=userspace_mappings(device,[4]);self.assertIn('/dev/nvidia4',excluded)
+            self.assertEqual(userspace_mappings(device,[5])[0],device)
+        with patch('pathlib.Path.stat',return_value=SimpleNamespace(st_mode=stat.S_IFREG)):
+            with self.assertRaisesRegex(ContractError,'character device'):userspace_mappings(device,[4])
+        deleted='1000-2000 r-xp 0 00:05 8 /tmp/library.so (deleted)'
+        kept,_=userspace_mappings(deleted,[4])
+        with self.assertRaisesRegex(ContractError,'deleted'):mapped_files(kept)
+
     def test_live_mapping_rejects_changed_and_unarchived_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / 'mapped file'; source.write_bytes(b'original runtime')

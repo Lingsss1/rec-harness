@@ -4,10 +4,38 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from rec_harness.core import Artifacts, ContractError, digest, read_json, write_json
+from rec_harness.core import Artifacts, ContractError, digest, file_hash, read_json, write_json
 from rec_harness.runtime import edge, node
 from rec_harness.store import Store
 from .amazon_identity import record_version
+
+
+def archive_job(directory,artifacts,verified_runtime_objects=None):
+    """Keep runtime bytes through their lock, without expanding them into graph attrs."""
+    directory=Path(directory);verified=set() if verified_runtime_objects is None else verified_runtime_objects
+    runtime={};lock=directory/'isolated/runtime-lock.json'
+    if lock.exists():
+        from rec_harness.runtime_archive import validate_runtime
+        archive=validate_runtime(read_json(lock))
+        request=read_json(directory/'isolated/request.json')
+        receipt=read_json(directory/'isolated/completed.json')
+        if request.get('runtime_archive_hash')!=archive['hash'] or receipt.get('runtime_archive_hash')!=archive['hash']:
+            raise ContractError('job runtime archive binding changed')
+        from rec_harness.process_identity import assert_stopped
+        assert_stopped(directory/'isolated')
+        for name,ref in archive['files'].items():
+            key=(ref['sha256'],ref['size'])
+            if key not in verified:artifacts.verify(ref);verified.add(key)
+            path=directory/'isolated/jail'/name
+            if path.is_symlink() or not path.is_file() or file_hash(path)!=ref['sha256']:
+                raise ContractError('job runtime bytes differ from archive')
+            runtime['isolated/jail/'+name]=ref
+    files=[str(p.relative_to(directory)) for p in directory.rglob('*')
+        if p.is_file() and not p.is_symlink() and str(p.relative_to(directory)) not in runtime]
+    refs=artifacts.snapshot(directory,files)
+    # The retained lock contains the complete path -> CAS mapping. Inputs,
+    # outputs, logs and even unexpected files inside jail remain archived above.
+    return refs
 
 
 def ingest(directory):
@@ -16,7 +44,7 @@ def ingest(directory):
     config = load_config(directory)
     store = Store(directory / 'memory')
     artifacts = Artifacts(directory / 'artifacts/objects')
-    imported = []
+    imported = [];verified_runtime_objects=set()
     try:
         known = {n['id'] for n in store.snapshot()['nodes']}
         paths = sorted([*(directory / 'jobs').glob('*/completed.json'),
@@ -29,8 +57,7 @@ def ingest(directory):
                 continue
             manifest = read_json(path.parent / 'manifest.json') if (path.parent / 'manifest.json').exists() else None
             task, protocol = 'amazon-' + result['dataset'], config['protocol_hash']
-            files = [str(p.relative_to(path.parent)) for p in path.parent.rglob('*') if p.is_file() and not p.is_symlink()]
-            refs = artifacts.snapshot(path.parent, files)
+            refs = archive_job(path.parent,artifacts,verified_runtime_objects)
             source_ref = artifacts.put(config['model_versions'][record_version(result)]['path'])
             model_id, observation_id = job_id + '-model', job_id + '-observation'
             attrs = {'valid': result['status'] == 'success', 'status': result['status'], 'metrics': result['metrics'],

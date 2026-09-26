@@ -61,3 +61,5 @@ Electronics、seed 42 的冻结隔离真实训练现已完整验收：HR@10 0.44
 最终评分入口补充真实隔离验收：`amazon-final-isolation-acceptance-v1/acceptance.json` 已通过。两模型×两初始化共 4 个真实 CPU jail，各接收 checkpoint/model/request/worker 四个显式输入；合成 4 用户、预设 HR@10 差值 1，全部吻合，累计 CPU 作业墙钟 31.0419864654541 秒，禁止新推理后的精确恢复成功，Codex 调用 0。验证准入收据和模型权重均为合成夹具，未读取 Amazon 最终测试集。冻结隔离研究的 12 项真实基线也已完成独立 CPU 复评分（排名差异 0）、终态无训练恢复；计费 2880.9106531739235 GPU 秒，新候选循环已启动，结果待定。
 
 当前版本安装交付已更新到 `package-install-acceptance-v4`：离线构建 wheel SHA256 `0e3b5c3b9fd6f1b161c1ebd25017990ccf9f5e792dd2ebf59650ec95ea66e4a9`，全新 Python 3.12 环境安装后，99 个 Python 模块及原生源码与源码树逐字节一致；5 个 CLI 导入入口及 7 项最终评估测试通过。仓库外以安装包执行 `final-isolation` 合成验收，4 个真实隔离 CPU 任务全部成功，30.797662779688835 秒，精确恢复未再次推理。使用显式外部 PyTorch 解释器；该 wheel 本身不打包 PyTorch 或系统运行环境。未发送 Codex 请求、未读取真实测试数据。
+
+冻结环境证据归档增加紧凑表示：`amazon_evidence.archive_job` 校验 job 请求/收据与 runtime lock 的绑定，逐文件核对实际环境字节及 CAS 对象，图中通过完整 `runtime-lock.json` 保留间接引用；不再将所有运行库路径重复展开到每个 Experiment。原始输入/输出/日志及不属于锁的意外文件仍完整归档，旧无锁任务保持原行为。真实已完成 Electronics 候选任务验证保留 67,909 个环境文件、仅 58 个平面产物引用，耗时 27.288949571549892 秒，未改动当前研究图。全套 281 项测试，265 通过、16 跳过；仍在执行的旧控制器使用原冻结代码，未中途替换。

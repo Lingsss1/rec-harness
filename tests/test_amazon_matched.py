@@ -36,7 +36,7 @@ class MatchedDevelopmentTests(unittest.TestCase):
                     raise RuntimeError('interrupted before candidate scoring')
                 if not (directory/'inference').exists():
                     (directory/'inference').mkdir(parents=True);launches.append(version)
-                return {'rank_disagreements':0,'hash':version+'-receipt'}
+                return {'rank_disagreements':0,'positive_tied_users':0,'hash':version+'-receipt'}
             scorer=stack.enter_context(patch(module+'rescore_job',side_effect=score))
             def run(execution='exec'):
                 return run_matched_development(study,'p',out,execution_id=execution,recipe={'runtime':'frozen'},uid_registry=Path(temp)/'uids')
@@ -72,4 +72,8 @@ class MatchedDevelopmentTests(unittest.TestCase):
                 stack.enter_context(patch.object(amazon_matched,name,return_value=value))
             with self.assertRaisesRegex(ContractError,'rankings disagree'):
                 run_matched_development(study,'p',output,execution_id='e',recipe={},uid_registry=Path(temp)/'uids')
+            self.assertFalse((output/'acceptance.json').exists())
+            with patch.object(amazon_matched,'rescore_job',return_value={'rank_disagreements':0,'positive_tied_users':1}):
+                with self.assertRaisesRegex(ContractError,'unresolved ties'):
+                    run_matched_development(study,'p',output,execution_id='e',recipe={},uid_registry=Path(temp)/'uids')
             self.assertFalse((output/'acceptance.json').exists())

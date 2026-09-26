@@ -73,6 +73,7 @@ def run_matched_development(study,proposal,output,*,execution_id,recipe,uid_regi
                         raise ContractError('completed development inference archive missing: '+name)
                     receipt=rescore_job(study,version,dataset,seed,directory,recipe,uid_registry,resume=directory.exists())
                     if receipt['rank_disagreements']!=0:raise ContractError('independent development rankings disagree: '+name)
+                    if receipt['positive_tied_users']!=0:raise ContractError('independent development scores contain unresolved ties: '+name)
                     receipts[name]=receipt['hash']
         readout=development_readout(study,proposal)
         report={'status':'completed','binding_hash':digest(binding),'development_hash':readout['hash'],

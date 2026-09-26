@@ -35,6 +35,7 @@ class AmazonAutoresearch:
         study=load_config(config['study']);identifier(config['task_id'])
         if type(config.get('max_rounds')) is not int or config['max_rounds']<1:raise ContractError('positive max_rounds required')
         if type(config.get('role_call_limit')) is not int or config['role_call_limit']<6:raise ContractError('role_call_limit must cover six roles')
+        if type(config.get('history_diagnostic',False)) is not bool:raise ContractError('history_diagnostic must be boolean')
         if not config.get('rescore_recipe') or not config.get('uid_registry'):raise ContractError('independent CPU rescoring configuration required')
         config['study_config_hash']=digest(read_json(Path(config['study'])/'study.json'))
         config['protocol_hash']=study['protocol_hash']
@@ -286,6 +287,10 @@ class AmazonAutoresearch:
         run_phase(self.study,pid,'development',execution_id=self.config.get('execution_id'))
         self._rescore(folder,binding['candidate_model_version'],cfg['development_seeds'])
         report=development_readout(self.study,pid);write_json(folder/'development-readout.json',report)
+        history=None
+        if self.config.get('history_diagnostic'):
+            from .amazon_history_context import development_history
+            history=development_history(self,folder,binding)
         graph_path=self.study/'research-readouts'/(pid+'-graph.json')
         graph=read_json(graph_path) if graph_path.exists() else ingest_development(self.study,pid)
         review={**context,'model_version':binding['candidate_model_version'],
@@ -293,6 +298,7 @@ class AmazonAutoresearch:
                 'handoff':{'cards':cards,'versions':versions},'development':report,
                 'instructions':['Evaluate the actual complete development readout. Include its exact hash in evidence_refs: '+report['hash'],
                                 'Keep only if eligible_for_confirmation is true. No confirmation results are supplied; conclusion unknown/provisional.']}
+        if history is not None:review['development_history']=history
         def decision_check(value,_):
             validate_card('decision',value)
             if report['hash'] not in value['evidence_refs']:raise ContractError('exact development readout hash required')

@@ -135,7 +135,10 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
     def test_legacy_measurement_cycle_coverage_is_reported_without_rewriting(self):
         self.run_pipeline(False,measurement=True,legacy_measurement=True)
 
-    def run_pipeline(self,confirmation,measurement=False,legacy_measurement=False):
+    def test_development_history_reaches_reviewers_without_extra_roles(self):
+        self.run_pipeline(False,history=True)
+
+    def run_pipeline(self,confirmation,measurement=False,legacy_measurement=False,history=False):
         import json
         from contextlib import ExitStack
         from rec_harness.autonomous import autoresearch
@@ -162,6 +165,9 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                     'role_call_limit':12,'rescore_recipe':{'fixture':True},'uid_registry':'fixture',
                     'agent_backend':{'template':'unused','runtime_root':'unused'}}
             if measurement:config['measurement_discovery']={'development_budget':10}
+            if history:
+                config['history_diagnostic']=True
+                history_call=stack.enter_context(patch('rec_harness.adapters.amazon_history_context.development_history',return_value={'report_hash':'development-slices','rows':[]}))
             write_json(root/'config.json',config);campaign=root/'campaign';calls=[];fits=[]
             self_test=self
             class Agent:
@@ -179,6 +185,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                         response['changed_files']=['model.py']
                         (target/'model/model.py').write_text(SOURCE.replace('return self.block(x)','return self.block(x) * 0.9'))
                     if role in ('evaluation','lead'):
+                        if history:self_test.assertEqual(context['development_history']['report_hash'],'development-slices')
                         self_test.assertEqual(context['model_version'],context['bindings']['candidate_model_version'])
                         if role=='evaluation':self_test.assertIsNone(context['visible_model_source'])
                         else:
@@ -223,6 +230,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             expected_roles=7 if measurement else 6
             self.assertEqual(fits,['development','confirmation'] if confirmation else ['development']);self.assertEqual(len(calls),expected_roles)
             self.assertEqual(result,again);self.assertEqual(result['state']['round'],1)
+            if history:history_call.assert_called_once()
             self.assertEqual(result['role_calls']['charged_or_reserved'],expected_roles)
             self.assertEqual((campaign/'rounds/round-1/private-confirmation.json').exists(),confirmation)
             with patch('rec_harness.adapters.amazon_autonomous.JailedCodexAgent',side_effect=AssertionError('audit must not initialize service')):

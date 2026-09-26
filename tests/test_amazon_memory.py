@@ -1,10 +1,36 @@
 import tempfile
 import unittest
 from pathlib import Path
-from rec_harness.adapters.amazon_memory import export_development_memory,validate_memory,execution_failure
+from rec_harness.adapters.amazon_memory import export_development_memory,validate_memory,execution_failure,validate_export_bindings
 from rec_harness.core import ContractError,digest,write_json
 
 class DevelopmentMemoryTests(unittest.TestCase):
+    def test_export_checks_committed_roles_handoff_and_readout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp)/'round-1';events=[]
+            values={'evidence':{'gap_id':'gap'},'hypothesis':{'method':{'method_id':'method'},'proposal':{}},
+                    'lead':{'selection':'discard'},'knowledge':{'patch_json':'{}'}}
+            for role,value in values.items():
+                write_json(folder/role/'response.json',value)
+                events.append({'kind':'role_completed','payload':{'role':role,'task':'round-1-'+role+'-1','response_hash':digest(value)}})
+            cards={'gap':values['evidence'],**values['hypothesis']}
+            write_json(folder/'handoff.json',{'cards':cards})
+            write_json(folder/'development-readout.json',{'hash':'committed'})
+            events.append({'kind':'auto_round_completed','payload':{'state':{'round':1},'result':{'cycle_identity':'cycle','development_hash':'committed'}}})
+            validate_export_bindings(folder,events)
+            (folder/'lead/response.json').unlink()
+            with self.assertRaisesRegex(ContractError,'missing committed response'):validate_export_bindings(folder,events)
+            write_json(folder/'lead/response.json',values['lead'])
+            for role in values:
+                write_json(folder/role/'response.json',{'changed':True})
+                with self.assertRaisesRegex(ContractError,'committed response'):validate_export_bindings(folder,events)
+                write_json(folder/role/'response.json',values[role])
+            write_json(folder/'handoff.json',{'cards':{**cards,'invented':'claim'}})
+            with self.assertRaisesRegex(ContractError,'handoff'):validate_export_bindings(folder,events)
+            write_json(folder/'handoff.json',{'cards':cards})
+            write_json(folder/'development-readout.json',{'hash':'rehashed-edited-metrics'})
+            with self.assertRaisesRegex(ContractError,'committed readout'):validate_export_bindings(folder,events)
+
     def test_recovered_failure_needs_matching_committed_development_completion(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder=Path(tmp)/'round-1';write_json(folder/'failure.json',{'reason':'host admission failed'})

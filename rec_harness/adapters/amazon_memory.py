@@ -44,6 +44,34 @@ def validate_readout(value,protocol,development_seeds=None):
     return value
 
 
+def validate_export_bindings(folder,events):
+    """Use available committed identities; do not silently trust edited projections."""
+    responses={}
+    for role in ['evidence','hypothesis','lead','knowledge']:
+        path=folder/role/'response.json'
+        completed=[e['payload'] for e in events if e['kind']=='role_completed'
+                   and e['payload'].get('role')==role
+                   and e['payload'].get('task','').startswith(folder.name+'-'+role+'-')]
+        if not path.exists():
+            if completed:raise ContractError('development memory missing committed response: '+role)
+            continue
+        value=read_json(path)
+        if completed:
+            if not any(e.get('response_hash')==digest(value) for e in completed):
+                raise ContractError('development memory role differs from committed response: '+role)
+            responses[role]=value
+    if (folder/'handoff.json').exists() and {'evidence','hypothesis'}<=responses.keys():
+        expected={'gap':responses['evidence'],**responses['hypothesis']}
+        if read_json(folder/'handoff.json')['cards']!=expected:
+            raise ContractError('development memory handoff differs from committed roles')
+    completed=[e['payload']['result'] for e in events if e['kind']=='auto_round_completed'
+               and 'round-'+str(e['payload']['state']['round'])==folder.name]
+    if completed and completed[-1].get('cycle_identity'):
+        path=folder/'development-readout.json'
+        if not path.exists() or read_json(path).get('hash')!=completed[-1]['development_hash']:
+            raise ContractError('development memory differs from committed readout')
+
+
 def export_development_memory(campaign,output):
     campaign=Path(campaign);config=read_json(campaign/'amazon-auto.json')
     study=read_json(Path(config['study'])/'study.json');entries=[]
@@ -55,6 +83,7 @@ def export_development_memory(campaign,output):
         try:store.verify();events=store.events()
         finally:store.close()
     for folder in sorted((campaign/'rounds').glob('round-*')):
+        validate_export_bindings(folder,events)
         entry={'round':config['task_id']+'/'+folder.name}
         for name,key in [('handoff.json','design'),('lead/response.json','development_decision'),('knowledge/response.json','provisional_knowledge')]:
             if (folder/name).exists():

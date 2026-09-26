@@ -8,14 +8,19 @@ from .amazon_report import audit_job
 from .independent_scoring import prepare_request, score_response
 
 
-def rescore_job(root, model_version, dataset, seed, output, recipe, uid_registry, *, bypass_block=None):
+def rescore_job(root, model_version, dataset, seed, output, recipe, uid_registry, *, bypass_block=None,bypass_blocks=None):
     root,output=Path(root),Path(output)
     output.mkdir(parents=True,exist_ok=False);output.chmod(0o700)
     config=load_config(root)
     if dataset not in config['datasets'] or seed not in config['development_seeds']+config['confirmation_seeds']:
         raise ContractError('rescore outside frozen study')
-    if bypass_block is not None and (type(bypass_block) is not int or bypass_block<0 or seed not in config['development_seeds']):
+    if bypass_block is not None and bypass_blocks is not None:raise ContractError('choose single or multiple block intervention')
+    blocks=[bypass_block] if bypass_block is not None else bypass_blocks
+    if blocks is not None and (not isinstance(blocks,(list,tuple)) or not blocks
+            or any(type(index) is not int or index<0 for index in blocks)
+            or len(set(blocks))!=len(blocks) or seed not in config['development_seeds']):
         raise ContractError('block intervention requires a nonnegative index and development seed')
+    if blocks is not None:blocks=sorted(blocks)
     result,_=audit_job(root,config,model_version,dataset,seed)
     job=root/'jobs'/f'{model_version}-{dataset}-{seed}'
     training=Path(config['data'])/(dataset+'_train.txt');expected=config['data_hashes'][training.name]
@@ -38,7 +43,7 @@ def rescore_job(root, model_version, dataset, seed, output, recipe, uid_registry
                '--checkpoint','/inputs/checkpoint.pt','--checkpoint-hash',files['checkpoint.pt']['sha256'],
                '--request','/inputs/request.json','--request-hash',files['request.json']['sha256'],
                '--output','/output/scores.json']
-    if bypass_block is not None:arguments+=['--bypass-block',str(bypass_block)]
+    for index in blocks or []:arguments+=['--bypass-block',str(index)]
     receipt=run_cpu_job(output/'inference',recipe,files,'worker.py',arguments,python=config['python'],
                         uid_registry=uid_registry,artifacts=Artifacts(root/'artifacts/objects'),timeout=180)
     if receipt['process']['status']!='success':raise ContractError('isolated checkpoint inference failed')
@@ -47,7 +52,9 @@ def rescore_job(root, model_version, dataset, seed, output, recipe, uid_registry
     archived=read_json(job/'validation_ranks.json')
     if report['user_ids']!=archived['user_ids']:raise ContractError('rescore user alignment changed')
     summary={'dataset':dataset,'model_version':model_version,'seed':seed,'users':len(rows),
+             'protocol_hash':config['protocol_hash'],
              'source_hash':files['model.py']['sha256'],'checkpoint_hash':files['checkpoint.pt']['sha256'],
+             'candidates_hash':result['candidates_hash'],
              'score_worker_hash':files['worker.py']['sha256'],
              'host_scorer_hash':file_hash(Path(__file__).with_name('independent_scoring.py')),
              'rank_disagreements':sum(a!=b for a,b in zip(report['ranks'],archived['ranks'])),
@@ -55,8 +62,8 @@ def rescore_job(root, model_version, dataset, seed, output, recipe, uid_registry
              'positive_tied_users':report['tied_user_count'],'host_report_hash':report['hash'],
              'inference_wall_seconds':receipt['wall_seconds'],
              'qualification':'independent CPU rescore on existing validation users; not new training or final test'}
-    if bypass_block is not None:
-        summary.update(bypass_block=bypass_block,
+    if blocks is not None:
+        summary.update(**({'bypass_block':bypass_block} if bypass_block is not None else {'bypass_blocks':blocks}),
             qualification='Fixed-weight block identity intervention on frozen development candidates; host-computed ranking changes, not retrained deletion benefit or causal mechanism confirmation.')
     summary['hash']=digest(summary);write_json(output/'acceptance.json',summary)
     return summary

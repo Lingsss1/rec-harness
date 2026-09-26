@@ -88,9 +88,13 @@ def main(argv=None):
     p.add_argument('directory'); p.add_argument('output')
     p.add_argument('--baseline',default='legacy_no_prefix');p.add_argument('--candidate',default='legacy_incumbent')
     p.add_argument('--partition',action='append',choices=['development','confirmation'])
-    p = commands.add_parser('amazon-block-score', help='host-score a reference or single-block bypass on development data')
+    p = commands.add_parser('amazon-block-score', help='host-score a reference or one/multiple-block bypass on development data')
     p.add_argument('directory');p.add_argument('model_version');p.add_argument('dataset');p.add_argument('seed',type=int);p.add_argument('output')
-    p.add_argument('--execution',required=True);p.add_argument('--bypass-block',type=int)
+    p.add_argument('--execution',required=True)
+    group=p.add_mutually_exclusive_group();group.add_argument('--bypass-block',type=int)
+    group.add_argument('--bypass-blocks',type=int,nargs='+')
+    p = commands.add_parser('amazon-block-interaction',help='recompute a paired reference/single/single/double block contrast')
+    p.add_argument('directories',nargs=4);p.add_argument('--output',required=True)
     p = commands.add_parser("world-build")
     p.add_argument("nodes"); p.add_argument("output"); p.add_argument("--workers", type=int, default=1)
     p = commands.add_parser("replay")
@@ -224,7 +228,10 @@ def main(argv=None):
                 raise ContractError('block score diagnostics are development-only')
             execution=read_json(args.execution)
             result=rescore_job(args.directory,args.model_version,args.dataset,args.seed,args.output,
-                execution['recipe'],execution['uid_registry'],bypass_block=args.bypass_block)
+                execution['recipe'],execution['uid_registry'],bypass_block=args.bypass_block,bypass_blocks=args.bypass_blocks)
+        elif args.command == 'amazon-block-interaction':
+            from .adapters.block_interaction import summarize_interaction
+            result=summarize_interaction(args.directories);write_json(args.output,result)
         elif args.command == 'amazon-summary':
             from .adapters.amazon_summary import build_summary
             report = build_summary(args.directory, args.output)

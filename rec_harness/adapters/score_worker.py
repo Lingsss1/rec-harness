@@ -10,16 +10,23 @@ from rec_harness.core import ContractError, digest, file_hash, read_json, write_
 
 @contextmanager
 def bypass_block(model,index):
-    """A fixed-weight intervention; always remove only the hook installed here."""
-    if index is None:
-        yield
-        return
+    with bypass_blocks(model,[] if index is None else [index]):yield
+
+
+@contextmanager
+def bypass_blocks(model,indices):
+    """Fixed-weight interventions; remove our hooks even if registration fails."""
     blocks=getattr(model,'blocks',())
-    if type(index) is not int or not 0<=index<len(blocks):
+    if not isinstance(indices,(list,tuple)) or any(type(i) is not int or not 0<=i<len(blocks) for i in indices):
         raise ContractError('bypass block index outside model')
-    handle=blocks[index].register_forward_hook(lambda module,inputs,output:inputs[0])
-    try:yield
-    finally:handle.remove()
+    if len(set(indices))!=len(indices):raise ContractError('duplicate bypass block index')
+    handles=[]
+    try:
+        for index in indices:
+            handles.append(blocks[index].register_forward_hook(lambda module,inputs,output:inputs[0]))
+        yield
+    finally:
+        for handle in reversed(handles):handle.remove()
 
 
 def main():
@@ -27,7 +34,7 @@ def main():
     parser = argparse.ArgumentParser()
     for name in ('source', 'source-hash', 'checkpoint', 'checkpoint-hash', 'request', 'request-hash', 'output'):
         parser.add_argument('--' + name, required=True)
-    parser.add_argument('--bypass-block',type=int)
+    parser.add_argument('--bypass-block',type=int,action='append',default=[])
     args = parser.parse_args()
     for path, expected in [(args.source,args.source_hash),(args.checkpoint,args.checkpoint_hash),(args.request,args.request_hash)]:
         if file_hash(path) != expected: raise ContractError('inference input hash mismatch')
@@ -48,7 +55,7 @@ def main():
                                  kernel_size=module.KERNEL_SIZE, dropout_rate=module.DROPOUT_RATE, maxlen=module.MAXLEN)
     model.load_state_dict(weights,strict=True); model.eval()
     outputs = []
-    with torch.inference_mode(),bypass_block(model,args.bypass_block):
+    with torch.inference_mode(),bypass_blocks(model,args.bypass_block):
         for start in range(0,len(request['rows']),64):
             rows = request['rows'][start:start+64]
             sequence = torch.zeros((len(rows),module.MAXLEN),dtype=torch.long)

@@ -328,3 +328,5 @@ python3 -m rec_harness amazon-history-diagnostic STUDY OUTPUT_DIR \
 该模式只审计开发初始化，不要求候选拥有确认训练，适用于开发阶段淘汰的候选。省略 `--partition` 保留原有开发和确认两阶段行为；包含确认阶段的报告必须留在主机，不传给研究角色。两个模型须使用一致的执行版本和配对评价输入。分箱使用完整训练历史长度，并非截断后的模型输入长度；观察到的差异不能单独证明长度的因果作用。
 
 Amazon 自动研究配置可增加 `"history_diagnostic": true`，在候选开发训练和独立复评分之后、evaluation/lead 之前生成开发历史长度诊断。默认关闭以保持既有运行行为。报告先归档到控制器 CAS 并提交 `development_history_completed` 事件，后续恢复验证报告、模型/协议/阶段、诊断源码及输入哈希；未完成目录保留为 interrupted 后重新计算，不产生新训练或推理。对角色仅投影类别、开发 seed、分箱人数、聚合指标和命中胜负，排除用户 ID、逐用户排名和输入路径。诊断不新增 Codex 角色调用，确认阶段不能通过该配置进入角色上下文。该诊断是确定性探索性切片，不是自主工具晋升或机制确认。
+
+固定 checkpoint 旁路评分支持 `--bypass-blocks 0 1`，与旧 `--bypass-block 0` 互斥；仍仅允许开发 seed。新增 `amazon-block-interaction REF SINGLE_A SINGLE_B PAIR --output REPORT.json`，要求四个目录构成完整参考/单块/单块/双块条件，重新读取私有主机评分输入计算排名，并检查模型、checkpoint、协议、评分源码、用户、实际训练历史和候选集合一致。输出每个指标的 `M(ab)-M(a)-M(b)+M(reference)`；它是固定权重的指标非加性，不足以认定冗余、机制确认或删除重训收益。重复/非法块索引会拒绝；部分 hook 注册失败也会清理本次 hook，保留原有 hook。双类别真实影子验收已在独立冻结源码目录启动，结果待定。

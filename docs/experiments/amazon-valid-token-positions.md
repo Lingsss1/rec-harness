@@ -33,6 +33,23 @@ CDs_and_Vinyl 的整体净损失为 34 次命中，其中该分箱净损失 32 �
 
 证据为 `development-history-diagnostic/report.json`（hash `5f5238dc7c8f805927ddee5689ed4532bee81e1b6fcd7ded9ee976ac45a1c396`）和 `history-diagnostic-acceptance.json`。诊断没有读取确认结果、最终测试，也没有新增模型训练或 Codex 调用。
 
+## Codex 实际调用
+
+事件账本记录 7 次外层调用，每个角色一次，无重试。以下耗时包含隔离启动等角色开销，不包含训练/研究图归档，也不是底层模型 API 请求次数。
+
+| 角色 | 次数 | 耗时（秒） |
+|---|---:|---:|
+| evidence | 1 | 92.86 |
+| measurement | 1 | 39.92 |
+| hypothesis | 1 | 88.52 |
+| experiment | 1 | 58.54 |
+| evaluation | 1 | 45.87 |
+| lead | 1 | 47.26 |
+| knowledge | 1 | 44.92 |
+| 合计 | 7 | 417.89 |
+
+可复核记录为运行根目录中的 `codex-call-summary.json`。
+
 ## 可追溯证据
 
 根目录为 `/home/liuzhishan/lhr/rec-harness-runs/amazon-frozen-autoresearch-followup-v1`：

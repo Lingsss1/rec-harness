@@ -10,6 +10,35 @@ from rec_harness.store import Store
 from .amazon_identity import record_version
 
 
+def restore_job_archive(refs,artifacts,destination):
+    """Restore archived files, expanding locked runtime refs; does not launch a job."""
+    destination=Path(destination)
+    if destination.exists():raise ContractError('job archive restore requires a new destination')
+    expanded=dict(refs);modes={}
+    lock='isolated/runtime-lock.json'
+    if lock in refs:
+        from rec_harness.runtime_archive import validate_runtime
+        archive=validate_runtime(read_json(artifacts.verify(refs[lock])))
+        for name in ['isolated/request.json','isolated/completed.json']:
+            if name not in refs or read_json(artifacts.verify(refs[name])).get('runtime_archive_hash')!=archive['hash']:
+                raise ContractError('archived job runtime binding changed')
+        for name,ref in archive['files'].items():
+            target='isolated/jail/'+name
+            if target in expanded and expanded[target]!=ref:
+                raise ContractError('flat and locked runtime references disagree')
+            expanded[target]=ref;modes[target]=archive['modes'][name]
+    verified=set()
+    for name,ref in expanded.items():
+        path=Path(name)
+        if not path.parts or path.is_absolute() or '..' in path.parts:
+            raise ContractError('invalid archived job path')
+        identity=(ref['sha256'],ref['size'])
+        if identity not in verified:artifacts.verify(ref);verified.add(identity)
+    artifacts.restore(expanded,destination)
+    for name,mode in modes.items():(destination/name).chmod(mode)
+    return {'files':len(expanded),'runtime_files':len(modes),'scope':'Archived files restored; device nodes and execution authorization are not recreated.'}
+
+
 def archive_job(directory,artifacts,verified_runtime_objects=None):
     """Keep runtime bytes through their lock, without expanding them into graph attrs."""
     directory=Path(directory);verified=set() if verified_runtime_objects is None else verified_runtime_objects

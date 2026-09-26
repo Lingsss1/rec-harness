@@ -36,6 +36,8 @@ def main(argv=None):
     p.add_argument('--eval-users',type=int,default=1000)
     p = commands.add_parser('amazon-final-run',help='run host-only final checkpoint scoring from a sealed selection')
     p.add_argument('output');p.add_argument('--recipe',required=True);p.add_argument('--uid-registry',required=True)
+    p = commands.add_parser('amazon-restore-archive',help='restore archived job files and expand frozen runtime references; does not execute a job')
+    p.add_argument('snapshot');p.add_argument('objects');p.add_argument('output')
     p = commands.add_parser('amazon-retry-source',help='reopen a failed pre-admission round after a host repair; retain costs and outputs')
     p.add_argument('directory');p.add_argument('--reason',required=True)
     p = commands.add_parser('autoresearch',help='create or resume autonomous research through its frozen round/budget stop')
@@ -113,6 +115,10 @@ def main(argv=None):
             from .adapters.amazon_final import run_final
             report=run_final(args.output,read_json(args.recipe),args.uid_registry)
             result={'status':'completed','report_hash':report['hash'],'report':str(Path(args.output).resolve()/'final-report.json')}
+        elif args.command == 'amazon-restore-archive':
+            from .adapters.amazon_evidence import restore_job_archive
+            from .core import Artifacts
+            result=restore_job_archive(read_json(args.snapshot),Artifacts(args.objects),args.output)
         elif args.command == 'amazon-retry-source':
             from .adapters.amazon_autonomous import AmazonAutoresearch
             controller=AmazonAutoresearch(args.directory,load_agent=False)

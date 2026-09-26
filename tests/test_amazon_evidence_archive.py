@@ -4,7 +4,7 @@ from pathlib import Path
 from rec_harness.core import Artifacts,ContractError,digest,file_hash,read_json,write_json
 from rec_harness.store import Store
 from rec_harness.runtime_archive import host_identity
-from rec_harness.adapters.amazon_evidence import archive_job,ingest
+from rec_harness.adapters.amazon_evidence import archive_job,ingest,restore_job_archive
 
 
 class EvidenceArchiveTests(unittest.TestCase):
@@ -27,6 +27,15 @@ class EvidenceArchiveTests(unittest.TestCase):
             locked=read_json(artifacts.verify(refs['isolated/runtime-lock.json']))
             self.assertEqual(artifacts.verify(locked['files']['usr/lib/libtest.so']).read_bytes(),b'frozen library')
             self.assertEqual(archive_job(job,artifacts),refs)
+            restored=root/'restored';result=restore_job_archive(refs,artifacts,restored)
+            self.assertEqual(result['runtime_files'],1)
+            self.assertEqual((restored/'isolated/jail/usr/lib/libtest.so').read_bytes(),runtime.read_bytes())
+            self.assertEqual((restored/'isolated/jail/usr/lib/libtest.so').stat().st_mode&0o777,0o444)
+            self.assertEqual((restored/'checkpoint.pt').read_text(),'keep')
+            with self.assertRaisesRegex(ContractError,'new destination'):restore_job_archive(refs,artifacts,restored)
+            conflict=dict(refs);conflict['isolated/jail/usr/lib/libtest.so']=refs['checkpoint.pt']
+            with self.assertRaisesRegex(ContractError,'references disagree'):restore_job_archive(conflict,artifacts,root/'conflict')
+            self.assertFalse((root/'conflict').exists())
             source=root/'model.py';source.write_text('source')
             config={'protocol_hash':'p','model_versions':{'base':{'path':str(source),'sha256':file_hash(source)}}}
             write_json(root/'study.json',config);write_json(root/'study-lock.json',{'config_hash':digest(config)})
@@ -50,9 +59,14 @@ class EvidenceArchiveTests(unittest.TestCase):
             write_json(job/'isolated/completed.json',{'runtime_archive_hash':archive['hash']})
             artifacts.verify(ref).unlink()
             with self.assertRaisesRegex(ContractError,'unavailable/corrupt'):archive_job(job,artifacts)
+            with self.assertRaisesRegex(ContractError,'unavailable/corrupt'):restore_job_archive(refs,artifacts,root/'missing')
+            self.assertFalse((root/'missing').exists())
 
     def test_legacy_job_remains_fully_archived(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);job=root/'job';job.mkdir();(job/'model.py').write_text('source')
             refs=archive_job(job,Artifacts(root/'objects'))
             self.assertEqual(set(refs),{'model.py'})
+            result=restore_job_archive(refs,Artifacts(root/'objects'),root/'restored')
+            self.assertEqual(result['runtime_files'],0)
+            self.assertEqual((root/'restored/model.py').read_text(),'source')

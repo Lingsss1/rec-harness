@@ -454,3 +454,15 @@ seed，先审计已登记源码和 checkpoint，再在隔离 CPU 进程推理。
 每次输出使用新目录，并记录推理墙钟时间。正式诊断需先验证参考排名一致，
 再完整报告计划内条件及费用。这是固定权重的开发集敏感性，不能当作删除后
 重训收益、机制确认或最终测试。示例四类全块验收另用独立账本计 36 BCU。
+
+## 恢复训练产物归档
+
+冻结隔离任务的图证据通过 `isolated/runtime-lock.json` 引用运行库，避免为每个实验重复展开数万条路径。导出 Experiment 的 `attrs.artifact_refs` 为一个 JSON 文件后，可执行：
+
+```bash
+python3 -m rec_harness amazon-restore-archive snapshot.json /path/to/artifacts/objects /path/to/new-output
+```
+
+恢复前核验全部引用、环境锁及请求/完成收据绑定，兼容旧的平面文件映射。锁内与平面映射冲突、缺失对象、已有输出目录均会拒绝。恢复运行库的只读/可执行权限；冻结环境身份仍按现有 runtime validator 校验。该命令只恢复已归档文件，不重建设备节点，不启动训练，也不把恢复目录自动认定为可执行研究环境。
+
+真实 Electronics 已完成任务的恢复验收还原了 67,967 个文件，其中 67,909 个环境文件的字节和权限逐项一致，checkpoint/排名归档一致，源研究图未变。验收未新增训练或 Codex 调用。

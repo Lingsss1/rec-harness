@@ -93,6 +93,7 @@ def main(argv=None):
     p.add_argument('--execution',required=True)
     group=p.add_mutually_exclusive_group();group.add_argument('--bypass-block',type=int)
     group.add_argument('--bypass-blocks',type=int,nargs='+')
+    p.add_argument('--resume',action='store_true',help='reuse completed inference and recover successful process collection')
     p = commands.add_parser('amazon-block-interaction',help='recompute a paired reference/single/single/double block contrast')
     p.add_argument('directories',nargs=4);p.add_argument('--output',required=True)
     p = commands.add_parser("world-build")
@@ -228,7 +229,7 @@ def main(argv=None):
                 raise ContractError('block score diagnostics are development-only')
             execution=read_json(args.execution)
             result=rescore_job(args.directory,args.model_version,args.dataset,args.seed,args.output,
-                execution['recipe'],execution['uid_registry'],bypass_block=args.bypass_block,bypass_blocks=args.bypass_blocks)
+                execution['recipe'],execution['uid_registry'],bypass_block=args.bypass_block,bypass_blocks=args.bypass_blocks,resume=args.resume)
         elif args.command == 'amazon-block-interaction':
             from .adapters.block_interaction import summarize_interaction
             result=summarize_interaction(args.directories);write_json(args.output,result)

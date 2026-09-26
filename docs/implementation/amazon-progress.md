@@ -330,3 +330,5 @@ python3 -m rec_harness amazon-history-diagnostic STUDY OUTPUT_DIR \
 Amazon 自动研究配置可增加 `"history_diagnostic": true`，在候选开发训练和独立复评分之后、evaluation/lead 之前生成开发历史长度诊断。默认关闭以保持既有运行行为。报告先归档到控制器 CAS 并提交 `development_history_completed` 事件，后续恢复验证报告、模型/协议/阶段、诊断源码及输入哈希；未完成目录保留为 interrupted 后重新计算，不产生新训练或推理。对角色仅投影类别、开发 seed、分箱人数、聚合指标和命中胜负，排除用户 ID、逐用户排名和输入路径。诊断不新增 Codex 角色调用，确认阶段不能通过该配置进入角色上下文。该诊断是确定性探索性切片，不是自主工具晋升或机制确认。
 
 固定 checkpoint 旁路评分支持 `--bypass-blocks 0 1`，与旧 `--bypass-block 0` 互斥；仍仅允许开发 seed。新增 `amazon-block-interaction REF SINGLE_A SINGLE_B PAIR --output REPORT.json`，要求四个目录构成完整参考/单块/单块/双块条件，重新读取私有主机评分输入计算排名，并检查模型、checkpoint、协议、评分源码、用户、实际训练历史和候选集合一致。输出每个指标的 `M(ab)-M(a)-M(b)+M(reference)`；它是固定权重的指标非加性，不足以认定冗余、机制确认或删除重训收益。重复/非法块索引会拒绝；部分 hook 注册失败也会清理本次 hook，保留原有 hook。双类别真实影子验收已在独立冻结源码目录启动，结果待定。
+
+`amazon-block-score --resume` 支持新格式评分目录的精确恢复：先冻结训练收据、协议、干预集合、解释器、recipe、UID 目录和评分代码，再保存候选排列。完成条件复用原推理收据并从 CAS 分数重算；成功进程的收集收据缺失时只恢复收集，不重启推理。私有键写入中断可根据已有排列和主机正例恢复，排列不变。活跃/失败/缺少终态的进程、修改的计划/输入/排名/验收结果会拒绝；旧目录需沿用原恢复流程。恢复作业如无法得知完整墙钟，保留 null 和进程耗时，不伪造零成本。

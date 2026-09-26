@@ -178,13 +178,18 @@ class AmazonAutoresearch:
             for seed in seeds:
                 directory=folder/'independent-rescores'/f'{version}-{dataset}-{seed}'
                 receipt=directory/'acceptance.json'
-                if receipt.exists():
+                if (directory/'rescore-plan.json').exists():
+                    result=rescore_job(self.study,version,dataset,seed,directory,self.config['rescore_recipe'],
+                                       self.config['uid_registry'],resume=True)
+                elif receipt.exists():
+                    # Legacy completed scoring predates frozen recovery plans.
+                    # Keep its existing contract; never synthesize a new plan.
                     result=read_json(receipt);training,_=audit_job(self.study,config,version,dataset,seed)
                     if result['hash']!=digest({k:v for k,v in result.items() if k!='hash'}) or result['checkpoint_hash']!=training['checkpoint_sha256'] or result['source_hash']!=training['source_hash']:
                         raise ContractError('cached independent rescore changed')
                 else:
-                    if directory.exists():directory.rename(directory.with_name(directory.name+'-interrupted-'+str(len(list(directory.parent.glob(directory.name+'-interrupted-*'))))))
-                    result=rescore_job(self.study,version,dataset,seed,directory,self.config['rescore_recipe'],self.config['uid_registry'])
+                    result=rescore_job(self.study,version,dataset,seed,directory,self.config['rescore_recipe'],
+                                       self.config['uid_registry'],resume=directory.exists())
                 if result['rank_disagreements'] or result['positive_tied_users']:
                     raise ContractError('independent rescore differs or contains unresolved ties')
                 summaries.append(result)

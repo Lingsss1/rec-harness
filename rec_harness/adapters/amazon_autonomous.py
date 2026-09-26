@@ -343,7 +343,10 @@ class AmazonAutoresearch:
             reason=state.get('stop_reason','max_rounds')
             while state['round']<self.config['max_rounds'] and reason!='measurement_required':
                 ledger=Store(self.study/'memory')
-                try:remaining=ledger.budget()['remaining']
+                try:
+                    from .amazon_campaign import campaign_guard
+                    campaign_guard(load_config(self.study),ledger)
+                    remaining=ledger.budget()['remaining']
                 finally:ledger.close()
                 folder=self.root/'rounds'/('round-'+str(state['round']+1))
                 roles=['evidence','hypothesis','experiment','evaluation','lead','knowledge']

@@ -19,6 +19,8 @@ def continue_campaign(root, predecessor, project, additional_budget, authorizati
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         prior=Store(predecessor/'memory')
         try:
+            if any(e['kind']=='amazon_final_selection_sealed' for e in prior.events()):
+                raise ContractError('final evaluation selection sealed; cannot continue research')
             if any(e['kind']=='amazon_campaign_continued' for e in prior.events()):
                 raise ContractError('predecessor already continued; do not fork its available budget twice')
             assert_stopped(predecessor/'jobs')
@@ -67,6 +69,8 @@ def continue_campaign(root, predecessor, project, additional_budget, authorizati
 
 def campaign_guard(config,store):
     events=store.events()
+    if any(e['kind']=='amazon_final_selection_sealed' for e in events):
+        raise ContractError('final evaluation selection sealed; research execution is closed')
     if any(e['kind']=='amazon_campaign_continued' for e in events):
         raise ContractError('campaign continued; only its successor may spend further budget')
     if config.get('continuation_required'):

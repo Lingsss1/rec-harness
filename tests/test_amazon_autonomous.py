@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from rec_harness.adapters.amazon_autonomous import AmazonAutoresearch
-from rec_harness.core import ContractError,read_json,write_json
+from rec_harness.core import ContractError,read_json,write_json,digest
 from rec_harness.store import Store
 
 class RoleRecoveryTests(unittest.TestCase):
@@ -74,6 +74,9 @@ class RoleRecoveryTests(unittest.TestCase):
         from rec_harness.core import Artifacts
         r=self.runner;r.root=self.root;r.artifacts=Artifacts(self.root/'artifacts/objects')
         r.study=self.root/'study';ledger=Store(r.study/'memory');ledger.configure_budget(10000);ledger.close()
+        config={'model_versions':{}}
+        write_json(r.study/'study.json',config)
+        write_json(r.study/'study-lock.json',{'config_hash':digest(config)})
         r.config={'max_rounds':1,'role_call_limit':12};r.lock=lambda:nullcontext()
         self.folder=self.root/'rounds/round-1';self.folder.mkdir(parents=True)
         def reject(*args):raise ContractError('host capability omission')

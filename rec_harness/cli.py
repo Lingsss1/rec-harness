@@ -30,6 +30,10 @@ def inspection_controller(directory):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="rec-harness")
     commands = parser.add_subparsers(dest="command", required=True)
+    p = commands.add_parser('amazon-final-seal',help='freeze validation-selected checkpoints and close research before host-only final evaluation')
+    p.add_argument('study');p.add_argument('output');p.add_argument('--model',action='append',required=True)
+    p.add_argument('--test-directory',required=True);p.add_argument('--eval-seed',type=int,required=True)
+    p.add_argument('--eval-users',type=int,default=1000)
     p = commands.add_parser('amazon-retry-source',help='reopen a failed pre-admission round after a host repair; retain costs and outputs')
     p.add_argument('directory');p.add_argument('--reason',required=True)
     p = commands.add_parser('autoresearch',help='create or resume autonomous research through its frozen round/budget stop')
@@ -99,7 +103,11 @@ def main(argv=None):
     p.add_argument("directory"); p.add_argument("--model"); p.add_argument("--timeout", type=int, default=120)
     args = parser.parse_args(argv)
     try:
-        if args.command == 'amazon-retry-source':
+        if args.command == 'amazon-final-seal':
+            from .adapters.amazon_final_selection import seal_selection
+            plan=seal_selection(args.study,args.output,args.model,args.test_directory,eval_seed=args.eval_seed,eval_users=args.eval_users)
+            result={'selection_hash':plan['hash'],'status':'sealed','test_data_opened':False}
+        elif args.command == 'amazon-retry-source':
             from .adapters.amazon_autonomous import AmazonAutoresearch
             controller=AmazonAutoresearch(args.directory,load_agent=False)
             try:result=controller.reopen_source_failure(args.reason)

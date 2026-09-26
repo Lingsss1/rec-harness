@@ -100,3 +100,21 @@ class DiscoveryTests(unittest.TestCase):
             altered=copy.deepcopy(context);altered['activation_diagnostics'][0][key]=value
             with self.subTest(field=key),self.assertRaises(ContractError):
                 review_context(self.research,self.state,altered,self.gap)
+
+    def test_block_scores_require_committed_observation_and_prevent_duplicate_measurement(self):
+        row={'observation_id':'block-score-one','model_version':self.state['incumbent'],
+            'dataset':'A','seed':42,'measurements':{'A.block-0.delta.HR@10':-.01},
+            'limitations':['Fixed weights; not retrained deletion effects.'],'scope':'development block interventions'}
+        context={'diagnostic':None,'block_score_diagnostics':[row]}
+        with self.assertRaisesRegex(ContractError,'current-model observation'):
+            review_context(self.research,self.state,context,self.gap)
+        self.research.store.patch({'base_version':self.research.store.version,'nodes':[
+            node(row['observation_id'],'Observation',{**row,'valid':True},self.research.task,self.research.protocol_hash)],'edges':[]})
+        request=review_context(self.research,self.state,context,self.gap)
+        self.assertIn(row['observation_id'],request['allowed_evidence_refs'])
+        response=copy.deepcopy(self.response);response['evidence_refs']=[row['observation_id']]
+        response['requirements'][0]['measurement']='A.block-0.delta.HR@10'
+        with self.assertRaisesRegex(ContractError,'already exists'):validate_review(request,response)
+        changed=copy.deepcopy(context);changed['block_score_diagnostics'][0]['measurements']['A.block-0.delta.HR@10']=1.
+        with self.assertRaisesRegex(ContractError,'committed observation'):
+            review_context(self.research,self.state,changed,self.gap)

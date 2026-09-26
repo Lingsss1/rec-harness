@@ -43,6 +43,10 @@ class AmazonAutoresearch:
         validate_config(config.get('measurement_discovery'))
         from .amazon_activation import validate_options
         validate_options(config.get('activation_diagnostic'),study)
+        if 'block_score_diagnostics' in config:raise ContractError('block_score_diagnostics is controller-owned; supply block_score_diagnostic_dirs')
+        if config.get('block_score_diagnostic_dirs'):
+            from .amazon_block_context import freeze_reports
+            config['block_score_diagnostics']=freeze_reports(config.pop('block_score_diagnostic_dirs'),study,Artifacts(root/'artifacts/objects'))
         if 'diagnostic_tool' in config:raise ContractError('diagnostic_tool is controller-owned; supply diagnostic_registry')
         if 'diagnostic_registry' in config:
             from rec_harness.diagnostics import freeze_tool
@@ -208,6 +212,9 @@ class AmazonAutoresearch:
             history=history[-limit:];research_memory=research_memory[-limit:];failures=failures[-limit:]
         from .amazon_diagnostics import diagnostic_context
         diagnostics=diagnostic_context(self,base,rows)
+        if self.config.get('block_score_diagnostics'):
+            from .amazon_block_context import block_context
+            diagnostics.update(block_context(self,base,cfg))
         if not diagnostics.get('measurement_failure'):
             from .amazon_activation import activation_context
             diagnostics.update(activation_context(self,base,cfg))
@@ -341,4 +348,7 @@ class AmazonAutoresearch:
             if self.config.get('activation_diagnostic'):
                 from .amazon_activation import cost_summary
                 result['activation_costs']=cost_summary(self.root)
+            if self.config.get('block_score_diagnostics'):
+                from .amazon_block_context import cost_summary
+                result['block_score_costs']=cost_summary(self.config)
             write_json(self.root/'run-report.json',result);return result

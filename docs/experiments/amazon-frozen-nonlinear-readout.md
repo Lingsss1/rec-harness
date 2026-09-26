@@ -37,7 +37,7 @@
 | knowledge | 1 | 39.89 |
 | 合计 | 7，无重试 | 416.20 |
 
-角色完成不等于整轮终态审计通过。监督进程已安排终态审计，将核对全部角色、成本、同执行版本及无新增调用/训练的恢复；审计结果仍待产生。
+独立终态审计已通过：七角色均有已提交的产物与费用；四类别同执行版本、独立排名一致；恢复未新增调用、训练、事件或成本。incumbent 保持 `legacy_incumbent`，候选未晋升，确认和最终测试均未执行。该隔离 study 总计 3,911.3455233946443 GPU 槽位秒，包括基线与候选。此结果证明本次开发阶段自动研究完整执行与恢复，不证明候选收益或整个方案所有阶段已完成。
 
 ## 本地证据
 
@@ -47,6 +47,7 @@
 - `research/rounds/round-1/development-readout.json`：冻结协议下的四类别开发比较。
 - `research/rounds/round-1/independent-rescores/*/acceptance.json`：四次独立排名复核。
 - `codex-call-summary.json`：实际七次角色调用与耗时。
-- `research-audit.py`、`watch-research-audit.py`：终态验收脚本及监督流程；`research-acceptance.json` 仅在真正通过后产生。
+- `research-audit.py`、`watch-research-audit.py`：终态验收脚本及监督流程；`research-acceptance.json` 与 `audit-watch-result.json` 均为 passed。
+- `development-memory.json`、`ready-next-development-memory.json`、`memory-acceptance.json`：已审计的本轮开发记忆及合并后的 5 条历史记录，不包含确认或最终测试结果。
 
 旧控制器将隔离运行库逐项展开到图证据，导致导入开销较大。当前开发工作树已改为保留完整 runtime lock 的紧凑引用并逐字节验证；此次运行的冻结代码未中途替换。

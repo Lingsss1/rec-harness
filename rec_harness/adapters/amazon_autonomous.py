@@ -319,13 +319,23 @@ class AmazonAutoresearch:
             self.store.recover();state=read_json(self.root/'state.json')
             # The event is authoritative if publication of state.json was interrupted.
             for event in self.store.events():
-                if event['kind']=='auto_round_completed' and event['payload']['state']['round']>state['round']:state=event['payload']['state']
+                if event['kind'] in {'auto_round_completed','auto_round_reopened'}:state=event['payload']['state']
+            transitions=[e for e in self.store.events() if e['kind'] in {'auto_round_completed','auto_round_reopened'}]
+            if transitions and transitions[-1]['kind']=='auto_round_reopened':
+                source_root=Path(__file__).resolve().parents[1]
+                for name,ref in transitions[-1]['payload']['controller_sources'].items():
+                    self.artifacts.verify(ref)
+                    if file_hash(source_root/name)!=ref['sha256']:raise ContractError('reopened controller source changed')
             reason=state.get('stop_reason','max_rounds')
             while state['round']<self.config['max_rounds'] and reason!='measurement_required':
                 ledger=Store(self.study/'memory')
                 try:remaining=ledger.budget()['remaining']
                 finally:ledger.close()
-                if self.store.budget()['remaining']<6+int('measurement_discovery' in self.config):reason='role_budget';break
+                folder=self.root/'rounds'/('round-'+str(state['round']+1))
+                roles=['evidence','hypothesis','experiment','evaluation','lead','knowledge']
+                if 'measurement_discovery' in self.config:roles.append('measurement')
+                required=sum(not (folder/role/'accepted.json').exists() for role in roles)
+                if self.store.budget()['remaining']<required:reason='role_budget';break
                 if remaining<self.config.get('minimum_round_gpu_seconds',1800):reason='gpu_budget';break
                 folder=self.root/'rounds'/('round-'+str(state['round']+1))
                 try:
@@ -352,3 +362,30 @@ class AmazonAutoresearch:
                 from .amazon_block_context import cost_summary
                 result['block_score_costs']=cost_summary(self.config)
             write_json(self.root/'run-report.json',result);return result
+
+    def reopen_source_failure(self,reason):
+        """Explicitly retry a pre-admission failure, retaining all calls and artifacts."""
+        if not isinstance(reason,str) or not reason.strip():raise ContractError('repair reason required')
+        with self.lock():
+            events=self.store.events()
+            transitions=[e for e in events if e['kind'] in {'auto_round_completed','auto_round_reopened'}]
+            if not transitions:raise ContractError('no failed round to reopen')
+            latest=transitions[-1]
+            if latest['kind']=='auto_round_reopened':return latest['payload']
+            payload=latest['payload'];state=payload['state'];folder=self.root/'rounds'/('round-'+str(state['round']))
+            if payload['result'].get('status')!='failed' or not (folder/'failure.json').exists():
+                raise ContractError('latest round is not a source failure')
+            if any((folder/name).exists() for name in ['handoff.json','preregistration.json','admission.json','private-confirmation-started.json']):
+                raise ContractError('only pre-admission failures can be reopened')
+            if self.store.db.execute("SELECT 1 FROM budget WHERE status='running'").fetchone():
+                raise ContractError('unsettled role work cannot be reopened')
+            if read_json(folder/'failure.json')!=payload['result']:raise ContractError('failure projection changed')
+            source_root=Path(__file__).resolve().parents[1]
+            source_refs={str(p.relative_to(source_root)):self.artifacts.put(p) for p in sorted(source_root.rglob('*.py'))}
+            record={'failed_event_hash':latest['hash'],'reason':reason,
+                'prior_artifacts':self.artifacts.snapshot(folder,[str(p.relative_to(folder)) for p in folder.rglob('*') if p.is_file()]),
+                'controller_sources':source_refs,'retained_role_cost':self.store.budget()['charged_or_reserved'],
+                'state':{'incumbent':state['incumbent'],'round':state['round']-1,'status':'ready'}}
+            self.store.event('auto_round_reopened',record)
+            write_json(self.root/'state.json',record['state'])
+            return record

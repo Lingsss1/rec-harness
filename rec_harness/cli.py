@@ -30,6 +30,8 @@ def inspection_controller(directory):
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="rec-harness")
     commands = parser.add_subparsers(dest="command", required=True)
+    p = commands.add_parser('amazon-retry-source',help='reopen a failed pre-admission round after a host repair; retain costs and outputs')
+    p.add_argument('directory');p.add_argument('--reason',required=True)
     p = commands.add_parser('autoresearch',help='create or resume autonomous research through its frozen round/budget stop')
     p.add_argument('directory');p.add_argument('--config',help='initial public task configuration; omit on resume')
     p = commands.add_parser('activation-probe',help='run or recover an isolated local NextItNet activation probe')
@@ -97,7 +99,12 @@ def main(argv=None):
     p.add_argument("directory"); p.add_argument("--model"); p.add_argument("--timeout", type=int, default=120)
     args = parser.parse_args(argv)
     try:
-        if args.command == 'autoresearch':
+        if args.command == 'amazon-retry-source':
+            from .adapters.amazon_autonomous import AmazonAutoresearch
+            controller=AmazonAutoresearch(args.directory,load_agent=False)
+            try:result=controller.reopen_source_failure(args.reason)
+            finally:controller.close()
+        elif args.command == 'autoresearch':
             from .autonomous import autoresearch
             result=autoresearch(args.directory,args.config)
         elif args.command == 'activation-probe':

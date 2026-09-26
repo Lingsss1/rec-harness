@@ -69,6 +69,43 @@ class RoleRecoveryTests(unittest.TestCase):
         self.assertEqual(sum(e['kind']=='role_completed' for e in self.runner.store.events()),1)
         self.assertEqual(self.runner.store.budget()['charged_or_reserved'],1)
 
+    def test_host_repair_reopens_without_repeating_successful_transport(self):
+        from contextlib import nullcontext
+        from rec_harness.core import Artifacts
+        r=self.runner;r.root=self.root;r.artifacts=Artifacts(self.root/'artifacts/objects')
+        r.study=self.root/'study';ledger=Store(r.study/'memory');ledger.configure_budget(10000);ledger.close()
+        r.config={'max_rounds':1};r.lock=lambda:nullcontext()
+        self.folder=self.root/'rounds/round-1';self.folder.mkdir(parents=True)
+        def reject(*args):raise ContractError('host capability omission')
+        with self.assertRaises(ContractError):r._role(self.folder,'lead',{},validator=reject)
+        failed={'status':'failed','reason':'host capability omission'}
+        state={'round':1,'incumbent':'base','status':'ready'}
+        write_json(self.folder/'failure.json',failed);write_json(self.root/'state.json',state)
+        r.store.event('auto_round_completed',{'result':failed,'state':state})
+        record=r.reopen_source_failure('Allow declared module calls after review')
+        before=r.store.verify();cost=r.store.budget()
+        self.assertEqual(r.reopen_source_failure('repeat'),record);self.assertEqual(r.store.verify(),before)
+        self.assertIn('failure.json',record['prior_artifacts']);self.assertTrue(record['controller_sources'])
+        def finish(state,folder):
+            r._role(folder,'lead',{},validator=lambda *args:None)
+            return {'selected':False}
+        with patch.object(r,'_round',side_effect=finish):result=r.run()
+        self.assertEqual(self.calls,2);self.assertEqual(r.store.budget(),cost)
+        self.assertEqual(result['state']['round'],1)
+        before=r.store.verify();self.assertEqual(r.run(),result);self.assertEqual(r.store.verify(),before)
+        with self.assertRaisesRegex(ContractError,'not a source failure'):r.reopen_source_failure('no')
+
+    def test_reopen_rejects_post_admission_and_running_work(self):
+        from contextlib import nullcontext
+        r=self.runner;r.root=self.root;r.lock=lambda:nullcontext()
+        folder=self.root/'rounds/round-1';failed={'status':'failed','reason':'failure'}
+        write_json(folder/'failure.json',failed)
+        r.store.event('auto_round_completed',{'result':failed,'state':{'round':1,'incumbent':'base'}})
+        write_json(folder/'handoff.json',{})
+        with self.assertRaisesRegex(ContractError,'pre-admission'):r.reopen_source_failure('repair')
+        (folder/'handoff.json').unlink();r.store.reserve('live',1)
+        with self.assertRaisesRegex(ContractError,'unsettled'):r.reopen_source_failure('repair')
+
 class AmazonPipelineRecoveryTests(unittest.TestCase):
     def test_single_entry_recovers_completed_training_and_finishes_six_roles(self):
         import json

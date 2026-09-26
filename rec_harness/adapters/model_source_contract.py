@@ -47,6 +47,11 @@ def review_source(baseline,candidate):
     classes=[n for n in after.body if isinstance(n,ast.ClassDef) and n.name in CLASSES]
     original={n.name:n for n in before.body if isinstance(n,ast.ClassDef) and n.name in CLASSES}
     if {n.name for n in classes}!=CLASSES or len(classes)!=2:raise ContractError('exactly the declared model classes required')
+    block_class=next(n for n in classes if n.name=='NextItNetBlock')
+    block_fields={target.attr for n in ast.walk(block_class) if isinstance(n,ast.Assign)
+                  and isinstance(n.value,ast.Call) and dotted(n.value.func) in MODULE_CALLS
+                  and dotted(n.value.func).startswith('nn.') for target in n.targets
+                  if isinstance(target,ast.Attribute) and dotted(target.value)=='self'}
     for cls in classes:
         if cls.decorator_list or cls.keywords or len(cls.bases)!=1 or dotted(cls.bases[0])!='nn.Module':
             raise ContractError('model inheritance/decorators outside contract')
@@ -68,6 +73,9 @@ def review_source(baseline,candidate):
                 raise ContractError('cannot shadow model execution globals')
             blocks={n.target.id for n in ast.walk(fn) if isinstance(n,ast.For) and isinstance(n.target,ast.Name)
                     and dotted(n.iter)=='self.blocks'}
+            block_calls={name+'.'+field for name in blocks for field in block_fields}
+            block_helpers={name+'._causal_conv' for name in blocks
+                           if any(isinstance(m,ast.FunctionDef) and m.name=='_causal_conv' for m in block_class.body)}
             if fn.name=='_causal_conv' and 'conv' in args:blocks.add('conv')
             for n in ast.walk(fn):
                 if not isinstance(n,NODES):raise ContractError('unsupported source syntax: '+type(n).__name__)
@@ -81,7 +89,7 @@ def review_source(baseline,candidate):
                                              'torch.float32','torch.float64','torch.int64','torch.bool'}
                         if path not in allowed and not any(v.startswith(path+'.') for v in allowed):
                             raise ContractError('unapproved library capability: '+path)
-                    if n.attr.startswith('_') and not (n.attr=='_causal_conv' and dotted(n.value)=='self'):
+                    if n.attr.startswith('_') and not ((n.attr=='_causal_conv' and dotted(n.value)=='self') or path in block_helpers):
                         if not (n.attr=='__init__' and isinstance(n.value,ast.Call) and dotted(n.value.func)=='super'):
                             raise ContractError('private/introspection attribute prohibited')
                     if isinstance(n.ctx,ast.Store) and not (isinstance(n.value,ast.Name) and n.value.id=='self'):
@@ -96,6 +104,7 @@ def review_source(baseline,candidate):
                         elif path.startswith('self.'):
                             if path not in module_fields|{'self.'+m for m in METHODS} and n.func.attr not in TENSOR_METHODS:
                                 raise ContractError('unapproved model call: '+path)
+                        elif path in block_calls|block_helpers:pass
                         elif n.func.attr=='__init__' and isinstance(n.func.value,ast.Call) and dotted(n.func.value.func)=='super':pass
                         elif n.func.attr not in TENSOR_METHODS:raise ContractError('unapproved tensor call: '+n.func.attr)
                     else:raise ContractError('indirect calls prohibited')

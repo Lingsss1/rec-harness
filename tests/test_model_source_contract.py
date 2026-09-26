@@ -20,6 +20,23 @@ class NextItNetModel(nn.Module):
 '''
 
 class SourceContractTests(unittest.TestCase):
+    def test_inline_block_uses_declared_modules_only(self):
+        source=SOURCE.replace('self.block = nn.Linear(hidden, hidden)',
+            'self.block = nn.Linear(hidden, hidden)\n        self.blocks = nn.ModuleList([NextItNetBlock(hidden)])')
+        source=source.replace('return self.block(x)','for block in self.blocks:\n            x = block(x)\n        return x')
+        candidate=source.replace('x = block(x)','x = block.linear(x)')
+        review_source(source,candidate)
+        helper_source=source.replace('return self.linear(x)',
+            'return self.linear(x)\n    def _causal_conv(self, conv, x):\n        return conv(x)')
+        review_source(helper_source,helper_source.replace('x = block(x)',
+            'x = block._causal_conv(block.linear, x)'))
+        with self.assertRaises(ContractError):
+            review_source(source,source.replace('x = block(x)','x = block._causal_conv(block.linear, x)'))
+        for call in ['block.unknown(x)','block.register_forward_hook(x)','block.linear.forward(x)',
+                     'block.__getattribute__(x)','x.linear(x)']:
+            with self.subTest(call=call),self.assertRaises(ContractError):
+                review_source(source,source.replace('x = block(x)','x = '+call))
+
     def test_new_learnable_architecture_without_exact_template(self):
         candidate=SOURCE.replace('self.block = nn.Linear(hidden, hidden)',
             'self.block = nn.Linear(hidden, hidden)\n        self.gate = nn.Parameter(torch.zeros(hidden))')

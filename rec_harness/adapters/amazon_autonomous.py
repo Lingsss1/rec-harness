@@ -38,6 +38,12 @@ class AmazonAutoresearch:
         if not config.get('rescore_recipe') or not config.get('uid_registry'):raise ContractError('independent CPU rescoring configuration required')
         config['study_config_hash']=digest(read_json(Path(config['study'])/'study.json'))
         config['protocol_hash']=study['protocol_hash']
+        if 'execution_id' in config:
+            identifier(config['execution_id'])
+            from .amazon_execution import resolve_execution
+            execution_store=Store(Path(config['study'])/'memory')
+            try:resolve_execution(execution_store,config['execution_id'])
+            finally:execution_store.close()
         validate_requirements(config.get('measurement_requirements',[]))
         from rec_harness.measurement_discovery import validate_config
         validate_config(config.get('measurement_discovery'))
@@ -184,6 +190,8 @@ class AmazonAutoresearch:
         for dataset in cfg['datasets']:
             for seed in cfg['development_seeds']:
                 result,_=audit_job(self.study,cfg,base,dataset,seed)
+                if result.get('execution_id','direct-reviewed-v1')!=(self.config.get('execution_id') or 'direct-reviewed-v1'):
+                    raise ContractError('development baseline execution differs from autonomous execution')
                 rows.append({'dataset':dataset,'seed':seed,'metrics':result['metrics']})
         ledger=Store(self.study/'memory')
         try:budget=ledger.budget()
@@ -269,7 +277,7 @@ class AmazonAutoresearch:
         write_json(folder/'handoff.json',{'cards':cards,'versions':versions})
         plan=register_plan(self.study,cards,versions);write_json(folder/'preregistration.json',plan)
         write_json(folder/'admission.json',admit_plan(self.study,pid,recipe=self.config['rescore_recipe'],uid_registry=self.config['uid_registry']))
-        run_phase(self.study,pid,'development')
+        run_phase(self.study,pid,'development',execution_id=self.config.get('execution_id'))
         self._rescore(folder,binding['candidate_model_version'],cfg['development_seeds'])
         report=development_readout(self.study,pid);write_json(folder/'development-readout.json',report)
         graph_path=self.study/'research-readouts'/(pid+'-graph.json')
@@ -296,7 +304,7 @@ class AmazonAutoresearch:
         if report['summary']['eligible_for_confirmation'] and lead['selection']=='keep':
             write_json(folder/'private-confirmation-started.json',{'scope':'host-only phase boundary; excludes later failures from agent context'})
             release_confirmation(self.study,pid,lead,report['hash'])
-            run_phase(self.study,pid,'confirmation')
+            run_phase(self.study,pid,'confirmation',execution_id=self.config.get('execution_id'))
             self._rescore(folder,binding['candidate_model_version'],cfg['confirmation_seeds'])
             cfg=load_config(self.study);effects={}
             for seed in cfg['confirmation_seeds']:

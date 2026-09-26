@@ -121,6 +121,12 @@ class RoleRecoveryTests(unittest.TestCase):
 
 class AmazonPipelineRecoveryTests(unittest.TestCase):
     def test_single_entry_recovers_completed_training_and_finishes_six_roles(self):
+        self.run_pipeline(False)
+
+    def test_confirmation_uses_same_frozen_execution_and_resumes_without_calls(self):
+        self.run_pipeline(True)
+
+    def run_pipeline(self,confirmation):
         import json
         from contextlib import ExitStack
         from rec_harness.autonomous import autoresearch
@@ -136,6 +142,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             write_json(study/'study.json',cfg);write_json(study/'study-lock.json',{'config_hash':digest(cfg)})
             ledger=Store(study/'memory');ledger.configure_budget(10000);ledger.close()
             config={'adapter':'amazon-nextitnet-v1','study':str(study),'task_id':'auto','max_rounds':1,
+                    'execution_id':'execution-test',
                     'role_call_limit':12,'rescore_recipe':{'fixture':True},'uid_registry':'fixture',
                     'agent_backend':{'template':'unused','runtime_root':'unused'}}
             write_json(root/'config.json',config);campaign=root/'campaign';calls=[];fits=[]
@@ -150,21 +157,24 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                     if role=='experiment':
                         response['changed_files']=['model.py']
                         (target/'model/model.py').write_text(SOURCE.replace('return self.block(x)','return self.block(x) * 0.9'))
-                    if role in ('evaluation','lead'):response.update(selection='discard',conclusion_status='unknown',evidence_refs=['report'])
+                    if role in ('evaluation','lead'):response.update(selection='keep' if confirmation else 'discard',conclusion_status='unknown',evidence_refs=['report'])
                     if role=='knowledge':response['patch_json']=json.dumps({'base_version':context['graph']['graph_version'],'nodes':[],'edges':[]})
                     for name,value in [('request.json',{'role':role}),('schema.json',schema_for(role)),('context.json',context),('response.json',response),('resources.json',{'status':'success'})]:write_json(target/name,value)
                     return response
             def gate(python,source,model_id,directory,env,timeout):
                 write_json(directory/'report.json',{'checks':{'parameter_gradients':{'w':{'finite':True}}}})
                 return {'status':'success'}
-            def phase(root,pid,partition):
-                marker=Path(root)/'trained.json'
+            def phase(root,pid,partition,execution_id=None):
+                self.assertEqual(execution_id,'execution-test')
+                marker=Path(root)/(partition+'-trained.json')
                 if not marker.exists():fits.append(partition);write_json(marker,{'completed':True})
             def graph(root,pid):
                 s=Store(Path(root)/'memory');g={'task_id':'graph-task','protocol_hash':'protocol','graph_version':s.version,'nodes':[],'edges':[]};s.close()
                 write_json(Path(root)/'research-readouts'/(pid+'-graph.json'),g);return g
-            report={'hash':'report','protocol_hash':'protocol','summary':{'eligible_for_confirmation':False}}
-            stack.enter_context(patch('rec_harness.adapters.amazon_autonomous.audit_job',return_value=({'metrics':{'HR@10':0.5}},{})))
+            report={'hash':'report','protocol_hash':'protocol','summary':{'eligible_for_confirmation':confirmation}}
+            stack.enter_context(patch('rec_harness.adapters.amazon_autonomous.audit_job',return_value=({'metrics':{'HR@10':0.5},'execution_id':'execution-test'},{'candidates_hash':'same','data_hashes':{}})))
+            stack.enter_context(patch('rec_harness.adapters.amazon_autonomous.release_confirmation',return_value={}))
+            resolver=stack.enter_context(patch('rec_harness.adapters.amazon_execution.resolve_execution',return_value={'execution_id':'execution-test'}))
             stack.enter_context(patch('rec_harness.adapters.amazon_admission.run_gate',side_effect=gate))
             stack.enter_context(patch('rec_harness.adapters.amazon_admission.run_training_smoke',
                 side_effect=lambda python,source,directory,recipe,artifacts,registry:{'status':'success','report_ref':artifacts.put(source['path'])}))
@@ -175,13 +185,14 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             with patch.object(AmazonAutoresearch,'_rescore',side_effect=KeyboardInterrupt()):
                 with self.assertRaises(KeyboardInterrupt):autoresearch(campaign,root/'config.json',agent=Agent())
             self.assertEqual(fits,['development']);self.assertEqual(calls,['evidence','hypothesis','experiment'])
+            self.assertEqual(resolver.call_args.args[1],'execution-test')
             with patch.object(AmazonAutoresearch,'_rescore',return_value=[]):
                 result=autoresearch(campaign,agent=Agent())
                 again=autoresearch(campaign,agent=Agent())
-            self.assertEqual(fits,['development']);self.assertEqual(len(calls),6)
+            self.assertEqual(fits,['development','confirmation'] if confirmation else ['development']);self.assertEqual(len(calls),6)
             self.assertEqual(result,again);self.assertEqual(result['state']['round'],1)
             self.assertEqual(result['role_calls']['charged_or_reserved'],6)
-            self.assertFalse((campaign/'rounds/round-1/private-confirmation.json').exists())
+            self.assertEqual((campaign/'rounds/round-1/private-confirmation.json').exists(),confirmation)
             with patch('rec_harness.adapters.amazon_autonomous.JailedCodexAgent',side_effect=AssertionError('audit must not initialize service')):
                 audit=AmazonAutoresearch(campaign,load_agent=False)
                 try:
@@ -201,6 +212,15 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                 finally:audit.close()
 
 class ContextPrivacyTests(unittest.TestCase):
+    def test_mixed_execution_baseline_rejected_before_role_submission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);runner=object.__new__(AmazonAutoresearch)
+            runner.root=root;runner.study=root/'study';runner.config={'execution_id':'execution-frozen'}
+            cfg={'datasets':['tiny'],'development_seeds':[42]}
+            with patch('rec_harness.adapters.amazon_autonomous.load_config',return_value=cfg),patch('rec_harness.adapters.amazon_autonomous.audit_job',return_value=({'metrics':{'HR@10':.5}},{})),patch.object(runner,'_role',side_effect=AssertionError('must reject before calling Codex')):
+                with self.assertRaisesRegex(ContractError,'baseline execution differs'):
+                    runner._round({'incumbent':'base'},root/'rounds/round-1')
+
     def test_confirmation_failures_do_not_enter_next_role_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);runner=object.__new__(AmazonAutoresearch)

@@ -2,7 +2,7 @@
 from pathlib import Path
 from rec_harness.core import Artifacts,ContractError,digest,file_hash,read_json,write_json
 from rec_harness.diagnostics import validate_measurement
-from rec_harness.runtime import node
+from rec_harness.runtime import node,edge
 from rec_harness.store import Store
 from .amazon_controls import load_config
 from .amazon_report import audit_job
@@ -95,7 +95,7 @@ def freeze_reports(directories,study,artifacts):
 
 def block_context(controller,base,study):
     rows=[];known={n['id']:n for n in controller.store.snapshot()['nodes']}
-    for record in controller.config.get('block_score_diagnostics',[]):
+    for record in controller.config.get('block_score_diagnostics',[])+controller.config.get('block_interaction_diagnostics',[]):
         public=read_json(controller.artifacts.verify(record['public_ref']))
         validate_measurement({k:public[k] for k in ['measurements','limitations']})
         if record['protocol_hash']!=controller.protocol_hash:raise ContractError('frozen block score protocol differs')
@@ -106,13 +106,28 @@ def block_context(controller,base,study):
         value=node(observation,'Observation',{**public,'summary_ref':record['public_ref'],'valid':True},controller.task,controller.protocol_hash)
         if observation in known and known[observation]!=value:raise ContractError('committed block score observation differs')
         if observation not in known:
-            controller.store.patch({'base_version':controller.store.version,'nodes':[value],'edges':[]},
+            nodes=[value];edges=[]
+            if record.get('diagnostic_kind')=='block_interaction':
+                tool_id='block-interaction-tool-'+record['implementation_hash'][:32]
+                tool=node(tool_id,'ToolVersion',{'implementation_hash':record['implementation_hash'],
+                    'version':'block-interaction-v1','scope':'Exploratory builtin diagnostic; not utility-promoted.'},controller.task,controller.protocol_hash)
+                if tool_id in known and known[tool_id]!=tool:raise ContractError('interaction tool identity changed')
+                if tool_id not in known:nodes.append(tool)
+                edges.append(edge(observation+'-measured',observation,tool_id,'MEASURED_BY',[observation],controller.task,controller.store.version+1))
+            controller.store.patch({'base_version':controller.store.version,'nodes':nodes,'edges':edges},
                 accompanying_events=[('block_score_summary_recorded',{'observation_id':observation,'summary_ref':record['public_ref']})])
-            known[observation]=value
+            known.update({n['id']:n for n in nodes})
         rows.append(public)
     return {'block_score_diagnostics':rows} if rows else {}
 
 
 def cost_summary(config):
+    costs={}
+    for record in config.get('block_interaction_diagnostics',[]):
+        for identity,seconds in record['inference_costs'].items():
+            if identity in costs and costs[identity]!=seconds:raise ContractError('interaction cost receipt differs')
+            costs[identity]=seconds
     return {'retained_diagnostic_bcu':sum(r['retained_bcu'] for r in config.get('block_score_diagnostics',[])),
+        'retained_interaction_cpu_seconds':sum(v for v in costs.values() if v is not None),
+        'interaction_jobs_with_unknown_full_time':sum(v is None for v in costs.values()),
         'new_diagnostic_bcu':0,'accounting':'Previously completed source diagnostic ledgers; retained once, not new role or GPU charges.'}

@@ -54,6 +54,10 @@ class AmazonAutoresearch:
         if config.get('block_score_diagnostic_dirs'):
             from .amazon_block_context import freeze_reports
             config['block_score_diagnostics']=freeze_reports(config.pop('block_score_diagnostic_dirs'),study,Artifacts(root/'artifacts/objects'))
+        if 'block_interaction_diagnostics' in config:raise ContractError('block_interaction_diagnostics is controller-owned')
+        if config.get('block_interaction_groups'):
+            from .amazon_interaction_context import freeze_interactions
+            config['block_interaction_diagnostics']=freeze_interactions(config.pop('block_interaction_groups'),study,Artifacts(root/'artifacts/objects'))
         if 'diagnostic_tool' in config:raise ContractError('diagnostic_tool is controller-owned; supply diagnostic_registry')
         if 'diagnostic_registry' in config:
             from rec_harness.diagnostics import freeze_tool
@@ -227,7 +231,7 @@ class AmazonAutoresearch:
             history=history[-limit:];research_memory=research_memory[-limit:];failures=failures[-limit:]
         from .amazon_diagnostics import diagnostic_context
         diagnostics=diagnostic_context(self,base,rows)
-        if self.config.get('block_score_diagnostics'):
+        if self.config.get('block_score_diagnostics') or self.config.get('block_interaction_diagnostics'):
             from .amazon_block_context import block_context
             diagnostics.update(block_context(self,base,cfg))
         if not diagnostics.get('measurement_failure'):
@@ -385,7 +389,7 @@ class AmazonAutoresearch:
             if self.config.get('activation_diagnostic'):
                 from .amazon_activation import cost_summary
                 result['activation_costs']=cost_summary(self.root)
-            if self.config.get('block_score_diagnostics'):
+            if self.config.get('block_score_diagnostics') or self.config.get('block_interaction_diagnostics'):
                 from .amazon_block_context import cost_summary
                 result['block_score_costs']=cost_summary(self.config)
             write_json(self.root/'run-report.json',result);return result

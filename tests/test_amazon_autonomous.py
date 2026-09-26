@@ -225,11 +225,13 @@ class ContextPrivacyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);runner=object.__new__(AmazonAutoresearch)
             runner.root=root;runner.study=root/'study';runner.config={'task_id':'auto'}
+            runner.store=Store(root/'memory');self.addCleanup(runner.store.close)
             ledger=Store(runner.study/'memory');ledger.configure_budget(100);ledger.close()
             prior=root/'rounds/round-1';write_json(prior/'failure.json',{'reason':'CONFIRMATION_SECRET'})
             write_json(prior/'private-confirmation-started.json',{'scope':'host'})
             write_json(root/'rounds/round-2/failure.json',{'reason':'invalid source syntax'})
-            write_json(root/'rounds/round-2/development-readout.json',{'hash':'dev-hash'})
+            from rec_harness.core import digest
+            write_json(root/'rounds/round-2/development-readout.json',{'hash':digest({})})
             write_json(root/'rounds/round-2/handoff.json',{'cards':{'mechanism':'previous gated model'}})
             write_json(root/'rounds/round-2/knowledge/response.json',{'patch_json':'development-only explanation'})
             write_json(root/'rounds/round-2/private-confirmation.json',{'result':'PRIVATE_METRICS'})

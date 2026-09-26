@@ -3,6 +3,24 @@ from pathlib import Path
 from rec_harness.core import ContractError,digest,read_json,write_json
 
 
+def execution_failure(folder,events):
+    folder=Path(folder)
+    if not (folder/'failure.json').exists() or (folder/'private-confirmation-started.json').exists():return None
+    result={'reason':read_json(folder/'failure.json')['reason'],'status':'unresolved',
+            'scope':'execution failure; no mechanism refutation'}
+    path=folder/'development-readout.json'
+    if not path.exists():return result
+    readout=read_json(path)
+    if readout.get('hash')!=digest({k:v for k,v in readout.items() if k!='hash'}):
+        raise ContractError('failure resolution readout changed')
+    completed=[e['payload']['result'] for e in events if e['kind']=='auto_round_completed'
+               and 'round-'+str(e['payload']['state']['round'])==folder.name]
+    if completed and completed[-1].get('cycle_identity') and completed[-1].get('development_hash')==readout['hash']:
+        result.update(status='resolved',resolution={'cycle_identity':completed[-1]['cycle_identity'],
+            'development_hash':readout['hash'],'scope':'Development cycle subsequently completed; historical failed-call cost retained.'})
+    return result
+
+
 def validate_memory(pack,protocol,development_seeds=None):
     if set(pack)!={'schema','protocol_hash','entries','hash'} or pack['schema']!='amazon-development-memory-v1':
         raise ContractError('invalid development memory schema')
@@ -30,6 +48,12 @@ def export_development_memory(campaign,output):
     campaign=Path(campaign);config=read_json(campaign/'amazon-auto.json')
     study=read_json(Path(config['study'])/'study.json');entries=[]
     if digest(study)!=config['study_config_hash']:raise ContractError('bound study changed')
+    events=[]
+    if (campaign/'memory/memory.sqlite').exists():
+        from rec_harness.store import Store
+        store=Store(campaign/'memory')
+        try:store.verify();events=store.events()
+        finally:store.close()
     for folder in sorted((campaign/'rounds').glob('round-*')):
         entry={'round':config['task_id']+'/'+folder.name}
         for name,key in [('handoff.json','design'),('lead/response.json','development_decision'),('knowledge/response.json','provisional_knowledge')]:
@@ -40,9 +64,8 @@ def export_development_memory(campaign,output):
             value=read_json(path)
             validate_readout(value,config['protocol_hash'],study['development_seeds'])
             entry['development']=value
-        if (folder/'failure.json').exists() and not (folder/'private-confirmation-started.json').exists():
-            entry['execution_failure']={'reason':read_json(folder/'failure.json')['reason'],
-                                        'scope':'execution failure; no mechanism refutation'}
+        failure=execution_failure(folder,events)
+        if failure is not None:entry['execution_failure']=failure
         if len(entry)>1:entries.append(entry)
     pack={'schema':'amazon-development-memory-v1','protocol_hash':config['protocol_hash'],'entries':entries}
     pack['hash']=digest(pack);validate_memory(pack,config['protocol_hash']);write_json(output,pack);return pack

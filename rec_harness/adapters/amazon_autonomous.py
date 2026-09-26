@@ -201,8 +201,14 @@ class AmazonAutoresearch:
         for pack in self.config.get('development_memory',[]):
             validate_memory(pack,cfg['protocol_hash'],cfg['development_seeds']);research_memory.extend(pack['entries'])
             history.extend(entry['development'] for entry in pack['entries'] if 'development' in entry)
-        failures=[{'round':path.parent.name,**read_json(path)} for path in sorted((self.root/'rounds').glob('*/failure.json'))
-                  if path.parent!=folder and not (path.parent/'private-confirmation-started.json').exists()]
+        from .amazon_memory import execution_failure
+        failures=[]
+        failure_paths=[path for path in sorted((self.root/'rounds').glob('*/failure.json'))
+                       if path.parent!=folder and not (path.parent/'private-confirmation-started.json').exists()]
+        events=self.store.events() if failure_paths else []
+        for path in failure_paths:
+            failure=execution_failure(path.parent,events)
+            if failure is not None:failures.append({'round':path.parent.name,**failure})
         for path in sorted((self.root/'rounds').glob('*/development-readout.json')):
             if path.parent!=folder:
                 history.append(read_json(path))

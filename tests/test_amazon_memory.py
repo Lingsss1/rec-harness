@@ -1,10 +1,25 @@
 import tempfile
 import unittest
 from pathlib import Path
-from rec_harness.adapters.amazon_memory import export_development_memory,validate_memory
+from rec_harness.adapters.amazon_memory import export_development_memory,validate_memory,execution_failure
 from rec_harness.core import ContractError,digest,write_json
 
 class DevelopmentMemoryTests(unittest.TestCase):
+    def test_recovered_failure_needs_matching_committed_development_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp)/'round-1';write_json(folder/'failure.json',{'reason':'host admission failed'})
+            readout={'schema':'amazon-development-selection-v1','rows':[]};readout['hash']=digest(readout)
+            write_json(folder/'development-readout.json',readout)
+            self.assertEqual(execution_failure(folder,[])['status'],'unresolved')
+            event={'kind':'auto_round_completed','payload':{'state':{'round':1},'result':{
+                'cycle_identity':'cycle','development_hash':readout['hash'],'confirmation_secret':'DO_NOT_EXPORT'}}}
+            value=execution_failure(folder,[event]);self.assertEqual(value['status'],'resolved')
+            self.assertNotIn('DO_NOT_EXPORT',str(value));self.assertIn('retained',str(value))
+            event['payload']['result']['development_hash']='other'
+            self.assertEqual(execution_failure(folder,[event])['status'],'unresolved')
+            write_json(folder/'private-confirmation-started.json',{})
+            self.assertIsNone(execution_failure(folder,[event]))
+
     def test_export_excludes_confirmation_results_and_preserves_failed_designs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);study={'development_seeds':[42]};write_json(root/'study/study.json',study)

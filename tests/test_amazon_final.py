@@ -11,6 +11,12 @@ from rec_harness.adapters.amazon_final import run_final
 
 class FinalRunTests(unittest.TestCase):
     def test_complete_comparison_and_exact_resume_without_inference(self):
+        self.check_comparison(False)
+
+    def test_recover_completed_process_without_receipt_or_duplicate_inference(self):
+        self.check_comparison(True)
+
+    def check_comparison(self,interrupted):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);study=root/'study';study.mkdir();output=root/'final'
             models={}
@@ -44,12 +50,21 @@ class FinalRunTests(unittest.TestCase):
                 response={'schema':'candidate-scores-response-v1','request_hash':digest(request),'rows':[
                     {'row_id':r['row_id'],'scores':[1.0 if ((i==4)==candidate) else 0.0 for i in r['candidates']]} for r in request['rows']]}
                 scores=directory/'scores.json';write_json(scores,response)
-                receipt={'process':{'status':'success'},'collection':{'artifacts':{'scores.json':kwargs['artifacts'].put(scores)}},'wall_seconds':0.1}
-                write_json(directory/'request.json',{'inputs':files,'arguments':arguments,'recipe':recipe})
+                receipt={'process':{'status':'success','wall_seconds':0.1},'collection':{'artifacts':{'scores.json':kwargs['artifacts'].put(scores)}},'wall_seconds':0.1}
+                write_json(directory/'request.json',{'inputs':files,'arguments':arguments,'recipe':recipe,'entry':entry})
+                write_json(directory/'process/process.json',receipt['process'])
+                write_json(directory/'jail/output/scores.json',response)
+                if interrupted and len(calls)==1:raise OSError('interrupted before collection receipt')
                 write_json(directory/'receipt.json',receipt);return receipt
             with patch('rec_harness.adapters.amazon_final.run_cpu_job',side_effect=infer):
+                if interrupted:
+                    with self.assertRaisesRegex(OSError,'before collection'):run_final(output,{},root/'uids')
                 report=run_final(output,{},root/'uids')
             self.assertEqual(len(calls),8)
+            if interrupted:
+                recovered=[r for r in report['records'] if r['inference_recovery']]
+                self.assertEqual(len(recovered),1);self.assertIsNone(recovered[0]['inference_wall_seconds'])
+                self.assertEqual(recovered[0]['inference_process_wall_seconds'],0.1)
             self.assertEqual(report['paired_effects_by_seed']['17']['candidate']['HR@10'],1)
             self.assertEqual(report['paired_effects_by_seed']['83']['candidate']['HR@10'],1)
             self.assertEqual(len({r['request_hash'] for r in report['records'] if r['dataset']=='a'}),1)

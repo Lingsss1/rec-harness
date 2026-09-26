@@ -4,10 +4,34 @@ import shutil
 import time
 
 from .agents import run_process
-from .core import ContractError, file_hash, write_json
+from .core import ContractError, file_hash, read_json, write_json
 from .gpu_job import allocate_uid, input_manifest
 from .gpu_outputs import collect_outputs
 from .isolation import prepare
+from .process_identity import assert_stopped
+
+
+def recover_completed_cpu_job(directory,recipe,files,entry,arguments,*,artifacts):
+    """Recover collection after successful process cleanup; never relaunch inference."""
+    directory=Path(directory);files=input_manifest(files)
+    submitted=read_json(directory/'request.json')
+    if any(submitted.get(key)!=value for key,value in {'inputs':files,'entry':entry,'arguments':arguments,'recipe':recipe}.items()):
+        raise ContractError('CPU recovery input binding changed')
+    assert_stopped(directory/'process')
+    completion=directory/'process/process.json'
+    if not completion.exists() or read_json(completion).get('status')!='success':
+        raise ContractError('completed successful CPU process required for recovery')
+    process=read_json(completion);receipt_path=directory/'receipt.json'
+    if receipt_path.exists():
+        receipt=read_json(receipt_path)
+        if receipt['process']!=process:raise ContractError('CPU recovery process receipt changed')
+        for ref in receipt['collection']['artifacts'].values():artifacts.verify(ref)
+        return receipt
+    collection=collect_outputs(directory/'jail/output',directory/'process',artifacts,max_bytes=32*1024**2)
+    artifacts.restore(collection['artifacts'],directory/'results')
+    receipt={'process':process,'collection':collection,'wall_seconds':None,
+        'recovery':{'kind':'completed_process_collection','time_scope':'Process wall time preserved; total job time including staging is unknown.'}}
+    write_json(receipt_path,receipt);return receipt
 
 
 def run_cpu_job(directory, recipe, files, entry, arguments, *, python, uid_registry, artifacts, timeout=120):

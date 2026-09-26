@@ -3,7 +3,7 @@ import fcntl
 from pathlib import Path
 
 from rec_harness.core import Artifacts,ContractError,digest,file_hash,read_json,write_json
-from rec_harness.cpu_job import run_cpu_job
+from rec_harness.cpu_job import run_cpu_job,recover_completed_cpu_job
 from rec_harness.process_identity import assert_stopped
 from .amazon_final_data import prepare_final_data
 from .amazon_final_selection import load_selection
@@ -50,10 +50,10 @@ def run_final(output,recipe,uid_registry):
                         raise ContractError('cached final inference binding changed')
                 else:
                     if inference.exists():
-                        assert_stopped(inference)
-                        raise ContractError('incomplete final inference retained; audit before explicit recovery')
-                    receipt=run_cpu_job(inference,recipe,files,'worker.py',arguments,python=plan['python'],
-                        uid_registry=uid_registry,artifacts=artifacts,timeout=180)
+                        receipt=recover_completed_cpu_job(inference,recipe,files,'worker.py',arguments,artifacts=artifacts)
+                    else:
+                        receipt=run_cpu_job(inference,recipe,files,'worker.py',arguments,python=plan['python'],
+                            uid_registry=uid_registry,artifacts=artifacts,timeout=180)
                 if receipt['process']['status']!='success':raise ContractError('final checkpoint inference failed')
                 response=read_json(artifacts.verify(receipt['collection']['artifacts']['scores.json']))
                 report=score_response(request,key,response)
@@ -64,7 +64,9 @@ def run_final(output,recipe,uid_registry):
                     'metrics':report['metrics'],'positive_tied_users':report['tied_user_count'],
                     'source_hash':job['source']['sha256'],'checkpoint_hash':job['checkpoint']['sha256'],
                     'request_hash':digest(request),'ranking_hash':report['hash'],'receipt_hash':digest(receipt),
-                    'inference_wall_seconds':receipt['wall_seconds']})
+                    'inference_wall_seconds':receipt['wall_seconds'],
+                    'inference_process_wall_seconds':receipt['process'].get('wall_seconds'),
+                    'inference_recovery':receipt.get('recovery')})
             load_selection(output)
             # Recheck test/history hashes before committing the final report.
             for ref in data['inputs']:

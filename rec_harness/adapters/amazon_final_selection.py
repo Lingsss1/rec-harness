@@ -8,6 +8,11 @@ from .amazon_controls import load_config
 from .amazon_report import audit_job
 
 
+def package_code_hashes():
+    root=Path(__file__).resolve().parents[1]
+    return {str(path.relative_to(root)):file_hash(path) for path in sorted(root.rglob('*.py'))}
+
+
 def seal_selection(study,output,models,test_directory,*,eval_seed,eval_users=1000):
     study=Path(study).resolve();output=Path(output).resolve()
     if output==study or study in output.parents or output in study.parents:
@@ -57,6 +62,7 @@ def seal_selection(study,output,models,test_directory,*,eval_seed,eval_users=100
                 'datasets':cfg['datasets'],'seeds':cfg['confirmation_seeds'],'data':cfg['data'],'data_hashes':cfg['data_hashes'],
                 'jobs':jobs,'execution_id':next(iter(identities)),
                 'python':cfg['python'],
+                'package_code':package_code_hashes(),
                 'evaluation_code':{name:file_hash(Path(__file__).with_name(name)) for name in ['amazon_final.py','amazon_final_data.py','independent_scoring.py','score_worker.py']},
                 'final_protocol':{'histories':'train followed by validation interactions','positive':'first test interaction',
                     'candidates':'positive plus 99 unique negatives excluding known history','unknown_items':'reject, do not silently drop users',
@@ -91,4 +97,6 @@ def load_selection(output):
             if file_hash(job[key]['path'])!=job[key]['sha256']:raise ContractError('frozen final model bytes changed')
     for name,expected in plan['evaluation_code'].items():
         if file_hash(Path(__file__).with_name(name))!=expected:raise ContractError('frozen final evaluator changed')
+    if plan.get('package_code')!=package_code_hashes():
+        raise ContractError('frozen final package code changed or absent; use the original frozen evaluator')
     return plan

@@ -3,12 +3,40 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+from contextlib import nullcontext
 from rec_harness.core import Artifacts,ContractError,digest,file_hash,read_json,write_json
 from rec_harness.store import Store
-from rec_harness.adapters.amazon_review_recovery import reuse_design,audit_frozen_rescore
+from rec_harness.adapters.amazon_review_recovery import reuse_design,audit_frozen_rescore,retry_review
+from rec_harness.adapters.amazon_auto_audit import verify_reused_role
 
 
 class ReviewReuseTests(unittest.TestCase):
+    def test_review_retry_preserves_charges_and_recovers_partial_archival(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);store=Store(root/'memory');store.configure_budget(9)
+            store.reserve('calls',6);store.settle('calls',6,'failed');before=store.budget()
+            controller=SimpleNamespace(root=root,store=store,config={'review_only':True},
+                artifacts=Artifacts(root/'artifacts/objects'),lock=nullcontext,close=lambda:None)
+            folder=root/'rounds/round-1'
+            for name in ['evaluation','evaluation-rejected-1']:
+                write_json(folder/name/'rejection.json',{'reason':'local launch failed'})
+            original=Path.rename;calls=[]
+            def interrupted(path,target):
+                calls.append(str(path))
+                if len(calls)==2:raise OSError('rename interruption')
+                return original(path,target)
+            try:
+                with patch('rec_harness.adapters.amazon_review_recovery.AmazonAutoresearch',return_value=controller):
+                    with patch.object(Path,'rename',interrupted):
+                        with self.assertRaisesRegex(OSError,'rename interruption'):retry_review(root,'fix home')
+                    result=retry_review(root,'fix home')
+                    self.assertEqual(retry_review(root,'fix home'),result)
+                self.assertEqual(store.budget(),before)
+                self.assertEqual(len([e for e in store.events() if e['kind']=='amazon_review_role_reopened']),1)
+                self.assertFalse((folder/'evaluation').exists())
+                self.assertEqual(len(list(Path(result['archive']).glob('*/rejection.json'))),2)
+            finally:store.close()
+
     def test_frozen_scorer_changes_fail_before_process_launch(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);worker=root/'package/adapters/score_worker.py'
@@ -57,12 +85,17 @@ class ReviewReuseTests(unittest.TestCase):
             first=reuse_design(None,source,target,plan)
             self.assertEqual(reuse_design(None,source,target,plan),first)
             self.assertEqual(first[1]['charged_or_reserved'],3)
+            for role in ['evidence','hypothesis','experiment']:
+                self.assertEqual(verify_reused_role(target/role,read_json(target/role/'accepted.json')),
+                                 read_json(target/role/'reuse.json'))
             self.assertEqual(read_json(target/'experiment/reuse.json')['source_response_hash'],digest({'changed_files':['model.py']}))
             store=Store(root/'original/memory',read_only=True)
             self.assertEqual(store.verify(),before);store.close()
             write_json(source/'evidence/resources.json',{'status':'success','wall_seconds':0})
             with self.assertRaisesRegex(ContractError,'committed role archive changed'):
                 reuse_design(None,source,target,plan)
+            with self.assertRaisesRegex(ContractError,'committed artifact changed'):
+                verify_reused_role(target/'evidence',read_json(target/'evidence/accepted.json'))
             model.write_text('changed')
             with self.assertRaisesRegex(ContractError,'registered candidate'):
                 reuse_design(None,source,target,plan)

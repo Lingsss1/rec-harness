@@ -156,3 +156,39 @@ def review_recovered(root,proposal,source_round,rescores):
             write_json(controller.root/'review-result.json',result)
             return result
     finally:controller.close()
+
+
+def retry_review(root,reason):
+    """Archive exhausted local role attempts before an explicit host-fix retry."""
+    if not reason.strip():raise ContractError('review repair reason required')
+    controller=AmazonAutoresearch(root,load_agent=False)
+    try:
+        with controller.lock():
+            if not controller.config.get('review_only'):raise ContractError('review-only repair required')
+            if (controller.root/'review-result.json').exists():raise ContractError('completed review cannot be reopened')
+            intent_path=controller.root/'review-retry-intent.json'
+            if intent_path.exists():intent=read_json(intent_path)
+            else:
+                folder=controller.root/'rounds/round-1'
+                failed=[role for role in ['evaluation','lead','knowledge'] if (folder/role/'rejection.json').exists()
+                        and not (folder/role/'accepted.json').exists()]
+                if len(failed)!=1:raise ContractError('one failed review role required')
+                role=failed[0];paths=[folder/role,*sorted(folder.glob(role+'-rejected-*'))]
+                archive=controller.root/'review-retries'/uuid.uuid4().hex
+                records={path.name:controller.artifacts.snapshot(path,[str(p.relative_to(path)) for p in path.rglob('*') if p.is_file()]) for path in paths}
+                intent={'reason':reason,'role':role,'archive':str(archive),'records':records,
+                        'retained_budget':controller.store.budget(),'scope':'Host repair; failed attempts stay charged and archived.'}
+                write_json(intent_path,intent)
+            for name,refs in intent['records'].items():
+                source=controller.root/'rounds/round-1'/name;destination=Path(intent['archive'])/name
+                path=source if source.exists() else destination
+                for relative,ref in refs.items():
+                    controller.artifacts.verify(ref)
+                    if file_hash(path/relative)!=ref['sha256']:raise ContractError('review retry source changed')
+                if source.exists():
+                    destination.parent.mkdir(parents=True,exist_ok=True);source.rename(destination)
+            event={'intent_hash':digest(intent),**intent}
+            if not any(e['kind']=='amazon_review_role_reopened' and e['payload']==event for e in controller.store.events()):
+                controller.store.event('amazon_review_role_reopened',event)
+            return event
+    finally:controller.close()

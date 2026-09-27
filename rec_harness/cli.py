@@ -73,6 +73,8 @@ def main(argv=None):
     p = commands.add_parser('amazon-review-development',help='resume evaluation, lead and knowledge for a recovered preregistered development matrix')
     p.add_argument('directory');p.add_argument('proposal');p.add_argument('source_round');p.add_argument('rescores')
     p.add_argument('--config',help='initial autonomous review configuration; omit on resume')
+    p = commands.add_parser('amazon-review-retry',help='archive an exhausted review role after a host repair without resetting charges')
+    p.add_argument('directory');p.add_argument('--reason',required=True)
     p = commands.add_parser('amazon-continue', help='create an authorized successor campaign with inherited costs')
     p.add_argument('directory'); p.add_argument('predecessor'); p.add_argument('project')
     p.add_argument('--additional-budget',type=float,required=True); p.add_argument('--authorization-file',required=True)
@@ -221,6 +223,9 @@ def main(argv=None):
             from .adapters.amazon_review_recovery import review_recovered
             if args.config:AmazonAutoresearch.init(args.directory,read_json(args.config),review_only=True)
             result=review_recovered(args.directory,args.proposal,args.source_round,args.rescores)
+        elif args.command == 'amazon-review-retry':
+            from .adapters.amazon_review_recovery import retry_review
+            result=retry_review(args.directory,args.reason)
         elif args.command == 'amazon-memory-export':
             from .adapters.amazon_memory import export_development_memory
             result=export_development_memory(args.directory,args.output)

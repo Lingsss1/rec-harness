@@ -105,10 +105,14 @@ class JailedCodexAgent:
                    'isolation': {'kind': 'chroot-unprivileged', 'uid': uid, 'run_id': run_id}}
         write_json(directory / 'request.json', request)
         launch = [sys.executable, '-m', 'rec_harness.isolation', 'enter', str(jail), '--uid', str(uid), '--', *argv]
+        # The isolated UID has no passwd entry. Resolve Codex's home to the
+        # directory staged above, independent of the controller's environment.
+        environment={**os.environ,'HOME':'/root','CODEX_HOME':'/root/.codex'}
         result = run_process(launch, Path(__file__).resolve().parents[1], directory,
-                             stdin=prompt, timeout=self.timeout)
+                             stdin=prompt, timeout=self.timeout,env=environment)
         search_receipt(directory, self.web_search[role])
         if result['status'] != 'success':
+            write_json(directory / 'resources.json', {**result, 'token_usage': None, 'isolation': request['isolation']})
             raise ContractError(f'isolated Codex failed: {result["status"]}')
         response_path = safe_file(workspace, 'response.json')
         response = read_json(response_path)

@@ -50,7 +50,7 @@ python3 -m rec_harness amazon-call-report CAMPAIGN
 
 `submission_cadence` 另给出首末提交跨度、相邻提交的最短/中位间隔，以及任意闭区间 60 秒窗口内的最大提交数。它只统计本控制器记录的提交，不把继承费用或角色复用虚构为带时间的请求；不能据此判断服务端 API 限流或并发。少于两次提交时不推算间隔，时间戳缺失、缺时区或发生时钟倒退时报告 unknown。
 
-报告使用只读 SQLite 快照核验事件与费用投影，可以在控制器运行期间读取，不恢复或重发任务。继承费用单列；扣费但未记录提交的中断列为 unattributed，不伪装成模型调用。角色提交发生在传输之前，可能在 CLI 启动前失败，所以提交次数不等于 CLI 启动数或内部 API 请求数。内部 API 请求数明确为 null。复用角色校验原完成事件，但不增加本轮调用；完整训练与继承来源审计仍使用 verify。若仅训练对照、尚未初始化角色控制器，报告会明确拒绝而不是返回零费用。该入口为源码新增，早先 v7 安装包尚不包含它。
+报告使用只读 SQLite 快照核验事件与费用投影，可以在控制器运行期间读取，不恢复或重发任务。继承费用单列；扣费但未记录提交的中断列为 unattributed，不伪装成模型调用。角色提交发生在传输之前，可能在 CLI 启动前失败，所以提交次数不等于 CLI 启动数或内部 API 请求数。内部 API 请求数明确为 null。复用角色校验原完成事件，但不增加本轮调用；完整训练与继承来源审计仍使用 verify。若仅训练对照、尚未初始化角色控制器，报告会明确拒绝而不是返回零费用。该入口已包含在通过验收的 v8 安装包中，早先 v7 包不包含它。
 
 Amazon 也支持下述 `diagnostic_registry` 与 `measurement_requirements`。诊断只接收已审计开发 seed 的品类聚合指标，包含 dataset 标签；不传入原始交互、checkpoint 或确认结果。启用工具时须指定独立 `diagnostic_budget`，费用记录在 diagnostic-budget，不能混算为 Codex 调用次数。必需测量缺失会生成 MeasurementGap，以 measurement_required 停止，保留 incumbent；此时不会生成模型提案或启动训练。工具外循环的 measurement_source 可直接引用该 Amazon campaign。新研究回合可冻结晋升后的工具并复测；项目总调度可自动创建 Amazon 后继回合，继续使用同一冻结 study 和共享 GPU 账本。
 

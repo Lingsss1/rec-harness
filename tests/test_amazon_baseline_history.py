@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from rec_harness.core import Artifacts,ContractError,file_hash,write_json
 from rec_harness.store import Store
-from rec_harness.adapters.amazon_baseline_history import baseline_history
+from rec_harness.adapters.amazon_baseline_history import baseline_history,verify_visible_history
 
 
 class BaselineHistoryTests(unittest.TestCase):
@@ -20,6 +20,7 @@ class BaselineHistoryTests(unittest.TestCase):
             write_json(ranks,{'user_ids':[987654],'ranks':[2]})
             store=Store(root/'memory');self.addCleanup(store.close)
             controller=SimpleNamespace(study=study,store=store,artifacts=Artifacts(root/'objects'))
+            controller.config={'protocol_hash':'p'}
             with patch('rec_harness.adapters.amazon_baseline_history.load_config',return_value=cfg),patch('rec_harness.adapters.amazon_baseline_history.audit_job',return_value=({'seed':42},{})) as audit:
                 value=baseline_history(controller,root/'round-1','base')
                 self.assertEqual(value['rows'][0]['slices'][0]['users'],1)
@@ -27,6 +28,17 @@ class BaselineHistoryTests(unittest.TestCase):
                 for forbidden in ['987654','user_ids','input_hashes','checkpoint','candidate',str(root)]:
                     self.assertNotIn(forbidden,str(value))
                 before=store.verify()
+                verify_visible_history(controller,root/'round-1',value)
+                self.assertEqual(store.verify(),before)
+                with self.assertRaisesRegex(ContractError,'differs from committed'):
+                    verify_visible_history(controller,root/'round-1',{**value,'rows':[]})
+                with self.assertRaisesRegex(ContractError,'unique completion'):
+                    verify_visible_history(controller,root/'round-2',value)
+                projected=root/'round-1/baseline-history.json';original=projected.read_bytes()
+                projected.write_bytes(original+b' ')
+                with self.assertRaisesRegex(ContractError,'projection changed'):
+                    verify_visible_history(controller,root/'round-1',value)
+                projected.write_bytes(original)
                 with patch('rec_harness.adapters.history_diagnostic.summarize',side_effect=AssertionError('must reuse aggregate')):
                     self.assertEqual(baseline_history(controller,root/'round-1','base'),value)
                 self.assertEqual(store.verify(),before)

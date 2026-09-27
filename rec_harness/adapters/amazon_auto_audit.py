@@ -90,6 +90,10 @@ def verify_campaign(controller):
             role=marker.parent.name
             if role not in {'evidence','measurement','hypothesis','experiment','evaluation','lead','knowledge'}:continue
             accepted=read_json(marker);response=read_json(marker.parent/'response.json');validate_schema(response,schema_for(role))
+            context=read_json(marker.parent/'context.json')
+            if 'baseline_history' in context:
+                from .amazon_baseline_history import verify_visible_history
+                verify_visible_history(controller,marker.parent.parent,context['baseline_history'])
             if role=='measurement':
                 from rec_harness.measurement_discovery import validate_review
                 validate_review(read_json(marker.parent/'context.json'),response)

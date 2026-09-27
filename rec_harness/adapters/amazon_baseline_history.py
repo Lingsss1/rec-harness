@@ -9,6 +9,27 @@ from .amazon_report import audit_job
 from . import history_diagnostic
 
 
+def public_projection(report):
+    return {'report_hash':report['hash'],'baseline':report['binding']['baseline'],'rows':report['rows'],
+            'qualification':'Exploratory development distribution by total training history, not truncated model input length. No causal long-range deficit, new inference or confirmation evidence.'}
+
+
+def verify_visible_history(controller,folder,projection):
+    """Verify a role's view against its committed aggregate, without recomputation."""
+    records=[e['payload'] for e in controller.store.events()
+             if e['kind']=='baseline_history_completed' and e['payload']['round']==folder.name]
+    if len(records)!=1:raise ContractError('visible baseline history lacks unique completion event')
+    record=records[0];ref=record['report']
+    report=read_json(controller.artifacts.verify(ref))
+    if file_hash(folder/'baseline-history.json')!=ref['sha256']:
+        raise ContractError('visible baseline history projection changed')
+    if (report['hash']!=record['report_hash']
+        or report['hash']!=digest({k:v for k,v in report.items() if k!='hash'})
+        or report['binding']['protocol_hash']!=controller.config['protocol_hash']):
+        raise ContractError('visible baseline history binding changed')
+    if projection!=public_projection(report):raise ContractError('role baseline history differs from committed aggregate')
+
+
 def baseline_history(controller,folder,baseline):
     cfg=load_config(controller.study);folder=Path(folder)
     records=[e['payload'] for e in controller.store.events()
@@ -58,5 +79,4 @@ def baseline_history(controller,folder,baseline):
             'report':controller.artifacts.put(path),'report_hash':report['hash'],
             'scope':'Development baseline aggregate; no candidate, confirmation, new training or model inference.'})
     if report['hash']!=digest({k:v for k,v in report.items() if k!='hash'}):raise ContractError('baseline history hash changed')
-    return {'report_hash':report['hash'],'baseline':baseline,'rows':report['rows'],
-            'qualification':'Exploratory development distribution by total training history, not truncated model input length. No causal long-range deficit, new inference or confirmation evidence.'}
+    return public_projection(report)

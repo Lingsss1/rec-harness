@@ -5,6 +5,16 @@ from rec_harness.adapters.amazon_memory import export_development_memory,validat
 from rec_harness.core import ContractError,digest,write_json
 
 class DevelopmentMemoryTests(unittest.TestCase):
+    def test_unfinished_recovered_review_cannot_export_memory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);study={'development_seeds':[42]}
+            write_json(root/'study/study.json',study)
+            write_json(root/'campaign/amazon-auto.json',{'study':str(root/'study'),
+                'study_config_hash':digest(study),'review_only':True})
+            with self.assertRaisesRegex(ContractError,'must finish before memory export'):
+                export_development_memory(root/'campaign',root/'memory.json')
+            self.assertFalse((root/'memory.json').exists())
+
     def test_export_checks_committed_roles_handoff_and_readout(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder=Path(tmp)/'round-1';events=[]

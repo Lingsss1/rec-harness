@@ -127,6 +127,10 @@ class AmazonAutoresearch:
                 and e['payload']['task_id'].startswith(folder.name+'-'+role+'-')
                 and e['payload']['input_hash']==digest(read_json(target/'context.json'))]
             if submitted:complete(submitted[-1]['task_id'],read_json(receipt).get('wall_seconds',0))
+        def transport_status():
+            for name in ['resources.json','process.json']:
+                if (target/name).exists():return read_json(target/name).get('status')
+            return None
         if (target/'accepted.json').exists():
             response=read_json(target/'response.json');validate_schema(response,schema_for(role))
             accepted=read_json(target/'accepted.json')
@@ -135,6 +139,9 @@ class AmazonAutoresearch:
             if validator:validator(response,target)
             recover_completion()
             return response
+        if ((target/'rejection.json').exists() and
+            read_json(target/'rejection.json').get('retryable') is False) or transport_status() not in (None,'success'):
+            raise ContractError(role+' transport failed; repair the host and explicitly reopen before retrying')
         previous=len(list(folder.glob(role+'-rejected-*')))
         for retry in range(max(0,2-previous)):
             if target.exists() and (target/'request.json').exists():
@@ -169,8 +176,11 @@ class AmazonAutoresearch:
                 return response
             except (ContractError,ValueError,KeyError,TypeError,OSError) as error:
                 self.store.settle(task,1,'failed')
-                write_json(target/'rejection.json',{'status':'rejected','reason':str(error)})
-                self.store.event('role_rejected',{'task':task,'role':role,'reason':str(error)})
+                retryable=transport_status()=='success'
+                write_json(target/'rejection.json',{'status':'rejected','reason':str(error),'retryable':retryable})
+                self.store.event('role_rejected',{'task':task,'role':role,'reason':str(error),'retryable':retryable})
+                if not retryable:
+                    raise ContractError(role+' transport failed; repair the host and explicitly reopen before retrying') from error
                 context={**context,'validation_error':str(error),'repair_instruction':'Correct this role output; preserve frozen bindings.'}
         raise ContractError(role+' failed after automatic retry')
 

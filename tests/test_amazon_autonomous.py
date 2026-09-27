@@ -43,6 +43,34 @@ class RoleRecoveryTests(unittest.TestCase):
         self.assertEqual(self.calls,2)
         self.assertEqual(self.runner.store.budget()['charged_or_reserved'],2)
 
+    def test_transport_failure_stops_without_retry_including_resume(self):
+        for status in ['crash','timeout',None]:
+            with self.subTest(status=status):
+                folder=self.folder/str(status);folder.mkdir()
+                calls=[]
+                def fail(role,context,target):
+                    calls.append(role)
+                    write_json(target/'request.json',{'role':role})
+                    if status:write_json(target/'resources.json',{'status':status})
+                    raise ContractError('host or network unavailable')
+                before=self.runner.store.budget()['charged_or_reserved']
+                with patch.object(self.runner.agent,'run',side_effect=fail):
+                    for _ in range(3):
+                        with self.assertRaisesRegex(ContractError,'explicitly reopen'):
+                            self.runner._role(folder,'lead',{})
+                self.assertEqual(calls,['lead'])
+                self.assertEqual(self.runner.store.budget()['charged_or_reserved'],before+1)
+                self.assertFalse(read_json(folder/'lead/rejection.json')['retryable'])
+
+    def test_existing_failed_transport_receipt_is_not_retried(self):
+        write_json(self.folder/'lead/request.json',{'role':'lead'})
+        write_json(self.folder/'lead/resources.json',{'status':'crash'})
+        write_json(self.folder/'lead/rejection.json',{'reason':'older transport failure'})
+        with self.assertRaisesRegex(ContractError,'explicitly reopen'):
+            self.runner._role(self.folder,'lead',{})
+        self.assertEqual(self.calls,0)
+        self.assertEqual(self.runner.store.budget()['charged_or_reserved'],0)
+
     def test_transport_receipt_recovers_after_controller_loss(self):
         original=write_json
         def interrupt(path,value):

@@ -60,6 +60,11 @@ def validate_export_bindings(folder,events):
             if not any(e.get('response_hash')==digest(value) for e in completed):
                 raise ContractError('development memory role differs from committed response: '+role)
             responses[role]=value
+        elif (folder/role/'reuse.json').exists():
+            from .amazon_auto_audit import verify_reused_role
+            accepted=read_json(folder/role/'accepted.json')
+            if digest(value)!=accepted['response_hash']:raise ContractError('reused memory response changed: '+role)
+            verify_reused_role(folder/role,accepted);responses[role]=value
     if (folder/'handoff.json').exists() and {'evidence','hypothesis'}<=responses.keys():
         expected={'gap':responses['evidence'],**responses['hypothesis']}
         if read_json(folder/'handoff.json')['cards']!=expected:
@@ -76,6 +81,16 @@ def export_development_memory(campaign,output):
     campaign=Path(campaign);config=read_json(campaign/'amazon-auto.json')
     study=read_json(Path(config['study'])/'study.json');entries=[]
     if digest(study)!=config['study_config_hash']:raise ContractError('bound study changed')
+    if config.get('review_only'):
+        if not (campaign/'review-result.json').exists():raise ContractError('recovered review must finish before memory export')
+        from .amazon_autonomous import AmazonAutoresearch
+        from .amazon_auto_audit import verify_campaign
+        controller=AmazonAutoresearch(campaign,load_agent=False)
+        try:
+            audit=verify_campaign(controller)
+            if audit['verified_cycles']!=1 or audit['roles_without_completion_event']:
+                raise ContractError('recovered review lacks a fully bound cycle')
+        finally:controller.close()
     events=[]
     if (campaign/'memory/memory.sqlite').exists():
         from rec_harness.store import Store

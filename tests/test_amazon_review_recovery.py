@@ -8,6 +8,7 @@ from rec_harness.core import Artifacts,ContractError,digest,file_hash,read_json,
 from rec_harness.store import Store
 from rec_harness.adapters.amazon_review_recovery import reuse_design,audit_frozen_rescore,retry_review
 from rec_harness.adapters.amazon_auto_audit import verify_reused_role
+from rec_harness.adapters.amazon_memory import validate_export_bindings
 
 
 class ReviewReuseTests(unittest.TestCase):
@@ -84,6 +85,12 @@ class ReviewReuseTests(unittest.TestCase):
             before=store.verify();store.close()
             first=reuse_design(None,source,target,plan)
             self.assertEqual(reuse_design(None,source,target,plan),first)
+            write_json(target/'handoff.json',plan)
+            validate_export_bindings(target,[])
+            write_json(target/'handoff.json',{'cards':{'forged':'design'}})
+            with self.assertRaisesRegex(ContractError,'handoff differs'):
+                validate_export_bindings(target,[])
+            write_json(target/'handoff.json',plan)
             self.assertEqual(first[1]['charged_or_reserved'],3)
             for role in ['evidence','hypothesis','experiment']:
                 self.assertEqual(verify_reused_role(target/role,read_json(target/role/'accepted.json')),

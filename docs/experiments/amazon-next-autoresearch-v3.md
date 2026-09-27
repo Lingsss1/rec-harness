@@ -19,3 +19,5 @@
 证据角色的 observation_refs 明确引用每类历史不超过 20 条的人数（937/951/950/879）及基线协议审计，并保留“描述性分布、非因果测量”的限制。新增信息已经进入实际分析，但未做有/无诊断的独立配对，因此不宣称增量决策收益。
 
 当前新假设是在 `NextItNetBlock.forward` 的第二次卷积后、原 dropout 前应用已有 GELU 激活；其余残差、归一化、dilation、上下文混合和训练协议保持。测量评审判定 sufficient。缺少第二次激活是源码事实，存在有害能力缺口及改善排名仍是未经验证的假设；具体候选准入和训练结果尚待完成。
+
+四个前置角色已全部一次成功，无重试。候选实际唯一源码差异为第二次卷积后的 `self.dropout(y)` 改为 `self.dropout(self.activation(y))`，源码 hash 为 `ae556df7a0c0808bd7c2dc5dc912eb5546a0abe297cc73683a395bddb8240635`。`admission.json` 的源码准入、CPU 数值合同和合成训练检查均成功。Movies 与 Industrial 开发任务已登记相同执行身份 `execution-436890f8386911956bb5cfca`，候选完整结果尚未产生。实现检查通过不证明新增非线性会改善推荐。

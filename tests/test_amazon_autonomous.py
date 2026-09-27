@@ -199,6 +199,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             if history:
                 config['history_diagnostic']=True
                 history_call=stack.enter_context(patch('rec_harness.adapters.amazon_history_context.development_history',return_value={'report_hash':'development-slices','rows':[]}))
+                stack.enter_context(patch('rec_harness.adapters.amazon_baseline_history.baseline_history',return_value={'report_hash':'baseline-slices','rows':[]}))
             write_json(root/'config.json',config);campaign=root/'campaign';calls=[];fits=[];control_fits=[]
             self_test=self
             class Agent:
@@ -216,6 +217,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                         response['changed_files']=['model.py']
                         (target/'model/model.py').write_text(SOURCE.replace('return self.block(x)','return self.block(x) * 0.9'))
                     if role in ('evaluation','lead'):
+                        if history:self_test.assertEqual(context['baseline_history']['report_hash'],'baseline-slices')
                         self_test.assertEqual(context['implementation_evidence']['status'],'verified')
                         self_test.assertEqual(context['implementation_evidence']['model_version'],context['model_version'])
                         if history:self_test.assertEqual(context['development_history']['report_hash'],'development-slices')

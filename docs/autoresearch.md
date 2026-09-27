@@ -56,6 +56,8 @@ Amazon 也支持下述 `diagnostic_registry` 与 `measurement_requirements`。�
 
 `verify` 和 `recover` 已识别 Amazon campaign，无需初始化 Codex 服务。verify 核对控制器/绑定 study 事件链、角色内容与绑定、已提交开发周期及 CAS，并单列旧角色记录缺少完整事件绑定的情况；它不替代逐 GPU 作业或私有确认结果审计。恢复在控制器锁下检查角色和诊断工作进程，保留未知实际成本的预留费用。
 
+可选 `history_diagnostic: true` 在假设生成前提供基线开发历史长度分布，并在候选开发完成后提供配对分桶结果。仅使用已审计开发 seed，事件/CAS 绑定输入并支持精确恢复；不会新增模型推理。具体字段边界和真实分布见 [开发历史诊断](experiments/amazon-baseline-history.md)。
+
 ## 独立最终评估
 
 研究结束后，先封存比较模型和验证集选出的 checkpoint，再执行最终测试。第一个 `--model` 是报告中的 comparator。每个模型必须已有全部类别、全部确认初始化的可审计 checkpoint，且执行版本和类别词表一致。

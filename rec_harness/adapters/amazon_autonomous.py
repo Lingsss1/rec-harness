@@ -257,6 +257,9 @@ class AmazonAutoresearch:
         history,research_memory=compact_development_context(history,research_memory,cfg['protocol_hash'],cfg['development_seeds'],available_history)
         from .amazon_diagnostics import diagnostic_context
         diagnostics=diagnostic_context(self,base,rows)
+        if self.config.get('history_diagnostic'):
+            from .amazon_baseline_history import baseline_history
+            diagnostics['baseline_history']=baseline_history(self,folder,base)
         if self.config.get('block_score_diagnostics') or self.config.get('block_interaction_diagnostics'):
             from .amazon_block_context import block_context
             diagnostics.update(block_context(self,base,cfg))

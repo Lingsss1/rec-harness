@@ -44,6 +44,31 @@ def validate_readout(value,protocol,development_seeds=None):
     return value
 
 
+def compact_development_context(history,entries,protocol,development_seeds,available_history=()):
+    """Keep each selected readout once, preserving references across retrieval windows."""
+    available={}
+    for report in [*available_history,*history]:
+        validate_readout(report,protocol,development_seeds)
+        available[report['hash']]=report
+    selected={report['hash']:report for report in history}
+    compact=[]
+    for original in entries:
+        entry=dict(original)
+        report=entry.pop('development',None)
+        if report is not None:
+            validate_readout(report,protocol,development_seeds)
+            if entry.get('development_hash',report['hash'])!=report['hash']:
+                raise ContractError('development memory reference mismatch')
+            entry['development_hash']=report['hash']
+            available[report['hash']]=report
+        if 'development_hash' in entry:
+            key=entry['development_hash']
+            if key not in available:raise ContractError('missing development memory readout')
+            selected[key]=available[key]
+        compact.append(entry)
+    return list(selected.values()),compact
+
+
 def validate_export_bindings(folder,events):
     """Use available committed identities; do not silently trust edited projections."""
     responses={}

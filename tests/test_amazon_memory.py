@@ -1,10 +1,47 @@
 import tempfile
 import unittest
+import copy
 from pathlib import Path
-from rec_harness.adapters.amazon_memory import export_development_memory,validate_memory,execution_failure,validate_export_bindings
+from rec_harness.adapters.amazon_memory import export_development_memory,validate_memory,execution_failure,validate_export_bindings,compact_development_context
 from rec_harness.core import ContractError,digest,write_json
 
 class DevelopmentMemoryTests(unittest.TestCase):
+    def test_context_round_trip_preserves_evidence_without_mutating_packs(self):
+        report={'schema':'amazon-development-selection-v1','protocol_hash':'p','rows':[{'seed':42,'metric':.53}]}
+        report['hash']=digest(report)
+        entries=[{'round':'old','development':report,'design':{'hypothesis':'scale'},'execution_failure':{'status':'resolved'}},
+                 {'round':'new','development_hash':report['hash'],'development_decision':{'selection':'discard'}}]
+        before=copy.deepcopy(entries)
+        history,compact=compact_development_context([report,report],entries,'p',[42])
+        self.assertEqual(entries,before)
+        self.assertEqual(history,[report])
+        lookup={r['hash']:r for r in history}
+        restored={**compact[0],'development':lookup[compact[0]['development_hash']]}
+        restored.pop('development_hash')
+        self.assertEqual(restored,entries[0]);self.assertEqual(compact[1],entries[1])
+
+    def test_context_retrieval_keeps_referenced_report_outside_history_window(self):
+        reports=[]
+        for metric in [.4,.5]:
+            report={'schema':'amazon-development-selection-v1','protocol_hash':'p','rows':[{'seed':42,'metric':metric}]}
+            report['hash']=digest(report);reports.append(report)
+        entry={'round':'selected','development_hash':reports[0]['hash']}
+        history,entries=compact_development_context(reports[-1:],[entry],'p',[42],reports)
+        self.assertEqual({r['hash'] for r in history},{r['hash'] for r in reports})
+        self.assertEqual(entries,[entry])
+        with self.assertRaisesRegex(ContractError,'missing development'):
+            compact_development_context(reports[-1:],[entry],'p',[42])
+
+    def test_context_rejects_changed_or_non_development_evidence(self):
+        report={'schema':'amazon-development-selection-v1','protocol_hash':'p','rows':[{'seed':42}]}
+        report['hash']=digest(report)
+        with self.assertRaisesRegex(ContractError,'reference mismatch'):
+            compact_development_context([],[{'development':report,'development_hash':'other'}],'p',[42])
+        for bad in [{**report,'protocol_hash':'other'},{**report,'rows':[{'seed':17}]}]:
+            with self.assertRaises(ContractError):compact_development_context([bad],[],'p',[42])
+            bad['hash']=digest({k:v for k,v in bad.items() if k!='hash'})
+            with self.assertRaises(ContractError):compact_development_context([],[{'development':bad}],'p',[42])
+
     def test_unfinished_recovered_review_cannot_export_memory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);study={'development_seeds':[42]}

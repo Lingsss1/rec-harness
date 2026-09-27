@@ -341,7 +341,9 @@ class ContextPrivacyTests(unittest.TestCase):
             write_json(prior/'private-confirmation-started.json',{'scope':'host'})
             write_json(root/'rounds/round-2/failure.json',{'reason':'invalid source syntax'})
             from rec_harness.core import digest
-            write_json(root/'rounds/round-2/development-readout.json',{'hash':digest({})})
+            report={'schema':'amazon-development-selection-v1','protocol_hash':'p','rows':[{'seed':42}]}
+            report['hash']=digest(report)
+            write_json(root/'rounds/round-2/development-readout.json',report)
             write_json(root/'rounds/round-2/handoff.json',{'cards':{'mechanism':'previous gated model'}})
             write_json(root/'rounds/round-2/knowledge/response.json',{'patch_json':'development-only explanation'})
             write_json(root/'rounds/round-2/private-confirmation.json',{'result':'PRIVATE_METRICS'})
@@ -354,3 +356,6 @@ class ContextPrivacyTests(unittest.TestCase):
             self.assertIn('previous gated model',str(context))
             self.assertIn('development-only explanation',str(context))
             self.assertNotIn('PRIVATE_METRICS',str(context))
+            self.assertEqual(context['history'],[report])
+            self.assertEqual(context['research_memory'][0]['development_hash'],report['hash'])
+            self.assertNotIn('development',context['research_memory'][0])

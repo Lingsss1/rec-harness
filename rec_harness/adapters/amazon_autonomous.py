@@ -247,9 +247,12 @@ class AmazonAutoresearch:
             report=read_json(path)
             validate_readout(report,cfg['protocol_hash'],cfg['development_seeds'])
             history.append(report)
+        available_history=history
         limit=self.config.get('research_policy',{}).get('retrieval_limit')
         if limit is not None:
             history=history[-limit:];research_memory=research_memory[-limit:];failures=failures[-limit:]
+        from .amazon_memory import compact_development_context
+        history,research_memory=compact_development_context(history,research_memory,cfg['protocol_hash'],cfg['development_seeds'],available_history)
         from .amazon_diagnostics import diagnostic_context
         diagnostics=diagnostic_context(self,base,rows)
         if self.config.get('block_score_diagnostics') or self.config.get('block_interaction_diagnostics'):
@@ -267,6 +270,7 @@ class AmazonAutoresearch:
             'source_contract':{'editable_classes':['NextItNetModel','NextItNetBlock'],'library_calls':sorted(MODULE_CALLS),
                                'tensor_methods':sorted(TENSOR_METHODS),'preserve':'all module configuration, imports, training/data helpers and method signatures'},
             'instructions':['Use exact supplied bindings. Only model.py is editable; no manual source-template admission is needed.',
+                'Prior development readouts appear once in history, keyed by hash. Resolve research_memory.development_hash against history; all referenced readouts are included.',
                 'Evidence GapCard.model_version MUST equal bindings.base_model_id (the incumbent being diagnosed), never candidate_model_version. GapCard.protocol_hash MUST equal bindings.train_protocol_hash.',
                 'Proposal.controls is a list of model IDs, not prose descriptions. Copy bindings.controls verbatim. Put explanations and CPU checks in mechanism/insertion_contract/falsification_condition.',
                 'Numerical contract must hold after learning, not only at initialization: encode_sequence returns causal [batch,length,hidden] final representations; score_candidates equals item_emb(candidates) @ encode_sequence(seq)[0,-1]. Forward uses the same encoded representations. Insert learnable readout transforms inside encode_sequence, never only in forward/score_candidates.',

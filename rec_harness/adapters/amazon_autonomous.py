@@ -352,10 +352,14 @@ class AmazonAutoresearch:
         cfg=load_config(self.study);pid=binding['proposal_id']
         graph_path=self.study/'research-readouts'/(pid+'-graph.json')
         graph=read_json(graph_path) if graph_path.exists() else ingest_development(self.study,pid)
+        from .amazon_review_evidence import admission_evidence
+        implementation=admission_evidence(self.study,pid,cfg['protocol_hash'],binding['candidate_model_version'],candidate)
         review={**context,'model_version':binding['candidate_model_version'],
                 'visible_model_source':None,
+                'implementation_evidence':implementation,
                 'handoff':{'cards':cards,'versions':versions},'development':report,
                 'instructions':['Evaluate the actual complete development readout. Include its exact hash in evidence_refs: '+report['hash'],
+                                'implementation_evidence reports host-verified admission checks; its report hashes are references, not files available in your workspace. Distinguish these checks from missing scientific evidence. Evaluation has no source file; lead receives candidate source separately.',
                                 'Keep only if eligible_for_confirmation is true. No confirmation results are supplied; conclusion unknown/provisional.']}
         if history is not None:review['development_history']=history
         def decision_check(value,_):

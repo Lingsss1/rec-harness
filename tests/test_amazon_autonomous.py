@@ -216,6 +216,8 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                         response['changed_files']=['model.py']
                         (target/'model/model.py').write_text(SOURCE.replace('return self.block(x)','return self.block(x) * 0.9'))
                     if role in ('evaluation','lead'):
+                        self_test.assertEqual(context['implementation_evidence']['status'],'verified')
+                        self_test.assertEqual(context['implementation_evidence']['model_version'],context['model_version'])
                         if history:self_test.assertEqual(context['development_history']['report_hash'],'development-slices')
                         self_test.assertEqual(context['model_version'],context['bindings']['candidate_model_version'])
                         if role=='evaluation':self_test.assertIsNone(context['visible_model_source'])

@@ -1,7 +1,13 @@
 import copy
 import unittest
 from rec_harness.core import ContractError,digest
-from rec_harness.model_graph import tensor_graph_summary,validate_tensor_graph
+from rec_harness.model_graph import tensor_graph_summary,validate_tensor_graph,sequence_semantics_summary
+
+
+def semantics_fixture():
+    return {condition:{'input_tokens_unchanged':True,'batch_independent':True,
+        'batch_permutation_equivariant':True,'input_axes':['user','time'],
+        'representation_axes':['user','time','feature']} for condition in ['dense','right_aligned_histories']}
 
 
 def report_fixture():
@@ -17,6 +23,17 @@ def report_fixture():
 
 
 class TensorGraphTests(unittest.TestCase):
+    def test_sequence_semantics_requires_all_conditions_and_honors_legacy_absence(self):
+        self.assertEqual(sequence_semantics_summary({})['status'],'unavailable')
+        with self.assertRaises(ContractError):sequence_semantics_summary({},required=True)
+        with self.assertRaises(ContractError):sequence_semantics_summary({'checks':{'sequence_semantics':[]}})
+        report={'checks':{'sequence_semantics':semantics_fixture()}}
+        self.assertEqual(sequence_semantics_summary(report,required=True)['status'],'verified')
+        for condition in ['dense','right_aligned_histories']:
+            for field in ['input_tokens_unchanged','batch_independent','batch_permutation_equivariant']:
+                broken=copy.deepcopy(report);broken['checks']['sequence_semantics'][condition][field]=False
+                with self.assertRaises(ContractError):sequence_semantics_summary(broken)
+
     def test_summary_binds_source_and_exposes_coverage(self):
         report=report_fixture();summary=tensor_graph_summary(report,'candidate','source',required=True)
         self.assertEqual(summary['operation_count'],1)

@@ -75,7 +75,7 @@ class TrainingGateTests(unittest.TestCase):
         self.assertEqual(result['execution_id'],'frozen-execution')
 
     def test_current_gate_rejects_missing_or_invalid_graph_even_with_valid_report_hash(self):
-        from test_tensor_graph import report_fixture
+        from test_tensor_graph import report_fixture,semantics_fixture
         source=self.config['model_versions']['model']
         for variant in ['missing','invalid','valid']:
             def child(argv,cwd,directory,**kwargs):
@@ -86,6 +86,7 @@ class TrainingGateTests(unittest.TestCase):
                 if variant=='missing':report.pop('tensor_graph')
                 report.update(inspector_hash=file_hash(argv[1]),checks={k:True for k in
                     ['causal_input_gradient','tail_readout','empty_history_finite','padding_gradient_zero']})
+                report['checks']['sequence_semantics']=semantics_fixture()
                 report['hash']=digest(report)
                 write_json(Path(argv[argv.index('--output')+1]),report)
                 return {'status':'success'}

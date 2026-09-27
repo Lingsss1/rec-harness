@@ -38,6 +38,26 @@ def validate_tensor_graph(graph, model_id, source_hash):
     return tensors
 
 
+def sequence_semantics_summary(report, *, required=False):
+    checks=report.get('checks',{})
+    value=checks.get('sequence_semantics') if isinstance(checks,dict) else None
+    if value is None:
+        if required:raise ContractError('sequence semantics required by current inspector')
+        return {'status':'unavailable','scope':'Historical probe did not record full-sequence batch semantics.'}
+    if not isinstance(value,dict):raise ContractError('sequence semantic conditions must be an object')
+    fields=('input_tokens_unchanged','batch_independent','batch_permutation_equivariant')
+    conditions={}
+    for condition in ('dense','right_aligned_histories'):
+        row=value.get(condition,{})
+        if not isinstance(row,dict) or any(row.get(key) is not True for key in fields):
+            raise ContractError('sequence semantic checks incomplete: '+condition)
+        if row.get('input_axes')!=['user','time'] or row.get('representation_axes')!=['user','time','feature']:
+            raise ContractError('sequence semantic axes differ')
+        conditions[condition]={key:row[key] for key in (*fields,'input_axes','representation_axes')}
+    return {'status':'verified','conditions':conditions,
+        'scope':'Finite synthetic eval-mode probes of input immutability and full-sequence batch independence; not all-input or proposal-specific semantic proof.'}
+
+
 def tensor_graph_summary(report, model_id, source_hash, *, required=False):
     graph=report.get('tensor_graph')
     if graph is None:

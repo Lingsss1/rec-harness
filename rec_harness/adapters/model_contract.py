@@ -128,12 +128,40 @@ def trace_operations(model, sequence, model_id, source_hash, *, max_operations=1
     return result
 
 
+def check_sequence_semantics(model, sequences):
+    """Per-user sequence representations must not depend on neighboring batch rows."""
+    import torch
+    if model.training:raise ContractError('sequence semantic probe requires eval mode')
+    if sequences.ndim!=2 or sequences.shape[0]<2 or sequences.shape[1]<1 or sequences.dtype!=torch.long:
+        raise ContractError('sequence semantic probe requires at least two nonempty integer histories')
+    original=sequences.clone()
+    def encode(value):
+        before=value.clone()
+        result=model.encode_sequence(value)
+        if not torch.equal(value,before):raise ContractError('sequence encoder modified input tokens')
+        if result.ndim!=3 or result.shape[:2]!=value.shape or not torch.isfinite(result).all():
+            raise ContractError('sequence semantic probe shape or finiteness failed')
+        return result.clone()
+    with torch.no_grad():
+        together=encode(sequences)
+        apart=torch.cat([encode(original[row:row+1].clone()) for row in range(len(original))])
+        if not torch.allclose(together,apart,atol=1e-5,rtol=1e-5):
+            raise ContractError('sequence representations depend on other batch users')
+        reversed_rows=encode(original.flip(0).clone()).flip(0)
+        if not torch.allclose(together,reversed_rows,atol=1e-5,rtol=1e-5):
+            raise ContractError('sequence representations depend on batch row order')
+    return {'input_tokens_unchanged':True,'batch_independent':True,'batch_permutation_equivariant':True,
+        'input_axes':['user','time'],'representation_axes':['user','time','feature'],
+        'scope':'Finite synthetic full-sequence batch/single-row/permutation probes in eval mode; not a proof for all inputs or training-mode randomness.'}
+
+
 def check_contract(model, *, itemnum, length=16):
     import torch
     from torch.nn import functional as F
     if itemnum < 8 or length < 4: raise ContractError('probe needs itemnum>=8 and length>=4')
     model.cpu().eval()
     dense = (torch.arange(2 * length).reshape(2, length) % (itemnum - 2)) + 1
+    dense_semantics=check_sequence_semantics(model,dense)
     with torch.no_grad():
         reference = model.encode_sequence(dense)
     if reference.ndim != 3 or reference.shape[:2] != dense.shape or not torch.isfinite(reference).all():
@@ -145,6 +173,7 @@ def check_contract(model, *, itemnum, length=16):
         if not torch.allclose(reference[:, :cutoff + 1], alternate[:, :cutoff + 1], atol=1e-5, rtol=1e-5):
             raise ContractError('future token perturbation changed causal prefix')
     sequences = dense.clone(); sequences[0, :-3] = 0; sequences[1, :-1] = 0
+    padded_semantics=check_sequence_semantics(model,sequences)
     with torch.no_grad():
         encoded = model.encode_sequence(sequences)
         candidates = torch.tensor([1, 2, itemnum])
@@ -193,6 +222,7 @@ def check_contract(model, *, itemnum, length=16):
     finally:
         handle.remove(); model.zero_grad(set_to_none=True)
     return {'causal_boundaries': boundaries, 'causal_input_gradient': True, 'tail_readout': True,
+            'sequence_semantics':{'dense':dense_semantics,'right_aligned_histories':padded_semantics},
             'empty_history_finite': True, 'padding_gradient_zero': True, 'training_loss': float(loss.detach()),
             'parameter_gradients': gradients, 'scope': 'fresh initialization, synthetic CPU inputs; not trained-checkpoint certification'}
 

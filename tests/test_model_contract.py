@@ -8,7 +8,7 @@ from rec_harness.store import Store
 
 try:
     import torch
-    from rec_harness.adapters.model_contract import check_contract, trace_encode, trace_operations
+    from rec_harness.adapters.model_contract import check_contract, trace_encode, trace_operations, check_sequence_semantics
 except ImportError:
     torch = None
 
@@ -141,6 +141,27 @@ class ModelContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError,'operation limit'):
             trace_operations(model,sequence,'v1','source',max_operations=1)
         self.assertEqual(first,trace_operations(model,sequence,'v1','source'))
+
+    def test_full_sequence_semantics_reject_cross_user_prefix_mixing(self):
+        encode=self.model.encode_sequence
+        def mixed(seq):
+            value=encode(seq)
+            # Leaves the tail readout and mid-sequence causal-gradient probe unchanged.
+            return torch.cat([value[:,:1]+value[:,:1].mean(0,keepdim=True),value[:,1:]],dim=1)
+        self.model.encode_sequence=mixed
+        with self.assertRaisesRegex(ContractError,'other batch users'):
+            check_contract(self.model,itemnum=32,length=8)
+
+    def test_sequence_semantics_reject_input_mutation(self):
+        encode=self.model.encode_sequence
+        def modifies(seq):
+            value=encode(seq)
+            seq[:,0]=0
+            return value
+        self.model.encode_sequence=modifies
+        self.model.eval()
+        with self.assertRaisesRegex(ContractError,'modified input tokens'):
+            check_sequence_semantics(self.model,torch.tensor([[1,2,3],[4,5,6]]))
 
     def test_checkpoint_hash_and_full_tensor_finiteness(self):
         from rec_harness.adapters.model_contract import load_checkpoint

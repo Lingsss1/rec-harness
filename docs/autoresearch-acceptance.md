@@ -639,3 +639,12 @@ Amazon autonomous 配置新增可选 `execution_id`，初始化时解析已注�
 候选及生成对照的 `implementation_evidence.tensor_graph` 由各自准入报告投影，包含图 hash、源码/模型身份、算子计数、原地修改次数、输出元数据与原覆盖范围。不发送张量值。提示词要求区分已执行路径与未执行分支，算子数量不证明机制。
 
 `tensor-graph-gate-acceptance-v1/acceptance.json` 完成真实 CPU 准入；其 `public-evidence.json` 验证角色摘要辅助函数与门控收据完全一致。`tensor-graph-isolated-acceptance-v1/acceptance.json` 完成同一真实候选在独立 UID/chroot/seccomp 下的 CPU 探针，均记录 168 个操作。隔离探针输出仍标为 untrusted，不能仅凭进程隔离或自报图通过来认定候选准入。新增两次合成 CPU 探针，无训练、Codex 调用或业务数据评价；本次没有让真实角色重新读取摘要。
+
+
+### 整段序列语义约束
+
+合同探针新增 `sequence_semantics`：在 dense 和不同长度的右对齐历史上，核验输入 token 不变、逐用户独立执行与合批执行的整段表示一致，以及批次行顺序置换等变。使用 eval 模式及固定数值容差；输入轴为 user/time，表示轴为 user/time/feature。该检查在原因果、尾部评分、梯度及合成训练压力检查之外执行。
+
+新 CPU 准入和隔离探针要求两个输入条件的检查都显式成功；评审只接收白名单摘要，历史缺项为 unavailable。反例测试覆盖只在序列前部混用其他用户而保持尾部不变的候选，以及编码后改写输入 token 的候选。它不以形状正确替代用户独立性，也不把有限探针当作所有输入或提案机制的证明。
+
+`sequence-semantics-acceptance-v1/acceptance.json` 对真实基线、门控候选、全局门控对照的 fresh 模型，以及第二 GELU 候选的一个既有开发 checkpoint 完成四次 CPU 门控，全部通过。没有新增训练或 Codex 调用，未读取最终测试数据或改变旧 campaign。四份合同报告绑定各自源码、inspector 和 checkpoint（适用时）。

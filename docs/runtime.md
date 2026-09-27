@@ -4,6 +4,8 @@
 
 连续多轮的统一入口、隔离示例及 Amazon 自动研究配置见 [单入口自动研究](autoresearch.md)。
 
+当前源码对应的离线 wheel 已通过独立安装和真实周期回放，构建标识、校验和、安装命令及依赖范围见 [安装验收 v7](implementation/install-acceptance-v7.md)。
+
 ## 最小验收
 
 ```bash

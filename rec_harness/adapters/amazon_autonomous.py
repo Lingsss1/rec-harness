@@ -362,14 +362,23 @@ class AmazonAutoresearch:
             from .amazon_history_graph import attach_history
             graph=attach_history(self,folder,graph,context['baseline_history'])
             write_json(graph_path,graph)
-        from .amazon_review_evidence import admission_evidence
+        from .amazon_review_evidence import admission_evidence,protocol_summary
         implementation=admission_evidence(self.study,pid,cfg['protocol_hash'],binding['candidate_model_version'],candidate)
+        execution_evidence=[]
+        for dataset in cfg['datasets']:
+            for seed in cfg['development_seeds']:
+                result,manifest=audit_job(self.study,cfg,binding['candidate_model_version'],dataset,seed)
+                execution_evidence.append({**protocol_summary(cfg,result,manifest),
+                    'model_version':binding['candidate_model_version'],
+                    'source_sha256':cfg['model_versions'][binding['candidate_model_version']]['sha256']})
         review={**context,'model_version':binding['candidate_model_version'],
                 'visible_model_source':None,
                 'implementation_evidence':implementation,
+                'candidate_execution_evidence':execution_evidence,
                 'handoff':{'cards':cards,'versions':versions},'development':report,
                 'instructions':['Evaluate the actual complete development readout. Include its exact hash in evidence_refs: '+report['hash'],
                                 'implementation_evidence reports host-verified admission checks; its report hashes are references, not files available in your workspace. Distinguish these checks from missing scientific evidence. Evaluation has no source file; lead receives candidate source separately.',
+                                'candidate_execution_evidence summarizes audited completed development training under the frozen worker and protocol. Use verified fields to assess actual execution settings, rather than local model helper defaults. It does not prove a causal mechanism or expose confirmation results.',
                                 'Keep only if eligible_for_confirmation is true. No confirmation results are supplied; conclusion unknown/provisional.']}
         if history is not None:review['development_history']=history
         def decision_check(value,_):

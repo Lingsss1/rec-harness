@@ -13,3 +13,7 @@
 后续基线上下文另提供 `baseline_execution_evidence`：直接投影已经通过 `audit_job` 的开发收据与 manifest，列出实际 epochs/batches/eval_users/eval_seed/patience/eval_every、fresh 初始化、worker/协议/执行身份和收据哈希。没有完整 manifest 时标注 unavailable；协议、worker 或开发 seed 不匹配时拒绝。该字段仅证明基线主机审计结果，不把它当作尚未执行候选的合规证明，也不传递原始用户、排名或 checkpoint。
 
 真实离线验收 `protocol-context-acceptance-v1/acceptance.json` 覆盖 v2 四类对照，均为每类 1000 验证用户，未新增调用或推理。已运行的冻结 v2 不热更新，后续 campaign 才使用该公开投影。
+
+第二 GELU 候选的评审再次指出：准入摘要不能证明实际候选执行采用冻结协议。后续 evaluation/lead 现在另收到 `candidate_execution_evidence`。在完成候选开发训练和独立复评分后，控制器逐类别、逐开发 seed 重新调用 `audit_job`，再投影同样的协议摘要，并附候选模型 ID 和源码哈希。它不取代独立评分，也不读取确认条件；缺少完整 manifest 的旧记录明确为 unavailable。此处使用现有评审调用，不增加角色数量。
+
+真实验收 `candidate-protocol-context-acceptance-v1/acceptance.json` 覆盖 v3 四类候选：均 verified、eval_users 为 1000、模型/执行身份匹配，收据与 manifest 哈希逐项等于已冻结开发读出。公开投影 hash 为 `d82cdbd2d3b3b0d985365caa40051885ef9f6275a4cad7aeb3dddb95a45c2b1a`。本次仅离线核验，没有新增 Codex、训练或推理；不修改在途 v3 上下文，不宣称已改善角色判断或减少调用次数。

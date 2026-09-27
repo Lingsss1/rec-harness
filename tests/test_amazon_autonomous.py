@@ -151,6 +151,31 @@ class RoleRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError,'unsettled'):r.reopen_source_failure('repair')
 
 class AmazonPipelineRecoveryTests(unittest.TestCase):
+    def test_mismatched_control_is_rejected_before_any_role_or_training(self):
+        for changed in ['execution','candidates','data']:
+            with self.subTest(changed=changed),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);study=root/'study'
+                ledger=Store(study/'memory');ledger.configure_budget(100);ledger.close()
+                runner=object.__new__(AmazonAutoresearch)
+                runner.root=root;runner.study=study
+                runner.config={'task_id':'task','execution_id':'exec','control_model_ids':['control']}
+                cfg={'datasets':['tiny'],'development_seeds':[42]}
+                def audit(root,config,version,dataset,seed):
+                    result={'execution_id':'exec','metrics':{'HR@10':.5}}
+                    manifest={'candidates_hash':'same','data_hashes':{'train':'same'}}
+                    if version=='control':
+                        if changed=='execution':result['execution_id']='other'
+                        elif changed=='candidates':manifest['candidates_hash']='other'
+                        else:manifest['data_hashes']={'train':'other'}
+                    return result,manifest
+                with patch('rec_harness.adapters.amazon_autonomous.load_config',return_value=cfg), \
+                     patch('rec_harness.adapters.amazon_autonomous.audit_job',side_effect=audit), \
+                     patch.object(runner,'_role',side_effect=AssertionError('unexpected Codex call')), \
+                     patch('rec_harness.adapters.amazon_autonomous.run_phase',side_effect=AssertionError('unexpected training')):
+                    with self.assertRaisesRegex(ContractError,'development control'):
+                        runner._round({'incumbent':'base'},root/'round-1')
+                self.assertFalse((root/'round-1/input.json').exists())
+
     def test_single_entry_recovers_completed_training_and_finishes_six_roles(self):
         self.run_pipeline(False)
 
@@ -383,7 +408,7 @@ class ContextPrivacyTests(unittest.TestCase):
             write_json(root/'rounds/round-2/private-confirmation.json',{'result':'PRIVATE_METRICS'})
             cfg={'datasets':['tiny'],'development_seeds':[42],'confirmation_seeds':[17,83],
                  'protocol':{},'protocol_hash':'p'}
-            with patch('rec_harness.adapters.amazon_autonomous.load_config',return_value=cfg), patch('rec_harness.adapters.amazon_autonomous.audit_job',return_value=({'metrics':{'HR@10':0.5}},{})):
+            with patch('rec_harness.adapters.amazon_autonomous.load_config',return_value=cfg), patch('rec_harness.adapters.amazon_autonomous.audit_job',return_value=({'metrics':{'HR@10':0.5}},{'candidates_hash':'same','data_hashes':{}})):
                 context=runner._context({'incumbent':'base'},root/'rounds/round-3')
             self.assertNotIn('CONFIRMATION_SECRET',str(context))
             self.assertIn('invalid source syntax',str(context))

@@ -36,7 +36,7 @@ python3 -m rec_harness autoresearch /path/to/amazon-campaign
 
 源码修改范围是 `NextItNetModel` / `NextItNetBlock` 内已声明方法，允许的张量算子和模块可在 `model_source_contract.py` 查看。训练、数据处理、导入和方法签名冻结。新增模型结构不需要修改逐候选字符串模板；超出能力范围的代码被拒绝。这个受限源码契约不是任意 Python 的安全证明。Amazon 配置可通过 `execution_id` 绑定已注册的冻结隔离运行环境；基线、候选和确认阶段必须使用相同执行版本。未指定时仍沿用 reviewed-source 路径。隔离路径已通过实际基线训练与独立复评分，不代表任意 GPU 代码或驱动层安全证明。
 
-每轮复用已审计 incumbent 作为配对对照；可选 `control_model_ids` 冻结额外已注册的对照模型，例如 `{"control_model_ids":["legacy_no_prefix"]}`。这些模型必须已在同一 study 注册，并具有匹配当前 execution_id 的完整开发结果；控制器审计后才向研究角色提供其开发指标，并在评审前独立复评分。提案必须原样引用 incumbent 与所有指定对照。确认释放后，主机按需训练或复用全部对照的确认结果并独立评分；候选须在每个确认 seed 上超过 incumbent 的 minimum_effect，同时严格优于每个额外对照，才能晋升。
+每轮复用已审计 incumbent 作为配对对照；可选 `control_model_ids` 冻结额外已注册的对照模型，例如 `{"control_model_ids":["legacy_no_prefix"]}`。这些模型必须已在同一 study 注册，并具有匹配当前 execution_id 的完整开发结果；在生成设计输入前，还须逐类别/seed 核对与 incumbent 相同的候选集合和数据哈希。控制器审计后才向研究角色提供其开发指标，并在评审前独立复评分。提案必须原样引用 incumbent 与所有指定对照。确认释放后，主机按需训练或复用全部对照的确认结果并独立评分；候选须在每个确认 seed 上超过 incumbent 的 minimum_effect，同时严格优于每个额外对照，才能晋升。
 
 额外对照只允许复用已注册源码，新生成机制对照的自动准入仍待扩展。既有对照结果属于此前已暴露证据；支持多对照执行不等于已验证某个机制。这不会增加默认角色调用数量，但会增加必要的训练/评分工作；所有成本仍保留。角色调用上限和 study GPU 秒分别计账；失败计费、历史成本接续及每个训练任务的预算检查保持生效。`minimum_round_gpu_seconds` 是启动下限，不是整轮成本预测；每个提案仍受自己的冻结预算和 study 总预算限制。
 

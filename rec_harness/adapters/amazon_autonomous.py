@@ -216,7 +216,8 @@ class AmazonAutoresearch:
         return summaries
 
     def _context(self,state,folder):
-        cfg=load_config(self.study);base=state['incumbent'];rows=[];execution_evidence=[]
+        cfg=load_config(self.study);base=state['incumbent'];rows=[];execution_evidence=[];baseline_identities={}
+        controls=list(dict.fromkeys([base,*self.config.get('control_model_ids',[])]))
         from .amazon_review_evidence import protocol_summary
         for dataset in cfg['datasets']:
             for seed in cfg['development_seeds']:
@@ -224,12 +225,13 @@ class AmazonAutoresearch:
                 if result.get('execution_id','direct-reviewed-v1')!=(self.config.get('execution_id') or 'direct-reviewed-v1'):
                     raise ContractError('development baseline execution differs from autonomous execution')
                 rows.append({'dataset':dataset,'seed':seed,'metrics':result['metrics']})
+                if len(controls)>1:
+                    baseline_identities[(dataset,seed)]=(manifest['candidates_hash'],manifest['data_hashes'])
                 execution_evidence.append(protocol_summary(cfg,result,manifest))
         ledger=Store(self.study/'memory')
         try:budget=ledger.budget()
         finally:ledger.close()
         pid=self.config['task_id']+'-'+folder.name
-        controls=list(dict.fromkeys([base,*self.config.get('control_model_ids',[])]))
         control_rows=[];control_execution=[]
         for version in controls:
             if version==base:continue
@@ -238,6 +240,8 @@ class AmazonAutoresearch:
                     result,manifest=audit_job(self.study,cfg,version,dataset,seed)
                     if result.get('execution_id','direct-reviewed-v1')!=(self.config.get('execution_id') or 'direct-reviewed-v1'):
                         raise ContractError('development control execution differs from autonomous execution')
+                    if (manifest['candidates_hash'],manifest['data_hashes'])!=baseline_identities[(dataset,seed)]:
+                        raise ContractError('development control evaluation identity differs from baseline')
                     control_rows.append({'model_version':version,'dataset':dataset,'seed':seed,'metrics':result['metrics']})
                     control_execution.append({**protocol_summary(cfg,result,manifest),'model_version':version})
         history=[];research_memory=[]

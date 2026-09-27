@@ -75,6 +75,9 @@ def main(argv=None):
     p.add_argument('--config',help='initial autonomous review configuration; omit on resume')
     p = commands.add_parser('amazon-review-retry',help='archive an exhausted review role after a host repair without resetting charges')
     p.add_argument('directory');p.add_argument('--reason',required=True)
+    p = commands.add_parser('amazon-call-report',help='read-only role submissions, outcomes and retained costs by round')
+    p.add_argument('directory')
+    p.add_argument('--format',choices=['json','markdown'],default='json')
     p = commands.add_parser('amazon-continue', help='create an authorized successor campaign with inherited costs')
     p.add_argument('directory'); p.add_argument('predecessor'); p.add_argument('project')
     p.add_argument('--additional-budget',type=float,required=True); p.add_argument('--authorization-file',required=True)
@@ -229,6 +232,10 @@ def main(argv=None):
         elif args.command == 'amazon-review-retry':
             from .adapters.amazon_review_recovery import retry_review
             result=retry_review(args.directory,args.reason)
+        elif args.command == 'amazon-call-report':
+            from .adapters.amazon_call_report import call_report,markdown_report
+            result=call_report(args.directory)
+            if args.format=='markdown':print(markdown_report(result));return 0
         elif args.command == 'amazon-memory-export':
             from .adapters.amazon_memory import export_development_memory
             result=export_development_memory(args.directory,args.output)

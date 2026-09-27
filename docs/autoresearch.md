@@ -40,6 +40,16 @@ python3 -m rec_harness autoresearch /path/to/amazon-campaign
 
 Amazon 角色有终态响应时恢复会复用，候选源码和上下文有哈希绑定；成功传输但不合法的响应最多尝试两次；传输失败立即停止，普通恢复不自动重发。已完成训练由 study 的审计与恢复机制复用；存在冻结计划的 CPU 复评分按原收据恢复，不移走目录后重复推理。失败轮写入 `failure.json` 并继续下一轮。已选中的 candidate 成为下一轮 incumbent。下一轮同时获得此前设计、开发集决策与 provisional knowledge；确认结果和确认阶段失败详情始终保留在主机侧。
 
+按轮次检查角色提交、完成、拒绝、待完成和复用数量：
+
+```bash
+python3 -m rec_harness amazon-call-report CAMPAIGN --format markdown
+# 默认 JSON 还包含逐次提交时间、账本状态和源事件头。
+python3 -m rec_harness amazon-call-report CAMPAIGN
+```
+
+报告使用只读 SQLite 快照核验事件与费用投影，可以在控制器运行期间读取，不恢复或重发任务。继承费用单列；扣费但未记录提交的中断列为 unattributed，不伪装成模型调用。角色提交发生在传输之前，可能在 CLI 启动前失败，所以提交次数不等于 CLI 启动数或内部 API 请求数。内部 API 请求数明确为 null。复用角色校验原完成事件，但不增加本轮调用；完整训练与继承来源审计仍使用 verify。若仅训练对照、尚未初始化角色控制器，报告会明确拒绝而不是返回零费用。该入口为源码新增，早先 v7 安装包尚不包含它。
+
 Amazon 也支持下述 `diagnostic_registry` 与 `measurement_requirements`。诊断只接收已审计开发 seed 的品类聚合指标，包含 dataset 标签；不传入原始交互、checkpoint 或确认结果。启用工具时须指定独立 `diagnostic_budget`，费用记录在 diagnostic-budget，不能混算为 Codex 调用次数。必需测量缺失会生成 MeasurementGap，以 measurement_required 停止，保留 incumbent；此时不会生成模型提案或启动训练。工具外循环的 measurement_source 可直接引用该 Amazon campaign。新研究回合可冻结晋升后的工具并复测；项目总调度可自动创建 Amazon 后继回合，继续使用同一冻结 study 和共享 GPU 账本。
 
 `verify` 和 `recover` 已识别 Amazon campaign，无需初始化 Codex 服务。verify 核对控制器/绑定 study 事件链、角色内容与绑定、已提交开发周期及 CAS，并单列旧角色记录缺少完整事件绑定的情况；它不替代逐 GPU 作业或私有确认结果审计。恢复在控制器锁下检查角色和诊断工作进程，保留未知实际成本的预留费用。

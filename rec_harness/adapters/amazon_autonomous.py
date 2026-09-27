@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from rec_harness.agents import schema_for,validate_schema
-from rec_harness.core import Artifacts,ContractError,digest,file_hash,read_json,write_json,validate_card,identifier
+from rec_harness.core import Artifacts,ContractError,digest,file_hash,read_json,write_json,validate_card,identifier,safe_file
 from rec_harness.jailed_agent import JailedCodexAgent
 from rec_harness.knowledge import validate_knowledge_patch
 from rec_harness.process_identity import assert_stopped
@@ -42,6 +42,8 @@ class AmazonAutoresearch:
         if type(config.get('max_rounds')) is not int or config['max_rounds']<1:raise ContractError('positive max_rounds required')
         if type(config.get('role_call_limit')) is not int or config['role_call_limit']<6:raise ContractError('role_call_limit must cover six roles')
         if type(config.get('history_diagnostic',False)) is not bool:raise ContractError('history_diagnostic must be boolean')
+        if type(config.get('generated_control_count',0)) is not int or config.get('generated_control_count',0)<0:
+            raise ContractError('generated_control_count must be a nonnegative integer')
         if not config.get('rescore_recipe') or not config.get('uid_registry'):raise ContractError('independent CPU rescoring configuration required')
         config['study_config_hash']=digest(read_json(Path(config['study'])/'study.json'))
         config['protocol_hash']=study['protocol_hash']
@@ -123,10 +125,13 @@ class AmazonAutoresearch:
             if any(e['kind']=='role_completed' and e['payload']['task']==task for e in self.store.events()):return
             self.store.event('role_completed',{'task':task,'role':role,**read_json(target/'accepted.json'),
                 'task_id':task,'status':'success','wall_seconds':wall_seconds,
-                'archive':artifacts.snapshot(target,[name for name in ['context.json','request.json','response.json','resources.json','schema.json','literature-search.json','stdout.jsonl'] if (target/name).exists()])})
+                'archive':artifacts.snapshot(target,[name for name in ['context.json','request.json','response.json','resources.json','schema.json','literature-search.json','stdout.jsonl'] if (target/name).exists()]+['model/'+name for name in read_json(target/'accepted.json').get('model_source_hashes',{})])})
         def accept(response):
             record={'response_hash':digest(response),'context_hash':digest(read_json(target/'context.json'))}
             if (target/'model/model.py').exists():record['source_hash']=file_hash(target/'model/model.py')
+            if role=='experiment' and context.get('generated_controls'):
+                names=['model.py',*[item['file'] for item in context['generated_controls']]]
+                record['model_source_hashes']={name:file_hash(safe_file(target/'model',name)) for name in names}
             write_json(target/'accepted.json',record)
         def recover_completion():
             receipt=target/'resources.json'
@@ -144,6 +149,8 @@ class AmazonAutoresearch:
             accepted=read_json(target/'accepted.json')
             if digest(response)!=accepted['response_hash'] or digest(read_json(target/'context.json'))!=accepted['context_hash']:raise ContractError('cached role changed')
             if 'source_hash' in accepted and file_hash(target/'model/model.py')!=accepted['source_hash']:raise ContractError('cached model changed')
+            for name,sha in accepted.get('model_source_hashes',{}).items():
+                if file_hash(safe_file(target/'model',name))!=sha:raise ContractError('cached model source changed: '+name)
             if validator:validator(response,target)
             recover_completion()
             return response
@@ -232,6 +239,8 @@ class AmazonAutoresearch:
         try:budget=ledger.budget()
         finally:ledger.close()
         pid=self.config['task_id']+'-'+folder.name
+        generated_controls=[{'model_version':pid+'-control-'+str(i+1),'file':'control-'+str(i+1)+'.py'}
+                            for i in range(self.config.get('generated_control_count',0))]
         control_rows=[];control_execution=[]
         for version in controls:
             if version==base:continue
@@ -289,21 +298,22 @@ class AmazonAutoresearch:
             'protocol':cfg['protocol'],'seeds':cfg['development_seeds']+cfg['confirmation_seeds'],
             'development_baseline':rows,'baseline_execution_evidence':execution_evidence,
             'development_controls':control_rows,'control_execution_evidence':control_execution,
+            'generated_controls':generated_controls,
             'history':history,'research_memory':research_memory,'prior_execution_failures':failures,'budget':budget,
             'bindings':{'proposal_id':pid,'candidate_model_version':pid+'-model','base_model_id':base,
-                        'controls':controls,'train_protocol_hash':cfg['protocol_hash'],
+                        'controls':controls+[v['model_version'] for v in generated_controls],'train_protocol_hash':cfg['protocol_hash'],
                         'seeds':cfg['development_seeds']+cfg['confirmation_seeds']},
             'source_contract':{'editable_classes':['NextItNetModel','NextItNetBlock'],'library_calls':sorted(MODULE_CALLS),
                                'tensor_methods':sorted(TENSOR_METHODS),'preserve':'all module configuration, imports, training/data helpers and method signatures'},
-            'instructions':['Use exact supplied bindings. Only model.py is editable; no manual source-template admission is needed.',
+            'instructions':['Use exact supplied bindings. Edit model.py for the candidate; when generated_controls is nonempty, create each named file as a complete model module with a distinct falsifiable control of the proposed mechanism. All files must preserve incumbent imports, training helpers and module settings.',
                 'Prior development readouts appear once in history, keyed by hash. Resolve research_memory.development_hash against history; all referenced readouts are included.',
                 'Evidence GapCard.model_version MUST equal bindings.base_model_id (the incumbent being diagnosed), never candidate_model_version. GapCard.protocol_hash MUST equal bindings.train_protocol_hash.',
                 'Proposal.controls is a list of model IDs, not prose descriptions. Copy bindings.controls verbatim. Put explanations and CPU checks in mechanism/insertion_contract/falsification_condition.',
                 'Numerical contract must hold after learning, not only at initialization: encode_sequence returns causal [batch,length,hidden] final representations; score_candidates equals item_emb(candidates) @ encode_sequence(seq)[0,-1]. Forward uses the same encoded representations. Insert learnable readout transforms inside encode_sequence, never only in forward/score_candidates.',
-                'Propose one distinct falsifiable architectural change against the incumbent and all explicitly bound registered controls. Existing control outcomes are previously exposed evidence; their presence alone does not establish a mechanism. Do not reopen rejected mechanisms.',
+                'Propose one distinct falsifiable architectural change against the incumbent and all explicitly bound controls, including each newly generated mechanism control. Existing control outcomes are previously exposed evidence; their presence alone does not establish a mechanism. Do not reopen rejected mechanisms.',
                 'Proposal budget must fit remaining GPU budget and cover all category/seed candidate fits plus missing comparator confirmation fits and overhead. Never shorten protocol.',
                 'Independent initialization for every category/seed. Only public development aggregates are supplied; no raw users, checkpoints or confirmation outcomes.',
-                'Experiment returns changed_files exactly [model.py]. Do not train. Host performs source admission, CPU contracts and GPU evaluation.',
+                'Experiment returns changed_files exactly model.py followed by every generated_controls file in supplied order. Do not train. Host checks every new source and performs CPU contracts and GPU evaluation. Proposal budget must cover all generated controls as well as the candidate.',
                 'Role output IDs and seeds must match bindings. Scientific conclusions stay unknown/provisional.']}
 
     def _round(self,state,folder):
@@ -330,12 +340,15 @@ class AmazonAutoresearch:
             if not 0<p['budget']<=context['budget']['remaining']:raise ContractError('proposal budget outside frozen envelope')
         generated=self._role(folder,'hypothesis',{**context,'gap':gap},source,proposal_check)
         def source_check(value,directory):
-            if value['changed_files']!=['model.py']:raise ContractError('only model.py may change')
-            review_source(source.read_text(),(directory/'model/model.py').read_text())
+            names=['model.py',*[item['file'] for item in context.get('generated_controls',[])]]
+            if value['changed_files']!=names:raise ContractError('changed_files must match frozen candidate/control files')
+            for name in names:review_source(source.read_text(),safe_file(directory/'model',name).read_text())
         self._role(folder,'experiment',{**context,'gap':gap,**generated},source,source_check)
         candidate=folder/'experiment/model/model.py';cards={'gap':gap,**generated}
+        generated_sources={item['model_version']:folder/'experiment/model'/item['file'] for item in context.get('generated_controls',[])}
         versions={'candidate':{'model_version':binding['candidate_model_version'],'source':{'path':str(candidate),'sha256':file_hash(candidate)}},
-                  'controls':[{'model_version':v,'source':cfg['model_versions'][v]} for v in binding['controls']]}
+                  'controls':[{'model_version':v,'source':({'path':str(generated_sources[v]),'sha256':file_hash(generated_sources[v])}
+                     if v in generated_sources else cfg['model_versions'][v])} for v in binding['controls']]}
         write_json(folder/'handoff.json',{'cards':cards,'versions':versions})
         plan=register_plan(self.study,cards,versions);write_json(folder/'preregistration.json',plan)
         write_json(folder/'admission.json',admit_plan(self.study,pid,recipe=self.config['rescore_recipe'],uid_registry=self.config['uid_registry']))
@@ -355,10 +368,12 @@ class AmazonAutoresearch:
             release_confirmation(self.study,pid,lead,report['hash'])
             # Comparators need not consume confirmation resources for rejected
             # development candidates. Existing matching receipts are reused.
-            run_study(self.study,model_versions=binding['controls'],
+            reused_controls=[v for v in binding['controls'] if v not in generated_sources]
+            run_study(self.study,model_versions=reused_controls,
                       seeds=cfg['confirmation_seeds'],execution_id=self.config.get('execution_id'))
-            for version in binding['controls']:self._rescore(folder,version,cfg['confirmation_seeds'])
+            for version in reused_controls:self._rescore(folder,version,cfg['confirmation_seeds'])
             run_phase(self.study,pid,'confirmation',execution_id=self.config.get('execution_id'))
+            for version in generated_sources:self._rescore(folder,version,cfg['confirmation_seeds'])
             self._rescore(folder,binding['candidate_model_version'],cfg['confirmation_seeds'])
             cfg=load_config(self.study);effects={};control_effects={}
             for seed in cfg['confirmation_seeds']:

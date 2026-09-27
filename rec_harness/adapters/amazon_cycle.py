@@ -62,6 +62,8 @@ def finalize_cycle(root, proposal_id, directory):
                 resources=read_json(folder/'resources.json')
                 if resources['status']!='success':raise ContractError('role has no successful terminal receipt')
                 files=['context.json','request.json','response.json','resources.json','schema.json']
+                if (folder/'accepted.json').exists():
+                    files.extend('model/'+name for name in read_json(folder/'accepted.json').get('model_source_hashes',{}))
                 files.extend(name for name in ['literature-search.json','stdout.jsonl','process.json','launch.json'] if (folder/name).is_file())
                 rejection=read_json(folder/'rejection.json') if (folder/'rejection.json').exists() else None
                 if rejection:files.append('rejection.json')

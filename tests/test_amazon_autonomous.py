@@ -200,7 +200,10 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
     def test_candidate_can_pass_all_registered_confirmation_controls(self):
         self.run_pipeline(True,extra_control=True,control_metric=.55)
 
-    def run_pipeline(self,confirmation,measurement=False,legacy_measurement=False,history=False,interrupt_control=False,extra_control=False,control_metric=.6):
+    def test_generated_control_is_admitted_archived_and_recovers_without_extra_roles(self):
+        self.run_pipeline(True,generated_control=True,control_metric=.55,interrupt_control=True)
+
+    def run_pipeline(self,confirmation,measurement=False,legacy_measurement=False,history=False,interrupt_control=False,extra_control=False,control_metric=.6,generated_control=False):
         import json
         from contextlib import ExitStack
         from rec_harness.autonomous import autoresearch
@@ -230,7 +233,10 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                     'role_call_limit':12,'rescore_recipe':{'fixture':True},'uid_registry':'fixture',
                     'agent_backend':{'template':'unused','runtime_root':'unused'}}
             if extra_control:config['control_model_ids']=['mechanism_control']
-            expected_controls=['legacy_incumbent']+(['mechanism_control'] if extra_control else [])
+            if generated_control:config['generated_control_count']=1
+            expected_reused=['legacy_incumbent']+(['mechanism_control'] if extra_control else [])
+            control_id='auto-round-1-control-1' if generated_control else 'mechanism_control'
+            expected_controls=expected_reused+([control_id] if generated_control else [])
             if measurement:config['measurement_discovery']={'development_budget':10}
             if history:
                 config['history_diagnostic']=True
@@ -256,6 +262,9 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                     if role=='experiment':
                         response['changed_files']=['model.py']
                         (target/'model/model.py').write_text(SOURCE.replace('return self.block(x)','return self.block(x) * 0.9'))
+                        if generated_control:
+                            response['changed_files'].append('control-1.py')
+                            (target/'model/control-1.py').write_text(SOURCE.replace('return self.block(x)','return self.block(x) * 0.7'))
                     if role in ('evaluation','lead'):
                         if history:self_test.assertEqual(context['baseline_history']['report_hash'],'baseline-slices')
                         self_test.assertEqual(context['implementation_evidence']['status'],'verified')
@@ -288,7 +297,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                 if not marker.exists():fits.append(partition);write_json(marker,{'completed':True})
             def controls(root,model_versions,seeds,execution_id=None):
                 self.assertEqual(execution_id,'execution-test')
-                self.assertEqual(model_versions,expected_controls);self.assertEqual(seeds,[17,83])
+                self.assertEqual(model_versions,expected_reused);self.assertEqual(seeds,[17,83])
                 self.assertEqual(calls[-1],'knowledge')
                 self.assertTrue((campaign/'rounds/round-1/private-confirmation-started.json').exists())
                 marker=Path(root)/'confirmation-controls.json'
@@ -300,8 +309,8 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                 write_json(Path(root)/'research-readouts'/(pid+'-graph.json'),g);return g
             report={'hash':'report','protocol_hash':'protocol','summary':{'eligible_for_confirmation':confirmation}}
             def audited_job(root,config,version,dataset,seed):
-                value=.6 if extra_control and seed in [17,83] and version!='legacy_incumbent' else .5
-                if extra_control and seed in [17,83] and version=='mechanism_control':value=control_metric
+                value=.6 if (extra_control or generated_control) and seed in [17,83] and version!='legacy_incumbent' else .5
+                if (extra_control or generated_control) and seed in [17,83] and version==control_id:value=control_metric
                 return ({'metrics':{'HR@10':value},'execution_id':'execution-test'},
                         {'candidates_hash':'same','data_hashes':{}})
             stack.enter_context(patch('rec_harness.adapters.amazon_autonomous.audit_job',side_effect=audited_job))
@@ -328,15 +337,15 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             expected_roles=7 if measurement else 6
             self.assertEqual(fits,['development','confirmation'] if confirmation else ['development']);self.assertEqual(len(calls),expected_roles)
             self.assertEqual(result,again);self.assertEqual(result['state']['round'],1)
-            self.assertEqual(control_fits,[expected_controls] if confirmation else [])
+            self.assertEqual(control_fits,[expected_reused] if confirmation else [])
             self.assertEqual(control_run.call_count,2 if interrupt_control else int(confirmation))
             if history:history_call.assert_called_once()
             self.assertEqual(result['role_calls']['charged_or_reserved'],expected_roles)
             self.assertEqual((campaign/'rounds/round-1/private-confirmation.json').exists(),confirmation)
-            if extra_control:
+            if extra_control or generated_control:
                 private=read_json(campaign/'rounds/round-1/private-confirmation.json')
                 self.assertTrue(all(v>.005 for v in private['effects'].values()))
-                self.assertEqual(private['control_effects'],{'17':{'mechanism_control':.6-control_metric},'83':{'mechanism_control':.6-control_metric}})
+                self.assertEqual(private['control_effects'],{'17':{control_id:.6-control_metric},'83':{control_id:.6-control_metric}})
                 self.assertEqual(private['selected'],control_metric<.6)
             with patch('rec_harness.adapters.amazon_autonomous.JailedCodexAgent',side_effect=AssertionError('audit must not initialize service')):
                 audit=AmazonAutoresearch(campaign,load_agent=False)
@@ -352,6 +361,16 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                     with self.assertRaisesRegex(ContractError,'readout differs from committed cycle'):audit.verify()
                     write_json(folder/'development-readout.json',original_readout)
                     cycle=read_json(folder/'cycle.json')
+                    if generated_control:
+                        self.assertIn('model/control-1.py',cycle['roles']['experiment']['artifacts'])
+                        path=folder/'experiment/model/control-1.py';original=path.read_bytes()
+                        path.write_bytes(original+b'\n# changed after completion\n')
+                        with self.assertRaisesRegex(ContractError,'model source changed'):audit.verify()
+                        with self.assertRaisesRegex(ContractError,'cached model source changed'):
+                            audit._role(folder,'experiment',{})
+                        with self.assertRaisesRegex(ContractError,'experiment archive changed'):
+                            finalize_cycle(study,'auto-round-1',folder)
+                        path.write_bytes(original)
                     for name in ['literature-search.json','stdout.jsonl']:
                         self.assertIn(name,cycle['roles']['hypothesis']['artifacts'])
                         path=folder/'hypothesis'/name;original_bytes=path.read_bytes()

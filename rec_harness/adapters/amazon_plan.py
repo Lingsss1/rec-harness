@@ -55,6 +55,8 @@ def compile_plan(config, cards, versions, remaining):
         raise ContractError('candidate and controls must have distinct source identities')
     if candidate['source']['sha256'] == config['model_versions'][baseline]['sha256']:
         raise ContractError('candidate source is identical to baseline')
+    from .insertion_contract import parse_contract
+    insertion_scope=parse_contract(proposal['insertion_contract'])
     phases = []
     for partition in ('development', 'confirmation'):
         jobs = [{'model_version': name, 'dataset': dataset, 'seed': seed}
@@ -64,6 +66,7 @@ def compile_plan(config, cards, versions, remaining):
                        'release_condition': 'code_admission' if partition == 'development' else 'frozen_selection_after_development'})
     return {'proposal_id': proposal['proposal_id'], 'baseline': baseline, 'protocol_hash': protocol,
             'cards': cards, 'versions': versions, 'phases': phases,
+            **({'insertion_scope':insertion_scope} if insertion_scope is not None else {}),
             'reused_control_versions': reused_controls,
             'control_reuse_scope': 'existing outcomes remain previously exposed evidence; reuse requires matched protocol/execution; historical cost stays charged to study ledger', 'requested_budget_gpu_seconds': proposal['budget'],
             'budget_policy': 'shared study ledger; declaration is not a reservation',

@@ -38,6 +38,8 @@ class AmazonAutoresearch:
         if config.get('review_predecessor'):
             if not review_only:raise ContractError('review predecessor requires review-only entry point')
             config['review_predecessor']=str(Path(config['review_predecessor']).resolve())
+        config.setdefault('structured_insertion_contract',True)
+        if type(config['structured_insertion_contract']) is not bool:raise ContractError('structured_insertion_contract must be boolean')
         study=load_config(config['study']);identifier(config['task_id'])
         if type(config.get('max_rounds')) is not int or config['max_rounds']<1:raise ContractError('positive max_rounds required')
         if type(config.get('role_call_limit')) is not int or config['role_call_limit']<6:raise ContractError('role_call_limit must cover six roles')
@@ -294,6 +296,11 @@ class AmazonAutoresearch:
         if not diagnostics.get('measurement_failure'):
             from .amazon_activation import activation_context
             diagnostics.update(activation_context(self,base,cfg))
+        if self.config.get('structured_insertion_contract'):
+            from .insertion_contract import SCHEMA,method_catalog
+            diagnostics['insertion_contract_format']={'schema':SCHEMA,
+                'allowed_methods':method_catalog(Path(cfg['model_versions'][base]['path']).read_text()),
+                'instructions':'Proposal.insertion_contract MUST be a JSON-encoded object with exactly schema, allowed_methods (nonempty subset of this catalog), rationale. Declare all methods the candidate AND generated controls may change, including initialization. Experiment edits outside these methods or comment-only changes are rejected before CPU admission. Other proposal fields explain the mechanism and falsification; method scope is not causal proof.'}
         return {**diagnostics,'task_id':self.config['task_id'],'model_version':base,'protocol_hash':cfg['protocol_hash'],
             'protocol':cfg['protocol'],'seeds':cfg['development_seeds']+cfg['confirmation_seeds'],
             'development_baseline':rows,'baseline_execution_evidence':execution_evidence,
@@ -338,11 +345,18 @@ class AmazonAutoresearch:
                 if p[key]!=binding[key]:raise ContractError('proposal binding mismatch: '+key+' must equal the literal JSON value '+json.dumps(binding[key]))
             if p['gap_ids']!=[gap['gap_id']] or p['method_ids']!=[value['method']['method_id']]:raise ContractError('unresolved proposal references')
             if not 0<p['budget']<=context['budget']['remaining']:raise ContractError('proposal budget outside frozen envelope')
+            if context.get('insertion_contract_format'):
+                from .insertion_contract import parse_contract
+                parse_contract(p['insertion_contract'],required=True,available_methods=context['insertion_contract_format']['allowed_methods'])
         generated=self._role(folder,'hypothesis',{**context,'gap':gap},source,proposal_check)
         def source_check(value,directory):
             names=['model.py',*[item['file'] for item in context.get('generated_controls',[])]]
             if value['changed_files']!=names:raise ContractError('changed_files must match frozen candidate/control files')
-            for name in names:review_source(source.read_text(),safe_file(directory/'model',name).read_text())
+            from .insertion_contract import parse_contract,verify_scope
+            contract=parse_contract(generated['proposal']['insertion_contract'],required=bool(context.get('insertion_contract_format')))
+            for name in names:
+                review=review_source(source.read_text(),safe_file(directory/'model',name).read_text())
+                verify_scope(contract,review)
         self._role(folder,'experiment',{**context,'gap':gap,**generated},source,source_check)
         candidate=folder/'experiment/model/model.py';cards={'gap':gap,**generated}
         generated_sources={item['model_version']:folder/'experiment/model'/item['file'] for item in context.get('generated_controls',[])}

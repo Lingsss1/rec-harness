@@ -486,3 +486,14 @@ python3 -m rec_harness amazon-restore-archive snapshot.json /path/to/artifacts/o
 恢复前核验全部引用、环境锁及请求/完成收据绑定，兼容旧的平面文件映射。锁内与平面映射冲突、缺失对象、已有输出目录均会拒绝。恢复运行库的只读/可执行权限；冻结环境身份仍按现有 runtime validator 校验。该命令只恢复已归档文件，不重建设备节点，不启动训练，也不把恢复目录自动认定为可执行研究环境。
 
 真实 Electronics 已完成任务的恢复验收还原了 67,967 个文件，其中 67,909 个环境文件的字节和权限逐项一致，checkpoint/排名归档一致，源研究图未变。验收未新增训练或 Codex 调用。
+
+
+新初始化的 Amazon campaign 默认启用 `structured_insertion_contract`。hypothesis 的 `Proposal.insertion_contract` 仍是字符串字段，但内容须为 JSON：
+
+```json
+{"schema":"nextitnet-method-scope-v1","allowed_methods":["NextItNetModel.__init__","NextItNetModel.encode_sequence"],"rationale":"说明为何这些方法承载候选与机制对照的改造"}
+```
+
+上下文提供当前源码的实际方法目录。合同在 hypothesis 阶段检查并冻结，candidate 和所有新生成对照共享这个改动范围；源码 AST 的实际变化必须非空且位于声明方法内。experiment 校验和独立准入预检均执行这一约束；准入在启动任何 CPU 探针前检查全部新模型，不能只检查候选而漏掉对照。每个版本的范围核验结果进入其评审证据。
+
+已有 campaign 不回填配置或改写合同。显式配置 `structured_insertion_contract: false` 保留自由文本兼容入口，但如果主动提交该 JSON 合同，仍须遵守范围约束。方法范围正确不证明自然语言机制成立；原因果、评分、批次独立性和梯度检查仍执行，对照实验仍承担效果和归因判断。

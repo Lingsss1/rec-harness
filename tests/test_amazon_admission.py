@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -44,11 +45,14 @@ class MultiModelAdmissionTests(unittest.TestCase):
         return {'status':'success','report_ref':artifacts.put(source['path'])}
 
     def test_all_new_sources_checked_once_and_committed_atomically(self):
+        self.cards['proposal']['insertion_contract']=json.dumps({'schema':'nextitnet-method-scope-v1','allowed_methods':['NextItNetModel.forward'],'rationale':'scale forward only'})
         register_plan(self.root,self.cards,self.versions)
         with patch('rec_harness.adapters.amazon_admission.run_gate',side_effect=self.gate) as gate, \
              patch('rec_harness.adapters.amazon_admission.run_training_smoke',side_effect=self.smoke) as smoke:
             first=admit_plan(self.root,'proposal',recipe={},uid_registry='unused')
             self.assertEqual(set(first['versions']),{'candidate','control'})
+            for item in first['versions'].values():
+                self.assertEqual(item['source_contract']['insertion_scope']['changed_methods'],['NextItNetModel.forward'])
             self.assertEqual([call.args[2] for call in gate.call_args_list],['candidate','control'])
             self.assertEqual(smoke.call_count,2)
             self.assertEqual(admit_plan(self.root,'proposal',recipe={},uid_registry='unused'),first)
@@ -58,6 +62,16 @@ class MultiModelAdmissionTests(unittest.TestCase):
         store=Store(self.root/'memory',read_only=True)
         try:self.assertEqual(sum(e['kind']=='amazon_model_candidate_admitted' for e in store.events()),1)
         finally:store.close()
+
+    def test_generated_control_outside_insertion_scope_rejected_before_cpu(self):
+        self.cards['proposal']['insertion_contract']=json.dumps({'schema':'nextitnet-method-scope-v1',
+            'allowed_methods':['NextItNetModel.forward'],'rationale':'readout only'})
+        self.versions['controls'][1]=self.source('control',SOURCE.replace('return self.linear(x)','return self.linear(x)*0.8'))
+        register_plan(self.root,self.cards,self.versions)
+        with patch('rec_harness.adapters.amazon_admission.run_gate',side_effect=AssertionError('CPU must not start')):
+            with self.assertRaisesRegex(ContractError,'outside frozen insertion scope'):
+                admit_plan(self.root,'proposal',recipe={},uid_registry='unused')
+        self.assertEqual(set(load_config(self.root)['model_versions']),{'base'})
 
     def test_failing_control_never_partially_registers_candidate(self):
         register_plan(self.root,self.cards,self.versions)

@@ -73,5 +73,7 @@ def admission_evidence(study,proposal_id,protocol_hash,candidate_id,candidate_pa
             'scope':'Host-verified source admission and synthetic CPU checks only. No proof of mechanism, recommendation benefit, training protocol overrides or final-test performance.'}
     if 'structural_changes' in source_review:
         result['structural_changes']=source_review['structural_changes']
+    if 'insertion_scope' in source_review:
+        result['insertion_scope']=source_review['insertion_scope']
     result['hash']=digest(result)
     return result

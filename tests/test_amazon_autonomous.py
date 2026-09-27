@@ -259,6 +259,8 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                         response['method']['method_id']='method'
                         response['proposal'].update({k:v for k,v in context['bindings'].items() if k!='candidate_model_version'})
                         response['proposal'].update(gap_ids=['gap'],method_ids=['method'],budget=9000)
+                        if context.get('insertion_contract_format'):
+                            response['proposal']['insertion_contract']=json.dumps({'schema':'nextitnet-method-scope-v1','allowed_methods':['NextItNetModel.forward'],'rationale':'fixture scale at model forward'})
                     if role=='experiment':
                         response['changed_files']=['model.py']
                         (target/'model/model.py').write_text(SOURCE.replace('return self.block(x)','return self.block(x) * 0.9'))

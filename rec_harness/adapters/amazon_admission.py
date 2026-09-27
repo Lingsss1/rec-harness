@@ -53,6 +53,9 @@ def admit_plan(root,proposal_id,*,recipe,uid_registry):
             for item in pending:
                 source=artifacts.verify(item['source'])
                 review=review_source(Path(config['model_versions'][base]['path']).read_text(),source.read_text())
+                from .insertion_contract import verify_scope
+                scope=verify_scope(plan.get('insertion_scope'),review)
+                if scope is not None:review={**review,'insertion_scope':scope}
                 reviewed.append((item,source,review))
             directory=root/'model-admissions'/proposal_id/uuid.uuid4().hex;directory.mkdir(parents=True)
             admitted={}

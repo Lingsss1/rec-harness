@@ -1,5 +1,7 @@
 # 自动生成机制对照的端到端验收
 
+最新状态：首次运行已停止于基线独立复评分，`controller-result.json` 为 failed，监视器为 not_audited。基线训练成功，成本 65.35039082169533 GPU 槽位秒；32 个合成用户中有 1 个完整排名不一致，正例同分为零，已报告 HR/NDCG 指标相同。原冻结检查要求所有排名一致，因此拒绝进入角色调用。尚无 Codex 调用、生成候选或对照的真实完成证据；失败和成本保留，不能称为端到端验收通过。
+
 按用户最新要求，优先完整实现 autoresearch，最终测试与词表修正暂缓。未提交的词表改动已备份至 `rec-harness-runs/deferred-vocabulary-work-v1/`，未加入当前执行代码；真实最终测试的失败封存保留。
 
 验收目录为 `/home/liuzhishan/lhr/rec-harness-runs/generated-control-e2e-v1/`。使用固定 RNG 生成的 32 个用户、最多 512 个物品的合成训练/验证数据，一个类别、开发 seed 42、条件确认 seeds 17/83。冻结既有 NextItNet incumbent 源码，训练协议为 2 epochs、每 epoch 2 batches；这是工程集成条件，不是推荐效果评价。

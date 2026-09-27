@@ -131,6 +131,8 @@ def verify_campaign(controller):
             cycle=records.get(result['cycle_identity'])
             if not cycle or cycle['readout_hash']!=result['development_hash']:raise ContractError('round lacks its committed development cycle')
             folder=root/'rounds'/('round-'+str(round_number))
+            if read_json(folder/'development-readout.json').get('hash')!=result['development_hash']:
+                raise ContractError('local development readout differs from committed cycle')
             if config.get('review_only') and result.get('selection')!=cycle['selection']:
                 raise ContractError('recovered review selection differs from committed cycle')
             if read_json(folder/'cycle.json')!=cycle:raise ContractError('cycle projection differs from committed study event')

@@ -270,6 +270,10 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                     self.assertEqual(verified['measurement_roles_without_cycle_binding'],int(legacy_measurement))
                     from rec_harness.adapters.amazon_cycle import finalize_cycle
                     folder=campaign/'rounds/round-1'
+                    original_readout=read_json(folder/'development-readout.json')
+                    write_json(folder/'development-readout.json',{**original_readout,'hash':'different-readout'})
+                    with self.assertRaisesRegex(ContractError,'readout differs from committed cycle'):audit.verify()
+                    write_json(folder/'development-readout.json',original_readout)
                     cycle=read_json(folder/'cycle.json')
                     for name in ['literature-search.json','stdout.jsonl']:
                         self.assertIn(name,cycle['roles']['hypothesis']['artifacts'])

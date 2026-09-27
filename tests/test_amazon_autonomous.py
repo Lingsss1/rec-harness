@@ -274,6 +274,14 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                         self_test.assertEqual(execution[0]['model_version'],context['model_version'])
                         self_test.assertEqual(execution[0]['source_sha256'],context['implementation_evidence']['source_sha256'])
                         self_test.assertEqual(execution[0]['status'],'unavailable')  # Fixture has no protocol manifest.
+                        if generated_control:
+                            controls=context['generated_control_evidence']
+                            self_test.assertEqual(len(controls),1)
+                            control=controls[0]
+                            self_test.assertEqual(control['model_version'],control_id)
+                            self_test.assertEqual(control['implementation_evidence']['status'],'verified')
+                            self_test.assertEqual(control['execution_evidence'][0]['source_sha256'],control['implementation_evidence']['source_sha256'])
+                            self_test.assertNotEqual(control['implementation_evidence']['source_sha256'],context['implementation_evidence']['source_sha256'])
                         if history:self_test.assertEqual(context['development_history']['report_hash'],'development-slices')
                         self_test.assertEqual(context['model_version'],context['bindings']['candidate_model_version'])
                         if role=='evaluation':self_test.assertIsNone(context['visible_model_source'])

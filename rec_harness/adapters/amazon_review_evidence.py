@@ -63,7 +63,7 @@ def admission_evidence(study,proposal_id,protocol_hash,candidate_id,candidate_pa
     result={'status':'verified','proposal_id':proposal_id,'protocol_hash':protocol_hash,
             'model_version':candidate_id,'source_sha256':item['source']['sha256'],
             'admission_hash':digest(record),'study_event_head':integrity['head'],
-            'source_contract':record['source_contract']['contract'],
+            'source_contract':item.get('source_contract',record['source_contract'])['contract'],
             'numerical_contract':{'status':gate['status'],'report_sha256':item['probe_ref']['sha256']},
             'training_smoke':({'status':smoke['status'],'report_sha256':smoke['report_ref']['sha256']} if smoke else {'status':'unavailable'}),
             'scope':'Host-verified source admission and synthetic CPU checks only. No proof of mechanism, recommendation benefit, training protocol overrides or final-test performance.'}

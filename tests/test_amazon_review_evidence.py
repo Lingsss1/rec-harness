@@ -53,6 +53,18 @@ class ReviewEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ContractError,'differs from admitted'):
                 admission_evidence(root,'p','protocol','candidate',source)
 
+    def test_control_uses_its_own_source_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);source,probe=self.fixture(root)
+            store=Store(root/'memory')
+            try:
+                record=store.events()[0]['payload']
+                control={**record['versions']['candidate'],'source_contract':{'contract':'control-specific'}}
+                store.event('amazon_model_candidate_admitted',{**record,'proposal_id':'control-plan','versions':{'control':control}})
+            finally:store.close()
+            value=admission_evidence(root,'control-plan','protocol','control',source)
+            self.assertEqual(value['source_contract'],'control-specific')
+
     def test_rejects_protocol_identity_and_corrupted_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);source,probe=self.fixture(root)

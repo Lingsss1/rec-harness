@@ -416,6 +416,18 @@ class AmazonAutoresearch:
                 execution_evidence.append({**protocol_summary(cfg,result,manifest),
                     'model_version':binding['candidate_model_version'],
                     'source_sha256':cfg['model_versions'][binding['candidate_model_version']]['sha256']})
+        generated_evidence=[]
+        for control in context.get('generated_controls',[]):
+            version=control['model_version'];source=cfg['model_versions'][version]
+            admitted=admission_evidence(self.study,pid,cfg['protocol_hash'],version,source['path'])
+            control_execution=[]
+            for dataset in cfg['datasets']:
+                for seed in cfg['development_seeds']:
+                    result,manifest=audit_job(self.study,cfg,version,dataset,seed)
+                    control_execution.append({**protocol_summary(cfg,result,manifest),
+                        'model_version':version,'source_sha256':source['sha256']})
+            generated_evidence.append({'model_version':version,'implementation_evidence':admitted,
+                                       'execution_evidence':control_execution})
         review={**context,'model_version':binding['candidate_model_version'],
                 'visible_model_source':None,
                 'implementation_evidence':implementation,
@@ -425,6 +437,9 @@ class AmazonAutoresearch:
                                 'implementation_evidence reports host-verified admission checks; its report hashes are references, not files available in your workspace. Distinguish these checks from missing scientific evidence. Evaluation has no source file; lead receives candidate source separately.',
                                 'candidate_execution_evidence summarizes audited completed development training under the frozen worker and protocol. Use verified fields to assess actual execution settings, rather than local model helper defaults. It does not prove a causal mechanism or expose confirmation results.',
                                 'Keep only if eligible_for_confirmation is true. No confirmation results are supplied; conclusion unknown/provisional.']}
+        if generated_evidence:
+            review['generated_control_evidence']=generated_evidence
+            review['instructions'].append('generated_control_evidence binds each new control to its own source admission and completed development execution. These checks do not establish that the control isolates the proposed mechanism; assess that separately from the paired outcomes.')
         if history is not None:review['development_history']=history
         def decision_check(value,_):
             validate_card('decision',value)

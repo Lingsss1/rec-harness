@@ -358,6 +358,10 @@ class AmazonAutoresearch:
         cfg=load_config(self.study);pid=binding['proposal_id']
         graph_path=self.study/'research-readouts'/(pid+'-graph.json')
         graph=read_json(graph_path) if graph_path.exists() else ingest_development(self.study,pid)
+        if 'baseline_history' in context:
+            from .amazon_history_graph import attach_history
+            graph=attach_history(self,folder,graph,context['baseline_history'])
+            write_json(graph_path,graph)
         from .amazon_review_evidence import admission_evidence
         implementation=admission_evidence(self.study,pid,cfg['protocol_hash'],binding['candidate_model_version'],candidate)
         review={**context,'model_version':binding['candidate_model_version'],

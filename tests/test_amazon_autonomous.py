@@ -201,6 +201,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                 history_call=stack.enter_context(patch('rec_harness.adapters.amazon_history_context.development_history',return_value={'report_hash':'development-slices','rows':[]}))
                 stack.enter_context(patch('rec_harness.adapters.amazon_baseline_history.baseline_history',return_value={'report_hash':'baseline-slices','rows':[]}))
                 stack.enter_context(patch('rec_harness.adapters.amazon_baseline_history.verify_visible_history'))
+                stack.enter_context(patch('rec_harness.adapters.amazon_history_graph.attach_history',side_effect=lambda c,f,g,p:g))
             write_json(root/'config.json',config);campaign=root/'campaign';calls=[];fits=[];control_fits=[]
             self_test=self
             class Agent:

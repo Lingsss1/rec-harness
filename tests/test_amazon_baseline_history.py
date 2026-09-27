@@ -7,6 +7,7 @@ from unittest.mock import patch
 from rec_harness.core import Artifacts,ContractError,file_hash,write_json
 from rec_harness.store import Store
 from rec_harness.adapters.amazon_baseline_history import baseline_history,verify_visible_history
+from rec_harness.adapters.amazon_history_graph import attach_history
 
 
 class BaselineHistoryTests(unittest.TestCase):
@@ -39,6 +40,14 @@ class BaselineHistoryTests(unittest.TestCase):
                 with self.assertRaisesRegex(ContractError,'projection changed'):
                     verify_visible_history(controller,root/'round-1',value)
                 projected.write_bytes(original)
+                graph={'task_id':'research','nodes':[],'edges':[],'graph_version':0}
+                first=attach_history(controller,root/'round-1',graph,value)
+                self.assertEqual({n['type'] for n in first['nodes']},{'ToolVersion','Observation'})
+                self.assertEqual(first['edges'][0]['relation'],'MEASURED_BY')
+                self.assertEqual(attach_history(controller,root/'round-1',first,value),first)
+                observation=next(n for n in first['nodes'] if n['type']=='Observation')
+                self.assertFalse(observation['attrs']['independent_unit'])
+                self.assertNotIn('987654',str(first));self.assertNotIn(str(root),str(first))
                 with patch('rec_harness.adapters.history_diagnostic.summarize',side_effect=AssertionError('must reuse aggregate')):
                     self.assertEqual(baseline_history(controller,root/'round-1','base'),value)
                 self.assertEqual(store.verify(),before)

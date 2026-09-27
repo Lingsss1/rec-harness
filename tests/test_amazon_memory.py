@@ -1,11 +1,39 @@
 import tempfile
 import unittest
 import copy
+from unittest.mock import patch
 from pathlib import Path
 from rec_harness.adapters.amazon_memory import export_development_memory,validate_memory,execution_failure,validate_export_bindings,compact_development_context
 from rec_harness.core import ContractError,digest,write_json
 
 class DevelopmentMemoryTests(unittest.TestCase):
+    def test_export_does_not_recover_source_projection_or_include_confirmation(self):
+        from rec_harness.store import Store
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);campaign=root/'campaign';study={'development_seeds':[42]}
+            write_json(root/'study/study.json',study)
+            write_json(campaign/'amazon-auto.json',{'study':str(root/'study'),
+                'study_config_hash':digest(study),'protocol_hash':'p','task_id':'task'})
+            folder=campaign/'rounds/round-1'
+            report={'schema':'amazon-development-selection-v1','protocol_hash':'p','rows':[{'seed':42}]}
+            report['hash']=digest(report);write_json(folder/'development-readout.json',report)
+            write_json(folder/'private-confirmation.json',{'secret':'PRIVATE_CONFIRMATION'})
+            store=Store(campaign/'memory')
+            store.event('auto_round_completed',{'state':{'round':1},'result':{
+                'cycle_identity':'cycle','development_hash':report['hash'],'private_result':'PRIVATE_CONFIRMATION'}})
+            before=store.verify();store.close()
+            projection=campaign/'memory/events.jsonl'
+            projection.write_text('interrupted projection\n')
+            with patch.object(Store,'export_events',side_effect=AssertionError('export mutated source')):
+                first=export_development_memory(campaign,root/'first.json')
+                second=export_development_memory(campaign,root/'second.json')
+            self.assertEqual(first,second)
+            self.assertNotIn('PRIVATE_CONFIRMATION',str(first))
+            self.assertEqual(projection.read_text(),'interrupted projection\n')
+            store=Store(campaign/'memory',read_only=True)
+            try:self.assertEqual(store.verify(),before)
+            finally:store.close()
+
     def test_context_round_trip_preserves_evidence_without_mutating_packs(self):
         report={'schema':'amazon-development-selection-v1','protocol_hash':'p','rows':[{'seed':42,'metric':.53}]}
         report['hash']=digest(report)

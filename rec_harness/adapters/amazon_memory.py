@@ -110,7 +110,7 @@ def export_development_memory(campaign,output):
         if not (campaign/'review-result.json').exists():raise ContractError('recovered review must finish before memory export')
         from .amazon_autonomous import AmazonAutoresearch
         from .amazon_auto_audit import verify_campaign
-        controller=AmazonAutoresearch(campaign,load_agent=False)
+        controller=AmazonAutoresearch(campaign,load_agent=False,read_only=True)
         try:
             audit=verify_campaign(controller)
             if audit['verified_cycles']!=1 or audit['roles_without_completion_event']:
@@ -119,8 +119,10 @@ def export_development_memory(campaign,output):
     events=[]
     if (campaign/'memory/memory.sqlite').exists():
         from rec_harness.store import Store
-        store=Store(campaign/'memory')
-        try:store.verify();events=store.events()
+        store=Store(campaign/'memory',read_only=True)
+        try:
+            store.db.execute('BEGIN')
+            store.verify();events=store.events()
         finally:store.close()
     for folder in sorted((campaign/'rounds').glob('round-*')):
         validate_export_bindings(folder,events)

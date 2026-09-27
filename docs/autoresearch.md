@@ -52,6 +52,8 @@ python3 -m rec_harness amazon-call-report CAMPAIGN
 
 报告使用只读 SQLite 快照核验事件与费用投影，可以在控制器运行期间读取，不恢复或重发任务。继承费用单列；扣费但未记录提交的中断列为 unattributed，不伪装成模型调用。角色提交发生在传输之前，可能在 CLI 启动前失败，所以提交次数不等于 CLI 启动数或内部 API 请求数。内部 API 请求数明确为 null。复用角色校验原完成事件，但不增加本轮调用；完整训练与继承来源审计仍使用 verify。若仅训练对照、尚未初始化角色控制器，报告会明确拒绝而不是返回零费用。该入口已包含在通过验收的 v8 安装包中，早先 v7 包不包含它。
 
+开发记忆导出也以只读方式打开源控制器账本，并在同一 SQLite 快照中校验和读取事件；不会顺便修复中断的 events.jsonl 投影。确认已执行不妨碍导出已有开发研究，但私有确认文件和终态中的确认结果不进入记忆。真实 v2 周期的双次导出与原记忆逐字段一致，源事件头和投影哈希不变，证据为 `read-only-memory-acceptance-v1/acceptance.json`；该验收没有新增角色、训练或推理。
+
 Amazon 也支持下述 `diagnostic_registry` 与 `measurement_requirements`。诊断只接收已审计开发 seed 的品类聚合指标，包含 dataset 标签；不传入原始交互、checkpoint 或确认结果。启用工具时须指定独立 `diagnostic_budget`，费用记录在 diagnostic-budget，不能混算为 Codex 调用次数。必需测量缺失会生成 MeasurementGap，以 measurement_required 停止，保留 incumbent；此时不会生成模型提案或启动训练。工具外循环的 measurement_source 可直接引用该 Amazon campaign。新研究回合可冻结晋升后的工具并复测；项目总调度可自动创建 Amazon 后继回合，继续使用同一冻结 study 和共享 GPU 账本。
 
 `verify` 和 `recover` 已识别 Amazon campaign，无需初始化 Codex 服务。verify 核对控制器/绑定 study 事件链、角色内容与绑定、已提交开发周期及 CAS，并单列旧角色记录缺少完整事件绑定的情况；它不替代逐 GPU 作业或私有确认结果审计。恢复在控制器锁下检查角色和诊断工作进程，保留未知实际成本的预留费用。

@@ -190,23 +190,54 @@ class Store:
             if evidence["type"] == "Experiment":
                 e = evidence["attrs"]
                 if e.get("valid") is True and e.get("protocol_hash") == attrs["protocol_hash"] and e.get("task_id") == attrs["task_id"]:
-                    experiments.append(e)
+                    experiments.append((ref,e))
         if attrs["status"] in {"supported", "confirmed_in_scope"}:
             # Explicit development evidence remains available for interpretation,
             # but cannot be spent again as independent confirmation. Older local
             # protocols without partitions retain their existing run contract.
-            qualified = [e for e in experiments
+            qualified = [(ref,e) for ref,e in experiments
                          if e.get("effect_gate_passed") is True
                          and e.get("origin") == "local_evidence"
+                         and e.get("independent_unit") is not False
+                         and isinstance(e.get("independent_run_id"),str) and e["independent_run_id"]
                          and e.get("partition") in {None, "confirmation"}]
-            runs = {e.get("independent_run_id") for e in qualified}
-            runs.discard(None)
-            if len(runs) < 2:
+            cached={}
+            def source_units(ref,trail):
+                if ref in trail:raise ContractError("claim source experiment lineage contains a cycle")
+                if ref in cached:return cached[ref]
+                record=nodes.get(ref)
+                if record is None or record["type"]!="Experiment":raise ContractError("claim source experiment missing")
+                evidence=record["attrs"]
+                if evidence.get("valid") is not True or evidence.get("origin")!="local_evidence" or evidence.get("protocol_hash")!=attrs["protocol_hash"]:
+                    raise ContractError("claim source experiment is not valid comparable local evidence")
+                if evidence.get("partition") not in {None,"confirmation"} or evidence.get("independent_unit") is False:
+                    raise ContractError("claim source experiment is not independent confirmation evidence")
+                sources=evidence.get("source_experiment_ids")
+                # Replay availability dependencies can name one attempt containing
+                # multiple independent seeds; do not treat them as training lineage.
+                if sources is not None:
+                    if not isinstance(sources,list) or not sources or any(not isinstance(s,str) for s in sources):
+                        raise ContractError("claim source experiment lineage incomplete")
+                    units=set()
+                    for source in sources:units.update(source_units(source,trail|{ref}))
+                else:
+                    if str(evidence.get("kind","")).startswith("derived_"):
+                        raise ContractError("derived claim evidence requires source experiment lineage")
+                    identity=evidence.get("independent_run_id")
+                    if not isinstance(identity,str) or not identity or evidence.get("independent_unit") is False:
+                        raise ContractError("claim source has no independent training identity")
+                    units={identity}
+                cached[ref]=units;return units
+            units={ref:source_units(ref,set()) for ref,_ in qualified}
+            pairs=[(left,right) for i,left in enumerate(qualified) for right in qualified[i+1:]
+                   if left[1]["independent_run_id"]!=right[1]["independent_run_id"]
+                   and units[left[0]].isdisjoint(units[right[0]])]
+            if not pairs:
                 raise ContractError("claim requires two independent comparable effect-qualified runs")
             if attrs["status"] == "confirmed_in_scope" and not any(
-                    e.get("mechanism_control") is True and e.get("independent_run_id") is not None
-                    for e in qualified):
-                raise ContractError("mechanism control required")
+                    left[1].get("mechanism_control") is True or right[1].get("mechanism_control") is True
+                    for left,right in pairs):
+                raise ContractError("mechanism control required in an independent evidence pair")
 
     def _project(self, body):
         self.db.execute("DELETE FROM nodes")

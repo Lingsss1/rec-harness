@@ -68,6 +68,59 @@ class GraphTests(Temporary):
         with self.assertRaises(ContractError):
             self.patch([claim])
 
+    def test_reanalysis_ids_cannot_duplicate_source_training_evidence(self):
+        def run(key, **attrs):
+            return node(key,'Experiment',{'valid':True,'effect_gate_passed':True,
+                'independent_run_id':key,'partition':'confirmation',**attrs},'t','p')
+        self.patch([run('raw-a',evidence_dependency_ids=['same-replay-attempt']),
+                    run('raw-b',evidence_dependency_ids=['same-replay-attempt']),
+                    run('analysis-a',kind='derived_paired_comparison',source_experiment_ids=['raw-a']),
+                    run('analysis-again',kind='derived_paired_comparison',source_experiment_ids=['analysis-a'])])
+        claim=node('claim','Claim',{'status':'supported','scope':'t','evidence_refs':['analysis-a','analysis-again']},'t','p')
+        with self.assertRaisesRegex(ContractError,'two independent'):self.patch([claim])
+        claim['attrs']['evidence_refs']=['analysis-a','raw-b']
+        self.patch([claim])
+        # Shared replay availability is not shared training: the source run IDs differ.
+        direct=node('direct','Claim',{'status':'supported','scope':'t','evidence_refs':['raw-a','raw-b']},'t','p')
+        self.patch([direct])
+
+    def test_overlapping_control_cannot_supply_independent_confirmation(self):
+        def run(key, **attrs):
+            return node(key,'Experiment',{'valid':True,'effect_gate_passed':True,
+                'independent_run_id':key,'partition':'confirmation',**attrs},'t','p')
+        self.patch([run('a'),run('b'),run('combined-control',kind='derived_paired_comparison',
+            source_experiment_ids=['a','b'],mechanism_control=True),run('slice',independent_unit=False)])
+        claim=node('claim','Claim',{'status':'supported','scope':'t','evidence_refs':['a','b','combined-control']},'t','p')
+        self.patch([claim])
+        claim['attrs']['status']='confirmed_in_scope'
+        with self.assertRaisesRegex(ContractError,'mechanism control'):self.patch([claim])
+        claim['attrs'].update(status='supported',evidence_refs=['a','slice'])
+        with self.assertRaisesRegex(ContractError,'two independent'):self.patch([claim])
+        self.patch([run('independent-control',mechanism_control=True)])
+        claim['attrs'].update(status='confirmed_in_scope',evidence_refs=['a','independent-control'])
+        self.patch([claim])
+
+    def test_missing_or_cyclic_source_lineage_cannot_support_claim(self):
+        def run(key, **attrs):
+            return node(key,'Experiment',{'valid':True,'effect_gate_passed':True,
+                'independent_run_id':key,**attrs},'t','p')
+        self.patch([run('raw'),run('missing',kind='derived_paired_comparison',source_experiment_ids=['absent']),
+                    run('cycle-a',source_experiment_ids=['cycle-b']),run('cycle-b',source_experiment_ids=['cycle-a'])])
+        for ref,reason in [('missing','missing'),('cycle-a','cycle')]:
+            claim=node('claim','Claim',{'status':'supported','scope':'t','evidence_refs':['raw',ref]},'t','p')
+            with self.assertRaisesRegex(ContractError,reason):self.patch([claim])
+
+    def test_reanalysis_cannot_relabel_development_or_nonindependent_sources(self):
+        def run(key, **attrs):
+            return node(key,'Experiment',{'valid':True,'effect_gate_passed':True,
+                'independent_run_id':key,'partition':'confirmation',**attrs},'t','p')
+        self.patch([run('raw'),run('dev',partition='development'),run('slice',independent_unit=False),
+                    run('renamed-dev',source_experiment_ids=['dev']),
+                    run('renamed-slice',source_experiment_ids=['slice'])])
+        for ref in ('renamed-dev','renamed-slice'):
+            claim=node('claim','Claim',{'status':'supported','scope':'t','evidence_refs':['raw',ref]},'t','p')
+            with self.assertRaisesRegex(ContractError,'independent confirmation'):self.patch([claim])
+
     def test_snapshot_rollback_rebuild_and_prefix(self):
         self.patch([node("old", "GapHypothesis", {"evidence_dependency_ids": ["a"]}, "t", "p")])
         self.patch([node("future", "GapHypothesis", {"evidence_dependency_ids": ["b"]}, "t", "p")])

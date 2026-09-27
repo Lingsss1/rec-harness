@@ -1,7 +1,10 @@
 import unittest
+import tempfile
 
 from rec_harness.adapters.amazon_comparison import contrast_facts
 from rec_harness.core import ContractError
+from rec_harness.runtime import node
+from rec_harness.store import Store
 
 
 class ComparisonFactsTests(unittest.TestCase):
@@ -44,6 +47,34 @@ class ComparisonFactsTests(unittest.TestCase):
         report['partitions']['development']['complete'] = False
         with self.assertRaisesRegex(ContractError, 'incomplete'):
             contrast_facts(config, report, results)
+
+    def test_source_bound_seed_aggregates_support_claim_without_counting_reanalysis(self):
+        config, report, results = self.fixture()
+        facts = contrast_facts(config, report, results)
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(directory)
+            self.addCleanup(store.close)
+            records = []
+            for (version, dataset, seed), result in results.items():
+                records.append(node(result['job_id'], 'Experiment', {
+                    'valid': True, 'independent_run_id': result['job_id'],
+                    'partition': 'development' if seed == 42 else 'confirmation',
+                    'effect_gate_passed': False}, 'amazon-' + dataset, 'p'))
+            for fact in facts:
+                records.append(node(fact['comparison_id'], 'Experiment', {
+                    **fact, 'kind': 'derived_paired_comparison', 'valid': True}, 'paired', 'p'))
+            store.patch({'base_version': store.version, 'nodes': records, 'edges': []})
+            confirmed = [fact for fact in facts if fact['partition'] == 'confirmation']
+            claim = node('claim', 'Claim', {'status': 'supported', 'scope': 'paired',
+                'evidence_refs': [fact['comparison_id'] for fact in confirmed]}, 'paired', 'p')
+            store.patch({'base_version': store.version, 'nodes': [claim], 'edges': []})
+            repeated = node('repeated', 'Experiment', {**confirmed[0],
+                'kind': 'derived_paired_comparison', 'valid': True,
+                'independent_run_id': 'renamed-seed'}, 'paired', 'p')
+            store.patch({'base_version': store.version, 'nodes': [repeated], 'edges': []})
+            claim['attrs']['evidence_refs'] = [confirmed[0]['comparison_id'], 'repeated']
+            with self.assertRaisesRegex(ContractError, 'two independent'):
+                store.patch({'base_version': store.version, 'nodes': [claim], 'edges': []})
 
 
 if __name__ == '__main__':

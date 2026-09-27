@@ -300,6 +300,31 @@ class AmazonAutoresearch:
         if self.config.get('history_diagnostic'):
             from .amazon_history_context import development_history
             history=development_history(self,folder,binding)
+        lead,cycle=self._review_roles(folder,context,binding,cards,versions,candidate,report,history)
+        selected=False;confirmation=None
+        if report['summary']['eligible_for_confirmation'] and lead['selection']=='keep':
+            write_json(folder/'private-confirmation-started.json',{'scope':'host-only phase boundary; excludes later failures from agent context'})
+            release_confirmation(self.study,pid,lead,report['hash'])
+            run_phase(self.study,pid,'confirmation',execution_id=self.config.get('execution_id'))
+            self._rescore(folder,binding['candidate_model_version'],cfg['confirmation_seeds'])
+            cfg=load_config(self.study);effects={}
+            for seed in cfg['confirmation_seeds']:
+                deltas=[]
+                for dataset in cfg['datasets']:
+                    candidate_result,cm=audit_job(self.study,cfg,binding['candidate_model_version'],dataset,seed)
+                    baseline_result,bm=audit_job(self.study,cfg,binding['base_model_id'],dataset,seed)
+                    if (cm['candidates_hash'],cm['data_hashes'],candidate_result.get('execution_id','direct-reviewed-v1'))!=(bm['candidates_hash'],bm['data_hashes'],baseline_result.get('execution_id','direct-reviewed-v1')):
+                        raise ContractError('confirmation pairing differs')
+                    deltas.append(candidate_result['metrics'][cfg['protocol']['metric']]-baseline_result['metrics'][cfg['protocol']['metric']])
+                effects[str(seed)]=sum(deltas)/len(deltas)
+            selected=all(effect>cfg['protocol']['minimum_effect'] for effect in effects.values())
+            confirmation={'effects':effects,'selected':selected,'scope':'host-only confirmation; not sent to Codex roles or final test'}
+            write_json(folder/'private-confirmation.json',confirmation)
+        return {'cycle_identity':cycle['identity'],'candidate':binding['candidate_model_version'],
+                'development_hash':report['hash'],'selected':selected,'confirmation_executed':confirmation is not None}
+
+    def _review_roles(self,folder,context,binding,cards,versions,candidate,report,history=None):
+        cfg=load_config(self.study);pid=binding['proposal_id']
         graph_path=self.study/'research-readouts'/(pid+'-graph.json')
         graph=read_json(graph_path) if graph_path.exists() else ingest_development(self.study,pid)
         review={**context,'model_version':binding['candidate_model_version'],
@@ -325,27 +350,7 @@ class AmazonAutoresearch:
                             'Evidence refs must be supplied graph node IDs, never file paths. Retain all negative slices; empty patch is valid.']}
         self._role(folder,'knowledge',knowledge_context,validator=lambda v,d:validate_knowledge_patch(json.loads(v['patch_json']),graph))
         cycle=finalize_cycle(self.study,pid,folder)
-        selected=False;confirmation=None
-        if report['summary']['eligible_for_confirmation'] and lead['selection']=='keep':
-            write_json(folder/'private-confirmation-started.json',{'scope':'host-only phase boundary; excludes later failures from agent context'})
-            release_confirmation(self.study,pid,lead,report['hash'])
-            run_phase(self.study,pid,'confirmation',execution_id=self.config.get('execution_id'))
-            self._rescore(folder,binding['candidate_model_version'],cfg['confirmation_seeds'])
-            cfg=load_config(self.study);effects={}
-            for seed in cfg['confirmation_seeds']:
-                deltas=[]
-                for dataset in cfg['datasets']:
-                    candidate_result,cm=audit_job(self.study,cfg,binding['candidate_model_version'],dataset,seed)
-                    baseline_result,bm=audit_job(self.study,cfg,binding['base_model_id'],dataset,seed)
-                    if (cm['candidates_hash'],cm['data_hashes'],candidate_result.get('execution_id','direct-reviewed-v1'))!=(bm['candidates_hash'],bm['data_hashes'],baseline_result.get('execution_id','direct-reviewed-v1')):
-                        raise ContractError('confirmation pairing differs')
-                    deltas.append(candidate_result['metrics'][cfg['protocol']['metric']]-baseline_result['metrics'][cfg['protocol']['metric']])
-                effects[str(seed)]=sum(deltas)/len(deltas)
-            selected=all(effect>cfg['protocol']['minimum_effect'] for effect in effects.values())
-            confirmation={'effects':effects,'selected':selected,'scope':'host-only confirmation; not sent to Codex roles or final test'}
-            write_json(folder/'private-confirmation.json',confirmation)
-        return {'cycle_identity':cycle['identity'],'candidate':binding['candidate_model_version'],
-                'development_hash':report['hash'],'selected':selected,'confirmation_executed':confirmation is not None}
+        return lead,cycle
 
     def run(self):
         with self.lock():

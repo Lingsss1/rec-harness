@@ -320,6 +320,16 @@ python -m rec_harness amazon-run-development STUDY_ROOT PROPOSAL_ID OUTPUT_DIR \
 
 自主研究的独立评分也使用冻结评分计划恢复：存在 rescore-plan.json 时调用评分恢复器，核验请求、CAS 收据和本地结果；不再把中断目录移走后另起推理。旧格式的已完成评分保留其原检查合同，未完成且没有冻结计划的旧目录需要原版本恢复，不自动重建为新计划。
 
+执行恢复完成后，可继续原方案的评审和知识写入：
+
+```bash
+python -m rec_harness amazon-review-development REVIEW_ROOT PROPOSAL_ID ORIGINAL_ROUND RESCORES \
+  --config REVIEW_CONFIG_JSON
+# 重复运行时省略 --config，复用已接受的角色输出。
+```
+
+配置使用自主研究字段，绑定恢复后的 study 与 execution_id；role_call_limit 必须覆盖原控制器已计调用及预计三次新评审。入口核验原 evidence/hypothesis/experiment（及已有 measurement）的接受标记、已提交角色事件和 CAS 来源，保存原调用的 reuse.json，不把复用伪装成新调用。原全部已计调用成本一次继承。完整开发矩阵及独立评分核验后，按正常流程运行 evaluation、lead、knowledge，并原子提交知识补丁和研究周期。该入口不生成新方案、不训练、不自动释放确认阶段；即使评审建议 keep，也仍需独立的主机确认释放门槛。恢复前后结果、来源控制器事件头或执行绑定变化会拒绝复用。
+
 `amazon-run-phase` 先检查所有候选已准入、源码匹配，并审计既有基准/对照在该阶段的全部配对
 结果；执行版本不一致时拒绝复用。只调度新模型版本，因此既有基准兼对照不会
 重复训练。使用 confirmation 参数仍须先通过冻结选择释放；入口不会自动解锁。

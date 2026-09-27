@@ -70,6 +70,9 @@ def main(argv=None):
     p = commands.add_parser('amazon-run-development',help='run or resume admitted matched development, including controls and independent scoring; no Codex calls')
     p.add_argument('directory');p.add_argument('proposal');p.add_argument('output')
     p.add_argument('--execution',required=True);p.add_argument('--recipe',required=True);p.add_argument('--uid-registry',required=True)
+    p = commands.add_parser('amazon-review-development',help='resume evaluation, lead and knowledge for a recovered preregistered development matrix')
+    p.add_argument('directory');p.add_argument('proposal');p.add_argument('source_round');p.add_argument('rescores')
+    p.add_argument('--config',help='initial autonomous review configuration; omit on resume')
     p = commands.add_parser('amazon-continue', help='create an authorized successor campaign with inherited costs')
     p.add_argument('directory'); p.add_argument('predecessor'); p.add_argument('project')
     p.add_argument('--additional-budget',type=float,required=True); p.add_argument('--authorization-file',required=True)
@@ -213,6 +216,11 @@ def main(argv=None):
             from .adapters.amazon_matched import run_matched_development
             result=run_matched_development(args.directory,args.proposal,args.output,
                 execution_id=args.execution,recipe=read_json(args.recipe),uid_registry=args.uid_registry)
+        elif args.command == 'amazon-review-development':
+            from .adapters.amazon_autonomous import AmazonAutoresearch
+            from .adapters.amazon_review_recovery import review_recovered
+            if args.config:AmazonAutoresearch.init(args.directory,read_json(args.config))
+            result=review_recovered(args.directory,args.proposal,args.source_round,args.rescores)
         elif args.command == 'amazon-memory-export':
             from .adapters.amazon_memory import export_development_memory
             result=export_development_memory(args.directory,args.output)

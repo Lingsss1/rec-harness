@@ -38,6 +38,31 @@ def dotted(expr):
     return ''
 
 
+def structural_changes(before,after):
+    """Compare admitted method ASTs; this is location evidence, not semantic proof."""
+    def methods(tree):
+        return {cls.name+'.'+fn.name:fn for cls in tree.body
+                if isinstance(cls,ast.ClassDef) and cls.name in CLASSES
+                for fn in cls.body if isinstance(fn,ast.FunctionDef)}
+    def writes(fn):
+        return sorted({dotted(n) for n in ast.walk(fn) if isinstance(n,ast.Attribute)
+                       and isinstance(n.ctx,ast.Store) and dotted(n).startswith('self.')})
+    left,right=methods(before),methods(after);changes=[]
+    for path in sorted(set(left)|set(right)):
+        old,new=left.get(path),right.get(path)
+        old_hash=digest(ast.dump(old,include_attributes=False)) if old is not None else None
+        new_hash=digest(ast.dump(new,include_attributes=False)) if new is not None else None
+        if old_hash==new_hash:continue
+        changes.append({'method':path,'before_ast_hash':old_hash,'after_ast_hash':new_hash,
+                        'before_written_fields':writes(old) if old is not None else [],
+                        'after_written_fields':writes(new) if new is not None else []})
+    return {'schema':'model-method-delta-v1',
+            'baseline_ast_hash':digest(ast.dump(before,include_attributes=False)),
+            'candidate_ast_hash':digest(ast.dump(after,include_attributes=False)),
+            'methods':changes,
+            'scope':'AST locations and assigned model fields only; comments and formatting ignored. Does not verify semantic insertion contracts, full tensor dataflow or causal isolation.'}
+
+
 def review_source(baseline,candidate):
     try:before,after=ast.parse(baseline),ast.parse(candidate)
     except SyntaxError as error:raise ContractError('invalid model syntax: '+str(error)) from error
@@ -109,4 +134,5 @@ def review_source(baseline,candidate):
                         elif n.func.attr not in TENSOR_METHODS:raise ContractError('unapproved tensor call: '+n.func.attr)
                     else:raise ContractError('indirect calls prohibited')
     return {'contract':'nextitnet-model-classes-v1','source_ast_hash':digest(ast.dump(after,include_attributes=False)),
+            'structural_changes':structural_changes(before,after),
             'scope':'model-class edits only; fixed module/training protocol; isolated numerical checks still required'}

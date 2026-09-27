@@ -59,11 +59,12 @@ class ReviewEvidenceTests(unittest.TestCase):
             store=Store(root/'memory')
             try:
                 record=store.events()[0]['payload']
-                control={**record['versions']['candidate'],'source_contract':{'contract':'control-specific'}}
+                control={**record['versions']['candidate'],'source_contract':{'contract':'control-specific','structural_changes':{'methods':['control-only-fixture']}}}
                 store.event('amazon_model_candidate_admitted',{**record,'proposal_id':'control-plan','versions':{'control':control}})
             finally:store.close()
             value=admission_evidence(root,'control-plan','protocol','control',source)
             self.assertEqual(value['source_contract'],'control-specific')
+            self.assertEqual(value['structural_changes'],{'methods':['control-only-fixture']})
 
     def test_rejects_protocol_identity_and_corrupted_report(self):
         with tempfile.TemporaryDirectory() as tmp:

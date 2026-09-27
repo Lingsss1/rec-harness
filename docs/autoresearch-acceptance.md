@@ -612,3 +612,10 @@ Amazon autonomous 配置新增可选 `execution_id`，初始化时解析已注�
 回归分别覆盖通用模型和 Amazon 测量交接、保留未完成的源导出文件、禁止调用导出方法、以及另一个连接在读取过程中追加事件时保持一致快照。项目调度和工具演化继续通过原入口接续。
 
 真实验证 `read-only-evolution-context-acceptance-v1/acceptance.json` 从已完成的合成生成对照 campaign 提取六份实际 Codex 决策轨迹，重复提取完全一致，源事件链及导出文件 hash 不变。轨迹 hash 为 `ec412623ecaa761596351d7810a47de74a812071966c9609041036e79f7aaa7a`。新增角色调用、训练和推理均为零；测量缺口交接的并发行为由回归覆盖，本次没有制造新的真实测量缺口或工具收益。
+
+
+### 实际模型改造位置的结构证据
+
+源码准入现在同时生成 `model-method-delta-v1`，记录整模块基线/候选 AST 哈希、变化方法的前后 AST 哈希以及 `self` 字段写入集合。新候选和每份新对照的差异分别随原子准入事件保存，评审上下文投影对应版本的记录。源码权限门控和数值检查保持独立；结构差异不证明方法机制或自然语言插入合同已经满足。
+
+`model-structural-evidence-acceptance-v1/acceptance.json` 对保留的真实源码进行只读核验：生成门控候选与全局门控对照均改变 `NextItNetModel.__init__` 和 `encode_sequence`，第二 GELU 候选仅改变 `NextItNetBlock.forward`。三个报告分别绑定完整源码及方法身份，没有修改历史准入、调用 Codex、训练或推理。回归覆盖注释不改变 AST 差异、实际方法与字段定位，以及候选和对照评审不能混用结构身份。

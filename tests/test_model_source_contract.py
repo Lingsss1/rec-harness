@@ -43,6 +43,21 @@ class SourceContractTests(unittest.TestCase):
         candidate=candidate.replace('return self.block(x)','return self.block(x) * torch.sigmoid(self.gate)')
         self.assertEqual(review_source(SOURCE,candidate)['contract'],'nextitnet-model-classes-v1')
 
+    def test_changes_identify_actual_methods_and_fields_not_comments(self):
+        candidate=SOURCE.replace('self.block = nn.Linear(hidden, hidden)',
+            'self.block = nn.Linear(hidden, hidden)\n        self.gate = nn.Parameter(torch.zeros(hidden))')
+        candidate=candidate.replace('return self.block(x)','return self.block(x) * torch.sigmoid(self.gate)')
+        delta=review_source(SOURCE,candidate)['structural_changes']
+        methods={row['method']:row for row in delta['methods']}
+        self.assertEqual(set(methods),{'NextItNetModel.__init__','NextItNetModel.forward'})
+        init=methods['NextItNetModel.__init__']
+        self.assertEqual(init['before_written_fields'],['self.block'])
+        self.assertEqual(init['after_written_fields'],['self.block','self.gate'])
+        self.assertNotEqual(init['before_ast_hash'],init['after_ast_hash'])
+        self.assertEqual(review_source(SOURCE,candidate+'\n# formatting comment\n')['structural_changes'],delta)
+        self.assertEqual(review_source(SOURCE,SOURCE+'\n# comment\n')['structural_changes']['methods'],[])
+        self.assertEqual(delta['candidate_ast_hash'],review_source(SOURCE,candidate)['source_ast_hash'])
+
     def test_forbidden_capabilities_and_protocol_edits(self):
         payloads=['open("/tmp/leak", "w")','torch.save(x, "/tmp/leak")',
                   'self.io = torch.save','x.__class__', 'eval("1")',

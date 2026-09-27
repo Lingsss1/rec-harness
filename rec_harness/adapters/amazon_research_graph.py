@@ -52,6 +52,9 @@ def ingest_development(root, proposal_id):
                         'evidence_dependency_ids':[fact_id],'report_ref':ref},task,protocol))
                     edges.append(edge(identifier+'-produced',fact_id,identifier,'PRODUCES',[fact_id],task,store.version+1))
                 store.patch({'base_version':store.version,'nodes':nodes,'edges':edges})
+            from .amazon_contract_graph import attach_contracts
+            from .amazon_controls import load_config
+            attach_contracts(root,store,load_config(root,store),report,task,protocol,fact_id)
             snapshot=store.snapshot()
             nodes=[n for n in snapshot['nodes'] if n['attrs']['task_id']==task]
             ids={n['id'] for n in nodes}

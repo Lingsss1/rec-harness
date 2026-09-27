@@ -36,8 +36,12 @@ def compose_chain(worlds,artifacts):
             visible=read_json(artifacts.verify(node['request_ref']))
             if previous['observation']['development_hash'] not in {r.get('hash') for r in visible.get('history',[])}:
                 raise ContractError('predecessor readout absent from next design context')
-            expected=previous['workspace_after'] if previous['observation']['selection']=='keep' else previous['workspace_before']
-            if node['workspace_before']!=expected or world['root_observation']['score']!=previous['observation']['score']:
+            # A development keep is only permission to confirm, not promotion.
+            # Bind the next recorded baseline to either known source/score pair.
+            allowed=[(previous['workspace_before'],prior['root_observation']['score'])]
+            if previous['observation']['selection']=='keep':
+                allowed.append((previous['workspace_after'],previous['observation']['candidate_score']))
+            if (node['workspace_before'],world['root_observation']['score']) not in allowed:
                 raise ContractError('chain incumbent or visible baseline differs')
             node['cost']=total-totals[-1]
         node.update(primary_parent_id=nodes[-1]['node_id'] if nodes else 'root',creation_seq=index+1,

@@ -19,6 +19,10 @@ def build_cycle_world(*,artifacts,protocol,proposal,baseline,candidate,visible,r
     for value in [gpu_total,candidate_gpu,role_calls,gpu_weight,role_weight]:number(value,'replay cost',0)
     if gpu_weight+role_weight<=0:raise ContractError('positive replay cost weight required')
     if candidate_gpu>gpu_total:raise ContractError('candidate cost exceeds retained study cost')
+    design_gpu=visible.get('budget',{}).get('charged_or_reserved',gpu_total-candidate_gpu)
+    number(design_gpu,'GPU cost visible before design',0)
+    if design_gpu>gpu_total or gpu_total-design_gpu+1e-8<candidate_gpu:
+        raise ContractError('design cost exceeds available pre-candidate cost')
     if report['hash']!=digest({k:v for k,v in report.items() if k!='hash'}):raise ContractError('development readout changed')
     if report['protocol_hash']!=protocol or visible['protocol_hash']!=protocol:
         raise ContractError('replay protocol differs')
@@ -38,12 +42,12 @@ def build_cycle_world(*,artifacts,protocol,proposal,baseline,candidate,visible,r
     node={'node_id':proposal,'primary_parent_id':'root','creation_seq':1,'dependencies':['root'],
           'context_dependencies_complete':True,'protocol_hash':protocol,'request_ref':request_ref,
           'workspace_before':workspace_before,'workspace_after':workspace_after,
-          'cost':candidate_gpu*gpu_weight+role_calls*role_weight,
+          'cost':(gpu_total-design_gpu)*gpu_weight+role_calls*role_weight,
           'observation':{'score':score,'candidate_score':summary['means'][candidate],'status':'success',
               'selection':selection,'eligible_for_confirmation':summary['eligible_for_confirmation'],
               'development_hash':report['hash']}}
     world=build_world([node],artifacts=artifacts,workers=1,
-        root_observation={'score':root_score,'status':'success'},initial_cost=(gpu_total-candidate_gpu)*gpu_weight)
+        root_observation={'score':root_score,'status':'success'},initial_cost=design_gpu*gpu_weight)
     world.update(schema='amazon-observed-cycle-world-v1',online_utility_evidence=False,
         cost_model={'gpu_second_weight':gpu_weight,'role_call_weight':role_weight,
                     'scope':'Retained study GPU slot seconds and this campaign CLI calls; CPU and token costs excluded.'},
@@ -102,6 +106,8 @@ def archive_cycle(campaign,output,*,gpu_weight,role_weight):
                     if file_hash(source['path'])!=source['sha256']:raise ContractError('replay model source changed')
                     target['model.py']=artifacts.put(source['path'])
                 visible=read_json(folder/'evidence/context.json')
+                if 'charged_or_reserved' not in visible.get('budget',{}):
+                    raise ContractError('design-time GPU cost snapshot required for observed replay')
                 world=build_cycle_world(artifacts=artifacts,protocol=config['protocol_hash'],proposal=plan['proposal_id'],
                     baseline=baseline,candidate=candidate,visible=visible,report=report,selection=cycle['selection'],
                     gpu_total=gpu['charged_or_reserved'],candidate_gpu=candidate_gpu,

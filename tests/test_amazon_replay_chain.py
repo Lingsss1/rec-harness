@@ -61,3 +61,16 @@ class ChainReplayTests(unittest.TestCase):
             else:second['resources']['campaign_cli_calls']=1
             second['hash']=digest({k:v for k,v in second.items() if k!='hash'})
             with self.assertRaisesRegex(ContractError,error):compose_chain([self.first,second],self.artifacts)
+
+    def test_development_keep_does_not_imply_confirmed_promotion(self):
+        first=copy.deepcopy(self.first)
+        first['nodes'][0]['observation'].update(selection='keep',eligible_for_confirmation=True,score=.501)
+        first['hash']=digest({k:v for k,v in first.items() if k!='hash'})
+        # Next observed campaign still uses the baseline: confirmation may reject.
+        world=compose_chain([first,self.second],self.artifacts)
+        self.assertEqual(world['nodes'][1]['workspace_before'],first['nodes'][0]['workspace_before'])
+        promoted=copy.deepcopy(self.second)
+        promoted['nodes'][0]['workspace_before']=first['nodes'][0]['workspace_after']
+        promoted['root_observation']['score']=.501
+        promoted['hash']=digest({k:v for k,v in promoted.items() if k!='hash'})
+        self.assertEqual(len(compose_chain([first,promoted],self.artifacts)['nodes']),2)

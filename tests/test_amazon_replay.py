@@ -61,3 +61,15 @@ class AmazonReplayTests(unittest.TestCase):
         ref=self.args['workspace_after']['model.py']
         self.args['artifacts'].verify(ref).write_text('changed')
         with self.assertRaises(ContractError):build_cycle_world(**self.args)
+
+    def test_post_design_recovery_cost_is_charged_on_transition(self):
+        visible={**self.args['visible'],'budget':{'charged_or_reserved':50}}
+        world=build_cycle_world(**{**self.args,'visible':visible})
+        self.assertEqual(world['initial_cost'],50)
+        self.assertEqual(world['nodes'][0]['cost'],72)
+        replay=Replay(world,121)
+        self.assertEqual(replay.step(['root'])['status'],'budget_exhausted')
+        self.assertEqual(replay.spent,50)
+        for value in [-1,81,101,float('nan')]:
+            with self.assertRaises(ContractError):
+                build_cycle_world(**{**self.args,'visible':{**visible,'budget':{'charged_or_reserved':value}}})

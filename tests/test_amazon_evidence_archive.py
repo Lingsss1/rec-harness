@@ -4,10 +4,53 @@ from pathlib import Path
 from rec_harness.core import Artifacts,ContractError,digest,file_hash,read_json,write_json
 from rec_harness.store import Store
 from rec_harness.runtime_archive import host_identity
-from rec_harness.adapters.amazon_evidence import archive_job,ingest,restore_job_archive
+from rec_harness.adapters.amazon_evidence import archive_job,ingest,restore_job_archive,job_partition
 
 
 class EvidenceArchiveTests(unittest.TestCase):
+    def test_partition_comes_from_frozen_split(self):
+        config={'development_seeds':[42],'confirmation_seeds':[17,83]}
+        self.assertEqual(job_partition(config,{'seed':42}),'development')
+        self.assertEqual(job_partition(config,{'seed':17}),'confirmation')
+        self.assertEqual(job_partition({}, {'seed':42}),'unknown')
+        for result in ({'seed':42,'partition':'confirmation'},{'seed':99},{'seed':True}):
+            with self.assertRaises(ContractError):job_partition(config,result)
+        for invalid in ({'development_seeds':[42]},
+                        {'development_seeds':[42],'confirmation_seeds':[42]},
+                        {'development_seeds':[42,42],'confirmation_seeds':[17]},
+                        {'development_seeds':[True],'confirmation_seeds':[17]}):
+            with self.assertRaises(ContractError):job_partition(invalid,{'seed':42})
+
+    def test_ingest_keeps_split_on_all_evidence_nodes_and_retry_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);source=root/'model.py';source.write_text('model source')
+            config={'protocol_hash':'p','development_seeds':[42],'confirmation_seeds':[17],
+                'model_versions':{'base':{'path':str(source),'sha256':file_hash(source)}}}
+            write_json(root/'study.json',config)
+            write_json(root/'study-lock.json',{'config_hash':digest(config)})
+            for index,(seed,status,attempt) in enumerate([(42,'failed','retry'),(42,'success',None),(17,'success',None)]):
+                job_id=f'base-tiny-{seed}'
+                job=root/'attempt-history'/job_id/attempt if attempt else root/'jobs'/job_id
+                result={'job_id':job_id,'model_version':'base','dataset':'tiny','seed':seed,
+                    'status':status,'metrics':{},'allocated_gpu_seconds':1,'process':{'completed_at':index}}
+                if attempt:result['task_id']=job_id+'-'+attempt
+                write_json(job/'completed.json',result)
+            self.assertEqual(len(ingest(root)['imported']),3)
+            store=Store(root/'memory',read_only=True)
+            try:
+                graph=store.snapshot();before=store.verify()
+            finally:store.close()
+            for record in graph['nodes']:
+                self.assertEqual(record['attrs']['partition'],
+                    'development' if '-42' in record['id'] else 'confirmation')
+            experiments={record['id']:record['attrs'] for record in graph['nodes'] if record['type']=='Experiment'}
+            self.assertEqual(experiments['base-tiny-42-retry']['independent_run_id'],
+                             experiments['base-tiny-42']['independent_run_id'])
+            self.assertEqual(ingest(root)['imported'],[])
+            store=Store(root/'memory',read_only=True)
+            try:self.assertEqual(store.verify(),before);self.assertEqual(store.snapshot(),graph)
+            finally:store.close()
+
     def test_runtime_lock_retains_bytes_without_flat_graph_expansion(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);job=root/'jobs/base-tiny-42';runtime=job/'isolated/jail/usr/lib/libtest.so'

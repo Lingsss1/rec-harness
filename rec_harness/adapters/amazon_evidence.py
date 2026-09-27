@@ -10,6 +10,26 @@ from rec_harness.store import Store
 from .amazon_identity import record_version
 
 
+def job_partition(config, result):
+    """Project the frozen seed split, never infer it from a receipt label."""
+    keys = ('development_seeds', 'confirmation_seeds')
+    if not any(key in config for key in keys):
+        return 'unknown'
+    groups = [config.get(key) for key in keys]
+    if any(not isinstance(group, list) or any(type(seed) is not int for seed in group)
+           for group in groups):
+        raise ContractError('evidence requires complete frozen seed partitions')
+    if any(len(set(group)) != len(group) for group in groups) or set(groups[0]) & set(groups[1]):
+        raise ContractError('evidence seed partitions overlap or contain duplicates')
+    seed = result.get('seed')
+    if type(seed) is not int or seed not in groups[0] + groups[1]:
+        raise ContractError('evidence seed outside frozen partitions')
+    partition = 'development' if seed in groups[0] else 'confirmation'
+    if 'partition' in result and result['partition'] != partition:
+        raise ContractError('evidence receipt partition differs from frozen split')
+    return partition
+
+
 def restore_job_archive(refs,artifacts,destination):
     """Restore archived files, expanding locked runtime refs; does not launch a job."""
     destination=Path(destination)
@@ -84,12 +104,14 @@ def ingest(directory):
             job_id = result.get('task_id', result['job_id'])
             if job_id in known:
                 continue
+            partition = job_partition(config, result)
             manifest = read_json(path.parent / 'manifest.json') if (path.parent / 'manifest.json').exists() else None
             task, protocol = 'amazon-' + result['dataset'], config['protocol_hash']
             refs = archive_job(path.parent,artifacts,verified_runtime_objects)
             source_ref = artifacts.put(config['model_versions'][record_version(result)]['path'])
             model_id, observation_id = job_id + '-model', job_id + '-observation'
             attrs = {'valid': result['status'] == 'success', 'status': result['status'], 'metrics': result['metrics'],
+                     'partition': partition,
                      # Retrying a category/seed is not new independent evidence.
                      'independent_run_id': result['job_id'], 'seed': result['seed'], 'dataset': result['dataset'],
                      'effect_gate_passed': False, 'artifact_refs': refs, 'source_ref': source_ref,
@@ -100,13 +122,16 @@ def ingest(directory):
             nodes = [node(job_id, 'Experiment', attrs, task, protocol),
                      node(model_id, 'ModelVersion', {'code_hash': config['model_versions'][record_version(result)]['sha256'],
                           'source_ref': source_ref, 'design_id': record_version(result), 'initialization': 'fresh',
+                          'partition': partition,
                           'checkpoint_ref': refs.get('checkpoint.pt'), 'evidence_dependency_ids': [job_id]}, task, protocol),
-                     node(observation_id, 'Observation', {'metrics': result['metrics'], 'evidence_dependency_ids': [job_id]}, task, protocol)]
+                     node(observation_id, 'Observation', {'metrics': result['metrics'], 'partition': partition,
+                          'evidence_dependency_ids': [job_id]}, task, protocol)]
             edges = [edge(job_id + '-evaluates', job_id, model_id, 'EVALUATES', [job_id], task, store.version + 1),
                      edge(job_id + '-produces', job_id, observation_id, 'PRODUCES', [job_id], task, store.version + 1)]
             if result['status'] != 'success':
                 failure_id = job_id + '-failure'
-                nodes.append(node(failure_id, 'Failure', {'failure_kind': result['status'], 'execution_evidence_only': True}, task, protocol))
+                nodes.append(node(failure_id, 'Failure', {'failure_kind': result['status'], 'partition': partition,
+                    'execution_evidence_only': True}, task, protocol))
                 edges.append(edge(job_id + '-fails', job_id, failure_id, 'HAS_FAILURE', [job_id], task, store.version + 1))
             store.patch({'base_version': store.version, 'nodes': nodes, 'edges': edges})
             imported.append(job_id)

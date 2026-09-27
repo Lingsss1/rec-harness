@@ -37,7 +37,8 @@ def ingest_development(root, proposal_id):
                     'minimum_effect':summary['minimum_effect'],'independent_run_id':prefix+'-development-aggregate',
                     'seed_ids':sorted({row['seed'] for row in summary['slices']}),
                     'scientific_unit':'declared development seed aggregate; not additional independent runs or category slices',
-                    'evidence_dependency_ids':sources,'report_ref':ref,'scientific_conclusion':'unknown',
+                    'evidence_dependency_ids':sources,'source_experiment_ids':sources,
+                    'report_ref':ref,'scientific_conclusion':'unknown',
                     'counterevidence':not summary['eligible_for_confirmation'],
                     'counterevidence_to':'candidate selection threshold; not a mechanism refutation'},task,protocol))
                 edges=[edge(prefix+'-targets',ids['proposal'],ids['gap'],'TARGETS',[],task,store.version+1),

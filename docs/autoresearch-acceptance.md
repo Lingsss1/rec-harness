@@ -674,3 +674,9 @@ Amazon autonomous 配置新增可选 `execution_id`，初始化时解析已注�
 `evidence_dependency_ids` 只表示回放可用性，不能用来推断训练独立性：同一研究 attempt 中的不同 seed 仍可独立。来源训练的 task 可以是类别任务，汇总 task 可以是配对比较，但协议必须一致。
 
 全套回归 372 项，352 通过、20 项环境相关跳过；随后新增的成对比较生产器→图升级集成测试与该文件另两项测试均通过。覆盖不同确认 seed 的合法汇总、重复分析拒绝、重标开发来源拒绝和重叠机制对照拒绝。没有新增 Codex、训练、推理或真实科学结论升级。该检查验证已声明来源，不能证明遗漏或伪造来源不存在。
+
+### 原始训练证据保留冻结分区
+
+Amazon `ingest` 新导入的 Experiment、ModelVersion、Observation 和 Failure 都记录由 study 冻结 seed 列表确定的 partition。显式收据标签与冻结划分冲突、seed 不在划分中、划分交叠/重复/不完整都会拒绝。完全缺少旧 seed 配置时标记 unknown，不推断确认资格；已入库旧节点保持不可变，不追补分区。重试继续沿用原 job 的 independent_run_id。开发聚合新增明确 `source_experiment_ids`，区分来源训练与回放依赖。
+
+`partition-provenance-acceptance-v1/acceptance.json` 对已完成 v3 合成研究三份开发收据及真实 Amazon v3 的八份开发、十六份确认收据完成只读分区投影，配置、收据及源事件导出均未改变。它不修改历史图，也不证明历史角色读取过新增字段。全量 375 项回归，355 通过、20 项环境相关跳过；实际导入测试覆盖两分区、失败重试身份及幂等图恢复。新增 Codex、训练、推理均为零。

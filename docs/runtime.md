@@ -148,6 +148,19 @@ python3 -m rec_harness replay /tmp/world.json actions.json --budget 12
 
 真实 Amazon 固定训练档案使用 `python3 -m rec_harness amazon-archive STUDY OUTPUT.json` 导出。转换器独立复核成功训练的rank指标、候选/数据/源码/检查点身份，将收据成本与事件预算流水对账，保留没有成功收据的前序、中止和未知成本，并以源事件head和内容hash冻结输出。不同类别的得分不能直接当作模型优劣排序。当前36次GPU训练没有研究决策上下文、模型设计父节点与同步研究动作，因此该输出明确为 `audit_only`，不是Replay输入；不补造父子链或据此评估调度策略收益。重试旧版本的详细收据仍保留于原始attempt-history，导出资源流水涵盖其费用。
 
+已有完整角色上下文和提交周期的 Amazon campaign 可另外转换为单周期观察回放：
+
+```bash
+python3 -m rec_harness amazon-replay-world CAMPAIGN OUTPUT_DIRECTORY \
+  --gpu-second-weight 1 --role-call-weight 1
+```
+
+入口要求恰好一个已提交开发周期、角色均绑定完成事件、没有待结算调用或训练；重新审计配对训练和完整成本账本。基线必须已出现在设计前的实际 evidence 上下文中，不能使用后来才知道的分数填充根节点。CAS 保存实际角色请求/响应、开发训练收据和模型源码，checkpoint 与逐用户排名不复制到回放目录。多周期或缺上下文档案仍需显式适配，旧 audit_only 档案不会自动升级。
+
+每个节点代表整个已观察到的研究周期，不能拆成虚构的并行 GPU 动作。根部冻结此前上下文；策略只能继续该记录或停止，新提示、工具、源码及角色内决策均不受支持。discard/provisional 保留基线作为选中分数，同时保留候选原开发分数和选择门槛结果，不能把未达标候选当作已晋升模型。外部策略使用 `replay-policy` 隔离入口，不能挂载完整 world。
+
+两个费用系数必须显式指定，它们定义回放预算单位，不代表货币或实际耗时的等价换算。资源向量分别保留 study 全部 GPU 槽位秒和本 campaign 的 CLI 调用（含继承失败），不包含 CPU/token 成本；不得用该预算宣称完整研究总成本。重复转换要求源事件头、内容和系数不变。该回放仅检查历史支持范围内的行为，不证明在线策略效用。旧策略运行时缺少 runtime_hashes 时会拒绝，须另建冻结运行时，不能关闭哈希校验继续。
+
 ## 诊断工具与 Harness 外部优化
 
 ```bash

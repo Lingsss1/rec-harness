@@ -87,6 +87,8 @@ class PolicySandbox:
         self.manifest = read_json(self.template / 'jail-manifest.json')
         if self.manifest.get('purpose') != 'replay-policy-runtime':
             raise ContractError('dedicated policy runtime required; agent/auth templates forbidden')
+        if not isinstance(self.manifest.get('runtime_hashes'),dict) or not self.manifest['runtime_hashes']:
+            raise ContractError('policy runtime lacks frozen file hashes; prepare a new runtime')
         self.timeout = timeout
 
     def decide(self, policy, visible, directory):

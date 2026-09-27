@@ -76,7 +76,7 @@ def verify_campaign(controller):
     if digest(config)!=read_json(root/'auto-lock.json')['config_hash']:raise ContractError('autonomous configuration changed')
     if digest(read_json(controller.study/'study.json'))!=config['study_config_hash']:raise ContractError('bound study changed')
     integrity=controller.store.verify();events=controller.store.events()
-    ledger=Store(controller.study/'memory');artifacts=Artifacts(controller.study/'artifacts/objects')
+    ledger=Store(controller.study/'memory',read_only=True);artifacts=Artifacts(controller.study/'artifacts/objects')
     role_count=0;local_only=0;partial=0;checked=set();cycles=0;measurement_bindings=0;legacy_measurements=0;reused_roles=0
     try:
         study_integrity=ledger.verify()

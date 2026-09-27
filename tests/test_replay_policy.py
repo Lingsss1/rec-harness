@@ -21,6 +21,14 @@ def world():
 
 
 class PolicyProtocolTests(unittest.TestCase):
+    def test_legacy_runtime_without_hashes_is_rejected_before_launch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            (root/'jail-manifest.json').write_text(json.dumps({'purpose':'replay-policy-runtime'}))
+            with self.assertRaisesRegex(ContractError,'prepare a new runtime'):
+                PolicySandbox(root,root/'jails')
+            self.assertFalse((root/'jails').exists())
+
     def test_future_selection_and_unbounded_memory_rejected(self):
         action = {'parents': [], 'action_kind': 'continue', 'select': 'later', 'memory': None, 'rationale': ''}
         with self.assertRaisesRegex(ContractError, 'outside visible'):

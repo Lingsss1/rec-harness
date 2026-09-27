@@ -92,6 +92,9 @@ def main(argv=None):
     p.add_argument('directory'); p.add_argument('output')
     p = commands.add_parser('amazon-archive', help='audit real GPU receipts and resource ledger without inventing replay transitions')
     p.add_argument('directory'); p.add_argument('output')
+    p = commands.add_parser('amazon-replay-world', help='freeze one observed development cycle for bounded historical replay')
+    p.add_argument('directory');p.add_argument('output')
+    p.add_argument('--gpu-second-weight',type=float,required=True);p.add_argument('--role-call-weight',type=float,required=True)
     p = commands.add_parser('amazon-history-diagnostic', help='aggregate paired validation gains by training-history length')
     p.add_argument('directory'); p.add_argument('output')
     p.add_argument('--baseline',default='legacy_no_prefix');p.add_argument('--candidate',default='legacy_incumbent')
@@ -268,6 +271,11 @@ def main(argv=None):
             result = {key: archive[key] for key in ['hash', 'qualification', 'charged_or_reserved_gpu_seconds', 'reasons']}
             result['record_count'] = len(archive['records'])
             result['output'] = args.output
+        elif args.command == 'amazon-replay-world':
+            from .adapters.amazon_replay import archive_cycle
+            world=archive_cycle(args.directory,args.output,gpu_weight=args.gpu_second_weight,role_weight=args.role_call_weight)
+            result={key:world[key] for key in ['hash','qualification','resources','support']}
+            result['output']=args.output
         elif args.command == "world-from-campaign":
             result = world_from_campaign(args.directory, args.workers)
             write_json(args.output, result)

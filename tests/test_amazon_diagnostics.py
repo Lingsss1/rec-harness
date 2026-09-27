@@ -44,7 +44,12 @@ class AmazonDiagnosticTests(unittest.TestCase):
             finally:store.close()
             from rec_harness.measurement_gaps import evolution_context
             gap=next(n['id'] for n in graph['nodes'] if n['type']=='MeasurementGap')
-            context=evolution_context(root/'campaign',gap)
+            projection=root/'campaign/memory/events.jsonl'
+            projection.write_text('preserve source projection\n')
+            with patch.object(Store,'export_events',side_effect=AssertionError('measurement source mutated')):
+                context=evolution_context(root/'campaign',gap)
+                self.assertEqual(context,evolution_context(root/'campaign',gap))
+            self.assertEqual(projection.read_text(),'preserve source projection\n')
             self.assertEqual({o['dataset'] for o in context['observations']},{'A','B'})
             self.assertEqual({o['seed'] for o in context['observations']},{42})
 

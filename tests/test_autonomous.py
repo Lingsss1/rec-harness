@@ -115,6 +115,26 @@ class AutonomousTests(unittest.TestCase):
         try:store.event('future_private_outcome',{'value':'not-visible'})
         finally:store.close()
         self.assertEqual(evolution_context(self.campaign,gap_id),context)
+        projection=self.campaign/'memory/events.jsonl'
+        projection.write_text('retained incomplete export\n')
+        with patch.object(Store,'export_events',side_effect=AssertionError('source projection must not be rewritten')):
+            self.assertEqual(evolution_context(self.campaign,gap_id),context)
+            self.assertEqual(evolution_context(self.campaign,gap_id),context)
+        self.assertEqual(projection.read_text(),'retained incomplete export\n')
+        original_verify=Store.verify;inserted=[]
+        def concurrent_append(source):
+            value=original_verify(source)
+            if source.read_only and not inserted:
+                inserted.append(True)
+                writer=Store(self.campaign/'memory')
+                try:writer.event('future_measurement_outcome',{'value':'not-visible'})
+                finally:writer.close()
+            return value
+        with patch.object(Store,'verify',concurrent_append):
+            self.assertEqual(evolution_context(self.campaign,gap_id),context)
+        self.assertEqual(inserted,[True])
+
+
 
     def test_failed_tool_does_not_create_a_measurement_gap_or_call_model_roles(self):
         self.measurement_requirement()

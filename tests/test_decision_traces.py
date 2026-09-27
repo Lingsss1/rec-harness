@@ -1,5 +1,7 @@
 import tempfile
 import unittest
+from unittest.mock import patch
+from rec_harness.store import Store
 from pathlib import Path
 from rec_harness.core import ContractError,read_json
 from rec_harness.decision_traces import collect_traces
@@ -26,6 +28,21 @@ class DecisionTraceTests(unittest.TestCase):
                 self.assertEqual(trace['role_output']['proposal']['base_model_id'],trace['model_version'])
                 research.store.event('future_outcome',{'result':'FUTURE'})
                 self.assertEqual(collect_traces(root,roles=['hypothesis'],cutoff_seq=cutoff),package)
+                projection=root/'memory/events.jsonl'
+                projection.write_text('preserve partial source projection\n')
+                with patch.object(Store,'export_events',side_effect=AssertionError('trace extraction wrote source')):
+                    self.assertEqual(collect_traces(root,roles=['hypothesis'],cutoff_seq=cutoff),package)
+                self.assertEqual(projection.read_text(),'preserve partial source projection\n')
+                original_verify=Store.verify;appended=[]
+                def concurrent_append(source):
+                    result=original_verify(source)
+                    if source.read_only and not appended:
+                        appended.append(True)
+                        research.store.event('future_concurrent_outcome',{'result':'NOT_IN_PREFIX'})
+                    return result
+                with patch.object(Store,'verify',concurrent_append):
+                    self.assertEqual(collect_traces(root,roles=['hypothesis'],cutoff_seq=cutoff),package)
+                self.assertEqual(appended,[True])
                 path=research.artifacts.verify(trace['visible_state_ref']);path.write_text('{}')
                 with self.assertRaises(ContractError):collect_traces(root,roles=['hypothesis'],cutoff_seq=cutoff)
             finally:research.store.close()

@@ -80,8 +80,9 @@ def evolution_context(campaign,gap_id):
     config=read_json(root/('amazon-auto.json' if amazon else 'campaign.json'))
     frozen=read_json(root/('auto-lock.json' if amazon else 'research_archive/manifest.json'))
     if digest(config)!=frozen['config_hash']:raise ContractError('measurement source configuration changed')
-    store=Store(root/'memory')
+    store=Store(root/'memory',read_only=True)
     try:
+        store.db.execute('BEGIN')
         integrity=store.verify()
         events=[e for e in store.events() if e['kind']=='measurement_gap_opened' and e['payload']['gap']['measurement_gap_id']==gap_id]
         if len(events)!=1:raise ContractError('one committed measurement gap required')
@@ -106,4 +107,6 @@ def evolution_context(campaign,gap_id):
             'source':{'task_id':config['task_id'],'protocol_hash':config['protocol_hash'],
                       'event_head':event['hash'],'trigger_sequence':event['seq'],'graph_version':version,'graph_hash':graph['hash']},
             'instructions':'Develop a diagnostic, not a model change. Validate invocation and applicability first. Independent validation must not reuse these development observations.'}
-    finally:store.close()
+    finally:
+        if store.db.in_transaction:store.db.execute('ROLLBACK')
+        store.close()

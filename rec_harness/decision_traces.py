@@ -9,8 +9,9 @@ def collect_traces(campaign,*,roles=None,cutoff_seq=None):
     root=Path(campaign);amazon=(root/'amazon-auto.json').exists()
     config=read_json(root/('amazon-auto.json' if amazon else 'campaign.json'))
     if read_json(root/('auto-lock.json' if amazon else 'research_archive/manifest.json'))['config_hash']!=digest(config):raise ContractError('trace campaign configuration changed')
-    store=Store(root/'memory');artifacts=Artifacts(root/'artifacts/objects')
+    store=Store(root/'memory',read_only=True);artifacts=Artifacts(root/'artifacts/objects')
     try:
+        store.db.execute('BEGIN')
         integrity=store.verify();events=store.events()
         cutoff=integrity['events'] if cutoff_seq is None else cutoff_seq
         if type(cutoff) is not int or not 0<=cutoff<=integrity['events']:raise ContractError('invalid trace cutoff')
@@ -65,7 +66,9 @@ def collect_traces(campaign,*,roles=None,cutoff_seq=None):
                 'cutoff_seq':cutoff,'event_head':events[cutoff-1]['hash'] if cutoff else '0'*64},
             'instructions':'Diagnose decision-process hypotheses from these exact visible inputs. Do not assign outcomes to unexecuted alternatives. Do not infer model or tool failure from transport failure.'}
         result['hash']=digest(result);return result
-    finally:store.close()
+    finally:
+        if store.db.in_transaction:store.db.execute('ROLLBACK')
+        store.close()
 
 
 def project_traces(research):

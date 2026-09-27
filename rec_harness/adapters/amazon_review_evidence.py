@@ -5,6 +5,26 @@ from rec_harness.core import Artifacts,ContractError,digest,file_hash
 from rec_harness.store import Store
 
 
+def protocol_summary(config,result,manifest):
+    """Project an already audited development receipt, without copying private data."""
+    keys=('epochs','batches','eval_users','eval_seed','patience','eval_every')
+    if not all(k in manifest.get('protocol',{}) for k in keys):
+        return {'status':'unavailable','scope':'No complete execution protocol manifest supplied.'}
+    if result['seed'] not in config['development_seeds']:
+        raise ContractError('non-development protocol evidence')
+    if any(manifest['protocol'][k]!=config['protocol'][k] for k in keys):
+        raise ContractError('public execution protocol differs')
+    if result['worker_hash']!=manifest['worker_hash'] or result['worker_hash']!=config['worker_sha256']:
+        raise ContractError('public execution worker differs')
+    if manifest['initialization']!='fresh':raise ContractError('public initialization differs')
+    return {'status':'verified','dataset':result['dataset'],'seed':result['seed'],
+            'execution_id':result.get('execution_id','direct-reviewed-v1'),
+            'worker_sha256':result['worker_hash'],'protocol_hash':config['protocol_hash'],
+            'protocol':{k:manifest['protocol'][k] for k in keys},'initialization':'fresh',
+            'receipt_hash':digest(result),'manifest_hash':digest(manifest),
+            'scope':'Host audit of completed development receipt and manifest, not candidate-source helper defaults. No claim of scientific confirmation or independent verification by the role.'}
+
+
 def admission_evidence(study,proposal_id,protocol_hash,candidate_id,candidate_path):
     study=Path(study)
     store=Store(study/'memory',read_only=True)

@@ -4,10 +4,23 @@ from pathlib import Path
 
 from rec_harness.core import Artifacts,ContractError,write_json
 from rec_harness.store import Store
-from rec_harness.adapters.amazon_review_evidence import admission_evidence
+from rec_harness.adapters.amazon_review_evidence import admission_evidence,protocol_summary
 
 
 class ReviewEvidenceTests(unittest.TestCase):
+    def test_protocol_summary_preserves_audited_settings_and_excludes_private_payload(self):
+        protocol=dict(epochs=200,batches=100,eval_users=1000,eval_seed=42,patience=4,eval_every=5)
+        config={'protocol':protocol,'protocol_hash':'p','worker_sha256':'w','development_seeds':[42]}
+        result={'worker_hash':'w','dataset':'tiny','seed':42,'user_ids':'PRIVATE'}
+        manifest={'protocol':protocol,'worker_hash':'w','initialization':'fresh','checkpoint_path':'PRIVATE'}
+        value=protocol_summary(config,result,manifest)
+        self.assertEqual(value['protocol'],protocol);self.assertNotIn('PRIVATE',str(value))
+        for bad in [{**result,'seed':17},{**result,'worker_hash':'other'}]:
+            with self.assertRaises(ContractError):protocol_summary(config,bad,manifest)
+        with self.assertRaises(ContractError):
+            protocol_summary(config,result,{**manifest,'protocol':{**protocol,'eval_users':200}})
+        self.assertEqual(protocol_summary(config,result,{})['status'],'unavailable')
+
     def fixture(self,root,**changes):
         source=root/'model.py';source.write_text('synthetic model')
         probe=root/'probe.json';write_json(probe,{'checks':'synthetic','private_path':'DO_NOT_SEND'})

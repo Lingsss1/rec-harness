@@ -212,13 +212,15 @@ class AmazonAutoresearch:
         return summaries
 
     def _context(self,state,folder):
-        cfg=load_config(self.study);base=state['incumbent'];rows=[]
+        cfg=load_config(self.study);base=state['incumbent'];rows=[];execution_evidence=[]
+        from .amazon_review_evidence import protocol_summary
         for dataset in cfg['datasets']:
             for seed in cfg['development_seeds']:
-                result,_=audit_job(self.study,cfg,base,dataset,seed)
+                result,manifest=audit_job(self.study,cfg,base,dataset,seed)
                 if result.get('execution_id','direct-reviewed-v1')!=(self.config.get('execution_id') or 'direct-reviewed-v1'):
                     raise ContractError('development baseline execution differs from autonomous execution')
                 rows.append({'dataset':dataset,'seed':seed,'metrics':result['metrics']})
+                execution_evidence.append(protocol_summary(cfg,result,manifest))
         ledger=Store(self.study/'memory')
         try:budget=ledger.budget()
         finally:ledger.close()
@@ -263,7 +265,8 @@ class AmazonAutoresearch:
             diagnostics.update(activation_context(self,base,cfg))
         return {**diagnostics,'task_id':self.config['task_id'],'model_version':base,'protocol_hash':cfg['protocol_hash'],
             'protocol':cfg['protocol'],'seeds':cfg['development_seeds']+cfg['confirmation_seeds'],
-            'development_baseline':rows,'history':history,'research_memory':research_memory,'prior_execution_failures':failures,'budget':budget,
+            'development_baseline':rows,'baseline_execution_evidence':execution_evidence,
+            'history':history,'research_memory':research_memory,'prior_execution_failures':failures,'budget':budget,
             'bindings':{'proposal_id':pid,'candidate_model_version':pid+'-model','base_model_id':base,
                         'controls':[base],'train_protocol_hash':cfg['protocol_hash'],
                         'seeds':cfg['development_seeds']+cfg['confirmation_seeds']},

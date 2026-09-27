@@ -166,7 +166,10 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
     def test_development_history_reaches_reviewers_without_extra_roles(self):
         self.run_pipeline(False,history=True)
 
-    def run_pipeline(self,confirmation,measurement=False,legacy_measurement=False,history=False):
+    def test_confirmation_comparator_interruption_resumes_without_new_roles(self):
+        self.run_pipeline(True,interrupt_control=True)
+
+    def run_pipeline(self,confirmation,measurement=False,legacy_measurement=False,history=False,interrupt_control=False):
         import json
         from contextlib import ExitStack
         from rec_harness.autonomous import autoresearch
@@ -196,7 +199,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             if history:
                 config['history_diagnostic']=True
                 history_call=stack.enter_context(patch('rec_harness.adapters.amazon_history_context.development_history',return_value={'report_hash':'development-slices','rows':[]}))
-            write_json(root/'config.json',config);campaign=root/'campaign';calls=[];fits=[]
+            write_json(root/'config.json',config);campaign=root/'campaign';calls=[];fits=[];control_fits=[]
             self_test=self
             class Agent:
                 def run(self,role,context,target):
@@ -234,6 +237,15 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                 self.assertEqual(execution_id,'execution-test')
                 marker=Path(root)/(partition+'-trained.json')
                 if not marker.exists():fits.append(partition);write_json(marker,{'completed':True})
+            def controls(root,model_versions,seeds,execution_id=None):
+                self.assertEqual(execution_id,'execution-test')
+                self.assertEqual(model_versions,['legacy_incumbent']);self.assertEqual(seeds,[17,83])
+                self.assertEqual(calls[-1],'knowledge')
+                self.assertTrue((campaign/'rounds/round-1/private-confirmation-started.json').exists())
+                marker=Path(root)/'confirmation-controls.json'
+                if not marker.exists():
+                    control_fits.append(model_versions);write_json(marker,{'completed':True})
+                    if interrupt_control:raise KeyboardInterrupt()
             def graph(root,pid):
                 s=Store(Path(root)/'memory');g={'task_id':'graph-task','protocol_hash':'protocol','graph_version':s.version,'nodes':[],'edges':[]};s.close()
                 write_json(Path(root)/'research-readouts'/(pid+'-graph.json'),g);return g
@@ -245,6 +257,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             stack.enter_context(patch('rec_harness.adapters.amazon_admission.run_training_smoke',
                 side_effect=lambda python,source,directory,recipe,artifacts,registry:{'status':'success','report_ref':artifacts.put(source['path'])}))
             stack.enter_context(patch('rec_harness.adapters.amazon_autonomous.run_phase',side_effect=phase))
+            control_run=stack.enter_context(patch('rec_harness.adapters.amazon_autonomous.run_study',side_effect=controls))
             stack.enter_context(patch('rec_harness.adapters.amazon_autonomous.ingest_development',side_effect=graph))
             for module in ['amazon_autonomous','amazon_cycle']:
                 stack.enter_context(patch('rec_harness.adapters.'+module+'.development_readout',return_value=report))
@@ -253,11 +266,16 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             self.assertEqual(fits,['development']);self.assertEqual(calls,['evidence']+(['measurement'] if measurement else [])+['hypothesis','experiment'])
             self.assertEqual(resolver.call_args.args[1],'execution-test')
             with patch.object(AmazonAutoresearch,'_rescore',return_value=[]):
+                if interrupt_control:
+                    with self.assertRaises(KeyboardInterrupt):autoresearch(campaign,agent=Agent())
+                    self.assertEqual(fits,['development'])
                 result=autoresearch(campaign,agent=Agent())
                 again=autoresearch(campaign,agent=Agent())
             expected_roles=7 if measurement else 6
             self.assertEqual(fits,['development','confirmation'] if confirmation else ['development']);self.assertEqual(len(calls),expected_roles)
             self.assertEqual(result,again);self.assertEqual(result['state']['round'],1)
+            self.assertEqual(control_fits,[['legacy_incumbent']] if confirmation else [])
+            self.assertEqual(control_run.call_count,2 if interrupt_control else int(confirmation))
             if history:history_call.assert_called_once()
             self.assertEqual(result['role_calls']['charged_or_reserved'],expected_roles)
             self.assertEqual((campaign/'rounds/round-1/private-confirmation.json').exists(),confirmation)

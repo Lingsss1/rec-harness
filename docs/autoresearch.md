@@ -32,13 +32,13 @@ python3 -m rec_harness autoresearch /path/to/amazon-campaign --config examples/a
 python3 -m rec_harness autoresearch /path/to/amazon-campaign
 ```
 
-控制器自动冻结研究提案、注册候选、检查模型源码、运行 CPU 数值契约及隔离的三步合成梯度检查，再调度完整开发集训练和独立 CPU 复评分。梯度检查要求学习后仍满足因果性、padding、尾部表示读出，以及 forward 与编码表示一致性；它不改变真实训练的优化器、协议或 checkpoint。只有通过开发集门槛并获 lead 保留建议才释放确认 seed。确认结果只在主机侧判定晋升，不发送至 Codex。当前确认仍使用相同验证用户的新初始化，不是最终测试。
+控制器自动冻结研究提案、注册候选、检查模型源码、运行 CPU 数值契约及隔离的三步合成梯度检查，再调度完整开发集训练和独立 CPU 复评分。梯度检查要求学习后仍满足因果性、padding、尾部表示读出，以及 forward 与编码表示一致性；它不改变真实训练的优化器、协议或 checkpoint。只有通过开发集门槛并获 lead 保留建议才释放确认 seed。新任务只需先完成开发 seed 的 incumbent 对照；释放后，控制器按同一 execution_id 运行或复用对照确认训练并独立复评分，再运行候选确认阶段，不为淘汰的候选提前训练确认对照。确认结果只在主机侧判定晋升，不发送至 Codex。当前确认仍使用相同验证用户的新初始化，不是最终测试。
 
 源码修改范围是 `NextItNetModel` / `NextItNetBlock` 内已声明方法，允许的张量算子和模块可在 `model_source_contract.py` 查看。训练、数据处理、导入和方法签名冻结。新增模型结构不需要修改逐候选字符串模板；超出能力范围的代码被拒绝。这个受限源码契约不是任意 Python 的安全证明。Amazon 配置可通过 `execution_id` 绑定已注册的冻结隔离运行环境；基线、候选和确认阶段必须使用相同执行版本。未指定时仍沿用 reviewed-source 路径。隔离路径已通过实际基线训练与独立复评分，不代表任意 GPU 代码或驱动层安全证明。
 
 每轮复用已审计 incumbent 作为唯一配对对照。另设机制消融仍需扩展适配器；不能据此声称已完成任意多对照研究。角色调用上限和 study GPU 秒分别计账；失败计费、历史成本接续及每个训练任务的预算检查保持生效。`minimum_round_gpu_seconds` 是启动下限，不是整轮成本预测；每个提案仍受自己的冻结预算和 study 总预算限制。
 
-Amazon 角色有终态响应时恢复会复用，候选源码和上下文有哈希绑定；不合法响应最多尝试两次。已完成训练由 study 的审计与恢复机制复用；不完整 CPU 复评分另存后重试。失败轮写入 `failure.json` 并继续下一轮。已选中的 candidate 成为下一轮 incumbent。下一轮同时获得此前设计、开发集决策与 provisional knowledge；确认结果和确认阶段失败详情始终保留在主机侧。
+Amazon 角色有终态响应时恢复会复用，候选源码和上下文有哈希绑定；成功传输但不合法的响应最多尝试两次；传输失败立即停止，普通恢复不自动重发。已完成训练由 study 的审计与恢复机制复用；存在冻结计划的 CPU 复评分按原收据恢复，不移走目录后重复推理。失败轮写入 `failure.json` 并继续下一轮。已选中的 candidate 成为下一轮 incumbent。下一轮同时获得此前设计、开发集决策与 provisional knowledge；确认结果和确认阶段失败详情始终保留在主机侧。
 
 Amazon 也支持下述 `diagnostic_registry` 与 `measurement_requirements`。诊断只接收已审计开发 seed 的品类聚合指标，包含 dataset 标签；不传入原始交互、checkpoint 或确认结果。启用工具时须指定独立 `diagnostic_budget`，费用记录在 diagnostic-budget，不能混算为 Codex 调用次数。必需测量缺失会生成 MeasurementGap，以 measurement_required 停止，保留 incumbent；此时不会生成模型提案或启动训练。工具外循环的 measurement_source 可直接引用该 Amazon campaign。新研究回合可冻结晋升后的工具并复测；项目总调度可自动创建 Amazon 后继回合，继续使用同一冻结 study 和共享 GPU 账本。
 

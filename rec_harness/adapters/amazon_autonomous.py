@@ -18,6 +18,7 @@ from .amazon_report import audit_job
 from .amazon_plan import register_plan
 from .amazon_admission import admit_plan
 from .amazon_phases import run_phase
+from .amazon_study import run_study
 from .amazon_selection import development_readout,release_confirmation
 from .amazon_research_graph import ingest_development
 from .amazon_cycle import finalize_cycle
@@ -320,6 +321,11 @@ class AmazonAutoresearch:
         if report['summary']['eligible_for_confirmation'] and lead['selection']=='keep':
             write_json(folder/'private-confirmation-started.json',{'scope':'host-only phase boundary; excludes later failures from agent context'})
             release_confirmation(self.study,pid,lead,report['hash'])
+            # Comparators need not consume confirmation resources for rejected
+            # development candidates. Existing matching receipts are reused.
+            run_study(self.study,model_versions=[binding['base_model_id']],
+                      seeds=cfg['confirmation_seeds'],execution_id=self.config.get('execution_id'))
+            self._rescore(folder,binding['base_model_id'],cfg['confirmation_seeds'])
             run_phase(self.study,pid,'confirmation',execution_id=self.config.get('execution_id'))
             self._rescore(folder,binding['candidate_model_version'],cfg['confirmation_seeds'])
             cfg=load_config(self.study);effects={}

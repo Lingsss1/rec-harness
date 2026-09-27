@@ -330,6 +330,8 @@ python -m rec_harness amazon-review-development REVIEW_ROOT PROPOSAL_ID ORIGINAL
 
 配置使用自主研究字段，绑定恢复后的 study 与 execution_id；role_call_limit 必须覆盖原控制器已计调用及预计三次新评审。入口核验原 evidence/hypothesis/experiment（及已有 measurement）的接受标记、已提交角色事件和 CAS 来源，保存原调用的 reuse.json，不把复用伪装成新调用。原全部已计调用成本一次继承。完整开发矩阵及独立评分核验后，按正常流程运行 evaluation、lead、knowledge，并原子提交知识补丁和研究周期。该入口不生成新方案、不训练、不自动释放确认阶段；即使评审建议 keep，也仍需独立的主机确认释放门槛。恢复前后结果、来源控制器事件头或执行绑定变化会拒绝复用。
 
+评审入口将配置冻结为 review_only；普通 autoresearch 训练循环拒绝这种控制器。评审可以核验旧执行归档，训练仍要求当前实现与注册执行版本一致。独立评分恢复使用收据记录的原源码包路径，在核验全部 Python 文件的清单与哈希后，以原评分解释器重新核验，且显式禁止启动新推理。移动或丢失原源码包需要先恢复归档；不能因新目录内文件字节相同而静默改写收据中的路径绑定。
+
 `amazon-run-phase` 先检查所有候选已准入、源码匹配，并审计既有基准/对照在该阶段的全部配对
 结果；执行版本不一致时拒绝复用。只调度新模型版本，因此既有基准兼对照不会
 重复训练。使用 confirmation 参数仍须先通过冻结选择释放；入口不会自动解锁。

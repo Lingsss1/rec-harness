@@ -45,7 +45,8 @@ def init_study(root, project, *, budget=14400, predecessor=None, continuation_re
         'protocol': {'epochs': 200, 'batches': 200, 'eval_users': 1000, 'eval_seed': 20260923, 'patience': 20, 'eval_every': 5,
                      'metric': 'HR@10', 'aggregation': 'unweighted_mean_four_categories', 'minimum_effect': 0.005,
                      'checkpoint_selection': 'public_validation_only', 'ranking': 'positive_plus_99_unique_negatives',
-                     'loss': 'numerically_stable_pairwise_BPR', 'cudnn_deterministic': False, 'initialization': 'independent_per_category_and_seed'},
+                     'loss': 'numerically_stable_pairwise_BPR', 'cudnn_deterministic': False, 'cuda_matmul_allow_tf32': False,
+                     'cudnn_allow_tf32': False, 'initialization': 'independent_per_category_and_seed'},
         'budget_gpu_seconds': budget, 'job_timeout_seconds': 1800, 'gpu_ids': gpu_ids,
         'trusted_baselines_only': True, 'hidden_evaluation': 'not_available_to_worker',
     }

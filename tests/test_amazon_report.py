@@ -14,6 +14,20 @@ class PairedReportTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, 'failed-tiny-42: unsuccessful process'):
             audit_job(self.root, self.config, 'failed', 'tiny', 42)
 
+    def test_frozen_precision_requires_matching_explicit_receipt(self):
+        directory = self.root / 'jobs/legacy_incumbent-tiny-42'
+        for key in ('cuda_matmul_allow_tf32', 'cudnn_allow_tf32'):
+            self.config['protocol'][key] = False
+            manifest = read_json(directory / 'manifest.json')
+            for value in (None, True, 0):
+                manifest[key] = value
+                write_json(directory / 'manifest.json', manifest)
+                with self.assertRaisesRegex(ContractError, f'precision setting {key}'):
+                    audit_job(self.root, self.config, 'legacy_incumbent', 'tiny', 42)
+            manifest[key] = False
+            write_json(directory / 'manifest.json', manifest)
+            audit_job(self.root, self.config, 'legacy_incumbent', 'tiny', 42)
+
     def test_pair_cannot_mix_execution_versions(self):
         directory = self.root / 'jobs/legacy_incumbent-tiny-42'
         result = read_json(directory / 'completed.json')

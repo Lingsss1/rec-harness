@@ -155,6 +155,7 @@ def main():
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = False  # Match project baseline; record statistical, not bitwise reproducibility.
     torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False  # Preserve FP32 convolution ranking for independent CPU rescore.
     if not torch.cuda.is_available():
         raise RuntimeError('GPU required for Amazon comparison')
     device = torch.device('cuda:0')
@@ -169,7 +170,8 @@ def main():
     metadata = {'dataset': args.dataset, 'seed': args.seed, 'source_hash': sha(args.source), 'worker_hash': sha(__file__),
                 'data_hashes': {'train': sha(train_path), 'validation': sha(valid_path)}, 'candidates_hash': sha(output / 'validation_candidates.json'),
                 'protocol': vars(args), 'hyperparameters': hyperparameters, 'torch': torch.__version__,
-                'device': torch.cuda.get_device_name(), 'cudnn_deterministic': False, 'itemnum': itemnum, 'n_users': len(train), 'initialization': 'fresh'}
+                'device': torch.cuda.get_device_name(), 'cuda_matmul_allow_tf32': torch.backends.cuda.matmul.allow_tf32,
+                'cudnn_allow_tf32': torch.backends.cudnn.allow_tf32, 'cudnn_deterministic': False, 'itemnum': itemnum, 'n_users': len(train), 'initialization': 'fresh'}
     dump(output / 'manifest.json', metadata)
     model = module.NextItNetModel(itemnum, hidden_units=module.HIDDEN_UNITS, num_blocks=module.NUM_BLOCKS,
                                   kernel_size=module.KERNEL_SIZE, dropout_rate=module.DROPOUT_RATE, maxlen=module.MAXLEN).to(device)

@@ -43,6 +43,9 @@ def audit_job(root, config, model_version, dataset, seed):
         require(manifest['protocol'][key] == config['protocol'][key], f'protocol {key}')
     require(manifest['initialization'] == 'fresh', 'initialization')
     require(manifest['cudnn_deterministic'] == config['protocol']['cudnn_deterministic'], 'determinism setting')
+    for key in ('cuda_matmul_allow_tf32', 'cudnn_allow_tf32'):
+        if key in config['protocol']:
+            require(type(manifest.get(key)) is bool and manifest[key] == config['protocol'][key], f'precision setting {key}')
     require(checks['causal_prefix'] is True and checks['tail_readout'] is True, 'model correctness')
     require(ranks['user_ids'] == [r['user_id'] for r in candidates], 'rank user alignment')
     require(len(ranks['ranks']) == len(candidates) > 0, 'rank count')

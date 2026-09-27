@@ -228,6 +228,7 @@ class AmazonAutoresearch:
         cfg=load_config(self.study);base=state['incumbent'];rows=[];execution_evidence=[];baseline_identities={}
         controls=list(dict.fromkeys([base,*self.config.get('control_model_ids',[])]))
         from .amazon_review_evidence import protocol_summary
+        from .amazon_training_evidence import training_contract_evidence
         for dataset in cfg['datasets']:
             for seed in cfg['development_seeds']:
                 result,manifest=audit_job(self.study,cfg,base,dataset,seed)
@@ -236,7 +237,8 @@ class AmazonAutoresearch:
                 rows.append({'dataset':dataset,'seed':seed,'metrics':result['metrics']})
                 if len(controls)>1:
                     baseline_identities[(dataset,seed)]=(manifest['candidates_hash'],manifest['data_hashes'])
-                execution_evidence.append(protocol_summary(cfg,result,manifest))
+                execution_evidence.append({**protocol_summary(cfg,result,manifest),
+                    'training_contract':training_contract_evidence(self.study,cfg,base,dataset,seed,result)})
         ledger=Store(self.study/'memory')
         try:budget=ledger.budget()
         finally:ledger.close()
@@ -254,7 +256,8 @@ class AmazonAutoresearch:
                     if (manifest['candidates_hash'],manifest['data_hashes'])!=baseline_identities[(dataset,seed)]:
                         raise ContractError('development control evaluation identity differs from baseline')
                     control_rows.append({'model_version':version,'dataset':dataset,'seed':seed,'metrics':result['metrics']})
-                    control_execution.append({**protocol_summary(cfg,result,manifest),'model_version':version})
+                    control_execution.append({**protocol_summary(cfg,result,manifest),'model_version':version,
+                        'training_contract':training_contract_evidence(self.study,cfg,version,dataset,seed,result)})
         history=[];research_memory=[]
         for pack in self.config.get('development_memory',[]):
             validate_memory(pack,cfg['protocol_hash'],cfg['development_seeds']);research_memory.extend(pack['entries'])
@@ -422,6 +425,7 @@ class AmazonAutoresearch:
             graph=attach_history(self,folder,graph,context['baseline_history'])
             write_json(graph_path,graph)
         from .amazon_review_evidence import admission_evidence,protocol_summary
+        from .amazon_training_evidence import training_contract_evidence
         implementation=admission_evidence(self.study,pid,cfg['protocol_hash'],binding['candidate_model_version'],candidate)
         execution_evidence=[]
         for dataset in cfg['datasets']:
@@ -429,6 +433,7 @@ class AmazonAutoresearch:
                 result,manifest=audit_job(self.study,cfg,binding['candidate_model_version'],dataset,seed)
                 execution_evidence.append({**protocol_summary(cfg,result,manifest),
                     'model_version':binding['candidate_model_version'],
+                    'training_contract':training_contract_evidence(self.study,cfg,binding['candidate_model_version'],dataset,seed,result),
                     'source_sha256':cfg['model_versions'][binding['candidate_model_version']]['sha256']})
         generated_evidence=[]
         for control in context.get('generated_controls',[]):
@@ -439,7 +444,8 @@ class AmazonAutoresearch:
                 for seed in cfg['development_seeds']:
                     result,manifest=audit_job(self.study,cfg,version,dataset,seed)
                     control_execution.append({**protocol_summary(cfg,result,manifest),
-                        'model_version':version,'source_sha256':source['sha256']})
+                        'model_version':version,'source_sha256':source['sha256'],
+                        'training_contract':training_contract_evidence(self.study,cfg,version,dataset,seed,result)})
             generated_evidence.append({'model_version':version,'implementation_evidence':admitted,
                                        'execution_evidence':control_execution})
         review={**context,'model_version':binding['candidate_model_version'],
@@ -449,7 +455,7 @@ class AmazonAutoresearch:
                 'handoff':{'cards':cards,'versions':versions},'development':report,
                 'instructions':['Evaluate the actual complete development readout. Include its exact hash in evidence_refs: '+report['hash'],
                                 'implementation_evidence reports host-verified admission checks; its report hashes are references, not files available in your workspace. When structural_changes is supplied, compare its actual changed methods and assigned fields with the proposal insertion contract; AST evidence does not prove that semantic contract. tensor_graph summarizes verified executed tensor paths; unavailable means no recorded coverage. Never infer unexecuted branch coverage or causal isolation from operator counts. sequence_semantics reports finite input-immutability and per-user batch-independence probes, not proof of the proposal-specific mechanism. Distinguish these checks from missing scientific evidence. Evaluation has no source file; lead receives candidate source separately.',
-                                'candidate_execution_evidence summarizes audited completed development training under the frozen worker and protocol. Use verified fields to assess actual execution settings, rather than local model helper defaults. It does not prove a causal mechanism or expose confirmation results.',
+                                'candidate_execution_evidence summarizes audited completed development training under the frozen worker and protocol. Use verified fields to assess actual execution settings, rather than local model helper defaults. training_contract distinguishes fresh pre-training probes from probes bound to the selected trained development checkpoint; unavailable means no archived gates. These are synthetic checks, not held-out recommendation quality. It does not prove a causal mechanism or expose confirmation results.',
                                 'Keep only if eligible_for_confirmation is true. No confirmation results are supplied; conclusion unknown/provisional.']}
         if generated_evidence:
             review['generated_control_evidence']=generated_evidence

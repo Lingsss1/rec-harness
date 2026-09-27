@@ -648,3 +648,12 @@ Amazon autonomous 配置新增可选 `execution_id`，初始化时解析已注�
 新 CPU 准入和隔离探针要求两个输入条件的检查都显式成功；评审只接收白名单摘要，历史缺项为 unavailable。反例测试覆盖只在序列前部混用其他用户而保持尾部不变的候选，以及编码后改写输入 token 的候选。它不以形状正确替代用户独立性，也不把有限探针当作所有输入或提案机制的证明。
 
 `sequence-semantics-acceptance-v1/acceptance.json` 对真实基线、门控候选、全局门控对照的 fresh 模型，以及第二 GELU 候选的一个既有开发 checkpoint 完成四次 CPU 门控，全部通过。没有新增训练或 Codex 调用，未读取最终测试数据或改变旧 campaign。四份合同报告绑定各自源码、inspector 和 checkpoint（适用时）。
+
+
+### 训练前后合同的开发证据交接
+
+`training_contract_evidence` 接收已经由 `audit_job` 核验的开发收据，进一步核对 pre/post 报告 hash、实际作业标识、源码以及 post checkpoint 绑定。摘要分别标记 fresh initialization 与 trained development checkpoint，附对应原因果/评分/梯度检查、操作图覆盖和序列语义检查。确认 seed 不允许进入此入口；没有历史 gate 的记录显式 unavailable，部分 gate 缺失或 checkpoint 错配拒绝。
+
+该摘要接入基线、已注册对照、候选及生成对照的开发执行证据，评审提示词区分准入探针和训练后探针。只发送白名单检查和报告摘要，不发送 checkpoint 文件、内部路径或逐用户数据。合同探针仍使用合成输入，不等于模型质量或机制证明。
+
+`training-contract-evidence-acceptance-v1/acceptance.json` 对七组已完成真实执行记录进行只读投影：v3 合成基线/候选/对照三组，以及真实 Amazon 第二 GELU 候选四类开发条件四组。14 份训练前后报告均与对应收据和源码/checkpoint 绑定。新增调用、训练及推理均为零；本次没有使历史角色重新消费新增字段。

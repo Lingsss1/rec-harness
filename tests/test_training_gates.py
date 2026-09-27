@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from rec_harness.adapters.amazon_study import execute_job
 from rec_harness.adapters.contract_gate import run_gate
-from rec_harness.core import file_hash, write_json
+from rec_harness.core import file_hash, write_json, digest
 
 
 class TrainingGateTests(unittest.TestCase):
@@ -73,6 +73,26 @@ class TrainingGateTests(unittest.TestCase):
             result=execute_job(self.config,self.root,'model','sample',42,0)
         self.assertEqual(result['status'],'success');self.assertEqual(runner.call_count,1)
         self.assertEqual(result['execution_id'],'frozen-execution')
+
+    def test_current_gate_rejects_missing_or_invalid_graph_even_with_valid_report_hash(self):
+        from test_tensor_graph import report_fixture
+        source=self.config['model_versions']['model']
+        for variant in ['missing','invalid','valid']:
+            def child(argv,cwd,directory,**kwargs):
+                report=report_fixture();report['model_id']='model';report['source_hash']=source['sha256']
+                graph=report['tensor_graph'];graph.update(model_id='model',source_hash=source['sha256'])
+                if variant=='invalid':graph['operations'][0]['inputs']=['missing-tensor']
+                graph['hash']=digest({k:v for k,v in graph.items() if k!='hash'})
+                if variant=='missing':report.pop('tensor_graph')
+                report.update(inspector_hash=file_hash(argv[1]),checks={k:True for k in
+                    ['causal_input_gradient','tail_readout','empty_history_finite','padding_gradient_zero']})
+                report['hash']=digest(report)
+                write_json(Path(argv[argv.index('--output')+1]),report)
+                return {'status':'success'}
+            with self.subTest(variant=variant),patch('rec_harness.adapters.contract_gate.run_process',side_effect=child):
+                result=run_gate('unused',source,'model',self.root/variant,{},30)
+            self.assertEqual(result['status'],'success' if variant=='valid' else 'invalid')
+            if variant=='valid':self.assertEqual(result['tensor_graph']['operation_count'],1)
 
     def test_relative_gate_paths_survive_child_working_directory_change(self):
         relative=Path(os.path.relpath(self.root,Path.cwd()))

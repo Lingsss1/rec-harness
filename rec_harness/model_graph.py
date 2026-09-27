@@ -38,6 +38,23 @@ def validate_tensor_graph(graph, model_id, source_hash):
     return tensors
 
 
+def tensor_graph_summary(report, model_id, source_hash, *, required=False):
+    graph=report.get('tensor_graph')
+    if graph is None:
+        if required:raise ContractError('tensor graph required by current inspector')
+        return {'status':'unavailable','scope':'Historical probe did not record tensor operations; no coverage inferred.'}
+    if report.get('model_id')!=model_id or report.get('source_hash')!=source_hash:
+        raise ContractError('tensor graph report model identity differs')
+    tensors=validate_tensor_graph(graph,model_id,source_hash)
+    counts={}
+    for op in graph['operations']:counts[op['operator']]=counts.get(op['operator'],0)+1
+    return {'status':'verified','graph_hash':graph['hash'],'model_version':model_id,'source_sha256':source_hash,
+        'operation_count':len(graph['operations']),'operator_counts':dict(sorted(counts.items())),
+        'mutation_operation_count':sum(bool(op['written_storages']) for op in graph['operations']),
+        'output_metadata':[tensors[ref]['metadata'] for ref in graph['outputs']],
+        'scope':graph['scope']}
+
+
 def register_contract(store, report_path, task_id, protocol_hash, *, checkpoint_path=None):
     report = read_json(report_path)
     if digest({k: v for k, v in report.items() if k != 'hash'}) != report['hash']:

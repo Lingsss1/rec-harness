@@ -29,9 +29,9 @@ class ReviewEvidenceTests(unittest.TestCase):
             manifest[key]=False
             self.assertIs(protocol_summary(config,result,manifest)['protocol'][key],False)
 
-    def fixture(self,root,**changes):
+    def fixture(self,root,probe_content=None,**changes):
         source=root/'model.py';source.write_text('synthetic model')
-        probe=root/'probe.json';write_json(probe,{'checks':'synthetic','private_path':'DO_NOT_SEND'})
+        probe=root/'probe.json';write_json(probe,probe_content or {'checks':'synthetic','private_path':'DO_NOT_SEND'})
         artifacts=Artifacts(root/'artifacts/objects')
         source_ref=artifacts.put(source);probe_ref=artifacts.put(probe)
         record={'proposal_id':'p','protocol_hash':'protocol','source_contract':{'contract':'model-v1'},
@@ -51,6 +51,25 @@ class ReviewEvidenceTests(unittest.TestCase):
             self.assertNotIn(tmp,str(first));self.assertNotIn('DO_NOT_SEND',str(first))
             source.write_text('modified candidate')
             with self.assertRaisesRegex(ContractError,'differs from admitted'):
+                admission_evidence(root,'p','protocol','candidate',source)
+
+    def test_tensor_graph_projection_comes_from_admitted_probe(self):
+        import hashlib
+        from test_tensor_graph import report_fixture
+        from rec_harness.core import digest
+        report=report_fixture();sha=hashlib.sha256(b'synthetic model').hexdigest()
+        report['source_hash']=sha;report['tensor_graph']['source_hash']=sha
+        graph=report['tensor_graph'];graph['hash']=digest({k:v for k,v in graph.items() if k!='hash'})
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);source,_=self.fixture(root,probe_content=report)
+            summary=admission_evidence(root,'p','protocol','candidate',source)['tensor_graph']
+            self.assertEqual(summary['graph_hash'],graph['hash'])
+            self.assertEqual(summary['source_sha256'],sha)
+            self.assertEqual(summary['operation_count'],1)
+        report['model_id']='different-model'
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);source,_=self.fixture(root,probe_content=report)
+            with self.assertRaisesRegex(ContractError,'model identity'):
                 admission_evidence(root,'p','protocol','candidate',source)
 
     def test_control_uses_its_own_source_contract(self):

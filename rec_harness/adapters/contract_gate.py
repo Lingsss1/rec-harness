@@ -38,6 +38,8 @@ def run_gate(python, source, model_id, directory, env, timeout, *, checkpoint=No
             checks = report['checks']
             if not all(checks.get(k) is True for k in ['causal_input_gradient', 'tail_readout', 'empty_history_finite', 'padding_gradient_zero']):
                 raise ContractError('gate checks incomplete')
+            from rec_harness.model_graph import tensor_graph_summary
+            result['tensor_graph']=tensor_graph_summary(report,model_id,source['sha256'],required=True)
             result['report_hash'] = report['hash']
         except (OSError, ValueError, KeyError, TypeError, ContractError) as error:
             result.update(status='invalid', reason=str(error))

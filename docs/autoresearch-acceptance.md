@@ -630,3 +630,12 @@ Amazon autonomous 配置新增可选 `execution_id`，初始化时解析已注�
 `tensor-operation-graph-acceptance-v1/acceptance.json` 完成三份真实保留源码的合成 CPU 验收：基线 161 个操作/20 类算子、门控候选 168/26、全局门控对照 163/22，原模块调用各 68 个。cumsum、padding、where 和残差加法均已覆盖；三份图入库及幂等注册通过。新增 3 次合成 CPU 探针，没有训练、Codex 或业务数据评估。
 
 范围是给定输入和执行模式下的已执行张量路径，不包含未执行分支、Python 标量/控制流及算子内部实现。因此不把此结果称为对所有输入的完整静态计算图，也不自动批准跨模型插入或证明语义合同。
+
+
+### 操作图门控与角色可见摘要
+
+当前 CPU 合同门控与隔离探针要求新报告包含有效操作图，核验外层模型/源码身份、内层图 hash、输入生产者、输出绑定和存储修改依赖。哈希正确但缺图或依赖引用错误的报告仍判 invalid。历史报告在评审投影中明确为 unavailable；不补造旧覆盖结果。
+
+候选及生成对照的 `implementation_evidence.tensor_graph` 由各自准入报告投影，包含图 hash、源码/模型身份、算子计数、原地修改次数、输出元数据与原覆盖范围。不发送张量值。提示词要求区分已执行路径与未执行分支，算子数量不证明机制。
+
+`tensor-graph-gate-acceptance-v1/acceptance.json` 完成真实 CPU 准入；其 `public-evidence.json` 验证角色摘要辅助函数与门控收据完全一致。`tensor-graph-isolated-acceptance-v1/acceptance.json` 完成同一真实候选在独立 UID/chroot/seccomp 下的 CPU 探针，均记录 168 个操作。隔离探针输出仍标为 untrusted，不能仅凭进程隔离或自报图通过来认定候选准入。新增两次合成 CPU 探针，无训练、Codex 调用或业务数据评价；本次没有让真实角色重新读取摘要。

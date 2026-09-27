@@ -1,7 +1,7 @@
 """Public, event-bound implementation checks for development reviewers."""
 from pathlib import Path
 
-from rec_harness.core import Artifacts,ContractError,digest,file_hash
+from rec_harness.core import Artifacts,ContractError,digest,file_hash,read_json
 from rec_harness.store import Store
 
 
@@ -53,7 +53,9 @@ def admission_evidence(study,proposal_id,protocol_hash,candidate_id,candidate_pa
     source=artifacts.verify(item['source_ref'])
     if file_hash(source)!=file_hash(candidate_path) or file_hash(source)!=item['source']['sha256']:
         raise ContractError('reviewer candidate differs from admitted source')
-    artifacts.verify(item['probe_ref'])
+    probe=read_json(artifacts.verify(item['probe_ref']))
+    from rec_harness.model_graph import tensor_graph_summary
+    graph_summary=tensor_graph_summary(probe,candidate_id,item['source']['sha256'])
     gate=item['gate']
     if gate['status']!='success':raise ContractError('reviewer numerical admission failed')
     smoke=item.get('training_smoke')
@@ -66,6 +68,7 @@ def admission_evidence(study,proposal_id,protocol_hash,candidate_id,candidate_pa
             'admission_hash':digest(record),'study_event_head':integrity['head'],
             'source_contract':source_review['contract'],
             'numerical_contract':{'status':gate['status'],'report_sha256':item['probe_ref']['sha256']},
+            'tensor_graph':graph_summary,
             'training_smoke':({'status':smoke['status'],'report_sha256':smoke['report_ref']['sha256']} if smoke else {'status':'unavailable'}),
             'scope':'Host-verified source admission and synthetic CPU checks only. No proof of mechanism, recommendation benefit, training protocol overrides or final-test performance.'}
     if 'structural_changes' in source_review:

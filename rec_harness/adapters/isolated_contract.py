@@ -49,6 +49,8 @@ def run_isolated_contract(python, source, model_id, directory, recipe, artifacts
             if report.get('hash') != digest({k: v for k, v in report.items() if k != 'hash'}) or any(
                     report.get(k) != request[k] for k in ('source_hash', 'inspector_hash', 'model_id')):
                 raise ContractError('CPU probe report identity mismatch')
+            from rec_harness.model_graph import tensor_graph_summary
+            receipt['tensor_graph']=tensor_graph_summary(report,model_id,source['sha256'],required=True)
             receipt['report_hash'] = report['hash']
         except (OSError, ValueError, TypeError, KeyError, ContractError) as error:
             receipt.update(status='invalid', reason=str(error))

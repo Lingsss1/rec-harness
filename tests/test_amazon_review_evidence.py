@@ -20,6 +20,14 @@ class ReviewEvidenceTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             protocol_summary(config,result,{**manifest,'protocol':{**protocol,'eval_users':200}})
         self.assertEqual(protocol_summary(config,result,{})['status'],'unavailable')
+        for key in ('cuda_matmul_allow_tf32','cudnn_allow_tf32'):
+            protocol[key]=False
+            for value in (None,True,0):
+                manifest[key]=value
+                with self.assertRaisesRegex(ContractError,'precision differs'):
+                    protocol_summary(config,result,manifest)
+            manifest[key]=False
+            self.assertIs(protocol_summary(config,result,manifest)['protocol'][key],False)
 
     def fixture(self,root,**changes):
         source=root/'model.py';source.write_text('synthetic model')

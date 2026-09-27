@@ -17,10 +17,16 @@ def protocol_summary(config,result,manifest):
     if result['worker_hash']!=manifest['worker_hash'] or result['worker_hash']!=config['worker_sha256']:
         raise ContractError('public execution worker differs')
     if manifest['initialization']!='fresh':raise ContractError('public initialization differs')
+    precision={}
+    for key in ('cuda_matmul_allow_tf32','cudnn_allow_tf32'):
+        if key in config['protocol']:
+            if type(manifest.get(key)) is not bool or manifest[key]!=config['protocol'][key]:
+                raise ContractError('public execution precision differs: '+key)
+            precision[key]=manifest[key]
     return {'status':'verified','dataset':result['dataset'],'seed':result['seed'],
             'execution_id':result.get('execution_id','direct-reviewed-v1'),
             'worker_sha256':result['worker_hash'],'protocol_hash':config['protocol_hash'],
-            'protocol':{k:manifest['protocol'][k] for k in keys},'initialization':'fresh',
+            'protocol':{**{k:manifest['protocol'][k] for k in keys},**precision},'initialization':'fresh',
             'receipt_hash':digest(result),'manifest_hash':digest(manifest),
             'scope':'Host audit of completed development receipt and manifest, not candidate-source helper defaults. No claim of scientific confirmation or independent verification by the role.'}
 

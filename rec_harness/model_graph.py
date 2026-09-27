@@ -5,10 +5,45 @@ from .core import Artifacts, ContractError, digest, file_hash, read_json, safe_f
 from .runtime import node, edge
 
 
+def validate_tensor_graph(graph, model_id, source_hash):
+    if graph.get('schema')!='observed-tensor-graph-v1' or graph.get('model_id')!=model_id or graph.get('source_hash')!=source_hash:
+        raise ContractError('tensor graph identity mismatch')
+    if digest({k:v for k,v in graph.items() if k!='hash'})!=graph.get('hash'):
+        raise ContractError('tensor graph hash mismatch')
+    tensors={row['id']:row for row in graph['tensors']}
+    if len(tensors)!=len(graph['tensors']):raise ContractError('duplicate graph tensor')
+    seen=set();produced=set();writes={}
+    for ordinal,operation in enumerate(graph['operations']):
+        identity=operation['id']
+        if identity in seen or operation['ordinal']!=ordinal:raise ContractError('tensor graph operation order')
+        if not set(operation['mutation_dependencies'])<=seen:raise ContractError('tensor graph forward mutation dependency')
+        for ref in operation['inputs']:
+            if ref not in tensors or tensors[ref]['producer'] is not None and tensors[ref]['producer'] not in seen:
+                raise ContractError('tensor graph unresolved input producer')
+        input_storages={tensors[ref]['storage'] for ref in operation['inputs']}
+        expected={writes[key] for key in input_storages if key in writes}
+        if set(operation['mutation_dependencies'])!=expected:
+            raise ContractError('tensor graph storage mutation dependencies differ')
+        if not set(operation['written_storages'])<=input_storages:
+            raise ContractError('tensor graph mutates unknown input storage')
+        for ref in operation['outputs']:
+            if ref not in tensors or ref in produced or tensors[ref]['producer']!=identity:
+                raise ContractError('tensor graph output producer differs')
+            produced.add(ref)
+        seen.add(identity)
+        for key in operation['written_storages']:writes[key]=identity
+    if produced!={ref for ref,row in tensors.items() if row['producer'] is not None}:
+        raise ContractError('tensor graph unbound output')
+    if not graph['outputs'] or not set(graph['outputs'])<=set(tensors):raise ContractError('tensor graph final outputs missing')
+    return tensors
+
+
 def register_contract(store, report_path, task_id, protocol_hash, *, checkpoint_path=None):
     report = read_json(report_path)
     if digest({k: v for k, v in report.items() if k != 'hash'}) != report['hash']:
         raise ContractError('model contract report hash mismatch')
+    tensor_graph=report.get('tensor_graph')
+    tensor_values=validate_tensor_graph(tensor_graph,report['model_id'],report['source_hash']) if tensor_graph is not None else {}
     checks = report['checks']
     if not all(checks.get(k) is True for k in ['causal_input_gradient', 'tail_readout', 'empty_history_finite', 'padding_gradient_zero']):
         raise ContractError('model correctness checks incomplete')
@@ -62,6 +97,27 @@ def register_contract(store, report_path, task_id, protocol_hash, *, checkpoint_
             relation = edge(relation_id, mapping[producer], component_id, 'FLOWS_TO', [observation_id], task_id, store.version + 1)
             relation['attrs']['measurement'] = 'direct_tensor_identity'
             edges.append(relation)
+    if tensor_graph is not None:
+        nodes[1]['attrs']['tensor_graph']={'hash':tensor_graph['hash'],'operations':len(tensor_graph['operations']),
+            'scope':tensor_graph['scope'],'report_ref':artifact}
+        operation_ids={op['id']:'component-'+digest([model_id,tensor_graph['hash'],op['id']])[:32]
+                       for op in tensor_graph['operations']}
+        for op in tensor_graph['operations']:
+            component_id=operation_ids[op['id']]
+            nodes.append(node(component_id,'Component',{'model_version':model_id,'source_hash':report['source_hash'],
+                'kind':'tensor_operation','operator':op['operator'],'ordinal':op['ordinal'],
+                'module_path':op['module_path'],'tensor_graph_hash':tensor_graph['hash'],
+                'input':[tensor_values[ref]['metadata'] for ref in op['inputs']],
+                'output':[tensor_values[ref]['metadata'] for ref in op['outputs']],
+                'shape_scope':report['input_protocol']},task_id,protocol_hash))
+            edges.append(edge(component_id+'-owner',model_id,component_id,'HAS_COMPONENT',[observation_id],task_id,store.version+1))
+            dependencies={tensor_values[ref]['producer'] for ref in op['inputs']} - {None}
+            dependencies.update(op['mutation_dependencies'])
+            for producer in sorted(dependencies):
+                relation=edge('flow-'+digest([operation_ids[producer],component_id])[:32],operation_ids[producer],component_id,
+                    'FLOWS_TO',[observation_id],task_id,store.version+1)
+                relation['attrs']['measurement']='observed_tensor_operation_or_storage_mutation'
+                edges.append(relation)
     store.patch({'base_version': store.version, 'nodes': nodes, 'edges': edges})
     return {'model_id': model_id, 'observation_id': observation_id, 'components': len(calls), 'imported': True}
 

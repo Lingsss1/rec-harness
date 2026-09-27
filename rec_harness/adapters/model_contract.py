@@ -63,6 +63,71 @@ def trace_encode(model, sequence, model_id, source_hash):
             'dataflow_coverage': 'direct_tensor_identity_only; functional transforms and residual arithmetic are not fully traced'}
 
 
+def trace_operations(model, sequence, model_id, source_hash, *, max_operations=10000):
+    """Record dispatched tensor operations on one concrete encode execution."""
+    import torch
+    from torch.utils._python_dispatch import TorchDispatchMode
+    if type(max_operations) is not int or max_operations < 1:
+        raise ContractError('positive tensor graph operation limit required')
+    values, operations, identities, retained = [], [], {}, []
+    storage_ids, writes, module_stack, handles = {}, {}, [], []
+    def storage(value):
+        # Storage identity binds views without leaking process addresses into artifacts.
+        key=value.untyped_storage()._cdata
+        if key not in storage_ids:storage_ids[key]='storage-'+str(len(storage_ids))
+        return storage_ids[key]
+    def define(value, producer=None, name=None):
+        ref='tensor-'+str(len(values))
+        row={'id':ref,'metadata':tensor_metadata(value),'storage':storage(value),'producer':producer}
+        if name is not None:row['external_name']=name
+        values.append(row);identities[id(value)]=ref;retained.append(value)
+        return ref
+    def reference(value):
+        return identities.get(id(value)) or define(value,name='unregistered_external')
+    define(sequence,name='sequence')
+    for name,value in [*model.named_parameters(),*model.named_buffers()]:
+        if id(value) not in identities:define(value,name=name)
+    class Recorder(TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            kwargs=kwargs or {}
+            if len(operations)>=max_operations:raise ContractError('tensor graph operation limit exceeded')
+            inputs=list(tensors((args,kwargs)))
+            refs=[reference(value) for value in inputs]
+            dependencies=sorted({writes[storage(value)] for value in inputs if storage(value) in writes})
+            ordinal=len(operations)
+            operation_id='operation-'+digest([model_id,source_hash,ordinal,str(func)])[:32]
+            mutated=[]
+            for index,argument in enumerate(func._schema.arguments):
+                if argument.alias_info is not None and argument.alias_info.is_write:
+                    value=args[index] if index<len(args) else kwargs.get(argument.name)
+                    mutated.extend(storage(tensor) for tensor in tensors(value))
+            output=func(*args,**kwargs)
+            output_refs=[define(value,producer=operation_id) for value in tensors(output)]
+            operations.append({'id':operation_id,'ordinal':ordinal,'operator':str(func),
+                'module_path':module_stack[-1] if module_stack else '',
+                'inputs':refs,'outputs':output_refs,'mutation_dependencies':dependencies,
+                'written_storages':sorted(set(mutated))})
+            for key in mutated:writes[key]=operation_id
+            return output
+    def before(path):
+        def hook(module,args):module_stack.append(path)
+        return hook
+    def after(module,args,output):module_stack.pop()
+    for path,module in model.named_modules():
+        if path:handles.extend([module.register_forward_pre_hook(before(path)),module.register_forward_hook(after)])
+    try:
+        with torch.no_grad(), Recorder():
+            encoded=model.encode_sequence(sequence)
+        outputs=[reference(value) for value in tensors(encoded)]
+    finally:
+        for handle in handles:handle.remove()
+    result={'schema':'observed-tensor-graph-v1','model_id':model_id,'source_hash':source_hash,
+        'tensors':values,'operations':operations,'outputs':outputs,
+        'scope':'Dispatched tensor operations for this concrete encode_sequence input and execution mode. Includes functional and mutation dependencies; excludes unexecuted branches, Python scalar/control flow and operator internals. Not a universal static graph or semantic insertion proof.'}
+    result['hash']=digest(result)
+    return result
+
+
 def check_contract(model, *, itemnum, length=16):
     import torch
     from torch.nn import functional as F
@@ -181,6 +246,7 @@ def inspect_source(source, expected_hash, model_id, output, *, checkpoint=None, 
               'inspector_hash': file_hash(__file__),
               'torch_version': torch.__version__, 'input_protocol': {'itemnum': itemnum, 'length': length, 'batch': 2, 'seed': 20260923, 'cpu_threads': threads},
               'structure': trace_encode(model, sequence, model_id, expected_hash),
+              'tensor_graph': trace_operations(model, sequence, model_id, expected_hash),
               'checks': check_contract(model, itemnum=itemnum, length=length)}
     if checkpoint:
         if file_hash(checkpoint) != checkpoint_hash:

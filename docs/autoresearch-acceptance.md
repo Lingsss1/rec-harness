@@ -619,3 +619,14 @@ Amazon autonomous 配置新增可选 `execution_id`，初始化时解析已注�
 源码准入现在同时生成 `model-method-delta-v1`，记录整模块基线/候选 AST 哈希、变化方法的前后 AST 哈希以及 `self` 字段写入集合。新候选和每份新对照的差异分别随原子准入事件保存，评审上下文投影对应版本的记录。源码权限门控和数值检查保持独立；结构差异不证明方法机制或自然语言插入合同已经满足。
 
 `model-structural-evidence-acceptance-v1/acceptance.json` 对保留的真实源码进行只读核验：生成门控候选与全局门控对照均改变 `NextItNetModel.__init__` 和 `encode_sequence`，第二 GELU 候选仅改变 `NextItNetBlock.forward`。三个报告分别绑定完整源码及方法身份，没有修改历史准入、调用 Codex、训练或推理。回归覆盖注释不改变 AST 差异、实际方法与字段定位，以及候选和对照评审不能混用结构身份。
+
+
+### 张量操作与存储修改依赖图
+
+模型合同探针新增 `observed-tensor-graph-v1`：使用 PyTorch dispatcher 记录一次具体 `encode_sequence` 执行中的 tensor 操作、输入/输出形状及 dtype、参数/输入来源、模块路径和存储别名。原地操作按 dispatcher schema 标识写入，并将后续别名读取依赖于最近一次写入。报告不保存张量值、运行时地址或激活。
+
+注册时核验图 hash、模型/源码绑定、张量生产者、拓扑顺序和存储修改依赖，拒绝前向引用及遗漏的写依赖；操作作为 Component 注册，张量与修改依赖作为 FLOWS_TO 注册。操作图和原模块调用图同时保留。探针限制最多 10,000 个操作并在异常时移除临时 hooks；合同报告自动归档新图，不需增加 Codex 调用。
+
+`tensor-operation-graph-acceptance-v1/acceptance.json` 完成三份真实保留源码的合成 CPU 验收：基线 161 个操作/20 类算子、门控候选 168/26、全局门控对照 163/22，原模块调用各 68 个。cumsum、padding、where 和残差加法均已覆盖；三份图入库及幂等注册通过。新增 3 次合成 CPU 探针，没有训练、Codex 或业务数据评估。
+
+范围是给定输入和执行模式下的已执行张量路径，不包含未执行分支、Python 标量/控制流及算子内部实现。因此不把此结果称为对所有输入的完整静态计算图，也不自动批准跨模型插入或证明语义合同。

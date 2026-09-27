@@ -3,12 +3,12 @@ import unittest
 from pathlib import Path
 
 from rec_harness.core import ContractError, digest, file_hash, write_json
-from rec_harness.model_graph import compare_sites, register_contract
+from rec_harness.model_graph import compare_sites, register_contract, validate_tensor_graph
 from rec_harness.store import Store
 
 try:
     import torch
-    from rec_harness.adapters.model_contract import check_contract, trace_encode
+    from rec_harness.adapters.model_contract import check_contract, trace_encode, trace_operations
 except ImportError:
     torch = None
 
@@ -70,6 +70,7 @@ class ModelContractTests(unittest.TestCase):
                 code = Path(directory) / (label + '.py'); code.write_text('# unit fixture only\n')
                 report[label + '_filename'] = code.name
                 report[label + '_hash'] = file_hash(code)
+            report['tensor_graph']=trace_operations(self.model,torch.tensor([[1,2,3,4]]),'v1',report['source_hash'])
             report['hash'] = digest(report)
             path = Path(directory) / 'report.json'; write_json(path, report)
             store = Store(Path(directory) / 'memory')
@@ -77,7 +78,8 @@ class ModelContractTests(unittest.TestCase):
                 first = register_contract(store, path, 'task', 'protocol')
                 self.assertTrue(first['imported'])
                 self.assertFalse(register_contract(store, path, 'task', 'protocol')['imported'])
-                self.assertEqual(sum(n['type'] == 'Component' for n in store.snapshot()['nodes']), 3)
+                self.assertEqual(sum(n['type'] == 'Component' for n in store.snapshot()['nodes']), 3+len(report['tensor_graph']['operations']))
+                self.assertTrue(any(e['attrs'].get('measurement')=='observed_tensor_operation_or_storage_mutation' for e in store.snapshot()['edges']))
                 self.assertTrue(any(e['relation'] == 'FLOWS_TO' for e in store.snapshot()['edges']))
                 checkpoint = Path(directory) / 'checkpoint.pt'
                 torch.save(self.model.state_dict(), checkpoint)
@@ -96,6 +98,49 @@ class ModelContractTests(unittest.TestCase):
         mapping = compare_sites(report, report)
         self.assertTrue(all(c['observed_shape_compatible'] for c in mapping['correspondences']))
         self.assertFalse(any(c['automatic_insertion_allowed'] for c in mapping['correspondences']))
+
+    def test_tensor_graph_includes_functional_residual_and_alias_mutations(self):
+        class Functional(torch.nn.Module):
+            def encode_sequence(self, seq):
+                x=seq.float()
+                view=x[:, :]
+                view.add_(1)
+                return x + torch.nn.functional.pad(x.cumsum(1)[:, :-1], (1,0))
+        model=Functional();sequence=torch.tensor([[1,2,3,4]])
+        first=trace_operations(model,sequence,'v1','source')
+        self.assertEqual(first,trace_operations(model,sequence,'v1','source'))
+        ops=first['operations'];names=[row['operator'] for row in ops]
+        self.assertIn('aten.cumsum.default',names)
+        self.assertIn('aten.constant_pad_nd.default',names)
+        mutation=next(row for row in ops if row['operator']=='aten.add_.Tensor')
+        residual=next(row for row in ops if row['operator']=='aten.add.Tensor')
+        self.assertIn(mutation['id'],residual['mutation_dependencies'])
+        self.assertTrue(mutation['written_storages'])
+        known=set();by_tensor={row['id']:row for row in first['tensors']}
+        for row in ops:
+            self.assertTrue(set(row['mutation_dependencies'])<=known)
+            for ref in row['inputs']:
+                producer=by_tensor[ref]['producer']
+                self.assertTrue(producer is None or producer in known)
+            known.add(row['id'])
+        self.assertEqual(by_tensor[first['outputs'][0]]['producer'],residual['id'])
+        self.assertEqual(validate_tensor_graph(first,'v1','source'),by_tensor)
+        import copy
+        broken=copy.deepcopy(first)
+        broken['operations'][0]['mutation_dependencies']=[residual['id']]
+        broken['hash']=digest({k:v for k,v in broken.items() if k!='hash'})
+        with self.assertRaisesRegex(ContractError,'forward mutation'):
+            validate_tensor_graph(broken,'v1','source')
+        broken=copy.deepcopy(first)
+        next(row for row in broken['operations'] if row['id']==residual['id'])['mutation_dependencies']=[]
+        broken['hash']=digest({k:v for k,v in broken.items() if k!='hash'})
+        with self.assertRaisesRegex(ContractError,'storage mutation dependencies'):
+            validate_tensor_graph(broken,'v1','source')
+
+
+        with self.assertRaisesRegex(ContractError,'operation limit'):
+            trace_operations(model,sequence,'v1','source',max_operations=1)
+        self.assertEqual(first,trace_operations(model,sequence,'v1','source'))
 
     def test_checkpoint_hash_and_full_tensor_finiteness(self):
         from rec_harness.adapters.model_contract import load_checkpoint

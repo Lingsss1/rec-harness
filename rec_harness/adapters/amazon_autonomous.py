@@ -82,6 +82,10 @@ class AmazonAutoresearch:
                                       for path in config.pop('development_memory_files',[])]
         base=config.get('base_model_id','legacy_incumbent')
         if base not in study['model_versions']:raise ContractError('unregistered initial model')
+        controls=config.get('control_model_ids',[])
+        if not isinstance(controls,list) or any(not isinstance(v,str) for v in controls) or len(set(controls))!=len(controls):
+            raise ContractError('control_model_ids must be distinct registered model IDs')
+        if any(v not in study['model_versions'] for v in controls):raise ContractError('unregistered control model')
         root.mkdir(parents=True,exist_ok=True);write_json(root/'amazon-auto.json',config)
         write_json(root/'auto-lock.json',{'config_hash':digest(config)})
         write_json(root/'state.json',{'round':0,'incumbent':base,'status':'ready'})
@@ -225,6 +229,17 @@ class AmazonAutoresearch:
         try:budget=ledger.budget()
         finally:ledger.close()
         pid=self.config['task_id']+'-'+folder.name
+        controls=list(dict.fromkeys([base,*self.config.get('control_model_ids',[])]))
+        control_rows=[];control_execution=[]
+        for version in controls:
+            if version==base:continue
+            for dataset in cfg['datasets']:
+                for seed in cfg['development_seeds']:
+                    result,manifest=audit_job(self.study,cfg,version,dataset,seed)
+                    if result.get('execution_id','direct-reviewed-v1')!=(self.config.get('execution_id') or 'direct-reviewed-v1'):
+                        raise ContractError('development control execution differs from autonomous execution')
+                    control_rows.append({'model_version':version,'dataset':dataset,'seed':seed,'metrics':result['metrics']})
+                    control_execution.append({**protocol_summary(cfg,result,manifest),'model_version':version})
         history=[];research_memory=[]
         for pack in self.config.get('development_memory',[]):
             validate_memory(pack,cfg['protocol_hash'],cfg['development_seeds']);research_memory.extend(pack['entries'])
@@ -269,9 +284,10 @@ class AmazonAutoresearch:
         return {**diagnostics,'task_id':self.config['task_id'],'model_version':base,'protocol_hash':cfg['protocol_hash'],
             'protocol':cfg['protocol'],'seeds':cfg['development_seeds']+cfg['confirmation_seeds'],
             'development_baseline':rows,'baseline_execution_evidence':execution_evidence,
+            'development_controls':control_rows,'control_execution_evidence':control_execution,
             'history':history,'research_memory':research_memory,'prior_execution_failures':failures,'budget':budget,
             'bindings':{'proposal_id':pid,'candidate_model_version':pid+'-model','base_model_id':base,
-                        'controls':[base],'train_protocol_hash':cfg['protocol_hash'],
+                        'controls':controls,'train_protocol_hash':cfg['protocol_hash'],
                         'seeds':cfg['development_seeds']+cfg['confirmation_seeds']},
             'source_contract':{'editable_classes':['NextItNetModel','NextItNetBlock'],'library_calls':sorted(MODULE_CALLS),
                                'tensor_methods':sorted(TENSOR_METHODS),'preserve':'all module configuration, imports, training/data helpers and method signatures'},
@@ -280,8 +296,8 @@ class AmazonAutoresearch:
                 'Evidence GapCard.model_version MUST equal bindings.base_model_id (the incumbent being diagnosed), never candidate_model_version. GapCard.protocol_hash MUST equal bindings.train_protocol_hash.',
                 'Proposal.controls is a list of model IDs, not prose descriptions. Copy bindings.controls verbatim. Put explanations and CPU checks in mechanism/insertion_contract/falsification_condition.',
                 'Numerical contract must hold after learning, not only at initialization: encode_sequence returns causal [batch,length,hidden] final representations; score_candidates equals item_emb(candidates) @ encode_sequence(seq)[0,-1]. Forward uses the same encoded representations. Insert learnable readout transforms inside encode_sequence, never only in forward/score_candidates.',
-                'Propose one distinct falsifiable architectural change and reuse incumbent as the sole matched control. Do not reopen rejected mechanisms.',
-                'Proposal budget must fit remaining GPU budget and include4 development plus8 conditional confirmation fits and overhead. Never shorten protocol.',
+                'Propose one distinct falsifiable architectural change against the incumbent and all explicitly bound registered controls. Existing control outcomes are previously exposed evidence; their presence alone does not establish a mechanism. Do not reopen rejected mechanisms.',
+                'Proposal budget must fit remaining GPU budget and cover all category/seed candidate fits plus missing comparator confirmation fits and overhead. Never shorten protocol.',
                 'Independent initialization for every category/seed. Only public development aggregates are supplied; no raw users, checkpoints or confirmation outcomes.',
                 'Experiment returns changed_files exactly [model.py]. Do not train. Host performs source admission, CPU contracts and GPU evaluation.',
                 'Role output IDs and seeds must match bindings. Scientific conclusions stay unknown/provisional.']}
@@ -315,11 +331,13 @@ class AmazonAutoresearch:
         self._role(folder,'experiment',{**context,'gap':gap,**generated},source,source_check)
         candidate=folder/'experiment/model/model.py';cards={'gap':gap,**generated}
         versions={'candidate':{'model_version':binding['candidate_model_version'],'source':{'path':str(candidate),'sha256':file_hash(candidate)}},
-                  'controls':[{'model_version':binding['base_model_id'],'source':cfg['model_versions'][binding['base_model_id']]}]}
+                  'controls':[{'model_version':v,'source':cfg['model_versions'][v]} for v in binding['controls']]}
         write_json(folder/'handoff.json',{'cards':cards,'versions':versions})
         plan=register_plan(self.study,cards,versions);write_json(folder/'preregistration.json',plan)
         write_json(folder/'admission.json',admit_plan(self.study,pid,recipe=self.config['rescore_recipe'],uid_registry=self.config['uid_registry']))
         run_phase(self.study,pid,'development',execution_id=self.config.get('execution_id'))
+        for version in binding['controls']:
+            if version!=binding['base_model_id']:self._rescore(folder,version,cfg['development_seeds'])
         self._rescore(folder,binding['candidate_model_version'],cfg['development_seeds'])
         report=development_readout(self.study,pid);write_json(folder/'development-readout.json',report)
         history=None
@@ -333,23 +351,31 @@ class AmazonAutoresearch:
             release_confirmation(self.study,pid,lead,report['hash'])
             # Comparators need not consume confirmation resources for rejected
             # development candidates. Existing matching receipts are reused.
-            run_study(self.study,model_versions=[binding['base_model_id']],
+            run_study(self.study,model_versions=binding['controls'],
                       seeds=cfg['confirmation_seeds'],execution_id=self.config.get('execution_id'))
-            self._rescore(folder,binding['base_model_id'],cfg['confirmation_seeds'])
+            for version in binding['controls']:self._rescore(folder,version,cfg['confirmation_seeds'])
             run_phase(self.study,pid,'confirmation',execution_id=self.config.get('execution_id'))
             self._rescore(folder,binding['candidate_model_version'],cfg['confirmation_seeds'])
-            cfg=load_config(self.study);effects={}
+            cfg=load_config(self.study);effects={};control_effects={}
             for seed in cfg['confirmation_seeds']:
-                deltas=[]
+                deltas=[];contrasts={v:[] for v in binding['controls'] if v!=binding['base_model_id']}
                 for dataset in cfg['datasets']:
                     candidate_result,cm=audit_job(self.study,cfg,binding['candidate_model_version'],dataset,seed)
                     baseline_result,bm=audit_job(self.study,cfg,binding['base_model_id'],dataset,seed)
                     if (cm['candidates_hash'],cm['data_hashes'],candidate_result.get('execution_id','direct-reviewed-v1'))!=(bm['candidates_hash'],bm['data_hashes'],baseline_result.get('execution_id','direct-reviewed-v1')):
                         raise ContractError('confirmation pairing differs')
                     deltas.append(candidate_result['metrics'][cfg['protocol']['metric']]-baseline_result['metrics'][cfg['protocol']['metric']])
+                    for version in contrasts:
+                        control_result,manifest=audit_job(self.study,cfg,version,dataset,seed)
+                        if (manifest['candidates_hash'],manifest['data_hashes'],control_result.get('execution_id','direct-reviewed-v1'))!=(cm['candidates_hash'],cm['data_hashes'],candidate_result.get('execution_id','direct-reviewed-v1')):
+                            raise ContractError('confirmation control pairing differs')
+                        contrasts[version].append(candidate_result['metrics'][cfg['protocol']['metric']]-control_result['metrics'][cfg['protocol']['metric']])
                 effects[str(seed)]=sum(deltas)/len(deltas)
-            selected=all(effect>cfg['protocol']['minimum_effect'] for effect in effects.values())
+                control_effects[str(seed)]={v:sum(values)/len(values) for v,values in contrasts.items()}
+            selected=all(effect>cfg['protocol']['minimum_effect'] for effect in effects.values()) and all(
+                effect>0 for contrasts in control_effects.values() for effect in contrasts.values())
             confirmation={'effects':effects,'selected':selected,'scope':'host-only confirmation; not sent to Codex roles or final test'}
+            if any(control_effects.values()):confirmation['control_effects']=control_effects
             write_json(folder/'private-confirmation.json',confirmation)
         return {'cycle_identity':cycle['identity'],'candidate':binding['candidate_model_version'],
                 'development_hash':report['hash'],'selected':selected,'confirmation_executed':confirmation is not None}

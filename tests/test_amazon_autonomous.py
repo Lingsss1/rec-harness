@@ -169,7 +169,13 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
     def test_confirmation_comparator_interruption_resumes_without_new_roles(self):
         self.run_pipeline(True,interrupt_control=True)
 
-    def run_pipeline(self,confirmation,measurement=False,legacy_measurement=False,history=False,interrupt_control=False):
+    def test_registered_mechanism_control_survives_confirmation_recovery(self):
+        self.run_pipeline(True,interrupt_control=True,extra_control=True)
+
+    def test_candidate_can_pass_all_registered_confirmation_controls(self):
+        self.run_pipeline(True,extra_control=True,control_metric=.55)
+
+    def run_pipeline(self,confirmation,measurement=False,legacy_measurement=False,history=False,interrupt_control=False,extra_control=False,control_metric=.6):
         import json
         from contextlib import ExitStack
         from rec_harness.autonomous import autoresearch
@@ -189,12 +195,17 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             cfg={'model_versions':{'legacy_incumbent':{'path':str(source),'sha256':file_hash(source)}},
                  'protocol_hash':'protocol','protocol':{'metric':'HR@10','minimum_effect':0.005},
                  'datasets':['tiny'],'development_seeds':[42],'confirmation_seeds':[17,83],'python':'python3'}
+            if extra_control:
+                control=study/'control.py';control.write_text(SOURCE.replace('return self.block(x)','return self.block(x) * 0.8'))
+                cfg['model_versions']['mechanism_control']={'path':str(control),'sha256':file_hash(control)}
             write_json(study/'study.json',cfg);write_json(study/'study-lock.json',{'config_hash':digest(cfg)})
             ledger=Store(study/'memory');ledger.configure_budget(10000);ledger.close()
             config={'adapter':'amazon-nextitnet-v1','study':str(study),'task_id':'auto','max_rounds':1,
                     'execution_id':'execution-test',
                     'role_call_limit':12,'rescore_recipe':{'fixture':True},'uid_registry':'fixture',
                     'agent_backend':{'template':'unused','runtime_root':'unused'}}
+            if extra_control:config['control_model_ids']=['mechanism_control']
+            expected_controls=['legacy_incumbent']+(['mechanism_control'] if extra_control else [])
             if measurement:config['measurement_discovery']={'development_budget':10}
             if history:
                 config['history_diagnostic']=True
@@ -212,6 +223,8 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                         response.update(assessment='sufficient',requirements=[],evidence_refs=context['allowed_evidence_refs'],rationale='Existing development aggregates suffice.')
                         response['prerequisites']={key:{'status':'satisfied','rationale':'Audited baseline supplied.'} for key in ['invocation','implementation','data','applicability']}
                     if role=='hypothesis':
+                        self_test.assertEqual(context['bindings']['controls'],expected_controls)
+                        if extra_control:self_test.assertEqual(context['development_controls'][0]['model_version'],'mechanism_control')
                         response['method']['method_id']='method'
                         response['proposal'].update({k:v for k,v in context['bindings'].items() if k!='candidate_model_version'})
                         response['proposal'].update(gap_ids=['gap'],method_ids=['method'],budget=9000)
@@ -250,7 +263,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                 if not marker.exists():fits.append(partition);write_json(marker,{'completed':True})
             def controls(root,model_versions,seeds,execution_id=None):
                 self.assertEqual(execution_id,'execution-test')
-                self.assertEqual(model_versions,['legacy_incumbent']);self.assertEqual(seeds,[17,83])
+                self.assertEqual(model_versions,expected_controls);self.assertEqual(seeds,[17,83])
                 self.assertEqual(calls[-1],'knowledge')
                 self.assertTrue((campaign/'rounds/round-1/private-confirmation-started.json').exists())
                 marker=Path(root)/'confirmation-controls.json'
@@ -261,7 +274,12 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                 s=Store(Path(root)/'memory');g={'task_id':'graph-task','protocol_hash':'protocol','graph_version':s.version,'nodes':[],'edges':[]};s.close()
                 write_json(Path(root)/'research-readouts'/(pid+'-graph.json'),g);return g
             report={'hash':'report','protocol_hash':'protocol','summary':{'eligible_for_confirmation':confirmation}}
-            stack.enter_context(patch('rec_harness.adapters.amazon_autonomous.audit_job',return_value=({'metrics':{'HR@10':0.5},'execution_id':'execution-test'},{'candidates_hash':'same','data_hashes':{}})))
+            def audited_job(root,config,version,dataset,seed):
+                value=.6 if extra_control and seed in [17,83] and version!='legacy_incumbent' else .5
+                if extra_control and seed in [17,83] and version=='mechanism_control':value=control_metric
+                return ({'metrics':{'HR@10':value},'execution_id':'execution-test'},
+                        {'candidates_hash':'same','data_hashes':{}})
+            stack.enter_context(patch('rec_harness.adapters.amazon_autonomous.audit_job',side_effect=audited_job))
             stack.enter_context(patch('rec_harness.adapters.amazon_autonomous.release_confirmation',return_value={}))
             resolver=stack.enter_context(patch('rec_harness.adapters.amazon_execution.resolve_execution',return_value={'execution_id':'execution-test'}))
             stack.enter_context(patch('rec_harness.adapters.amazon_admission.run_gate',side_effect=gate))
@@ -285,11 +303,16 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             expected_roles=7 if measurement else 6
             self.assertEqual(fits,['development','confirmation'] if confirmation else ['development']);self.assertEqual(len(calls),expected_roles)
             self.assertEqual(result,again);self.assertEqual(result['state']['round'],1)
-            self.assertEqual(control_fits,[['legacy_incumbent']] if confirmation else [])
+            self.assertEqual(control_fits,[expected_controls] if confirmation else [])
             self.assertEqual(control_run.call_count,2 if interrupt_control else int(confirmation))
             if history:history_call.assert_called_once()
             self.assertEqual(result['role_calls']['charged_or_reserved'],expected_roles)
             self.assertEqual((campaign/'rounds/round-1/private-confirmation.json').exists(),confirmation)
+            if extra_control:
+                private=read_json(campaign/'rounds/round-1/private-confirmation.json')
+                self.assertTrue(all(v>.005 for v in private['effects'].values()))
+                self.assertEqual(private['control_effects'],{'17':{'mechanism_control':.6-control_metric},'83':{'mechanism_control':.6-control_metric}})
+                self.assertEqual(private['selected'],control_metric<.6)
             with patch('rec_harness.adapters.amazon_autonomous.JailedCodexAgent',side_effect=AssertionError('audit must not initialize service')):
                 audit=AmazonAutoresearch(campaign,load_agent=False)
                 try:

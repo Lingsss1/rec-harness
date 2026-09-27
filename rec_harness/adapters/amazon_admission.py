@@ -38,8 +38,13 @@ def admit_plan(root,proposal_id,*,recipe,uid_registry):
             plans=[e['payload'] for e in events if e['kind']=='amazon_research_plan_registered' and e['payload']['proposal_id']==proposal_id]
             if len(plans)!=1:raise ContractError('unique preregistered plan required')
             plan=plans[0];base=plan['baseline'];version=plan['versions']['candidate'];name=version['model_version']
-            if [v['model_version'] for v in plan['versions']['controls']]!=[base] or plan.get('reused_control_versions')!=[base]:
-                raise ContractError('automatic admission supports the incumbent as matched control')
+            controls=plan['versions']['controls'];names=[v['model_version'] for v in controls]
+            if base not in names or plan.get('reused_control_versions')!=names:
+                raise ContractError('automatic admission requires registered controls including incumbent')
+            for control in controls:
+                registered=config['model_versions'].get(control['model_version'])
+                if not registered or registered['sha256']!=control['source']['sha256'] or file_hash(registered['path'])!=registered['sha256']:
+                    raise ContractError('automatic admission control source changed')
             artifacts=Artifacts(root/'artifacts/objects');source=artifacts.verify(version['source'])
             review=review_source(Path(config['model_versions'][base]['path']).read_text(),source.read_text())
             directory=root/'model-admissions'/proposal_id/uuid.uuid4().hex;directory.mkdir(parents=True)

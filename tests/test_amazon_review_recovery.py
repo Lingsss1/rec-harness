@@ -7,6 +7,13 @@ from rec_harness.adapters.amazon_review_recovery import reuse_design
 
 
 class ReviewReuseTests(unittest.TestCase):
+    def test_review_only_controller_cannot_enter_training_loop(self):
+        from rec_harness.adapters.amazon_autonomous import AmazonAutoresearch
+        controller=AmazonAutoresearch.__new__(AmazonAutoresearch)
+        controller.config={'review_only':True}
+        with self.assertRaisesRegex(ContractError,'cannot run training'):
+            controller.run()
+
     def test_event_bound_design_copy_is_idempotent_and_rejects_changed_source_receipts(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);source=root/'original/rounds/round-1';target=root/'new/rounds/round-1'

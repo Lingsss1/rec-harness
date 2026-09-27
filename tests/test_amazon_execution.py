@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from rec_harness.adapters.amazon_execution import register_execution, resolve_execution, preflight_execution
+from rec_harness.adapters.amazon_execution import register_execution, resolve_execution, preflight_execution,inspect_execution
 from rec_harness.core import Artifacts, ContractError, write_json
 from rec_harness.store import Store
 
@@ -77,6 +77,7 @@ class ExecutionRegistrationTests(unittest.TestCase):
                 self.assertEqual(first, resolve_execution(store, first['execution_id']))
                 self.assertEqual(set(first['code_artifacts']), set(first['code_hashes']))
                 with patch('rec_harness.adapters.amazon_execution.code_identity', return_value={'changed': 'hash'}):
+                    self.assertEqual(inspect_execution(store,first['execution_id']),first)
                     with self.assertRaisesRegex(ContractError, 'code changed'):
                         resolve_execution(store, first['execution_id'])
                 with self.assertRaisesRegex(ContractError, 'uniquely registered'):

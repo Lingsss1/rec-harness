@@ -219,7 +219,7 @@ def main(argv=None):
         elif args.command == 'amazon-review-development':
             from .adapters.amazon_autonomous import AmazonAutoresearch
             from .adapters.amazon_review_recovery import review_recovered
-            if args.config:AmazonAutoresearch.init(args.directory,read_json(args.config))
+            if args.config:AmazonAutoresearch.init(args.directory,read_json(args.config),review_only=True)
             result=review_recovered(args.directory,args.proposal,args.source_round,args.rescores)
         elif args.command == 'amazon-memory-export':
             from .adapters.amazon_memory import export_development_memory

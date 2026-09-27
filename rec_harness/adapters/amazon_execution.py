@@ -75,7 +75,8 @@ def preflight_execution(store, execution, python):
     return receipt
 
 
-def resolve_execution(store, execution_id):
+def inspect_execution(store, execution_id):
+    """Verify an archived execution for read-only review, not permission to run it."""
     store.verify()
     matches = [e['payload'] for e in store.events() if e['kind'] == 'amazon_execution_registered'
                and e['payload']['execution_id'] == execution_id]
@@ -83,8 +84,8 @@ def resolve_execution(store, execution_id):
         raise ContractError('execution version must be uniquely registered')
     execution = matches[0]
     body = {k: v for k, v in execution.items() if k != 'execution_id'}
-    if 'execution-' + digest(body)[:24] != execution_id or execution['code_hashes'] != code_identity():
-        raise ContractError('registered execution code changed; register a new version')
+    if 'execution-' + digest(body)[:24] != execution_id:
+        raise ContractError('registered execution identity changed')
     artifacts = Artifacts(store.root.parent / 'artifacts/objects')
     refs = execution.get('code_artifacts')
     if not isinstance(refs, dict) or set(refs) != set(execution['code_hashes']):
@@ -99,4 +100,11 @@ def resolve_execution(store, execution_id):
         if archive['recipe_hash'] != digest(execution['recipe']) or not archive['files']:
             raise ContractError('registered runtime archive differs from execution recipe')
         validate_runtime(archive, artifacts)
+    return execution
+
+
+def resolve_execution(store, execution_id):
+    execution=inspect_execution(store,execution_id)
+    if execution['code_hashes']!=code_identity():
+        raise ContractError('registered execution code changed; register a new version')
     return execution

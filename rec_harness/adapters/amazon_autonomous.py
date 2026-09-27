@@ -28,10 +28,12 @@ from .model_source_contract import review_source,MODULE_CALLS,TENSOR_METHODS
 
 class AmazonAutoresearch:
     @staticmethod
-    def init(root,configuration):
+    def init(root,configuration,*,review_only=False):
         root=Path(root).resolve()
         if root.exists() and any(root.iterdir()):raise ContractError('autonomous directory must be empty')
         config=dict(configuration);config['study']=str(Path(config['study']).resolve())
+        if config.get('review_only') and not review_only:raise ContractError('review-only configuration requires review entry point')
+        if review_only:config['review_only']=True
         study=load_config(config['study']);identifier(config['task_id'])
         if type(config.get('max_rounds')) is not int or config['max_rounds']<1:raise ContractError('positive max_rounds required')
         if type(config.get('role_call_limit')) is not int or config['role_call_limit']<6:raise ContractError('role_call_limit must cover six roles')
@@ -41,9 +43,9 @@ class AmazonAutoresearch:
         config['protocol_hash']=study['protocol_hash']
         if 'execution_id' in config:
             identifier(config['execution_id'])
-            from .amazon_execution import resolve_execution
+            from .amazon_execution import inspect_execution,resolve_execution
             execution_store=Store(Path(config['study'])/'memory')
-            try:resolve_execution(execution_store,config['execution_id'])
+            try:(inspect_execution if review_only else resolve_execution)(execution_store,config['execution_id'])
             finally:execution_store.close()
         validate_requirements(config.get('measurement_requirements',[]))
         from rec_harness.measurement_discovery import validate_config
@@ -353,6 +355,7 @@ class AmazonAutoresearch:
         return lead,cycle
 
     def run(self):
+        if self.config.get('review_only'):raise ContractError('review-only controller cannot run training or generate designs')
         with self.lock():
             self.store.recover();state=read_json(self.root/'state.json')
             # The event is authoritative if publication of state.json was interrupted.

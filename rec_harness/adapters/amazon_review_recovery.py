@@ -68,6 +68,7 @@ def reuse_design(controller,source,folder,plan):
 def review_recovered(root,proposal,source_round,rescores):
     controller=AmazonAutoresearch(root)
     try:
+        if not controller.config.get('review_only'):raise ContractError('dedicated review-only controller required')
         with controller.lock():
             cfg=load_config(controller.study)
             store=Store(controller.study/'memory',read_only=True)

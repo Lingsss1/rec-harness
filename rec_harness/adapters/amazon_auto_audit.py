@@ -1,7 +1,7 @@
 """Local controller/cycle integrity audit; never send confirmation data to roles."""
 from pathlib import Path
 from rec_harness.agents import schema_for,validate_schema
-from rec_harness.core import Artifacts,ContractError,digest,file_hash,read_json,safe_file
+from rec_harness.core import Artifacts,ContractError,digest,file_hash,read_json
 from rec_harness.store import Store
 from rec_harness.cost_audit import audit_cost,verify_cost_prefix
 
@@ -101,8 +101,8 @@ def verify_campaign(controller):
                 raise ContractError('accepted role content changed')
             if 'source_hash' in accepted and file_hash(marker.parent/'model/model.py')!=accepted['source_hash']:
                 raise ContractError('accepted role source changed')
-            for name,sha in accepted.get('model_source_hashes',{}).items():
-                if file_hash(safe_file(marker.parent/'model',name))!=sha:raise ContractError('accepted role model source changed')
+            from .amazon_role_sources import verify_generated_sources
+            verify_generated_sources(marker.parent,role,context,accepted)
             completed=[e['payload'] for e in events if e['kind']=='role_completed' and e['payload']['role']==role
                 and e['payload']['task'].startswith(marker.parent.parent.name+'-'+role+'-')]
             if completed:

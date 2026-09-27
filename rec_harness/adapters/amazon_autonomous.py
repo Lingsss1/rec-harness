@@ -149,8 +149,8 @@ class AmazonAutoresearch:
             accepted=read_json(target/'accepted.json')
             if digest(response)!=accepted['response_hash'] or digest(read_json(target/'context.json'))!=accepted['context_hash']:raise ContractError('cached role changed')
             if 'source_hash' in accepted and file_hash(target/'model/model.py')!=accepted['source_hash']:raise ContractError('cached model changed')
-            for name,sha in accepted.get('model_source_hashes',{}).items():
-                if file_hash(safe_file(target/'model',name))!=sha:raise ContractError('cached model source changed: '+name)
+            from .amazon_role_sources import verify_generated_sources
+            verify_generated_sources(target,role,read_json(target/'context.json'),accepted)
             if validator:validator(response,target)
             recover_completion()
             return response

@@ -363,10 +363,18 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                     cycle=read_json(folder/'cycle.json')
                     if generated_control:
                         self.assertIn('model/control-1.py',cycle['roles']['experiment']['artifacts'])
+                        marker=folder/'experiment/accepted.json';accepted=read_json(marker)
+                        for broken in [{k:v for k,v in accepted.items() if k!='model_source_hashes'},
+                                       {**accepted,'model_source_hashes':{'model.py':accepted['source_hash']}}]:
+                            write_json(marker,broken)
+                            with self.assertRaisesRegex(ContractError,'incomplete generated model source bindings'):audit.verify()
+                            with self.assertRaisesRegex(ContractError,'incomplete generated model source bindings'):
+                                audit._role(folder,'experiment',{})
+                        write_json(marker,accepted)
                         path=folder/'experiment/model/control-1.py';original=path.read_bytes()
                         path.write_bytes(original+b'\n# changed after completion\n')
                         with self.assertRaisesRegex(ContractError,'model source changed'):audit.verify()
-                        with self.assertRaisesRegex(ContractError,'cached model source changed'):
+                        with self.assertRaisesRegex(ContractError,'model source changed'):
                             audit._role(folder,'experiment',{})
                         with self.assertRaisesRegex(ContractError,'experiment archive changed'):
                             finalize_cycle(study,'auto-round-1',folder)

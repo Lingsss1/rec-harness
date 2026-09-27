@@ -135,6 +135,8 @@ def review_recovered(root,proposal,source_round,rescores):
             marker=controller.root/'review-recovery.json'
             if marker.exists() and read_json(marker)!=freeze:raise ContractError('frozen review recovery changed')
             if not marker.exists():write_json(marker,freeze)
+            from .amazon_review_history import retain_predecessor
+            retain_predecessor(controller,freeze,folder)
             for row in report['rows']:
                 name=f"{row['model_version']}-{row['dataset']}-{row['seed']}";directory=Path(rescores)/name
                 if not (directory/'acceptance.json').is_file() or not (directory/'inference').is_dir():

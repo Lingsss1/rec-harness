@@ -81,6 +81,9 @@ def verify_campaign(controller):
     try:
         study_integrity=ledger.verify()
         cost=audit_cost(controller.store,config['role_call_limit'])
+        if config.get('review_predecessor'):
+            from .amazon_review_history import verify_predecessor
+            verify_predecessor(controller)
         reopened=verify_reopen_history(controller)
         records={e['payload']['identity']:e['payload'] for e in ledger.events() if e['kind']=='amazon_research_cycle_completed'}
         for marker in (root/'rounds').glob('round-*/*/accepted.json'):

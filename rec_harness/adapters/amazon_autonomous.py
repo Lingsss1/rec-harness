@@ -34,6 +34,9 @@ class AmazonAutoresearch:
         config=dict(configuration);config['study']=str(Path(config['study']).resolve())
         if config.get('review_only') and not review_only:raise ContractError('review-only configuration requires review entry point')
         if review_only:config['review_only']=True
+        if config.get('review_predecessor'):
+            if not review_only:raise ContractError('review predecessor requires review-only entry point')
+            config['review_predecessor']=str(Path(config['review_predecessor']).resolve())
         study=load_config(config['study']);identifier(config['task_id'])
         if type(config.get('max_rounds')) is not int or config['max_rounds']<1:raise ContractError('positive max_rounds required')
         if type(config.get('role_call_limit')) is not int or config['role_call_limit']<6:raise ContractError('role_call_limit must cover six roles')
@@ -83,10 +86,10 @@ class AmazonAutoresearch:
         write_json(root/'state.json',{'round':0,'incumbent':base,'status':'ready'})
         store=Store(root/'memory');store.configure_budget(config['role_call_limit']);store.close()
 
-    def __init__(self,root,agent=None,*,load_agent=True):
+    def __init__(self,root,agent=None,*,load_agent=True,read_only=False):
         self.root=Path(root).resolve();self.config=read_json(self.root/'amazon-auto.json')
         if digest(self.config)!=read_json(self.root/'auto-lock.json')['config_hash']:raise ContractError('autonomous configuration changed')
-        self.study=Path(self.config['study']);self.store=Store(self.root/'memory')
+        self.study=Path(self.config['study']);self.store=Store(self.root/'memory',read_only=read_only)
         self.task=self.config['task_id'];self.protocol_hash=self.config['protocol_hash']
         self.artifacts=Artifacts(self.root/'artifacts/objects');backend=self.config['agent_backend']
         self.agent=(agent or JailedCodexAgent(backend['template'],backend['runtime_root'],timeout=self.config.get('role_timeout',300),

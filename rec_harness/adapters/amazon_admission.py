@@ -39,26 +39,40 @@ def admit_plan(root,proposal_id,*,recipe,uid_registry):
             if len(plans)!=1:raise ContractError('unique preregistered plan required')
             plan=plans[0];base=plan['baseline'];version=plan['versions']['candidate'];name=version['model_version']
             controls=plan['versions']['controls'];names=[v['model_version'] for v in controls]
-            if base not in names or plan.get('reused_control_versions')!=names:
-                raise ContractError('automatic admission requires registered controls including incumbent')
+            reused=[v for v in names if v in config['model_versions']]
+            if base not in names or plan.get('reused_control_versions')!=reused:
+                raise ContractError('automatic admission requires incumbent and exact registered control identities')
             for control in controls:
-                registered=config['model_versions'].get(control['model_version'])
-                if not registered or registered['sha256']!=control['source']['sha256'] or file_hash(registered['path'])!=registered['sha256']:
+                if control['model_version'] not in reused:continue
+                registered=config['model_versions'][control['model_version']]
+                if registered['sha256']!=control['source']['sha256'] or file_hash(registered['path'])!=registered['sha256']:
                     raise ContractError('automatic admission control source changed')
-            artifacts=Artifacts(root/'artifacts/objects');source=artifacts.verify(version['source'])
-            review=review_source(Path(config['model_versions'][base]['path']).read_text(),source.read_text())
+            artifacts=Artifacts(root/'artifacts/objects')
+            pending=[version,*[v for v in controls if v['model_version'] not in reused]]
+            reviewed=[]
+            for item in pending:
+                source=artifacts.verify(item['source'])
+                review=review_source(Path(config['model_versions'][base]['path']).read_text(),source.read_text())
+                reviewed.append((item,source,review))
             directory=root/'model-admissions'/proposal_id/uuid.uuid4().hex;directory.mkdir(parents=True)
-            path=directory/'model.py';path.write_bytes(source.read_bytes());ref={'path':str(path),'sha256':file_hash(path)}
-            gate=run_gate(config['python'],ref,name,directory/'contract',{},60)
-            if gate['status']!='success':raise ContractError('model numerical contract failed; attempt preserved at '+str(directory))
-            probe=read_json(directory/'contract/report.json');gradients=probe['checks']['parameter_gradients']
-            if not gradients or not all(g.get('finite') is True for g in gradients.values()):
-                raise ContractError('model gradients nonfinite')
-            smoke=run_training_smoke(config['python'],ref,directory/'training-smoke',recipe,artifacts,uid_registry)
+            admitted={}
+            for item,source,review in reviewed:
+                model_id=item['model_version']
+                target=directory if model_id==name else directory/model_id
+                target.mkdir(parents=True,exist_ok=True)
+                path=target/'model.py';path.write_bytes(source.read_bytes());ref={'path':str(path),'sha256':file_hash(path)}
+                gate=run_gate(config['python'],ref,model_id,target/'contract',{},60)
+                if gate['status']!='success':raise ContractError('model numerical contract failed; attempt preserved at '+str(target))
+                probe=read_json(target/'contract/report.json');gradients=probe['checks']['parameter_gradients']
+                if not gradients or not all(g.get('finite') is True for g in gradients.values()):
+                    raise ContractError('model gradients nonfinite')
+                smoke=run_training_smoke(config['python'],ref,target/'training-smoke',recipe,artifacts,uid_registry)
+                admitted[model_id]={'source':ref,'source_ref':artifacts.put(path),
+                    'probe_ref':artifacts.put(target/'contract/report.json'),'gate':gate,
+                    'training_smoke':smoke,'source_contract':review}
             record={'proposal_id':proposal_id,'plan_handoff_hash':plan['handoff_hash'],'baseline':base,
-                'protocol_hash':config['protocol_hash'],'source_contract':review,
-                'versions':{name:{'source':ref,'source_ref':artifacts.put(path),
-                                 'probe_ref':artifacts.put(directory/'contract/report.json'),'gate':gate,'training_smoke':smoke}},
-                'scope':'automatic model-class capability contract plus CPU numerical checks; no unrestricted Python admission'}
+                'protocol_hash':config['protocol_hash'],'source_contract':reviewed[0][2],
+                'versions':admitted,
+                'scope':'Atomic admission of all new planned model versions under source and CPU numerical/training contracts; no unrestricted Python admission'}
             store.event('amazon_model_candidate_admitted',record);return record
         finally:store.close()

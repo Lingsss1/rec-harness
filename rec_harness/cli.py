@@ -98,6 +98,9 @@ def main(argv=None):
     p = commands.add_parser('amazon-replay-world', help='freeze one observed development cycle for bounded historical replay')
     p.add_argument('directory');p.add_argument('output')
     p.add_argument('--gpu-second-weight',type=float,required=True);p.add_argument('--role-call-weight',type=float,required=True)
+    p = commands.add_parser('amazon-replay-chain', help='freeze ordered observed cycles with committed cost lineage')
+    p.add_argument('output');p.add_argument('campaigns',nargs='+')
+    p.add_argument('--gpu-second-weight',type=float,required=True);p.add_argument('--role-call-weight',type=float,required=True)
     p = commands.add_parser('amazon-history-diagnostic', help='aggregate paired validation gains by training-history length')
     p.add_argument('directory'); p.add_argument('output')
     p.add_argument('--baseline',default='legacy_no_prefix');p.add_argument('--candidate',default='legacy_incumbent')
@@ -236,6 +239,9 @@ def main(argv=None):
             from .adapters.amazon_call_report import call_report,markdown_report
             result=call_report(args.directory)
             if args.format=='markdown':print(markdown_report(result));return 0
+        elif args.command == 'amazon-replay-chain':
+            from .adapters.amazon_replay_chain import archive_chain
+            result=archive_chain(args.campaigns,args.output,gpu_weight=args.gpu_second_weight,role_weight=args.role_call_weight)
         elif args.command == 'amazon-memory-export':
             from .adapters.amazon_memory import export_development_memory
             result=export_development_memory(args.directory,args.output)

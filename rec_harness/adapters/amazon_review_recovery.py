@@ -1,14 +1,54 @@
 """Continue three review roles after a preregistered execution was recovered."""
 from pathlib import Path
 import shutil
+import sys
+import uuid
 
 from rec_harness.core import Artifacts,ContractError,read_json,write_json,digest,file_hash
 from rec_harness.store import Store
 from rec_harness.cost_audit import audit_cost
+from rec_harness.agents import run_process
 from .amazon_autonomous import AmazonAutoresearch
 from .amazon_controls import load_config
 from .amazon_selection import development_readout
-from .amazon_rescore import rescore_job
+from .amazon_execution import inspect_execution
+
+
+def audit_frozen_rescore(controller,directory,row,execution):
+    """Recheck receipts using their original verified scorer package and interpreter.
+
+    Input source locations are part of CPU recovery identity. A new review
+    checkout must not replace them merely because its worker bytes are equal.
+    """
+    request=read_json(directory/'inference/request.json')
+    package=Path(request['inputs']['worker.py']['path']).resolve().parents[1]
+    if set(execution['code_hashes'])!={str(p.relative_to(package)) for p in package.rglob('*.py')}:
+        raise ContractError('original scorer package inventory differs')
+    for name,expected in execution['code_hashes'].items():
+        if file_hash(package/name)!=expected:raise ContractError('original scorer package changed')
+    scoring_plan=read_json(directory/'rescore-plan.json')
+    from .independent_scoring import require_scoring_runtime
+    require_scoring_runtime(scoring_plan['host_scoring_runtime'])
+    audit=controller.root/'scoring-audits'/uuid.uuid4().hex;audit.mkdir(parents=True)
+    parameters={'study':str(controller.study),'directory':str(directory.resolve()),'row':row,
+                'recipe':controller.config['rescore_recipe'],'uid_registry':scoring_plan['uid_registry']}
+    write_json(audit/'request.json',parameters)
+    script="""import sys
+from pathlib import Path
+from rec_harness.core import read_json,write_json,ContractError
+from rec_harness.adapters import amazon_rescore
+def forbidden(*args,**kwargs):raise ContractError('review cannot launch new inference')
+amazon_rescore.run_cpu_job=forbidden
+request=read_json(sys.argv[1]);row=request['row']
+result=amazon_rescore.rescore_job(request['study'],row['model_version'],row['dataset'],row['seed'],request['directory'],request['recipe'],request['uid_registry'],resume=True)
+write_json(sys.argv[2],result)
+"""
+    result_path=audit/'result.json'
+    process=run_process([sys.executable,'-c',script,str(audit/'request.json'),str(result_path)],
+        package.parent,audit/'process',timeout=180,
+        env={'PATH':'/usr/bin:/bin','PYTHONPATH':str(package.parent),'LANG':'C.UTF-8'})
+    if process['status']!='success':raise ContractError('frozen scoring audit failed; inspect '+str(audit))
+    return read_json(result_path)
 
 
 def reuse_design(controller,source,folder,plan):
@@ -74,6 +114,7 @@ def review_recovered(root,proposal,source_round,rescores):
             store=Store(controller.study/'memory',read_only=True)
             try:
                 plans=[e['payload'] for e in store.events() if e['kind']=='amazon_research_plan_registered' and e['payload']['proposal_id']==proposal]
+                execution=inspect_execution(store,controller.config['execution_id'])
             finally:store.close()
             if len(plans)!=1:raise ContractError('unique preregistered plan required')
             plan=plans[0];folder=controller.root/'rounds/round-1'
@@ -98,12 +139,10 @@ def review_recovered(root,proposal,source_round,rescores):
                 name=f"{row['model_version']}-{row['dataset']}-{row['seed']}";directory=Path(rescores)/name
                 if not (directory/'acceptance.json').is_file() or not (directory/'inference').is_dir():
                     raise ContractError('complete independent scoring required before review')
-                scoring_plan=read_json(directory/'rescore-plan.json')
                 training=read_json(controller.study/'jobs'/name/'completed.json')
                 if training.get('execution_id')!=controller.config.get('execution_id'):
                     raise ContractError('recovered review execution differs')
-                scored=rescore_job(controller.study,row['model_version'],row['dataset'],row['seed'],directory,
-                    controller.config['rescore_recipe'],scoring_plan['uid_registry'],resume=True)
+                scored=audit_frozen_rescore(controller,directory,row,execution)
                 if scored['rank_disagreements'] or scored['positive_tied_users']:raise ContractError('independent scoring gate failed')
             context={'task_id':controller.task,'model_version':candidate,'protocol_hash':cfg['protocol_hash'],
                      'protocol':cfg['protocol'],'bindings':binding,'recovery_provenance':freeze}

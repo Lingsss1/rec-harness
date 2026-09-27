@@ -1,12 +1,31 @@
 from pathlib import Path
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 from rec_harness.core import Artifacts,ContractError,digest,file_hash,read_json,write_json
 from rec_harness.store import Store
-from rec_harness.adapters.amazon_review_recovery import reuse_design
+from rec_harness.adapters.amazon_review_recovery import reuse_design,audit_frozen_rescore
 
 
 class ReviewReuseTests(unittest.TestCase):
+    def test_frozen_scorer_changes_fail_before_process_launch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);worker=root/'package/adapters/score_worker.py'
+            worker.parent.mkdir(parents=True);worker.write_text('original')
+            directory=root/'scores'
+            write_json(directory/'inference/request.json',{'inputs':{'worker.py':{'path':str(worker)}}})
+            execution={'code_hashes':{'adapters/score_worker.py':file_hash(worker)}}
+            worker.write_text('changed')
+            with patch('rec_harness.adapters.amazon_review_recovery.run_process') as launch:
+                with self.assertRaisesRegex(ContractError,'scorer package changed'):
+                    audit_frozen_rescore(SimpleNamespace(root=root),directory,{},execution)
+                launch.assert_not_called()
+                (worker.parent/'extra.py').write_text('unexpected')
+                with self.assertRaisesRegex(ContractError,'inventory differs'):
+                    audit_frozen_rescore(SimpleNamespace(root=root),directory,{},execution)
+                launch.assert_not_called()
+
     def test_review_only_controller_cannot_enter_training_loop(self):
         from rec_harness.adapters.amazon_autonomous import AmazonAutoresearch
         controller=AmazonAutoresearch.__new__(AmazonAutoresearch)

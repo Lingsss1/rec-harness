@@ -1,12 +1,45 @@
 """Read-only, event-bound role attempt counts; never infer internal API usage."""
 from pathlib import Path
 import re
+from datetime import datetime
+import statistics
 
 from rec_harness.core import ContractError,digest,read_json
 from rec_harness.cost_audit import audit_cost
 from rec_harness.store import Store
 
 ROLE_ORDER={role:index for index,role in enumerate(['evidence','measurement','hypothesis','experiment','evaluation','lead','knowledge'])}
+
+
+def submission_cadence(attempts):
+    result={'submissions':len(attempts),'span_seconds':None,'minimum_interval_seconds':None,
+            'median_interval_seconds':None,'peak_submissions_in_60_seconds':None,
+            'qualification':'Framework submission timestamps only; not internal API rate, execution concurrency or service limits.'}
+    times=[]
+    try:
+        for attempt in attempts:
+            value=datetime.fromisoformat(attempt['submitted_at'])
+            if value.utcoffset() is None:raise ValueError('timezone missing')
+            times.append(value.timestamp())
+    except (ValueError,TypeError,KeyError):
+        return {**result,'status':'unknown','reason':'invalid or timezone-free submission timestamp'}
+    if any(b<a for a,b in zip(times,times[1:])):
+        return {**result,'status':'unknown','reason':'submission clock moved backwards'}
+    result['status']='observed'
+    if not times:
+        result['peak_submissions_in_60_seconds']=0
+        return result
+    intervals=[b-a for a,b in zip(times,times[1:])]
+    result['span_seconds']=times[-1]-times[0]
+    if intervals:
+        result['minimum_interval_seconds']=min(intervals)
+        result['median_interval_seconds']=statistics.median(intervals)
+    left=0;peak=0
+    for right,current in enumerate(times):
+        while current-times[left]>60:left+=1
+        peak=max(peak,right-left+1)
+    result['peak_submissions_in_60_seconds']=peak
+    return result
 
 
 def markdown_report(report):
@@ -18,6 +51,12 @@ def markdown_report(report):
     lines.extend(['',f"Local submissions: {report['local_submissions']}; inherited charges: {report['retained_cost']}; "
                   f"unattributed charges: {report['unattributed_cost']}; total charged/reserved: {report['budget']['charged_or_reserved']}.",
                   '',report['qualification']])
+    cadence=report['submission_cadence']
+    lines.extend(['',f"Submission cadence: {cadence['status']}; span seconds: {cadence['span_seconds']}; "
+                  f"minimum interval seconds: {cadence['minimum_interval_seconds']}; "
+                  f"median interval seconds: {cadence['median_interval_seconds']}; "
+                  f"peak submissions in an inclusive 60-second window: {cadence['peak_submissions_in_60_seconds']}.",
+                  cadence['qualification']])
     return '\n'.join(lines)
 
 def call_report(directory):
@@ -81,7 +120,7 @@ def call_report(directory):
             'attempts':attempts,'local_submissions':len(submissions),'local_submission_cost':submitted_cost,
             'retained_cost':retained_cost,'retained_reservations':retained,
             'unattributed_cost':unattributed_cost,'unattributed_reservations':unattributed,
-            'internal_api_requests':None,
+            'internal_api_requests':None,'submission_cadence':submission_cadence(attempts),
             'qualification':'Role submissions are recorded before transport and may fail before CLI startup. Reused roles are not new calls. Internal CLI reconnect/API counts are unknown; inherited charges are separate.'}
     finally:
         if store.db.in_transaction:store.db.execute('ROLLBACK')

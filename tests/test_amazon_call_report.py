@@ -6,10 +6,29 @@ from unittest.mock import patch
 from rec_harness.core import ContractError,digest,write_json
 from rec_harness.store import Store
 from rec_harness.cost_audit import audit_cost
-from rec_harness.adapters.amazon_call_report import call_report
+from rec_harness.adapters.amazon_call_report import call_report,submission_cadence
 
 
 class CallReportTests(unittest.TestCase):
+    def test_cadence_distinguishes_bursts_from_training_gaps(self):
+        times=['00:00:00','00:00:30','00:01:00','00:10:00']
+        report=submission_cadence([{'submitted_at':'2026-09-27T'+t+'+00:00'} for t in times])
+        self.assertEqual(report['span_seconds'],600)
+        self.assertEqual(report['minimum_interval_seconds'],30)
+        self.assertEqual(report['median_interval_seconds'],30)
+        self.assertEqual(report['peak_submissions_in_60_seconds'],3)
+
+    def test_cadence_does_not_invent_missing_intervals_or_clock_order(self):
+        self.assertIsNone(submission_cadence([])['minimum_interval_seconds'])
+        single=[{'submitted_at':'2026-09-27T00:00:00+00:00'}]
+        self.assertIsNone(submission_cadence(single)['median_interval_seconds'])
+        self.assertEqual(submission_cadence(single+single)['peak_submissions_in_60_seconds'],2)
+        for attempts in [[{'submitted_at':'invalid'}],[{'submitted_at':'2026-09-27T00:00:00'}],
+                         single+[{'submitted_at':'2026-09-26T23:00:00+00:00'}]]:
+            report=submission_cadence(attempts)
+            self.assertEqual(report['status'],'unknown')
+            self.assertIsNone(report['peak_submissions_in_60_seconds'])
+
     def setUp(self):
         tmp=tempfile.TemporaryDirectory();self.addCleanup(tmp.cleanup);self.root=Path(tmp.name)
         cfg={'role_call_limit':20};write_json(self.root/'amazon-auto.json',cfg)

@@ -38,6 +38,8 @@ python3 -m rec_harness autoresearch /path/to/amazon-campaign
 
 每轮复用已审计 incumbent 作为唯一配对对照。另设机制消融仍需扩展适配器；不能据此声称已完成任意多对照研究。角色调用上限和 study GPU 秒分别计账；失败计费、历史成本接续及每个训练任务的预算检查保持生效。`minimum_round_gpu_seconds` 是启动下限，不是整轮成本预测；每个提案仍受自己的冻结预算和 study 总预算限制。
 
+主机确认晋升要求每个确认 seed 的类别平均增益都严格超过冻结的 `minimum_effect`。独立配对报告中的旧字段 `effect_gate_passed` 仍仅表示跨 seed 平均增益达标；新增 `per_seed_effect_gate_passed` 和 `all_seed_effect_gates_passed` 明确逐 seed 判断，摘要与 Markdown 报告保留这一差异。缺失配对时不生成这些门槛结论，旧报告未提供逐 seed 判断时显示“未提供”。配对报告本身不释放确认、不执行晋升，也不建立机制结论。
+
 Amazon 角色有终态响应时恢复会复用，候选源码和上下文有哈希绑定；成功传输但不合法的响应最多尝试两次；传输失败立即停止，普通恢复不自动重发。已完成训练由 study 的审计与恢复机制复用；存在冻结计划的 CPU 复评分按原收据恢复，不移走目录后重复推理。失败轮写入 `failure.json` 并继续下一轮。已选中的 candidate 成为下一轮 incumbent。下一轮同时获得此前设计、开发集决策与 provisional knowledge；确认结果和确认阶段失败详情始终保留在主机侧。
 
 按轮次检查角色提交、完成、拒绝、待完成和复用数量：

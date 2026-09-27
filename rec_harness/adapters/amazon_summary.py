@@ -25,6 +25,8 @@ def summarize_contrast(report, metric):
                 'seed_count': len(rows)})
         partitions[name] = {k: part[k] for k in ('baseline_mean', 'candidate_mean', 'mean_effect',
                            'seed_effects', 'minimum_effect', 'effect_gate_passed')}
+        partitions[name].update({k:part[k] for k in ('effect_gate_scope','per_seed_effect_gate_passed',
+            'all_seed_effect_gates_passed','all_seed_gate_scope') if k in part})
         partitions[name].update(datasets=slices,
             negative_slices=[{'dataset': row['dataset'], 'seed': row['seed'], 'effect': row['delta'][metric]}
                              for row in part['rows'] if row['delta'][metric] < 0])
@@ -37,12 +39,14 @@ def render(report):
              '本报告复核既有模型及固定机制消融，仅使用验证结果；不代表新 Codex 候选收益或最终测试成绩。', '',
              f"协议：`{report['protocol_hash']}`。主指标：{report['metric']}。类别等权平均，种子作为独立初始化单位。", '',
              '## 配对结果', '',
-             '| 对比（后者减前者） | 阶段 | 基准 | 候选 | 差值（百分点） | 各种子差值（百分点） |',
-             '|---|---|---:|---:|---:|---|']
+             '| 对比（后者减前者） | 阶段 | 基准 | 候选 | 差值（百分点） | 各种子差值（百分点） | 每个种子均超过门槛 |',
+             '|---|---|---:|---:|---:|---|---|']
     for contrast in report['contrasts']:
         for partition, row in contrast['partitions'].items():
             effects = ', '.join(f'{seed}: {effect * 100:+.3f}' for seed, effect in row['seed_effects'].items())
-            lines.append(f"| {contrast['baseline']} → {contrast['candidate']} | {partition} | {row['baseline_mean']:.6f} | {row['candidate_mean']:.6f} | {row['mean_effect'] * 100:+.3f} | {effects} |")
+            gate=row.get('all_seed_effect_gates_passed')
+            gate_label='未提供' if gate is None else ('是' if gate else '否')
+            lines.append(f"| {contrast['baseline']} → {contrast['candidate']} | {partition} | {row['baseline_mean']:.6f} | {row['candidate_mean']:.6f} | {row['mean_effect'] * 100:+.3f} | {effects} | {gate_label} |")
     for contrast in report['contrasts']:
         lines += ['', f"## {contrast['baseline']} → {contrast['candidate']}：确认阶段类别结果", '',
                   '| 类别 | 基准 | 候选 | 差值（百分点） |', '|---|---:|---:|---:|']
@@ -59,6 +63,7 @@ def render(report):
               '- 既有模型同时改变多个设置，整体增益不能全部归因于前缀混合。',
               '- 固定前缀消融在既有模型结果已暴露后注册；其结论限于该对照和这些数据。',
               '- 阈值通过不等于统计显著；有限种子不支持普遍有效性结论。',
+              '- effect_gate_passed 仅指平均增益达标；每个种子均达标另列。此报告本身不执行候选晋升。',
               '- 新 Codex 候选、正式候选准入和最终测试仍需完成。', '',
               '## 审计身份', '', f"报告摘要：`{report['hash']}`。事件链头：`{report['event_state']['head']}`。", '',
               '同目录 `report.json` 包含模型源码身份、配对报告 CAS 引用和原始预算读数。']

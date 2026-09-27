@@ -61,6 +61,23 @@ class PairedReportTests(unittest.TestCase):
         self.assertFalse(partial['complete'])
         self.assertNotIn('effect_gate_passed', partial)
 
+    def test_mean_pass_does_not_hide_failed_confirmation_initialization(self):
+        from rec_harness.adapters.amazon_summary import summarize_contrast
+        directory=self.root/'jobs/legacy_incumbent-tiny-83'
+        write_json(directory/'validation_ranks.json',{'user_ids':[1],'ranks':[11]})
+        receipt=read_json(directory/'completed.json')
+        receipt['metrics']={'HR@10':0.0,'NDCG@10':0.0}
+        write_json(directory/'completed.json',receipt)
+        report=paired_report(self.root)
+        confirmation=report['partitions']['confirmation']
+        self.assertEqual(confirmation['mean_effect'],0.5)
+        self.assertTrue(confirmation['effect_gate_passed'])
+        self.assertEqual(confirmation['per_seed_effect_gate_passed'],{'17':True,'83':False})
+        self.assertFalse(confirmation['all_seed_effect_gates_passed'])
+        summary=summarize_contrast(report,'HR@10')['partitions']['confirmation']
+        self.assertFalse(summary['all_seed_effect_gates_passed'])
+        self.assertIn('not autonomous confirmation promotion',summary['effect_gate_scope'])
+
     def test_score_cannot_disagree_with_archived_ranks(self):
         path = self.root / 'jobs/legacy_incumbent-tiny-42/completed.json'
         receipt = read_json(path); receipt['metrics']['HR@10'] = 0.9; write_json(path, receipt)

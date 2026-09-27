@@ -99,7 +99,12 @@ def paired_report(root, baseline='fixed_baseline', candidate='legacy_incumbent',
                          mean_effect=statistics.mean(effects),
                          seed_effect_stdev=statistics.stdev(effects) if len(effects) > 1 else None,
                          minimum_effect=config['protocol']['minimum_effect'],
-                         effect_gate_passed=statistics.mean(effects) > config['protocol']['minimum_effect'])
+                         effect_gate_passed=statistics.mean(effects) > config['protocol']['minimum_effect'],
+                         effect_gate_scope='Mean effect across initializations only; not autonomous confirmation promotion.',
+                         per_seed_effect_gate_passed={str(seed):effect > config['protocol']['minimum_effect']
+                             for seed,effect in zip(seeds,effects)},
+                         all_seed_effect_gates_passed=all(effect > config['protocol']['minimum_effect'] for effect in effects),
+                         all_seed_gate_scope='Every reported initialization exceeds minimum_effect. Descriptive audit; does not release confirmation, promote a model or establish its mechanism.')
         report['partitions'][partition] = entry
     write_json(output or root / 'paired-audit-report.json', report)
     return report

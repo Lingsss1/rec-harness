@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import rec_harness
 from pathlib import Path
 from rec_harness.core import ContractError,file_hash
 from rec_harness.evolution import freeze_validator_files
@@ -10,7 +11,7 @@ class ValidatorBindingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             suite=Path(root)/'suite.json';suite.write_text('{}')
             hashes=freeze_validator_files({'utility':{'command':['{python}','-m','rec_harness.tool_online','--suite',str(suite)]}})
-            package=Path(__file__).resolve().parents[1]/'rec_harness'
+            package=Path(rec_harness.__file__).resolve().parent
             for name in ['tool_online.py','runtime.py','cpu_job.py','toy_isolated.py']:
                 self.assertEqual(hashes[str(package/name)],file_hash(package/name))
             self.assertEqual(hashes[str(suite)],file_hash(suite))

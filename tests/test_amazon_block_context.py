@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import rec_harness
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -22,7 +23,7 @@ class AmazonBlockContextTests(unittest.TestCase):
         store=Store(self.directory/'memory');objects=Artifacts(self.directory/'objects');scores=Artifacts(self.study/'artifacts/objects')
         self.addCleanup(store.close);store.configure_budget(2);store.event('block_scores_registered',{'config_hash':digest(config)})
         request,key=prepare_request([{'user_id':90210,'history':[1,2],'candidates':list(range(1,101))}],seed=13)
-        base=Path(__file__).resolve().parents[1]/'rec_harness/adapters'
+        base=Path(rec_harness.__file__).resolve().parent/'adapters'
         for task,block in [('reference',None),('block-0',0)]:
             values=[0.]*100;position=key['rows'][0]['positive_index'];values[position]=1.
             if block is not None:values[(position+1)%100]=2.

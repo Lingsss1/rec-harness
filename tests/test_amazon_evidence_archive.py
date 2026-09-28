@@ -4,7 +4,7 @@ from pathlib import Path
 from rec_harness.core import Artifacts,ContractError,digest,file_hash,read_json,write_json
 from rec_harness.store import Store
 from rec_harness.runtime_archive import host_identity
-from rec_harness.adapters.amazon_evidence import archive_job,ingest,restore_job_archive,job_partition
+from rec_harness.adapters.amazon_evidence import archive_job,ingest,restore_job_archive,job_partition,compact_job_archive,resolve_job_archive
 
 
 class EvidenceArchiveTests(unittest.TestCase):
@@ -87,9 +87,13 @@ class EvidenceArchiveTests(unittest.TestCase):
             self.assertEqual(ingest(root)['imported'],['base-tiny-42'])
             store=Store(root/'memory');before=store.verify();graph=store.snapshot();store.close()
             fact=next(n for n in graph['nodes'] if n['type']=='Experiment')
-            linked=read_json(artifacts.verify(fact['attrs']['artifact_refs']['isolated/runtime-lock.json']))
+            indexed=resolve_job_archive(fact['attrs']['artifact_refs'],artifacts)
+            linked=read_json(artifacts.verify(indexed['isolated/runtime-lock.json']))
             self.assertEqual(linked,archive)
             self.assertNotIn('isolated/jail/usr/lib/libtest.so',fact['attrs']['artifact_refs'])
+            compact_restore=root/'compact-restored'
+            restore_job_archive(fact['attrs']['artifact_refs'],artifacts,compact_restore)
+            self.assertEqual((compact_restore/'isolated/jail/usr/lib/libtest.so').read_bytes(),b'frozen library')
             self.assertEqual(ingest(root)['imported'],[])
             store=Store(root/'memory')
             try:self.assertEqual(store.verify(),before);self.assertEqual(store.snapshot(),graph)
@@ -113,3 +117,51 @@ class EvidenceArchiveTests(unittest.TestCase):
             result=restore_job_archive(refs,Artifacts(root/'objects'),root/'restored')
             self.assertEqual(result['runtime_files'],0)
             self.assertEqual((root/'restored/model.py').read_text(),'source')
+
+    def test_large_unlocked_job_keeps_every_file_outside_graph(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);job=root/'jobs/base-tiny-42';source=root/'model.py';source.write_text('model')
+            config={'protocol_hash':'p','development_seeds':[42],'confirmation_seeds':[17],
+                'model_versions':{'base':{'path':str(source),'sha256':file_hash(source)}}}
+            write_json(root/'study.json',config);write_json(root/'study-lock.json',{'config_hash':digest(config)})
+            for index in range(400):
+                path=job/'isolated/jail/usr/lib'/('library-'+str(index));path.parent.mkdir(parents=True,exist_ok=True)
+                path.write_bytes(b'preserve all original runtime files')
+            write_json(job/'completed.json',{'job_id':'base-tiny-42','model_version':'base','dataset':'tiny','seed':42,
+                'status':'success','metrics':{'HR@10':0.5},'allocated_gpu_seconds':1,'process':{'completed_at':1}})
+            ingest(root);store=Store(root/'memory',read_only=True)
+            try:
+                graph=store.snapshot();before=store.verify()
+                fact=next(n for n in graph['nodes'] if n['type']=='Experiment')
+                self.assertLess(len(json.dumps(fact)),2500)
+                self.assertLess(store.db.execute('SELECT max(length(body)) FROM snapshots').fetchone()[0],5000)
+            finally:store.close()
+            artifacts=Artifacts(root/'artifacts/objects');descriptor=fact['attrs']['artifact_refs']
+            refs=resolve_job_archive(descriptor,artifacts)
+            self.assertEqual(descriptor['file_count'],401);self.assertEqual(len(refs),401)
+            self.assertGreater(len(json.dumps(refs)),50000)
+            restored=root/'restored';restore_job_archive(descriptor,artifacts,restored)
+            self.assertEqual({str(p.relative_to(restored)) for p in restored.rglob('*') if p.is_file()},set(refs))
+            for name in refs:self.assertEqual((restored/name).read_bytes(),(job/name).read_bytes())
+            self.assertEqual(ingest(root)['imported'],[])
+            store=Store(root/'memory',read_only=True)
+            try:self.assertEqual(store.verify(),before);self.assertEqual(store.snapshot(),graph)
+            finally:store.close()
+
+    def test_compact_manifest_and_objects_fail_closed_before_restore(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);source=root/'input';source.write_bytes(b'original');artifacts=Artifacts(root/'objects')
+            refs={'input':artifacts.put(source)};descriptor=compact_job_archive(refs,artifacts)
+            self.assertEqual(resolve_job_archive(descriptor,artifacts),refs)
+            for broken in [{**descriptor,'file_count':2},{**descriptor,'file_count':True},
+                           {**descriptor,'schema':'unknown'},compact_job_archive({'../escape':refs['input']},artifacts),
+                           compact_job_archive({'a//b':refs['input'],'a/b':refs['input']},artifacts)]:
+                with self.assertRaises(ContractError):restore_job_archive(broken,artifacts,root/'bad')
+                self.assertFalse((root/'bad').exists())
+            artifacts.verify(descriptor['manifest_ref']).write_text('changed')
+            with self.assertRaisesRegex(ContractError,'unavailable/corrupt'):
+                restore_job_archive(descriptor,artifacts,root/'bad')
+            self.assertFalse((root/'bad').exists())
+            # Legacy maps remain readable, including a file literally named schema.
+            self.assertEqual(resolve_job_archive({'schema':refs['input']},artifacts),{'schema':refs['input']})

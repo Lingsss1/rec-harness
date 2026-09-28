@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from rec_harness.core import Artifacts, ContractError, digest, file_hash, read_json, write_json
 from rec_harness.runtime import edge, node
@@ -30,10 +31,43 @@ def job_partition(config, result):
     return partition
 
 
+def compact_job_archive(refs,artifacts):
+    """Keep the complete file index in CAS rather than every graph snapshot."""
+    with TemporaryDirectory(prefix='amazon-job-index-') as temporary:
+        path=Path(temporary)/'manifest.json'
+        write_json(path,{'schema':'amazon-job-files-v1','files':refs})
+        manifest=artifacts.put(path)
+    return {'schema':'amazon-job-archive-v1','manifest_ref':manifest,'file_count':len(refs)}
+
+
+def resolve_job_archive(refs,artifacts):
+    """Read a compact index or an unchanged legacy flat file mapping."""
+    if not isinstance(refs,dict):raise ContractError('invalid job archive mapping')
+    if isinstance(refs.get('schema'),str):
+        if (set(refs)!={'schema','manifest_ref','file_count'} or refs['schema']!='amazon-job-archive-v1'
+                or type(refs['file_count']) is not int or refs['file_count']<0):
+            raise ContractError('invalid compact job archive descriptor')
+        manifest=read_json(artifacts.verify(refs['manifest_ref']))
+        if (not isinstance(manifest,dict) or set(manifest)!={'schema','files'}
+                or manifest['schema']!='amazon-job-files-v1' or not isinstance(manifest['files'],dict)
+                or len(manifest['files'])!=refs['file_count']):
+            raise ContractError('job archive manifest differs from descriptor')
+        refs=manifest['files']
+    names=set()
+    for name,ref in refs.items():
+        path=Path(name)
+        if (not path.parts or path.is_absolute() or '..' in path.parts
+                or str(path) in names or not isinstance(ref,dict)):
+            raise ContractError('invalid archived job path or reference')
+        names.add(str(path))
+    return dict(refs)
+
+
 def restore_job_archive(refs,artifacts,destination):
     """Restore archived files, expanding locked runtime refs; does not launch a job."""
     destination=Path(destination)
     if destination.exists():raise ContractError('job archive restore requires a new destination')
+    refs=resolve_job_archive(refs,artifacts)
     expanded=dict(refs);modes={}
     lock='isolated/runtime-lock.json'
     if lock in refs:
@@ -114,7 +148,7 @@ def ingest(directory):
                      'partition': partition,
                      # Retrying a category/seed is not new independent evidence.
                      'independent_run_id': result['job_id'], 'seed': result['seed'], 'dataset': result['dataset'],
-                     'effect_gate_passed': False, 'artifact_refs': refs, 'source_ref': source_ref,
+                     'effect_gate_passed': False, 'artifact_refs': compact_job_archive(refs,artifacts), 'source_ref': source_ref,
                      'allocated_gpu_seconds': result['allocated_gpu_seconds'], 'peak_memory_bytes': result.get('peak_memory_bytes'),
                      'data_hashes': manifest['data_hashes'] if manifest else None,
                      'evaluation_candidates_hash': manifest['candidates_hash'] if manifest else None,

@@ -27,3 +27,5 @@
 来源投影为Source节点，通过Method→DERIVED_FROM→Source关联。相同locator合并为一个节点，各方法映射去重后保留在边上；来源状态为agent_reported_unverified、版本unknown、正文档案为空。引用或晋升不会把来源升级为已核验事实，也不会生成模型效果Claim。
 
 37项相关测试通过（5.305秒），覆盖真实Store检索能找到方法、终态再运行不新增角色或事件、重复引用合并及未核验标签，同时检查既有模型方法来源和诊断路径。没有新增Codex调用或真实工具生成，仍晚于v24安装包。
+
+后续[真实生成验收](../experiments/tool-method-authoring-v1.md)已完成：一次Codex调用生成工具及original方法卡，六个CPU参考案例通过，恢复无新增执行，合计10 BCU。该验收使用操作者给定的解析测量任务，不证明论文正文核验、自主缺口发现或在线效用，未晋升工具。

@@ -6,6 +6,8 @@
 
 ## 当前交付与模型结果
 
+- [真实工具方法卡验收v1](../experiments/tool-method-authoring-v1.md)：一次Codex生成工具及original方法卡，三个离线阶段的六个CPU案例通过，合计10 BCU；方法卡事件/CAS及图节点可追溯，恢复无新增执行。任务由操作者预定义，不计为自主缺口发现、论文核验、在线效用或晋升。
+
 - [不同合成任务的经验迁移 v1](../experiments/heterogeneous-transfer-v1.md)完成：源分段任务→目标周期任务，开发/确认均为零增益；30次真实角色、50 BCU。两阶段经验送达与完整恢复审计通过，无待结算；不推广为真实推荐或一般记忆有效。
 
 - [晋升后真实 CPU 复测](../experiments/project-successor-cpu-v1.md)完成工程验收，实际输出送达 evidence 与 measurement；修复了精简测量审查输入导致送达审计报错的问题。角色/晋升仍为夹具，不算自主发现或正效用；无新增 Codex 调用，终态恢复零执行。此修复晚于 v21。

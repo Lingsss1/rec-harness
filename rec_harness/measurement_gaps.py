@@ -19,6 +19,39 @@ def validate_requirements(requirements):
         for key in ('blocked_decision','cheapest_test','acceptance_contract'):
             if not isinstance(item[key],str) or not item[key]:raise ContractError('measurement requirement text missing: '+key)
         number(item['development_budget'],'tool development budget',0)
+        if 'source_measurement_gap_ids' in item:
+            refs=item['source_measurement_gap_ids']
+            if not isinstance(refs,list) or not refs or not all(isinstance(ref,str) and ref for ref in refs) or len(set(refs))!=len(refs):
+                raise ContractError('distinct source measurement gap identifiers required')
+
+
+def record_coverage(research,state,diagnostic,rule):
+    """Record actual successor output coverage, without declaring a gap resolved."""
+    refs=rule.get('source_measurement_gap_ids')
+    if not refs:return
+    from .runtime import node,edge
+    observation='diagnostic-'+diagnostic['identity']
+    graph=research.store.snapshot();known={n['id']:n for n in graph['nodes']}
+    source=known.get(observation)
+    if (not source or source['type']!='Observation' or not source['attrs'].get('valid')
+        or source['attrs'].get('model_version')!=state['incumbent']
+        or source['attrs'].get('implementation_hash')!=diagnostic['implementation_hash']
+        or source['attrs'].get('output')!=diagnostic['output']):
+        raise ContractError('measurement coverage requires committed matching diagnostic evidence')
+    identity='measurement-coverage-'+digest({'rule':rule,'diagnostic':diagnostic['identity'],'protocol':research.protocol_hash})
+    if identity in known:return
+    attrs={'kind':'measurement_output_coverage','measurement':rule['measurement'],
+        'value':diagnostic['output']['measurements'][rule['measurement']],
+        'source_measurement_gap_ids':refs,'model_version':state['incumbent'],
+        'tool_version':diagnostic['tool_version'],'implementation_hash':diagnostic['implementation_hash'],
+        'evidence_dependency_ids':[observation],'independent_unit':False,
+        'scope':'Required output observed after tool activation; not semantic acceptance, gap resolution or mechanism proof.'}
+    edges=[edge(identity+'-source',identity,observation,'DERIVED_FROM',[observation],research.task,research.store.version+1)]
+    for i,ref in enumerate(refs):
+        if ref in known and known[ref]['type']=='MeasurementGap':
+            edges.append(edge(identity+'-gap-'+str(i),identity,ref,'ABOUT',[observation],research.task,research.store.version+1))
+    research.store.patch({'base_version':research.store.version,'nodes':[node(identity,'Observation',attrs,research.task,research.protocol_hash)],
+        'edges':edges},accompanying_events=[('measurement_output_observed',{'observation_id':identity,**attrs})])
 
 
 def triage(research,state,diagnostic,*,requirements=None,review_ref=None,limitation=None,related_gap_ids=None):
@@ -34,12 +67,14 @@ def triage(research,state,diagnostic,*,requirements=None,review_ref=None,limitat
     from .runtime import node,edge
     graph=research.store.snapshot();known={n['id'] for n in graph['nodes']};gaps=[]
     for rule in requirements:
-        if rule['measurement'] in measurements:continue
+        if rule['measurement'] in measurements:
+            record_coverage(research,state,diagnostic,rule)
+            continue
         identity=digest({'rule':rule,'model':state['incumbent'],'protocol':research.protocol_hash,
                          'tool':diagnostic['implementation_hash'] if diagnostic else None,**({'review_ref':review_ref} if review_ref else {})})
         gap_id='measurement-gap-'+identity
         experiments=[r['run_id'] for r in runs if r.get('run_id') in known]
-        gap={'measurement_gap_id':gap_id,'related_gap_ids':related_gap_ids or [],'experiment_refs':experiments,
+        gap={'measurement_gap_id':gap_id,'related_gap_ids':list(dict.fromkeys((related_gap_ids or [])+rule.get('source_measurement_gap_ids',[]))),'experiment_refs':experiments,
             'blocked_decision':rule['blocked_decision'],'competing_explanations':rule['competing_explanations'],
             'current_tools_and_versions':[diagnostic['tool_version']] if diagnostic else [],
             'observed_limitation':limitation or ('required output absent from successful tool result' if diagnostic else 'no validated diagnostic tool configured'),

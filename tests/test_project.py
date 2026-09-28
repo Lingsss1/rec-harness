@@ -170,6 +170,34 @@ class ProjectTests(unittest.TestCase):
             self.assertEqual(len(calls),2)
         context=read_json(self.campaign/'episodes/tool-1/campaign/candidates/project-tool-1/context.json')
         self.assertEqual(context['measurement_review']['assessment'],'measurement_gap')
+        child=self.campaign/'episodes/model-2/campaign'
+        rule=read_json(child/'campaign.json')['measurement_requirements'][0]
+        gap_id=context['measurement_gap']['measurement_gap_id']
+        self.assertEqual(rule['source_measurement_gap_ids'],[gap_id])
+        store=Store(child/'memory')
+        try:
+            records=[e['payload'] for e in store.events() if e['kind']=='measurement_output_observed']
+            self.assertEqual(len(records),1)
+            self.assertEqual(records[0]['source_measurement_gap_ids'],[gap_id])
+            self.assertEqual(records[0]['value'],0.5)
+            self.assertFalse(records[0]['independent_unit'])
+            graph=store.snapshot();known={n['id']:n for n in graph['nodes']}
+            source=known[records[0]['evidence_dependency_ids'][0]]
+            self.assertEqual(source['attrs']['output']['measurements']['spread'],0.5)
+            self.assertEqual(source['attrs']['implementation_hash'],records[0]['implementation_hash'])
+            from types import SimpleNamespace
+            from rec_harness.measurement_gaps import record_coverage
+            config=read_json(child/'campaign.json')
+            research=SimpleNamespace(store=store,task=config['task_id'],protocol_hash=config['protocol_hash'])
+            state={'incumbent':source['attrs']['model_version']}
+            before=store.verify()
+            record_coverage(research,state,source['attrs'],rule)
+            self.assertEqual(store.verify(),before)
+            forged=json.loads(json.dumps(source['attrs']))
+            forged['output']['measurements']['spread']=100
+            with self.assertRaisesRegex(ContractError,'matching diagnostic evidence'):
+                record_coverage(research,state,forged,rule)
+        finally:store.close()
 
     def test_promoted_tool_missing_discovered_output_blocks_successor(self):
         path=self.config('tool');config=read_json(path)
@@ -186,10 +214,15 @@ class ProjectTests(unittest.TestCase):
             child=self.campaign/'episodes/model-2/campaign'
             self.assertEqual(read_json(child/'campaign.json')['measurement_requirements'][0]['measurement'],'spread')
             self.assertEqual(read_json(child/'run-report.json')['state']['stop_reason'],'measurement_required')
+            store=Store(child/'memory')
+            try:self.assertFalse(any(e['kind']=='measurement_output_observed' for e in store.events()))
+            finally:store.close()
             decision_context=read_json(next((child/'research_archive/decisions').glob('*/context.json')))
             self.assertEqual(decision_context['diagnostic']['status'],'success')
             self.assertEqual(set(decision_context['diagnostic']['output']['measurements']),{'unrelated'})
             self.assertEqual(decision_context['measurement_gaps'][0]['required_information'],'spread')
+            self.assertEqual(decision_context['measurement_gaps'][0]['related_gap_ids'],
+                read_json(child/'campaign.json')['measurement_requirements'][0]['source_measurement_gap_ids'])
             self.assertFalse(any('hypothesis' in p.name for p in (child/'tasks').iterdir()))
             self.assertEqual(autoresearch(self.campaign,agent=agent),report)
         self.assertEqual(report['state']['measurement_obligations'][0]['required_information'],'spread')

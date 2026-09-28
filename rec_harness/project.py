@@ -12,6 +12,7 @@ class ResearchProject:
     @staticmethod
     def init(root,configuration):
         root=Path(root).resolve();config=copy.deepcopy(configuration)
+        config.setdefault('measurement_lineage',True)
         identifier(config['task_id'])
         if config['model'].get('adapter') not in {None,'amazon-nextitnet-v1'}:raise ContractError('unsupported project model adapter')
         if config['model'].get('adapter')=='amazon-nextitnet-v1':
@@ -98,7 +99,9 @@ class ResearchProject:
         for gap in state.get('measurement_obligations',[]):
             rule={'measurement':gap['required_information'],**{k:gap[k] for k in ['blocked_decision','competing_explanations','cheapest_test','development_budget','acceptance_contract']}}
             previous=requirements.get(rule['measurement'])
-            if previous is not None and previous!=rule:raise ContractError('successor measurement contract conflicts with promoted tool obligation')
+            if previous is not None and {k:v for k,v in previous.items() if k!='source_measurement_gap_ids'}!=rule:raise ContractError('successor measurement contract conflicts with promoted tool obligation')
+            if self.config.get('measurement_lineage'):
+                rule['source_measurement_gap_ids']=sorted(set((previous or {}).get('source_measurement_gap_ids',[]))|{gap['measurement_gap_id']})
             requirements[rule['measurement']]=rule
         if requirements:config['measurement_requirements']=list(requirements.values())
         if state.get('active_tool'):

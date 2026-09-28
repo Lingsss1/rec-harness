@@ -71,6 +71,11 @@ class Research:
         if 'diagnostic_tool' in config:raise ContractError('diagnostic_tool is controller-owned; supply diagnostic_registry')
         if config.get('execution',{}).get('kind') not in {None,'isolated-toy-v1'}:
             raise ContractError('unsupported execution backend; refusing implicit fallback')
+        if 'synthetic_task' in config['protocol']:
+            from .toy_isolated import validate_task
+            if config.get('execution',{}).get('kind')!='isolated-toy-v1':raise ContractError('synthetic task requires isolated host scoring')
+            if config['protocol']['synthetic_task'] is None:raise ContractError('explicit synthetic task cannot be null')
+            validate_task(config['protocol']['synthetic_task'])
         if config.get('agent_backend',{}).get('kind') not in {None,'codex','jailed_codex'}:
             raise ContractError('unsupported agent backend; refusing implicit fallback')
         if 'harness_registry' in config:
@@ -284,7 +289,8 @@ class Research:
                     if any(file_hash(Path(__file__).with_name(name+'.py'))!=backend[field] for name,field in
                            [('toy_isolated','host_scorer_hash'),('toy_worker','worker_hash')]):
                         raise ContractError('frozen isolated evaluator changed')
-                    execution=isolated_evaluate(model,output,seed,backend,self.artifacts,self.protocol['timeout_seconds'])
+                    task_options={'task':self.protocol['synthetic_task']} if 'synthetic_task' in self.protocol else {}
+                    execution=isolated_evaluate(model,output,seed,backend,self.artifacts,self.protocol['timeout_seconds'],**task_options)
                     checked={'status':execution['status']}
                 else:
                     checked = run_process(self._command(self.protocol["check_command"], model, output, seed), model, directory / "check", timeout=self.protocol["timeout_seconds"])

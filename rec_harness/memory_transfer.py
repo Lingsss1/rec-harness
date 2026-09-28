@@ -68,7 +68,10 @@ def freeze(source_campaign,target_suite,directory,*,context_limit=262144,max_nod
                 'source_event_head':integrity['head'],'source_cost':source.store.budget()['charged_or_reserved'],
                 'source_codex_requests':bool(real_source),'context_byte_limit':context_limit,
                 'source_exporter_hash':file_hash(Path(__file__).with_name('memory_policy.py')),
-                'qualification':'Source stage cost is reported separately; independent synthetic conditions in one task family, not cross-domain or final-test evidence.'}
+                'qualification':('Source stage cost is reported separately; independent synthetic conditions in one task family, not cross-domain or final-test evidence.'
+                    if all(c['config']['protocol'].get('synthetic_task',{}).get('family','bilinear-v1')=='bilinear-v1' for c in suite['cases'])
+                        and config['protocol'].get('synthetic_task',{}).get('family','bilinear-v1')=='bilinear-v1'
+                    else 'Source stage cost is separate; frozen synthetic regression task contracts, not real recommendation, cross-domain or final-test evidence.')}
             body['hash']=digest(body);write_json(root/'study.json',body)
             if source.verify()!=integrity:raise ContractError('source changed during transfer freeze')
             return body

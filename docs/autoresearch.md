@@ -21,6 +21,8 @@ python3 -m rec_harness autoresearch /path/to/campaign
 
 示例冻结 24 BCU、最多 3 轮。基线成本 2，每轮 6 个角色加 2 个 seed，并为知识修复预留 1 BCU，通常完成 2 轮后自动停机。BCU 是配置的工作成本，不是美元或 GPU 秒。调用超时、非法提案和失败训练保留成本与证据；知识格式错误可自动修复一次。控制器中断的未完成通用轮次保留为失败轨迹，随后开始新轮；不会把未完成实验冒充成功。`max_rounds` 是整个 campaign 的上限。
 
+隔离小型任务可通过 `protocol.synthetic_task` 冻结任务类型、样本规模及噪声，支持双线性、分段和周期交互；省略时保留原任务。配置与边界见[合成任务合同](implementation/synthetic-task-contract.md)。
+
 ## 显式研究 Skill
 
 可在通用模型配置的 `codex.role_skills` 中按角色提供冻结指令；Amazon 和工具/Harness 演化使用 `agent_backend.role_skills`。前缀验证套件也使用其 `agent_backend.role_skills`。例如：

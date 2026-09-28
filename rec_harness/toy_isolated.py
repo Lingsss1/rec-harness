@@ -8,11 +8,34 @@ from .core import ContractError, file_hash, number, read_json, write_json
 from .cpu_job import run_cpu_job
 
 
-def samples(seed,n):
+FAMILIES={'bilinear-v1','piecewise-v1','periodic-v1'}
+
+
+def validate_task(task):
+    if task is None:return
+    if not isinstance(task,dict) or set(task)!={'family','training_rows','validation_rows','noise_std'}:
+        raise ContractError('synthetic task requires family, training_rows, validation_rows and noise_std')
+    if not isinstance(task['family'],str) or task['family'] not in FAMILIES:raise ContractError('unsupported synthetic task family')
+    for key in ['training_rows','validation_rows']:
+        if type(task[key]) is not int or not 16<=task[key]<=10000:
+            raise ContractError('synthetic sample counts must be integers from16 to10000')
+    number(task['noise_std'],'synthetic noise standard deviation',0)
+    if task['noise_std']>1:raise ContractError('synthetic noise standard deviation exceeds1')
+
+
+def samples(seed,n,task=None):
+    validate_task(task)
     rng=random.Random(seed);rows=[]
+    # Separate noise stream keeps feature draws independent of noise settings.
+    noise=random.Random(str(seed)+':observation-noise-v1')
     for _ in range(n):
         a,b=rng.uniform(-1,1),rng.uniform(-1,1)
-        rows.append(([a,b],.25*a+.15*b+1.5*a*b))
+        family=task['family'] if task else 'bilinear-v1'
+        if family=='bilinear-v1':target=.25*a+.15*b+1.5*a*b
+        elif family=='piecewise-v1':target=.25*a+.15*b+(1.5*a*b if a>=0 else -1.5*a*b)+.4*b*b
+        else:target=.25*a+.15*b+math.sin(3*a)*math.cos(3*b)
+        if task and task['noise_std']:target+=noise.gauss(0,task['noise_std'])
+        rows.append(([a,b],target))
     return rows
 
 
@@ -31,11 +54,12 @@ def score_response(response,targets):
     return {'quality':1/(1+mse),'mse':mse,'serialized_coefficients':len(weights)}
 
 
-def evaluate(model,output,seed,execution,artifacts,timeout):
+def evaluate(model,output,seed,execution,artifacts,timeout,*,task=None):
+    validate_task(task)
     model,output=Path(model),Path(output);directory=output.parent/'isolated'
     directory.mkdir(parents=True,exist_ok=False);started=time.monotonic()
-    validation=samples(seed+10000,120)
-    request={'seed':seed,'training':samples(seed,180),'queries':[row for row,_ in validation]}
+    validation=samples(seed+10000,task['validation_rows'] if task else 120,task)
+    request={'seed':seed,'training':samples(seed,task['training_rows'] if task else 180,task),'queries':[row for row,_ in validation]}
     write_json(directory/'request.json',request)
     worker=Path(__file__).with_name('toy_worker.py')
     files={'worker.py':{'path':str(worker),'sha256':file_hash(worker)},

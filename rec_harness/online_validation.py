@@ -27,6 +27,10 @@ def freeze_suite(specification,directory):
         seen.add(item['id']);config=configuration(spec_path.parent/item['config'])
         if config.get('adapter') is not None or config.get('execution',{}).get('kind')!='isolated-toy-v1':
             raise ContractError('online Harness validator currently requires host-scored isolated toy research')
+        from .toy_isolated import validate_task
+        if 'synthetic_task' in config['protocol']:
+            if config['protocol']['synthetic_task'] is None:raise ContractError('explicit synthetic task cannot be null')
+            validate_task(config['protocol']['synthetic_task'])
         if config.get('agent_backend',{}).get('kind')!='jailed_codex':raise ContractError('online validation requires isolated Codex roles')
         if not isinstance(config.get('codex',{}).get('model'),str) or not config['codex']['model'].strip():
             raise ContractError('online validation must freeze an explicit codex.model, not a mutable service default')
@@ -44,8 +48,10 @@ def freeze_suite(specification,directory):
         cases.append({'id':item['id'],'stage':item['stage'],'config':config,'inputs':snapshot})
     if {c['stage'] for c in cases}!={'development','confirmation'}:raise ContractError('development and confirmation cases required')
     policy=spec.get('baseline_policy',{});validate_policy(policy)
+    families={c['config']['protocol'].get('synthetic_task',{}).get('family','bilinear-v1') for c in cases}
     body={'schema':'online-harness-suite-v1','cases':cases,'baseline_policy':policy,
-        'qualification':'independent synthetic data/seed conditions; one task family, not held-out benchmark evidence'}
+        'qualification':('independent synthetic data/seed conditions; one task family, not held-out benchmark evidence' if families=={'bilinear-v1'}
+            else 'Independent synthetic regression conditions across declared task families; not real recommendation or held-out benchmark evidence.')}
     body['identity']=suite_identity(body);body['hash']=digest(body)
     write_json(root/'suite.json',body)
     return body

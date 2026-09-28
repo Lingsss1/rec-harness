@@ -1,0 +1,91 @@
+import copy
+import unittest
+from pathlib import Path
+from rec_harness.core import Artifacts,ContractError,digest,read_json,write_json
+from rec_harness.store import Store
+from rec_harness.tool_history import collect
+from rec_harness.evolution_auto import AutonomousEvolution
+from rec_harness.evolution import STAGES
+import test_tool_method
+
+
+class ToolHistoryTests(unittest.TestCase):
+    def setUp(self):
+        fixture=test_tool_method.ToolMethodTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        self.fixture=fixture;self.root=fixture.fixture.root;self.source=self.root/'history'
+        self.store=Store(self.source/'memory');self.addCleanup(self.store.close)
+        self.objects=Artifacts(self.source/'objects');self.plan={'development_ids':['old-development']}
+        write_json(self.source/'candidates/old/plan.json',self.plan)
+        self.store.event('candidate_proposed',{'candidate_id':'old','kind':'tool','plan_hash':digest(self.plan)})
+        self.store.event('candidate_implemented',{'candidate_id':'old','implementation_hash':'old-code'})
+        report={'evaluation_ids':['old-validation'],'gain':0.125,'private_fixture_marker':'MUST_NOT_SHARE'}
+        self.store.event('validation_rejected',{'candidate_id':'old','stage':'utility','rejection_kind':'validation_gate',
+            'report':report,'report_hash':digest(report)})
+        self.store.event('evolution_stopped',{'candidate_id':'old','status':'rejected'})
+
+    def test_freeze_excludes_scores_future_events_and_duplicate_sources(self):
+        before=self.store.verify();cutoff=before['events']
+        history,excluded=collect([{'campaign':str(self.source),'cutoff_seq':cutoff}])
+        self.assertEqual(self.store.verify(),before)
+        self.assertEqual(excluded,['old-development','old-validation'])
+        row=history['candidates'][0];self.assertEqual(row['status'],'rejected');self.assertIsNone(row['method_card'])
+        self.assertNotIn('MUST_NOT_SHARE',str(history));self.assertNotIn('0.125',str(history))
+        self.store.event('evolution_stopped',{'candidate_id':'old','status':'future'})
+        self.assertEqual(collect([{'campaign':str(self.source),'cutoff_seq':cutoff}]),(history,excluded))
+        with self.assertRaisesRegex(ContractError,'duplicate'):
+            collect([{'campaign':str(self.source),'cutoff_seq':cutoff},{'campaign':str(self.source)}])
+
+    def test_new_author_receives_frozen_history_and_exclusions(self):
+        config=read_json(self.fixture.fixture.config());config['kind']='tool';config['context']={}
+        rule=next(iter(config['plan']['stages'].values()))
+        config['plan']['stages']={stage:copy.deepcopy(rule) for stage in STAGES['tool']}
+        config['tool_history_sources']=[{'campaign':str(self.source)}]
+        target=self.root/'new';AutonomousEvolution.init(target,config)
+        frozen=read_json(target/'evolution-auto.json')
+        self.assertNotIn('tool_history_sources',frozen)
+        self.assertIn('old-validation',frozen['plan']['development_ids'])
+        outer=self
+        class Author:
+            def run(self,role,context,directory):
+                outer.assertEqual(context['context']['tool_history']['candidates'][0]['status'],'rejected')
+                model=Path(directory)/'model';model.mkdir(parents=True)
+                (model/'diagnostic.py').write_text('def measure(request): return {}\n')
+                return {'changed_files':['diagnostic.py']}
+        self.store.event('evolution_stopped',{'candidate_id':'old','status':'future'})
+        auto=AutonomousEvolution(target,agent=Author());self.addCleanup(auto.store.close)
+        c=auto.config;candidate=auto.evolution.propose(c['candidate_id'],'tool',c['context'],c['plan'],agent=auto.agent)
+        self.assertEqual(candidate['status'],'implemented')
+
+    def test_missing_validation_identity_or_changed_plan_rejected(self):
+        self.store.event('validation_rejected',{'candidate_id':'old','stage':'shadow'})
+        with self.assertRaisesRegex(ContractError,'evaluation IDs'):collect([{'campaign':str(self.source)}])
+        write_json(self.source/'candidates/old/plan.json',{'development_ids':['changed']})
+        with self.assertRaisesRegex(ContractError,'plan changed'):collect([{'campaign':str(self.source)}])
+
+    def test_method_card_source_is_verified_and_not_promoted_to_fact(self):
+        plan={**self.plan,'tool_method_contract':'diagnostic-method-v1'}
+        write_json(self.source/'candidates/new/plan.json',plan)
+        write_json(self.root/'card.json',self.fixture.card);ref=self.objects.put(self.root/'card.json')
+        self.store.event('candidate_proposed',{'candidate_id':'new','kind':'tool','plan_hash':digest(plan)})
+        self.store.event('candidate_implemented',{'candidate_id':'new','implementation_hash':'new-code','proposal_ref':ref})
+        history,_=collect([{'campaign':str(self.source),'candidate_ids':['new']}])
+        self.assertEqual(history['candidates'][0]['method_card'],self.fixture.card)
+        self.assertEqual(history['candidates'][0]['status'],'implemented')
+        self.objects.verify(ref).write_text('{}')
+        with self.assertRaisesRegex(ContractError,'corrupt artifact'):collect([{'campaign':str(self.source),'candidate_ids':['new']}])
+
+    def test_superseded_and_rolled_back_are_not_reported_as_current_promotions(self):
+        self.store.event('candidate_promoted',{'candidate_id':'old'})
+        self.store.event('candidate_promoted',{'candidate_id':'replacement','previous':{'candidate_id':'old'}})
+        self.assertEqual(collect([{'campaign':str(self.source)}])[0]['candidates'][0]['status'],'superseded')
+        self.store.event('candidate_rollback',{'from':'old','to':None})
+        self.assertEqual(collect([{'campaign':str(self.source)}])[0]['candidates'][0]['status'],'rolled_back')
+
+    def test_project_preflights_history_before_creating_or_running_model(self):
+        import test_project
+        from rec_harness.project import ResearchProject
+        fixture=test_project.ProjectTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        config=read_json(fixture.config('tool'));config['tool']['tool_history_sources']=[]
+        with self.assertRaisesRegex(ContractError,'nonempty tool history'):
+            ResearchProject.init(fixture.campaign,config)
+        self.assertFalse(fixture.campaign.exists())

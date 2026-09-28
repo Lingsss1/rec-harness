@@ -69,9 +69,10 @@ def configuration(path):
         config['optimizer_measurement_source']=str((path.parent/config['optimizer_measurement_source']).resolve())
     if 'trace_source' in config:
         config['trace_source']['campaign']=str((path.parent/config['trace_source']['campaign']).resolve())
-    if 'trace_sources' in config:
-        if not isinstance(config['trace_sources'],list):raise ContractError('trace_sources must be a list')
-        for source in config['trace_sources']:
+    for key in ['trace_sources','tool_history_sources']:
+        if key not in config:continue
+        if not isinstance(config[key],list):raise ContractError(key+' must be a list')
+        for source in config[key]:
             source['campaign']=str((path.parent/source['campaign']).resolve())
     for key in ('development_memory_files','development_history','initial_memory_files'):
         if key in config:config[key]=[str((path.parent/value).resolve()) for value in config[key]]

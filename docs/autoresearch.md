@@ -176,6 +176,8 @@ python3 -m rec_harness amazon-memory-export /path/to/amazon-campaign /path/to/de
 
 工具计划可启用 `"tool_method_contract": "diagnostic-method-v1"`，要求生成角色提交独立方法卡，区分旧工具优化、论文适配和自主设计，并将测量定义与来源对应关系归档到注册信息。字段、兼容性和验证边界见[工具方法卡](implementation/tool-method-card.md)。未启用的既有计划不追写卡片。
 
+工具配置还可声明 `tool_history_sources: [{"campaign": "../old-tool-campaign"}]`，冻结已有和失败工具的方法卡及验证状态，供作者先比较历史再选择方法。历史评价条件自动加入新验证的排除集合；不会传入分数或验证样本。截止点、候选筛选和缺失记录处理见[工具历史输入](implementation/tool-history.md)。
+
 这是模型、工具和 Harness 三个循环的联合入口。`examples/toy/autoresearch.json` 只启动模型循环；完整项目需要另外提供工具和 Harness 的冻结验证配置。不会用固定返回 `passed` 的演示验证器替代真实验证。
 
 项目配置结构如下；路径指向已准备好的子配置，工具运行环境与小型示例相同：

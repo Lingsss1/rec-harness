@@ -46,6 +46,10 @@ class ResearchProject:
             # Verify external history before spending calls on the first model.
             # Evolution still freezes its own prefix when that episode starts.
             collect_trace_set(harness['trace_sources'])
+        if (config.get('tool',{}).get('tool_history_sources') is not None
+                and config.get('max_tool_updates',1)>0 and config['max_model_episodes']>1):
+            from .tool_history import collect
+            collect(config['tool']['tool_history_sources'])
         if 'tool_runtime' in config:
             from .diagnostics import validate_runtime
             validate_runtime(config['tool_runtime'])

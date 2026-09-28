@@ -12,6 +12,7 @@ class AutonomousEvolution:
         if root.exists() and any(root.iterdir()):raise ContractError('evolution campaign directory must be empty')
         config=dict(configuration);identifier(config['candidate_id'])
         if config['kind'] not in STAGES:raise ContractError('tool or harness evolution required')
+        if 'tool_history_sources' in config and config['kind']!='tool':raise ContractError('tool history requires a tool candidate')
         if 'trace_source' in config and 'trace_sources' in config:raise ContractError('supply trace_source or trace_sources, not both')
         if 'trace_source' in config or 'trace_sources' in config:
             from .decision_traces import collect_traces,collect_trace_set,source_task_ids
@@ -38,6 +39,15 @@ class AutonomousEvolution:
             if not source_task_ids(config['context']).issubset(config['plan']['development_ids']):
                 raise ContractError('tool validation must exclude every optimizer source task')
         if config['kind']=='tool':
+            if 'tool_history' in config.get('context',{}) and 'tool_history_sources' not in config:
+                raise ContractError('tool history must be frozen from committed sources')
+            if 'tool_history_sources' in config:
+                from .tool_history import collect
+                context=config.get('context',{})
+                if 'tool_history' in context:raise ContractError('tool history must be frozen from committed sources')
+                history,excluded=collect(config.pop('tool_history_sources'))
+                config['context']={**context,'tool_history':history}
+                config['plan']={**config['plan'],'development_ids':sorted(set(config['plan']['development_ids'])|set(excluded))}
             from .agents import search_policy
             backend=dict(config.get('agent_backend',{}));configured=backend.get('web_search')
             modes=search_policy(configured)

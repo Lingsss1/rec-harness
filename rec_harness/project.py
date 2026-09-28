@@ -1,6 +1,7 @@
 """Sequential model/tool/Harness episodes with explicit frozen activation boundaries."""
 import copy
 import fcntl
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from .core import Artifacts,ContractError,digest,identifier,read_json,write_json
@@ -17,6 +18,8 @@ class ResearchProject:
         config.setdefault('inherit_harness_policy',True)
         config.setdefault('optimizer_measurement_handoff',True)
         config.setdefault('enforce_tool_measurement_scope',True)
+        config.setdefault('verify_successor_memory',True)
+        if type(config['verify_successor_memory']) is not bool:raise ContractError('successor memory verification must be boolean')
         if type(config['enforce_tool_measurement_scope']) is not bool:raise ContractError('tool measurement scope enforcement must be boolean')
         scope=config.get('tool',{}).get('plan',{}).get('measurement_scope')
         if scope is not None:
@@ -97,13 +100,19 @@ class ResearchProject:
             recorded=[e['payload']['episode'] for e in self.store.events() if e['kind']=='project_transition' and e['payload'].get('episode',{}).get('campaign')==str(previous)]
             report=read_json(previous/'run-report.json')
             if not recorded or digest(report)!=recorded[-1]['result_hash'] or old!=report['state']:raise ContractError('parent model result differs from committed project episode')
+            if self.config.get('verify_successor_memory'):
+                parent_store=Store(previous/'memory',read_only=True)
+                try:
+                    if parent_store.verify()!=report['integrity']:
+                        raise ContractError('parent model history differs from committed project episode')
+                finally:parent_store.close()
             package=directory/'source-memory.json'
             if config.get('adapter')=='amazon-nextitnet-v1':
                 from .adapters.amazon_memory import export_development_memory
                 source_config=read_json(previous/'amazon-auto.json')
                 if Path(source_config['study']).resolve()!=Path(config['study']).resolve():raise ContractError('Amazon successor must retain the bound study')
                 config['base_model_id']=old['incumbent']
-                if not package.exists():export_development_memory(previous,package)
+                self.successor_memory(package,lambda path:export_development_memory(previous,path))
                 config['development_memory_files']=config.get('development_memory_files',[])+[str(package)]
             else:
                 if set(old['workspace']) & set(config.get('evaluator_files',[])):raise ContractError('inherited model overlaps frozen evaluator')
@@ -112,7 +121,7 @@ class ResearchProject:
                 from .memory_policy import export_memory
                 source_config=read_json(previous/'campaign.json');store=Store(previous/'memory')
                 try:
-                    if not package.exists():export_memory(store,package,task_id=source_config['task_id'],protocol_hash=source_config['protocol_hash'])
+                    self.successor_memory(package,lambda path:export_memory(store,path,task_id=source_config['task_id'],protocol_hash=source_config['protocol_hash']))
                 finally:store.close()
                 config['initial_memory_files']=config.get('initial_memory_files',[])+[str(package)]
         requirements={r['measurement']:r for r in config.get('measurement_requirements',[])}
@@ -132,6 +141,17 @@ class ResearchProject:
             config['harness_registry']=str(self.root/state['active_harness'])
             config['harness_identity']=self.config['harness']['plan']['identity']
         return config
+
+    def successor_memory(self,package,export):
+        """Reconcile an interrupted export with its source before child admission."""
+        if not package.exists():
+            export(package)
+        elif self.config.get('verify_successor_memory'):
+            with tempfile.TemporaryDirectory(prefix='verify-memory-',dir=package.parent) as temporary:
+                expected=Path(temporary)/'expected.json'
+                export(expected)
+                if read_json(package)!=read_json(expected):
+                    raise ContractError('successor memory differs from committed parent export')
 
     def evolve_config(self,state,directory,kind):
         config=self.template(kind,directory);config['adapter']='research-evolution-v1'

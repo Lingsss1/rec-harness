@@ -590,3 +590,5 @@ python3 -m rec_harness amazon-progress /path/to/amazon-campaign
 新轮次在完成事件中绑定角色账本和 study GPU 账本的成本前缀，查询时重新核验。两种单位分开列出，均保留继承成本与失败支出；这不是含外部诊断/演化账本的项目总费用。历史角色费用可以按其事件前缀重建，但缺少轮末 GPU 前缀时明确标为 `historical_boundary_unavailable`，不会拿当前总费用回填历史点。查询为只读，不启动服务、训练或恢复账本。
 
 每行的 `completion_sequence` 和 `event_hash` 标识具体完成事件；显式重开后同一 round 可有多行，原失败点仍保留。`role_pending_reservations` 和 `study_pending_reservations` 是该历史边界仍在运行的预留数，不是当前待结算数。之后的结算不会重写过去的预留金额。缺失历史 GPU 边界时，其金额和预留数均为 null，不能解释为零支出。
+
+新项目的后继记忆默认启用来源一致性检查：恢复时从已提交前驱重建导出并核对缓存，拒绝替换包与提交后改变的前驱事件链，详见[后继记忆绑定](implementation/successor-memory-binding.md)。

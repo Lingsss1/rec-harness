@@ -230,6 +230,12 @@ class Evolution:
                 snapshot = self.artifacts.snapshot(task_dir / "model", response["changed_files"])
                 if not snapshot:
                     raise ContractError("empty tool implementation")
+                if source:
+                    unchanged={name:ref for name,ref in source.items() if name not in snapshot}
+                    for ref in unchanged.values():self.artifacts.verify(ref)
+                    if self.artifacts.snapshot(task_dir/'model',unchanged)!=unchanged:
+                        raise ContractError('tool changed inherited files without declaring them')
+                    snapshot={**source,**snapshot}
             frozen.update(status="implemented", implementation=snapshot, implementation_hash=digest(snapshot))
             status = "success"
             self.store.event("candidate_implemented", frozen)

@@ -41,6 +41,28 @@ class DiscoverAgent(ProjectAgent):
 
 
 class ProjectTests(unittest.TestCase):
+    def test_tool_rejects_undeclared_changes_or_deletion_of_inherited_files(self):
+        source=self.root/'tool-source';source.mkdir()
+        (source/'diagnostic.py').write_text('def measure(request): return {}\n')
+        (source/'helper.py').write_text('SCALE = 0.5\n')
+        config=read_json(self.config('tool'))
+        config['tool'].update(source=str(source),model_files=['diagnostic.py','helper.py'])
+        path=self.root/'invalid-tool.json';write_json(path,config)
+        for deletion in [False,True]:
+            with self.subTest(deletion=deletion):
+                class UndeclaredAgent(ProjectAgent):
+                    def run(agent,role,context,directory):
+                        response=super().run(role,context,directory)
+                        if role=='tool':
+                            helper=Path(directory)/'model/helper.py'
+                            if deletion:helper.unlink()
+                            else:helper.write_text('SCALE = 99\n')
+                        return response
+                campaign=self.root/('invalid-'+str(deletion))
+                result=autoresearch(campaign,path,agent=UndeclaredAgent())
+                self.assertEqual(result['state']['stop_reason'],'tool_rejected')
+                self.assertFalse((campaign/'episodes/tool-1/campaign/active-tool.json').exists())
+
     def test_tool_then_harness_preserve_all_three_states_across_interruption(self):
         config=read_json(self.config('tool'))
         config['harness']=read_json(self.config('harness'))['harness']
@@ -129,6 +151,10 @@ class ProjectTests(unittest.TestCase):
                     inherited.append(source.read_text() if source.exists() else None)
                     response=super().run(role,context,directory)
                     source.write_text(source.read_text()+'# generation '+str(len(inherited))+'\n')
+                    helper=source.parent/'helper.py'
+                    if len(inherited)==1:
+                        helper.write_text('SCALE = 0.5\n');response['changed_files'].append('helper.py')
+                    else:self.assertEqual(helper.read_text(),'SCALE = 0.5\n')
                     return response
                 return super().run(role,context,directory)
         def measure(directory,*args,**kwargs):
@@ -148,6 +174,9 @@ class ProjectTests(unittest.TestCase):
         second_tool=read_json(self.campaign/'episodes/tool-2/campaign/evolution-auto.json')
         self.assertEqual(second_tool['context']['tool_predecessor']['implementation_hash'],first_tool['implementation_hash'])
         self.assertEqual(second_tool['source_snapshot'],first_tool['implementation'])
+        published=read_json(self.campaign/'episodes/tool-2/campaign/candidates/project-tool-2/candidate.json')
+        self.assertEqual(published['implementation']['helper.py'],first_tool['implementation']['helper.py'])
+        self.assertEqual((self.campaign/'episodes/tool-2/campaign/versions/project-tool-2/helper.py').read_text(),'SCALE = 0.5\n')
         store=Store(self.campaign/'episodes/tool-2/campaign/memory')
         try:
             graph=store.snapshot();edge=next(e for e in graph['edges'] if e['relation']=='BASED_ON')

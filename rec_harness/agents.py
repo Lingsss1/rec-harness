@@ -19,7 +19,7 @@ ROLES = {
     "evaluation": "Assess the public paired runs. Separate selection from scientific conclusion. Failures do not refute mechanisms. Return a DecisionRecord recommendation.",
     "knowledge": "Propose a local GraphPatch based on the supplied graph version. Retain counterevidence and use provisional claims unless independent evidence meets the gates. Never invent observations.",
     "lead": "Review role handoffs and public evaluation. Recommend keep/discard/provisional with evidence and remaining uncertainty; deterministic gates remain authoritative.",
-    "tool": "Implement a diagnostic candidate under model/. Define the measurement, positive/null controls, independent reference and limitations. Do not assert real utility from synthetic tests.",
+    "tool": "Implement a diagnostic candidate under model/. Return every added or modified file in changed_files, with paths relative to model/. Preserve inherited files that you do not change; file deletion is unsupported. Define the measurement, positive/null controls, independent reference and limitations. Do not assert real utility from synthetic tests.",
     "optimizer": "Audit supplied historical visible-state traces. Propose a minimal HarnessPatch affecting only prompts, retrieval or routing. Never edit budget, evaluator, archive or promotion rules. patch_diff must be a JSON object with only prompts, retrieval_limit, routing keys.",
 }
 

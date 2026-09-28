@@ -9,8 +9,9 @@ def audit_exposure(campaign):
     root=Path(campaign);config=read_json(root/'campaign.json')
     if read_json(root/'research_archive/manifest.json')['config_hash']!=digest(config):
         raise ContractError('exposure campaign configuration changed')
-    objects=Artifacts(root/'artifacts/objects');store=Store(root/'memory')
+    objects=Artifacts(root/'artifacts/objects');store=Store(root/'memory',read_only=True)
     try:
+        store.db.execute('BEGIN')
         integrity=store.verify();records={};submitted={};completed=set();exposures=[]
         tool=config.get('diagnostic_tool')
         if tool:
@@ -32,12 +33,21 @@ def audit_exposure(campaign):
                 submitted[value['task_id']]=value
                 diagnostic=context.get('diagnostic')
                 if diagnostic is not None:
-                    if diagnostic!=records.get(diagnostic['identity']):raise ContractError('role saw uncommitted or changed measurement')
-                    if diagnostic['model_version']!=context['model_version']:raise ContractError('role saw stale model measurement')
+                    projected=value['role']=='measurement'
+                    baseline=context.get('baseline') or ([] if projected else {})
+                    runs=baseline if projected else baseline.get('runs',[])
                     request={'task_id':context['task_id'],'model_version':context['model_version'],
                         'protocol_hash':context['protocol_hash'],'runs':[{'seed':row['seed'],'valid':row['valid'],
                         'metrics':row.get('metrics',{}),**({'dataset':row['dataset']} if 'dataset' in row else {})}
-                        for row in (context.get('baseline') or {}).get('runs',[])]}
+                        for row in runs]}
+                    if tool is None:raise ContractError('role saw measurement without a bound tool')
+                    identity=digest({'request':request,'tool':tool['implementation_hash'],'worker':tool['worker']})
+                    record=records.get(identity if projected else diagnostic.get('identity'))
+                    expected=({k:record[k] for k in ['status','tool_version','implementation_hash','output','tool_registration'] if k in record}
+                              if projected and record else record)
+                    if diagnostic!=expected:raise ContractError('role saw uncommitted or changed measurement')
+                    diagnostic=record
+                    if diagnostic['model_version']!=context['model_version']:raise ContractError('role saw stale model measurement')
                     if diagnostic['input_hash']!=digest(request):raise ContractError('measurement does not describe the visible baseline')
                     if diagnostic['identity']!=digest({'request':request,'tool':tool['implementation_hash'],'worker':tool['worker']}):
                         raise ContractError('measurement execution identity changed')
@@ -52,7 +62,9 @@ def audit_exposure(campaign):
         return {'task_id':config['task_id'],'tool_hash':tool['implementation_hash'] if tool else None,
             'measurements':len(records),'exposures':exposures,'integrity':integrity,
             'qualification':'Committed measurement present in exact role input; not proof of semantic use or causal decision benefit'}
-    finally:store.close()
+    finally:
+        if store.db.in_transaction:store.db.execute('ROLLBACK')
+        store.close()
 
 
 def main():

@@ -69,6 +69,10 @@ def freeze_tool(options,artifacts):
             'scope':'Diagnostic validation under frozen conditions; not independent model-effect or mechanism evidence. Source ancestry does not establish a local rollback target.'}
         if contract==OBSERVATION_CONTRACT:
             registration['usage']['input']=runtime_contract(contract)['available_inputs']
+        if plan.get('tool_method_contract'):
+            registration['method_card']=read_json(registry.artifacts.verify(candidate['proposal_ref']))
+            registration['method_card_hash']=candidate['proposal_ref']['sha256']
+            registration['method_card_status']='author declaration; source content and scientific utility are not established by this card'
         if registry.store.verify()['head']!=head:raise ContractError('tool registry changed during activation')
         worker=Path(__file__).with_name('diagnostic_worker.py')
         return {'candidate_id':candidate['candidate_id'],'implementation':snapshot,'implementation_hash':digest(snapshot),

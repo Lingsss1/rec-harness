@@ -123,6 +123,7 @@ class Evolution:
         identifier(candidate_id)
         if kind not in STAGES:
             raise ContractError("invalid candidate kind")
+        if 'tool_method_contract' in plan and kind!='tool':raise ContractError('tool method contract requires a tool candidate')
         required(plan, ["budget", "agent_cost", "development_ids", "stages", "identity", "rollback_version"])
         if set(plan["stages"]) != set(STAGES[kind]):
             raise ContractError("all frozen validation stages are required")
@@ -185,6 +186,10 @@ class Evolution:
         if kind=='harness' and 'measurement_handoff_request' in context:role='optimizer_router'
         task_dir = directory / "development"
         request_context={"context":context,"acceptance_plan":plan}
+        if kind=='tool':
+            from .tool_method import contract
+            method_contract=contract(plan)
+            if method_contract is not None:request_context['tool_method_contract']=method_contract
         submissions=[e['payload'] for e in self.store.events()
                      if e['kind']=='candidate_generation_submitted' and e['payload']['candidate_id']==candidate_id]
         recovered=bool(submissions)
@@ -267,6 +272,12 @@ class Evolution:
                 snapshot = self.artifacts.snapshot(task_dir, files)
             else:
                 snapshot = self.artifacts.snapshot(task_dir / "model", response["changed_files"])
+                if plan.get('tool_method_contract'):
+                    from .tool_method import FILENAME,validate
+                    if FILENAME not in snapshot:raise ContractError('tool method card must be declared in changed_files')
+                    method_ref=snapshot.pop(FILENAME)
+                    validate(read_json(self.artifacts.verify(method_ref)),digest(source) if source else None)
+                    frozen['proposal_ref']=method_ref
                 if not snapshot:
                     raise ContractError("empty tool implementation")
                 if source:

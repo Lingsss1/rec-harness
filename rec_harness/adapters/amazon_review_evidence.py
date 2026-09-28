@@ -5,6 +5,46 @@ from rec_harness.core import Artifacts,ContractError,digest,file_hash,read_json
 from rec_harness.store import Store
 
 
+def experiment_report(directory, events):
+    """Carry implementation limitations forward without treating prose as tests."""
+    from rec_harness.agents import schema_for, validate_schema
+    from rec_harness.core import safe_file
+    directory=Path(directory);folder=directory/'experiment'
+    completed=[event['payload'] for event in events if event['kind']=='role_completed'
+               and event['payload'].get('role')=='experiment'
+               and event['payload'].get('task','').startswith(directory.name+'-experiment-')]
+    if not (folder/'response.json').exists():
+        if completed:raise ContractError('committed experiment report missing')
+        return {'status':'unavailable','scope':'No archived implementation report.'}
+    response=read_json(folder/'response.json')
+    if completed:
+        if not any(item.get('response_hash')==digest(response) for item in completed):
+            raise ContractError('experiment report differs from completion event')
+    elif (folder/'reuse.json').exists():
+        from .amazon_auto_audit import verify_reused_role
+        verify_reused_role(folder,read_json(folder/'accepted.json'))
+    else:
+        return {'status':'unavailable','scope':'Implementation report has no bound completion event.'}
+    accepted=read_json(folder/'accepted.json')
+    if completed and not any(all(item.get(key)==value for key,value in accepted.items()) for item in completed):
+        raise ContractError('experiment report receipt differs from completion event')
+    if accepted.get('response_hash')!=digest(response) or accepted.get('context_hash')!=digest(read_json(folder/'context.json')):
+        raise ContractError('experiment report accepted identity changed')
+    validate_schema(response,schema_for('experiment'))
+    hashes=accepted.get('model_source_hashes',{})
+    for name,sha in hashes.items():
+        if file_hash(safe_file(folder/'model',name))!=sha:
+            raise ContractError('experiment report source changed')
+    if hashes and set(hashes)!=set(response['changed_files']):
+        raise ContractError('experiment report changed files differ from accepted sources')
+    return {'status':'identity_verified','origin':'agent_hypothesis',
+        'response_hash':digest(response),'context_hash':accepted['context_hash'],
+        'changed_files':response['changed_files'],'source_hashes':hashes,
+        'reported_checks':response['implementation_checks'],'reported_limitations':response['limitations'],
+        'checks_verified_by_this_report':False,
+        'scope':'Event-bound implementation author report, not independently verified test evidence. Empty limitations do not prove complete verification. Compare with host admission/training evidence and the proposal; preserve unexecuted or unresolved checks in the decision.'}
+
+
 def protocol_summary(config,result,manifest):
     """Project an already audited development receipt, without copying private data."""
     keys=('epochs','batches','eval_users','eval_seed','patience','eval_every')

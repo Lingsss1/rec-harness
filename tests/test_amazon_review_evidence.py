@@ -2,12 +2,42 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rec_harness.core import Artifacts,ContractError,write_json
+from rec_harness.core import Artifacts,ContractError,write_json,digest,file_hash
 from rec_harness.store import Store
-from rec_harness.adapters.amazon_review_evidence import admission_evidence,protocol_summary
+from rec_harness.adapters.amazon_review_evidence import admission_evidence,protocol_summary,experiment_report
 
 
 class ReviewEvidenceTests(unittest.TestCase):
+    def test_author_limitations_are_bound_but_not_promoted_to_verified_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/'round-1';folder=root/'experiment'
+            model=folder/'model/model.py';model.parent.mkdir(parents=True);model.write_text('source')
+            response={'changed_files':['model.py'],'implementation_checks':['AST checked'],
+                      'limitations':['Checkpoint intervention was not run.']}
+            context={'model_version':'base'}
+            accepted={'response_hash':digest(response),'context_hash':digest(context),
+                      'model_source_hashes':{'model.py':file_hash(model)}}
+            for name,value in [('response',response),('context',context),('accepted',accepted)]:
+                write_json(folder/(name+'.json'),value)
+            events=[{'kind':'role_completed','payload':{'role':'experiment','task':'round-1-experiment-0',**accepted}}]
+            result=experiment_report(root,events)
+            self.assertEqual(result['status'],'identity_verified')
+            self.assertEqual(result['reported_limitations'],response['limitations'])
+            self.assertEqual(result['reported_checks'],response['implementation_checks'])
+            self.assertFalse(result['checks_verified_by_this_report'])
+            self.assertEqual(experiment_report(root,[])['status'],'unavailable')
+            write_json(folder/'response.json',{**response,'limitations':[]})
+            with self.assertRaisesRegex(ContractError,'completion event'):experiment_report(root,events)
+            write_json(folder/'response.json',response)
+            write_json(folder/'context.json',{'model_version':'other'})
+            write_json(folder/'accepted.json',{**accepted,'context_hash':digest({'model_version':'other'})})
+            with self.assertRaisesRegex(ContractError,'completion event'):experiment_report(root,events)
+            write_json(folder/'context.json',context);write_json(folder/'accepted.json',accepted)
+            model.write_text('modified')
+            with self.assertRaisesRegex(ContractError,'source changed'):experiment_report(root,events)
+            (folder/'response.json').unlink()
+            with self.assertRaisesRegex(ContractError,'missing'):experiment_report(root,events)
+
     def test_protocol_summary_preserves_audited_settings_and_excludes_private_payload(self):
         protocol=dict(epochs=200,batches=100,eval_users=1000,eval_seed=42,patience=4,eval_every=5)
         config={'protocol':protocol,'protocol_hash':'p','worker_sha256':'w','development_seeds':[42]}

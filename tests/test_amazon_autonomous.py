@@ -268,6 +268,10 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                             response['changed_files'].append('control-1.py')
                             (target/'model/control-1.py').write_text(SOURCE.replace('return self.block(x)','return self.block(x) * 0.7'))
                     if role in ('evaluation','lead'):
+                        author=context['implementation_author_report']
+                        self_test.assertEqual(author['status'],'identity_verified')
+                        self_test.assertFalse(author['checks_verified_by_this_report'])
+                        self_test.assertEqual(author['reported_limitations'],sample(schema_for('experiment'))['limitations'])
                         if history:self_test.assertEqual(context['baseline_history']['report_hash'],'baseline-slices')
                         self_test.assertEqual(context['implementation_evidence']['status'],'verified')
                         self_test.assertEqual(context['implementation_evidence']['model_version'],context['model_version'])
@@ -296,7 +300,10 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                             self_test.assertEqual(context['visible_model_source']['sha256'],file_hash(target/'model/model.py'))
                             self_test.assertEqual(context['visible_model_source']['model_version'],context['model_version'])
                         response.update(selection='keep' if confirmation else 'discard',conclusion_status='unknown',evidence_refs=['report'])
-                    if role=='knowledge':response['patch_json']=json.dumps({'base_version':context['graph']['graph_version'],'nodes':[],'edges':[]})
+                    if role=='knowledge':
+                        self_test.assertEqual(context['implementation_author_report']['reported_limitations'],sample(schema_for('experiment'))['limitations'])
+                        self_test.assertFalse(context['implementation_author_report']['checks_verified_by_this_report'])
+                        response['patch_json']=json.dumps({'base_version':context['graph']['graph_version'],'nodes':[],'edges':[]})
                     for name,value in [('request.json',{'role':role}),('schema.json',schema_for(role)),('context.json',context),('response.json',response),('resources.json',{'status':'success'})]:write_json(target/name,value)
                     if role=='hypothesis':
                         write_json(target/'literature-search.json',{'search_observed':False,'qualification':'fixture; no source verification'})

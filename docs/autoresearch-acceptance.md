@@ -688,3 +688,11 @@ Amazon 每轮新建上下文时，对本轮检索到的历史设计 GapCard 生�
 这是每轮上下文中的复查要求，未增加角色调用，也不在状态表生成时擅自执行诊断。只覆盖检索工作集中的原始设计卡，不声称检查了库内全部 GapHypothesis、证明了模型语义对应或完成了实际重测。已经冻结的旧 input.json 和角色请求保持原样。
 
 `gap-applicability-acceptance-v1/acceptance.json` 读取真实 Amazon v3 的十条已归档公开开发记忆：对 legacy_incumbent 全部属于同一声明范围；对第二 GELU 候选全部标记 model_changed，并要求重新测量。源记忆 hash 不变，没有读取确认结果或新增调用/训练/推理。全套 376 项测试，356 通过、20 项环境相关跳过；控制器上下文测试覆盖旧卡复查和私有确认字段不进入上下文，辅助测试覆盖协议变化、缺少范围、状态不自动迁移及来源保留。尚未用新真实 Codex 轮次验证其决策效用。
+
+### 实现作者检查与限制交接
+
+两轮 v4 真实验收显示，提案可以包含额外 checkpoint 诊断；主指标评估完成并不意味着这些诊断已执行。评审此前有主机准入/训练证据，但没有 experiment 输出的 `implementation_checks` 和 `limitations`。新增 `implementation_author_report` 将该输出交给 evaluation、lead 和 knowledge，绑定完成事件、接受收据、上下文及可用的候选/对照源码 hash；复用角色沿原完成事件核验。无事件绑定的历史说明显式 unavailable，已绑定说明缺失或改变拒绝。
+
+字段标记 origin=agent_hypothesis、checks_verified_by_this_report=false；身份核验不证明作者声称的检查真实发生。评审需对照提案和主机证据，在 unresolved_explanations 中保留未执行或缺乏支持的验证事项，知识角色也收到同一限制说明。此实现不自动解析自然语言为可执行诊断，也不新增角色调用。
+
+`implementation-author-handoff-acceptance-v1/acceptance.json` 对 v4 两轮真实 experiment 记录完成只读投影，候选和对照四份源码身份、原限制说明及完成事件绑定均通过，源账本未变。未让已结束角色重新消费字段。全量 377 项回归，357 通过、20 跳过；补充的控制器回归验证 evaluation/lead/knowledge 交接和恢复，篡改响应、重写接受上下文、改变源码及删除已提交报告均有拒绝测试。该改动晚于 v12 安装交付。

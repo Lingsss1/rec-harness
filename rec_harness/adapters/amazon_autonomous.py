@@ -426,7 +426,7 @@ class AmazonAutoresearch:
             from .amazon_history_graph import attach_history
             graph=attach_history(self,folder,graph,context['baseline_history'])
             write_json(graph_path,graph)
-        from .amazon_review_evidence import admission_evidence,protocol_summary
+        from .amazon_review_evidence import admission_evidence,protocol_summary,experiment_report
         from .amazon_training_evidence import training_contract_evidence
         implementation=admission_evidence(self.study,pid,cfg['protocol_hash'],binding['candidate_model_version'],candidate)
         execution_evidence=[]
@@ -452,10 +452,12 @@ class AmazonAutoresearch:
                                        'execution_evidence':control_execution})
         review={**context,'model_version':binding['candidate_model_version'],
                 'visible_model_source':None,
+                'implementation_author_report':experiment_report(folder,self.store.events()),
                 'implementation_evidence':implementation,
                 'candidate_execution_evidence':execution_evidence,
                 'handoff':{'cards':cards,'versions':versions},'development':report,
                 'instructions':['Evaluate the actual complete development readout. Include its exact hash in evidence_refs: '+report['hash'],
+                                'implementation_author_report preserves the experiment role reported checks and limitations. Its verified identity does not verify any claimed check. Compare it with the proposal correctness_checks/falsification_condition and host evidence; explicitly retain unexecuted or unsupported validations in unresolved_explanations. Do not equate completion of training and primary-metric selection with completion of every proposed diagnostic or scientific test.',
                                 'implementation_evidence reports host-verified admission checks; its report hashes are references, not files available in your workspace. When structural_changes is supplied, compare its actual changed methods and assigned fields with the proposal insertion contract; AST evidence does not prove that semantic contract. tensor_graph summarizes verified executed tensor paths; unavailable means no recorded coverage. Never infer unexecuted branch coverage or causal isolation from operator counts. sequence_semantics reports finite input-immutability and per-user batch-independence probes, not proof of the proposal-specific mechanism. Distinguish these checks from missing scientific evidence. Evaluation has no source file; lead receives candidate source separately.',
                                 'candidate_execution_evidence summarizes audited completed development training under the frozen worker and protocol. Use verified fields to assess actual execution settings, rather than local model helper defaults. training_contract distinguishes fresh pre-training probes from probes bound to the selected trained development checkpoint; unavailable means no archived gates. These are synthetic checks, not held-out recommendation quality. It does not prove a causal mechanism or expose confirmation results.',
                                 'Keep only if eligible_for_confirmation is true. No confirmation results are supplied; conclusion unknown/provisional.']}
@@ -472,12 +474,14 @@ class AmazonAutoresearch:
             'visible_model_source':{'path':'model/model.py','model_version':binding['candidate_model_version'],
                                     'sha256':file_hash(candidate)}},candidate,decision_check)
         knowledge_context={'graph':graph,'development':report,'decision':lead,
+            'implementation_author_report':review['implementation_author_report'],
             'patch_contract':{'base_version':graph['graph_version'],'fields':['base_version','nodes','edges'],
                 'allowed_node_types':['Claim','GapHypothesis','MeasurementGap'],'origin':'agent_hypothesis',
                 'task_id':graph['task_id'],'protocol_hash':cfg['protocol_hash'],'status':'provisional',
                 'evidence_refs':[n['id'] for n in graph['nodes']]},
             'instructions':['Append new provisional explanations only. Every node attrs must include task_id/protocol_hash/origin; Claims additionally need scope/status/evidence_refs.',
-                            'Evidence refs must be supplied graph node IDs, never file paths. Retain all negative slices; empty patch is valid.']}
+                            'Evidence refs must be supplied graph node IDs, never file paths. Retain all negative slices; empty patch is valid.',
+                            'Implementation author checks and limitations are reported claims, not host-verified test outcomes. Preserve relevant unresolved validation requirements; do not infer that every proposed diagnostic ran because the development cycle completed.']}
         self._role(folder,'knowledge',knowledge_context,validator=lambda v,d:validate_knowledge_patch(json.loads(v['patch_json']),graph))
         cycle=finalize_cycle(self.study,pid,folder)
         return lead,cycle

@@ -151,6 +151,43 @@ class EvolutionAutomationTests(unittest.TestCase):
         self.assertEqual(autoresearch(self.campaign,agent=self.agent),result)
         store=Store(self.campaign/'memory');self.assertEqual(store.verify(),before);store.close()
 
+    def test_raw_validator_report_recovers_before_acceptance_from_cas(self):
+        original=Store.event
+        def interrupt(store,kind,value):
+            if kind=='validation_passed':raise KeyboardInterrupt()
+            return original(store,kind,value)
+        with patch.object(Store,'event',interrupt):
+            with self.assertRaises(KeyboardInterrupt):autoresearch(self.campaign,self.config(),agent=self.agent)
+        write_json(self.campaign/'candidates/candidate/validation/prefix_audit/result.json',{'passed':False})
+        from rec_harness.agents import run_process
+        with patch('rec_harness.evolution.run_process',wraps=run_process) as runner:
+            result=autoresearch(self.campaign,agent=self.agent)
+        self.assertEqual(result['status'],'promoted');self.assertEqual(runner.call_count,2)
+        self.assertEqual(result['budget']['charged_or_reserved'],4);self.assertEqual(self.agent.calls,1)
+
+    def test_successful_validator_process_recovers_before_report_commit(self):
+        from rec_harness.agents import run_process
+        def interrupt(*args,**kwargs):
+            run_process(*args,**kwargs)
+            raise KeyboardInterrupt()
+        with patch('rec_harness.evolution.run_process',side_effect=interrupt):
+            with self.assertRaises(KeyboardInterrupt):autoresearch(self.campaign,self.config(),agent=self.agent)
+        with patch('rec_harness.evolution.run_process',wraps=run_process) as runner:
+            result=autoresearch(self.campaign,agent=self.agent)
+        self.assertEqual(result['status'],'promoted');self.assertEqual(runner.call_count,2)
+        self.assertEqual(result['budget']['charged_or_reserved'],4);self.assertEqual(self.agent.calls,1)
+
+    def test_unknown_custom_validator_outcome_stays_pending_without_rerun(self):
+        from rec_harness.validation_stage import ValidationRecoveryRequired
+        with patch('rec_harness.evolution.run_process',side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):autoresearch(self.campaign,self.config(),agent=self.agent)
+        with patch('rec_harness.evolution.run_process',side_effect=AssertionError('must not rerun')):
+            for _ in range(2):
+                with self.assertRaises(ValidationRecoveryRequired):autoresearch(self.campaign,agent=self.agent)
+        store=Store(self.campaign/'memory');self.addCleanup(store.close)
+        self.assertFalse(any(e['kind'] in {'validation_rejected','evolution_stopped'} for e in store.events()))
+        self.assertEqual(store.budget()['charged_or_reserved'],2);self.assertEqual(self.agent.calls,1)
+
     def test_committed_generation_recovers_before_candidate_projection_without_new_call(self):
         from rec_harness import evolution as module
         original=module.write_json

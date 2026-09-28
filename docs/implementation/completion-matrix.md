@@ -16,7 +16,7 @@
 
 - 最新真实传输验收：[v18 工具检索与草稿归档](../experiments/tool-literature-transport-v1.md)：1 次 Codex 调用、零重试，实际搜索/打开来源，指令、日志、返回源码和 CAS 绑定通过，无新增调用恢复通过。没有运行验证阶梯或晋升；不是自主发现缺口或正效用证据。
 
-- 最新完整回归：`dffc01c` 加在线输出观测的519项源码测试全部通过、零跳过，141.203秒，含Torch、Linux OS隔离和公开边界检查。`online-output-observation-v1/acceptance.json`及源码清单绑定此次测试版本；另有3个真实CPU隔离作业通过，无新增Codex调用或Amazon训练。该版本已纳入下列v23安装包。
+- 最新源码回归：外层验证恢复变更共527项，完整发现运行523项通过、4项显式OS测试跳过（135.359秒）；随后独立启用并通过这4项（6.209秒），共527项通过。`outer-validation-recovery-v1/acceptance.json`、源码清单及两份日志记录覆盖边界，公开边界检查通过。没有新增Codex调用或Amazon训练；这两轮恢复变更尚未进入下列v23安装包。
 - 最新安装交付：[v23](install-acceptance-v23.md)，冻结`4544e15`：131个模块与原生源码逐字节一致，14个入口通过；安装环境519项测试全过、零跳过，125个实际加载模块来自安装目录，7项历史核验与源码一致。包含多来源轨迹、淘汰续接及公开观测工具、shadow、在线输出观测。本次没有新增Codex调用或Amazon训练。
 - 最新已完成真实 Amazon 优化：[v3](../experiments/amazon-next-autoresearch-v3.md)。开发平均 HR@10 增加 0.012750；独立初始化确认增加 0.013125，主机选中候选。确认使用相同验证用户，不是最终测试；该研究已封存，不使用确认结果继续调优。
 - 最近真实工程验收：[多文件 CPU 执行](../experiments/multifile-diagnostic-jail-v1.md)与[诊断提交中断恢复](../experiments/diagnostic-recovery-jail-v1.md)。没有新增 Codex 调用或训练，也不增加工具效用结论。
@@ -47,7 +47,7 @@
 
 ## 接续工作
 
-修复[reference/shadow案例中断恢复](tool-validation-case-recovery.md)：输入绑定后复用成功CPU收据，未知结果禁止自动重跑，结果从CAS核对。23项相关测试及两个真实CPU参考案例通过；晚于v23，未重跑全部519项。外层Evolution仍会移动未完成阶段目录，下一步须接通外层恢复，不能宣称整条autoresearch恢复链已修复。
+修复[reference/shadow案例及外层阶段中断恢复](tool-validation-case-recovery.md)：输入绑定后复用成功CPU收据，未知结果禁止自动重跑，结果从CAS核对。外层Evolution保留阶段目录与案例身份，先归档报告再判定门槛；支持安全恢复的内置验证器继续剩余案例，其他未知进程保留待处理状态，不记作科学淘汰。直接案例恢复已有两个真实CPU参考作业验收，新增外层组合与故障窗口由工程测试覆盖；均晚于v23安装包。
 
 新增[在线合成模型输出观测](online-output-observations.md)：协议显式启用后，从已训练模型的两份预测CAS生成标量输出统计，绑定模型与实验并随incumbent更新。开发/确认两轮三组工程链、送达和恢复通过，纳入上述519项回归；3个真实CPU作业的独立主机复算一致。不是隐藏层激活，尚不证明真实Amazon内部诊断的在线效用或自主测量缺口发现。
 

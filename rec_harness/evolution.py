@@ -13,6 +13,7 @@ from .process_identity import assert_stopped
 from .agents import CodexAgent, run_process, schema_for, validate_schema
 from .core import Artifacts, ContractError, digest, identifier, number, file_hash, public_only, read_json, required, validate_card, write_json
 from .store import Store
+from .validation_stage import ValidationRecoveryRequired
 
 STAGES = {
     "tool": ["correctness", "synthetic", "robustness", "shadow", "utility", "cost_regression"],
@@ -314,6 +315,8 @@ class Evolution:
                     self.validate(candidate_id,stage)
                 version=self.promote(candidate_id)
                 result={'candidate_id':candidate_id,'kind':kind,'status':'promoted','version':version}
+        except ValidationRecoveryRequired:
+            raise
         except (ContractError,OSError,ValueError,KeyError) as error:
             result={'candidate_id':candidate_id,'kind':kind,'status':'rejected','reason':str(error)}
             rejections=[e['payload'] for e in self.store.events() if e['kind']=='validation_rejected'
@@ -354,27 +357,9 @@ class Evolution:
         if any(e['kind']=='validation_rejected' and e['payload']['candidate_id']==candidate_id and e['payload']['stage']==stage for e in self.store.events()):
             raise ContractError('frozen validation previously rejected; create a new candidate and plan')
         target = validations / stage
-        attempts=directory/'validation-attempts';attempts.mkdir(exist_ok=True)
-        if target.exists():
-            assert_stopped(target)
-            target.rename(attempts/(stage+'-'+str(len(list(attempts.glob(stage+'-*')))+1)))
-        target.mkdir(parents=True, exist_ok=False)
-        self.artifacts.restore(candidate["implementation"], target / "candidate")
-        rule = plan["stages"][stage]
-        result_path = target / "result.json"
-        reservation = f"{candidate_id}-validate-{stage}-{len(list(attempts.glob(stage+'-*')))+1}"
-        self.store.reserve(reservation, rule["cost"])
-        status = "rejected"
         try:
-            from .cost_audit import freeze_cost_prefix
-            cost_context=target/'controller-cost.json'
-            write_json(cost_context,freeze_cost_prefix(self.store,plan['budget']))
-            argv = [s.format_map({"python": sys.executable, "candidate": str(target / "candidate"),
-                "output": str(result_path),"cost_context":str(cost_context)}) for s in rule["command"]]
-            process = run_process(argv, target, target / "process", timeout=rule["timeout"])
-            if process["status"] != "success":
-                raise ContractError("independent validator failed")
-            report = read_json(result_path)
+            from .validation_stage import report as stage_report
+            report=stage_report(self,candidate,plan,stage,run_process)
             self._check_report(candidate, plan, stage, report)
             frozen_report = {"report": report, "report_hash": digest(report), "implementation_hash": candidate["implementation_hash"], "plan_hash": candidate["plan_hash"]}
             write_json(target / "accepted.json", frozen_report)
@@ -382,8 +367,9 @@ class Evolution:
             candidate["status"] = {"robustness": "offline_validated", "shadow": "shadow_validated", "utility": "utility_validated",
                                    "prefix_audit": "offline_validated", "development": "development_validated", "confirmation": "utility_validated"}.get(stage, candidate["status"])
             write_json(directory / "candidate.json", candidate)
-            status = "accepted"
             return frozen_report
+        except ValidationRecoveryRequired:
+            raise
         except (ContractError, OSError, ValueError) as error:
             rejection={"candidate_id":candidate_id,"stage":stage,"reason":str(error)}
             if isinstance(error,ValidationGateRejected):
@@ -391,8 +377,6 @@ class Evolution:
                     implementation_hash=candidate['implementation_hash'],plan_hash=candidate['plan_hash'])
             self.store.event("validation_rejected",rejection)
             raise
-        finally:
-            self.store.settle(reservation, rule["cost"], status)
 
     def _accepted_stage(self,candidate,plan,stage):
         records=[e['payload'] for e in self.store.events() if e['kind']=='validation_passed'
@@ -500,6 +484,9 @@ class Evolution:
         integrity=self.store.verify()
         count=0
         for event in self.store.events():
+            if event['kind'] in {'validation_stage_started','validation_stage_report_recorded'}:
+                key='cost_context_ref' if event['kind']=='validation_stage_started' else 'report_ref'
+                self.artifacts.verify(event['payload'][key]);count+=1
             if event['kind'] in {'candidate_implemented','measurement_handoff_recorded'} and event['payload'].get('proposal_ref'):
                 self.artifacts.verify(event['payload']['proposal_ref']);count+=1
             if event['kind'] in {'candidate_generation_recovered','candidate_generation_archived'}:

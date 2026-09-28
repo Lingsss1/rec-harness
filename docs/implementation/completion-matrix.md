@@ -2,6 +2,8 @@
 
 目标保持为完整方案实现及 Amazon NextItNet 对比优化。小型示例不构成完成证据。
 
+已修复[历史前缀修订提示](prefix-revision-visibility.md)遗漏：新 EvidenceBundle 可精确冻结，限额变化保留当时的修订提示，未来修订不可见。此前真实套件 4 个案例只读重建一致，源图冻结读取改为只读，无新增角色或训练。
+
 共享轨迹格式已有[一次真实 Codex 验收](../experiments/harness-incremental-codex-v2.md)：输入可精确还原，生成合法增量补丁、保留基底设置，图中的轨迹身份及无重复调用恢复通过。未运行效用验证或晋升，且补丁不同于未共享版本，不宣称决策等价。
 
 优化器新增[轨迹上下文无损共享](optimizer-trace-sharing.md)：完全相同的 visible_state 字段按 hash 共用，保留每条轨迹的完整可见状态及角色输出。真实历史输入从 210,942 降至 168,201 字节且完整还原一致；没有新增 Codex 调用，不换算 token/费用改善。

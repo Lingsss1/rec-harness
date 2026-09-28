@@ -8,6 +8,36 @@ from rec_harness.harness_prefix import freeze_suite,run_validation,check_respons
 
 
 class PrefixTests(unittest.TestCase):
+    def test_revised_claim_prefix_reproduces_visibility_without_future_revisions(self):
+        from rec_harness.harness_prefix import historical_bundle
+        from rec_harness.runtime import node,edge
+        from rec_harness.store import Store
+        store=Store(self.root/'campaign/memory');self.addCleanup(store.close)
+        store.patch({'base_version':0,'nodes':[
+            node('old','Claim',{'status':'retracted','scope':'fixture','evidence_refs':[]},'task','protocol'),
+            node('replacement','Claim',{'status':'provisional','scope':'fixture','evidence_refs':[]},'task','protocol')],
+            'edges':[edge('revision','replacement','old','SUPERSEDES',['replacement'],'task',1)]})
+        original=store.bundle('task','protocol','evidence',query='old',limit=1)
+        frozen=store.snapshot()
+        self.assertEqual(historical_bundle(frozen,original,1),original)
+        entries=original['revision_visibility']['entries']
+        self.assertEqual(entries[0]['node_id'],'old')
+        self.assertEqual(entries[0]['omitted_superseder_count'],1)
+        expanded=historical_bundle(frozen,original,2)
+        self.assertEqual(expanded['revision_visibility']['entries'][0]['visible_superseders'],['replacement'])
+        context={**self.context,'evidence':original}
+        trace={'trace_id':'revised','role':'evidence','visible_state':context,'input_hash':digest(context),
+            'visible_source_snapshot':read_json(self.root/'suite/suite.json')['cases'][0]['source'],'submitted_event':'fixture'}
+        before=store.verify()
+        with patch('rec_harness.harness_prefix.collect_traces',return_value={'decision_traces':[trace],'source':{'event_head':'fixture'}}),patch.object(Store,'export_events',side_effect=AssertionError('source mutation forbidden')):
+            suite=freeze_suite(self.root/'spec.json',self.root/'revised-suite')
+        self.assertEqual(suite['cases'][0]['context']['evidence'],original)
+        self.assertEqual(store.verify(),before)
+        store.patch({'base_version':1,'nodes':[node('future','Claim',{'status':'provisional','scope':'fixture','evidence_refs':[]},'task','protocol')],
+            'edges':[edge('future-revision','future','old','SUPERSEDES',['future'],'task',2)]})
+        self.assertEqual(historical_bundle(frozen,original,1),original)
+        self.assertNotIn('future',str(historical_bundle(frozen,original,2)))
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name)
         campaign=self.root/'campaign';write_json(campaign/'campaign.json',{'research_policy':{}})

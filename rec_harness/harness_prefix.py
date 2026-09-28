@@ -48,7 +48,7 @@ def check_response(role,context,response):
 
 
 def historical_bundle(graph,original,limit):
-    from .retrieval import select
+    from .retrieval import select,revision_visibility
     body={key:graph[key] for key in ['nodes','edges']}
     if digest(body)!=graph['hash'] or graph['version']!=original['graph_snapshot_id'] or graph['hash']!=original['graph_hash']:
         raise ContractError('historical graph binding changed')
@@ -58,7 +58,9 @@ def historical_bundle(graph,original,limit):
     counter|={n['id'] for n in nodes.values() if n['attrs'].get('status') in {'disputed','demoted'} or n['type']=='Failure' or n['attrs'].get('counterevidence') is True}
     query=original.get('retrieval',{}).get('query','')
     selected,audit=select(nodes,edges,counter,original['role'],query,limit,canonical)
+    revisions=revision_visibility(nodes,edges,selected)
     return {**{k:original[k] for k in ['graph_snapshot_id','graph_hash','role','task_id','protocol_hash']},
+        **({'revision_visibility':revisions} if revisions['entries'] else {}),
         'nodes':[nodes[key] for key in selected],'edges':[e for e in edges if e['source'] in selected and e['target'] in selected],
         'retrieval':{'query':query,'limit':limit,'retrieved_node_ids':selected,'counterevidence_available':len(counter),
             'counterevidence_omitted':len(counter-set(selected)),**audit}}
@@ -92,7 +94,7 @@ def freeze_suite(specification,directory):
         graph=None;view=trace['visible_state'].get('evidence',{})
         original=restore(view) if 'presentation' in view else view
         if 'graph_snapshot_id' in original:
-            store=Store(campaign/'memory')
+            store=Store(campaign/'memory',read_only=True)
             try:graph=store.snapshot(original['graph_snapshot_id'])
             finally:store.close()
             rebuilt=historical_bundle(graph,original,original['retrieval']['limit'])

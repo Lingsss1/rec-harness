@@ -31,6 +31,25 @@ class KnowledgeBoundaryTests(unittest.TestCase):
         graph,patch=self.fixture();patch['base_version']=6
         with self.assertRaisesRegex(ContractError,'base differs'):validate_knowledge_patch(patch,graph)
 
+    def test_store_contract_failures_are_rejected_before_role_acceptance(self):
+        graph,patch=self.fixture()
+        for field in ['scope','evidence_refs']:
+            bad=copy.deepcopy(patch);bad['nodes'][0]['attrs'].pop(field)
+            with self.assertRaisesRegex(ContractError,'missing '+field):validate_knowledge_patch(bad,graph)
+        bad=copy.deepcopy(patch);bad['nodes'][0]['attrs']['hidden_score']=1
+        with self.assertRaises(ContractError):validate_knowledge_patch(bad,graph)
+        bad=copy.deepcopy(patch);bad['nodes'][0]['attrs']['evidence_refs']='development'
+        with self.assertRaisesRegex(ContractError,'string array'):validate_knowledge_patch(bad,graph)
+        from rec_harness.runtime import edge
+        relation=edge('relation','interpretation','development','SUPPORTS',['development'],'task',1)
+        patch['edges']=[relation]
+        validate_knowledge_patch(patch,graph)
+        foreign=copy.deepcopy(graph);foreign['protocol_hash']='p'
+        foreign['nodes'][0]['attrs']['protocol_hash']='foreign'
+        with self.assertRaisesRegex(ContractError,'incomparable'):validate_knowledge_patch(patch,foreign)
+        patch['edges'][0]['attrs']['evidence_refs']='development'
+        with self.assertRaisesRegex(ContractError,'string array'):validate_knowledge_patch(patch,graph)
+
 
 class CycleCommitRecoveryTests(unittest.TestCase):
     def graph_patch(self):

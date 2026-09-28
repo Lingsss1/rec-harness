@@ -45,6 +45,26 @@ class ContractGraphTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError,'relation changed'):
             attach_contracts(self.root,store,self.cfg,report,'research','p','fact')
 
+    def test_parameter_sharing_is_available_in_graph_observation(self):
+        for stage,probe in self.reports.items():
+            aliases=['left.weight','right.weight']
+            identity='parameter-'+digest([probe['model_id'],probe['source_hash'],aliases])[:32]
+            probe['structure']={'parameter_sharing':{'schema':'registered-parameter-sharing-v1',
+                'parameters':[{'id':identity,'registered_names':aliases}],'scope':'fixture'},
+                'components':[{'id':name,'module_path':name,'callsite':'encode_sequence:1',
+                    'parameters':{'weight':{}},'parameter_bindings':{'weight':identity}} for name in ['left','right']]}
+            self.save(stage)
+        store,report=self.prepare_graph()
+        result=attach_contracts(self.root,store,self.cfg,report,'research','p','fact')
+        attrs=next(n['attrs'] for n in store.snapshot()['nodes'] if n['id'] in result['observations'])
+        for stage in ['pre','post']:
+            sharing=attrs['stages'][stage]['parameter_sharing']
+            self.assertEqual(sharing['registered_parameter_count'],1)
+            self.assertEqual(sharing['shared_groups'][0]['registered_names'],aliases)
+        before=store.verify()
+        attach_contracts(self.root,store,self.cfg,report,'research','p','fact')
+        self.assertEqual(store.verify(),before)
+
     def test_changed_receipt_rejected_without_graph_write(self):
         store,report=self.prepare_graph();before=store.verify()
         self.result['checkpoint_sha256']='changed'

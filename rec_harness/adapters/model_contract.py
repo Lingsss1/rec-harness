@@ -31,6 +31,11 @@ def tensors(value):
 
 def trace_encode(model, sequence, model_id, source_hash):
     calls, handles, counts, stacks, producers, retained = [], [], {}, {}, {}, []
+    aliases={}
+    for name,parameter in model.named_parameters(remove_duplicate=False):
+        aliases.setdefault(id(parameter),[]).append(name)
+    parameter_ids={key:'parameter-'+digest([model_id,source_hash,sorted(names)])[:32]
+                   for key,names in aliases.items()}
     def before(path):
         def hook(module, args):
             ordinal = counts.get(path, 0) + 1; counts[path] = ordinal
@@ -41,7 +46,9 @@ def trace_encode(model, sequence, model_id, source_hash):
                       'module_type': type(module).__name__, 'input': tensor_metadata(args),
                       'direct_input_producers': sorted({producers[id(t)] for t in inputs if id(t) in producers}),
                       'parameters': {n: {'shape': list(p.shape), 'trainable': p.requires_grad}
-                                     for n, p in module.named_parameters(recurse=False)}}
+                                     for n, p in module.named_parameters(recurse=False)},
+                      'parameter_bindings': {n:parameter_ids[id(p)]
+                                     for n,p in module.named_parameters(recurse=False,remove_duplicate=False)}}
             stacks.setdefault(path, []).append(record); retained.extend(inputs)
         return hook
     def after(path):
@@ -59,7 +66,11 @@ def trace_encode(model, sequence, model_id, source_hash):
         shape = list(encoded.shape)
     finally:
         for handle in handles: handle.remove()
-    return {'components': calls, 'encoded_shape': shape,
+    sharing={'schema':'registered-parameter-sharing-v1','parameters':[
+        {'id':parameter_ids[key],'registered_names':sorted(names)}
+        for key,names in sorted(aliases.items(),key=lambda item:sorted(item[1]))],
+        'scope':'Registered Parameter object identity and observed module calls during encode_sequence; distinct objects sharing storage and functional parameter reads are not identified as shared calls.'}
+    return {'components': calls, 'encoded_shape': shape, 'parameter_sharing':sharing,
             'dataflow_coverage': 'direct_tensor_identity_only; functional transforms and residual arithmetic are not fully traced'}
 
 

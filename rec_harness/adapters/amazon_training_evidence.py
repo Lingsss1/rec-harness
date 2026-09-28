@@ -1,7 +1,7 @@
 """Public pre/post-training contract evidence, restricted to development jobs."""
 from pathlib import Path
 from rec_harness.core import ContractError,digest,read_json
-from rec_harness.model_graph import tensor_graph_summary,sequence_semantics_summary
+from rec_harness.model_graph import tensor_graph_summary,sequence_semantics_summary,parameter_sharing_summary
 from .amazon_identity import model_sources,record_version
 
 
@@ -38,7 +38,9 @@ def training_contract_evidence(study,config,version,dataset,seed,result):
         stages[stage]={'report_hash':report['hash'],'probe_identity':job,
             'weight_state':'fresh_initialization' if stage=='pre' else 'trained_development_checkpoint',
             'checks':{key:True for key in fields},'tensor_graph':graph,
-            'sequence_semantics':sequence_semantics_summary(report)}
+            'sequence_semantics':sequence_semantics_summary(report),
+            **({'parameter_sharing':parameter_sharing_summary(report)}
+               if 'parameter_sharing' in report.get('structure',{}) else {})}
     return {'status':'verified','model_version':version,'dataset':dataset,'seed':seed,
         'source_sha256':source_hash,'receipt_hash':digest(result),'stages':stages,
         'scope':'Host-verified synthetic contracts before training and on the selected development checkpoint. No checkpoint payload, confirmation result, all-input or scientific mechanism proof.'}

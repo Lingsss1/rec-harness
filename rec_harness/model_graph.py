@@ -38,6 +38,44 @@ def validate_tensor_graph(graph, model_id, source_hash):
     return tensors
 
 
+def parameter_sharing_summary(report):
+    """Resolve observed use sites against registered Parameter object identities."""
+    structure=report.get('structure',{})
+    sharing=structure.get('parameter_sharing')
+    if sharing is None:
+        return {'status':'unavailable','scope':'Historical probe did not record registered parameter identity.'}
+    if sharing.get('schema')!='registered-parameter-sharing-v1':
+        raise ContractError('unknown parameter sharing schema')
+    parameters={};names=set();uses={}
+    for row in sharing['parameters']:
+        identity=row['id'];aliases=row['registered_names']
+        if (identity in parameters or not isinstance(aliases,list) or not aliases or
+            any(not isinstance(name,str) or not name for name in aliases) or
+            len(set(aliases))!=len(aliases) or names.intersection(aliases)):
+            raise ContractError('invalid registered parameter aliases')
+        expected='parameter-'+digest([report['model_id'],report['source_hash'],sorted(aliases)])[:32]
+        if identity!=expected:raise ContractError('parameter identity differs from model and source')
+        names.update(aliases);parameters[identity]=row;uses[identity]=[]
+    sites=set()
+    for call in structure['components']:
+        if call['id'] in sites:raise ContractError('duplicate parameter use component')
+        sites.add(call['id'])
+        bindings=call.get('parameter_bindings')
+        if not isinstance(bindings,dict) or not set(call['parameters'])<=set(bindings):
+            raise ContractError('component parameter bindings incomplete')
+        for local,identity in bindings.items():
+            name=call['module_path']+'.'+local if call['module_path'] else local
+            if identity not in parameters or name not in parameters[identity]['registered_names']:
+                raise ContractError('component parameter binding does not resolve')
+            uses[identity].append({'component_id':call['id'],'module_path':call['module_path'],
+                                  'callsite':call['callsite'],'parameter_name':local})
+    groups=[{**parameters[identity],'observed_uses':uses[identity]}
+            for identity in sorted(parameters)
+            if len(parameters[identity]['registered_names'])>1 or len(uses[identity])>1]
+    return {'status':'verified','registered_parameter_count':len(parameters),
+            'shared_groups':groups,'scope':sharing['scope']}
+
+
 def sequence_semantics_summary(report, *, required=False):
     checks=report.get('checks',{})
     value=checks.get('sequence_semantics') if isinstance(checks,dict) else None
@@ -81,6 +119,7 @@ def register_contract(store, report_path, task_id, protocol_hash, *, checkpoint_
         raise ContractError('model contract report hash mismatch')
     tensor_graph=report.get('tensor_graph')
     tensor_values=validate_tensor_graph(tensor_graph,report['model_id'],report['source_hash']) if tensor_graph is not None else {}
+    sharing=parameter_sharing_summary(report)
     checks = report['checks']
     if not all(checks.get(k) is True for k in ['causal_input_gradient', 'tail_readout', 'empty_history_finite', 'padding_gradient_zero']):
         raise ContractError('model correctness checks incomplete')
@@ -110,9 +149,13 @@ def register_contract(store, report_path, task_id, protocol_hash, *, checkpoint_
     calls = report['structure']['components']
     mapping = {c['id']: 'component-' + digest([model_id, c['module_path'], c['callsite']])[:32] for c in calls}
     if len(mapping) != len(calls): raise ContractError('duplicate component callsite')
+    if sharing['status']=='verified':
+        sharing={**sharing,'shared_groups':[{**group,'observed_uses':[
+            {**use,'component_id':mapping[use['component_id']]} for use in group['observed_uses']]}
+            for group in sharing['shared_groups']]}
     nodes = [node(model_id, 'ModelVersion', {'code_hash': report['source_hash'], 'design_id': report['model_id'],
                 'settings': report['settings'], 'source_ref': source_refs['source'],
-                'structure_signature': digest(calls),
+                'structure_signature': digest(calls), 'parameter_sharing':sharing,
                 'checkpoint_hash': report.get('checkpoint_hash'),
                 'checkpoint_ref': checkpoint_ref,
                 'weight_source': 'trained_checkpoint_probe' if report.get('checkpoint_hash') else 'fresh_synthetic_probe'}, task_id, protocol_hash),
@@ -126,7 +169,8 @@ def register_contract(store, report_path, task_id, protocol_hash, *, checkpoint_
         nodes.append(node(component_id, 'Component', {'model_version': model_id, 'source_hash': report['source_hash'],
             'module_path': call['module_path'], 'callsite': call['callsite'], 'module_type': call['module_type'],
             'input': call['input'], 'output': call['output'], 'parameters': call['parameters'],
-            'shape_scope': report['input_protocol']}, task_id, protocol_hash))
+            'shape_scope': report['input_protocol'],
+            **({'parameter_bindings':call['parameter_bindings']} if 'parameter_bindings' in call else {})}, task_id, protocol_hash))
         edges.append(edge(component_id + '-owner', model_id, component_id, 'HAS_COMPONENT', [observation_id], task_id, store.version + 1))
         for producer in call['direct_input_producers']:
             if producer not in mapping: raise ContractError('unresolved dataflow producer')

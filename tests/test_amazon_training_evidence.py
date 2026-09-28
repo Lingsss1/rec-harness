@@ -32,8 +32,26 @@ class TrainingEvidenceTests(unittest.TestCase):
         self.assertEqual(value['stages']['pre']['weight_state'],'fresh_initialization')
         self.assertEqual(value['stages']['post']['weight_state'],'trained_development_checkpoint')
         self.assertEqual(value['stages']['post']['tensor_graph']['status'],'unavailable')
+        self.assertNotIn('parameter_sharing',value['stages']['post'])  # Preserve historical summary identity.
         self.assertNotIn('DO_NOT_EXPORT',str(value));self.assertNotIn('checkpoint_sha256',str(value))
         self.assertEqual(value,self.evidence())
+
+    def test_parameter_sharing_reaches_pre_and_post_training_review(self):
+        for stage in ['pre','post']:
+            report=self.reports[stage]
+            aliases=['left.weight','right.weight']
+            identity='parameter-'+digest([report['model_id'],report['source_hash'],aliases])[:32]
+            report['structure']={'parameter_sharing':{'schema':'registered-parameter-sharing-v1',
+                'parameters':[{'id':identity,'registered_names':aliases}],'scope':'fixture'},
+                'components':[{'id':name,'module_path':name,'callsite':'encode_sequence:1',
+                    'parameters':{'weight':{'shape':[4,4]}},'parameter_bindings':{'weight':identity}}
+                    for name in ['left','right']]}
+            self.save(stage)
+        evidence=self.evidence()
+        for stage in ['pre','post']:
+            group=evidence['stages'][stage]['parameter_sharing']['shared_groups'][0]
+            self.assertEqual(group['registered_names'],aliases)
+            self.assertEqual(len(group['observed_uses']),2)
 
     def test_rehashed_wrong_checkpoint_or_job_identity_rejected(self):
         for key,value in [('checkpoint_hash','other'),('model_id','other-job'),('source_hash','other')]:

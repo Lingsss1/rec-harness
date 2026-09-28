@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from rec_harness.core import ContractError, digest, file_hash, write_json
-from rec_harness.model_graph import compare_sites, register_contract, validate_tensor_graph
+from rec_harness.model_graph import compare_sites, register_contract, validate_tensor_graph, parameter_sharing_summary
 from rec_harness.store import Store
 
 try:
@@ -45,6 +45,38 @@ class ModelContractTests(unittest.TestCase):
         second = trace_encode(self.model, sequence, 'v2', 'code')
         self.assertFalse({c['id'] for c in first['components']} & {c['id'] for c in second['components']})
 
+    def test_parameter_ties_and_repeated_calls_are_distinct_from_equal_shapes(self):
+        class Pair(torch.nn.Module):
+            def __init__(self,tied):
+                super().__init__()
+                self.left=torch.nn.Linear(4,4,bias=False)
+                self.right=torch.nn.Linear(4,4,bias=False)
+                if tied:self.right.weight=self.left.weight
+            def encode_sequence(self,x):return self.right(self.left(x))
+        x=torch.ones(2,3,4)
+        for tied in (False,True):
+            model=Pair(tied)
+            structure=trace_encode(model,x,'pair','source')
+            report={'model_id':'pair','source_hash':'source','structure':structure}
+            summary=parameter_sharing_summary(report)
+            self.assertEqual(summary['registered_parameter_count'],1 if tied else 2)
+            self.assertEqual(len(summary['shared_groups']),int(tied))
+            if tied:
+                group=summary['shared_groups'][0]
+                self.assertEqual(group['registered_names'],['left.weight','right.weight'])
+                self.assertEqual({use['module_path'] for use in group['observed_uses']},{'left','right'})
+                structure['components'][1]['parameter_bindings']['weight']='unknown'
+                with self.assertRaisesRegex(ContractError,'binding does not resolve'):parameter_sharing_summary(report)
+        report={'model_id':'v1','source_hash':'source',
+                'structure':trace_encode(self.model,torch.tensor([[1,2,3,4]]),'v1','source')}
+        summary=parameter_sharing_summary(report)
+        self.assertEqual(len(summary['shared_groups']),2)  # mix weight and bias, used twice.
+        self.assertTrue(all(len(group['registered_names'])==1 for group in summary['shared_groups']))
+        self.assertTrue(all(len(group['observed_uses'])==2 for group in summary['shared_groups']))
+        self.assertNotIn(str(id(self.model.mix.weight)),str(summary))
+        report['structure'].pop('parameter_sharing')
+        self.assertEqual(parameter_sharing_summary(report)['status'],'unavailable')
+
     def test_future_leak_wrong_readout_and_disconnected_parameter_rejected(self):
         encode = self.model.encode_sequence
         self.model.encode_sequence = lambda seq: encode(seq) + encode(seq).flip(1)
@@ -70,6 +102,7 @@ class ModelContractTests(unittest.TestCase):
                 code = Path(directory) / (label + '.py'); code.write_text('# unit fixture only\n')
                 report[label + '_filename'] = code.name
                 report[label + '_hash'] = file_hash(code)
+            report['structure']=trace_encode(self.model,torch.tensor([[1,2,3,4]]),'v1',report['source_hash'])
             report['tensor_graph']=trace_operations(self.model,torch.tensor([[1,2,3,4]]),'v1',report['source_hash'])
             report['hash'] = digest(report)
             path = Path(directory) / 'report.json'; write_json(path, report)
@@ -77,6 +110,13 @@ class ModelContractTests(unittest.TestCase):
             try:
                 first = register_contract(store, path, 'task', 'protocol')
                 self.assertTrue(first['imported'])
+                registered_model=next(n for n in store.snapshot()['nodes'] if n['id']==first['model_id'])
+                self.assertEqual(len(registered_model['attrs']['parameter_sharing']['shared_groups']),2)
+                graph_ids={n['id'] for n in store.snapshot()['nodes']}
+                self.assertTrue(all(use['component_id'] in graph_ids
+                    for group in registered_model['attrs']['parameter_sharing']['shared_groups'] for use in group['observed_uses']))
+                component=next(n for n in store.snapshot()['nodes'] if n['type']=='Component' and n['attrs'].get('module_path')=='mix')
+                self.assertEqual(set(component['attrs']['parameter_bindings']),{'weight','bias'})
                 self.assertFalse(register_contract(store, path, 'task', 'protocol')['imported'])
                 self.assertEqual(sum(n['type'] == 'Component' for n in store.snapshot()['nodes']), 3+len(report['tensor_graph']['operations']))
                 self.assertTrue(any(e['attrs'].get('measurement')=='observed_tensor_operation_or_storage_mutation' for e in store.snapshot()['edges']))

@@ -43,6 +43,7 @@ def attach_contracts(root,store,config,report,task,protocol,fact_id):
             stages[stage]={'weight_state':value['weight_state'],'report_hash':value['report_hash'],
                 'checks':value['checks'],'sequence_semantics_status':value['sequence_semantics']['status'],
                 'tensor_graph_status':graph['status'],
+                **({'parameter_sharing':value['parameter_sharing']} if 'parameter_sharing' in value else {}),
                 **({'tensor_graph_hash':graph['graph_hash'],'operation_count':graph['operation_count']} if graph['status']=='verified' else {})}
         attrs={'kind':'synthetic_training_contract','partition':'development','model_version':version,
             'dataset':dataset,'seed':seed,'status':evidence['status'],'valid':evidence['status']=='verified',

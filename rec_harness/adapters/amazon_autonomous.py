@@ -54,6 +54,8 @@ class AmazonAutoresearch:
         if not config.get('rescore_recipe') or not config.get('uid_registry'):raise ContractError('independent CPU rescoring configuration required')
         config['study_config_hash']=digest(read_json(Path(config['study'])/'study.json'))
         config['protocol_hash']=study['protocol_hash']
+        config.setdefault('trace_development_feedback',True)
+        if type(config['trace_development_feedback']) is not bool:raise ContractError('trace_development_feedback must be boolean')
         if 'execution_id' in config:
             identifier(config['execution_id'])
             from .amazon_execution import inspect_execution,resolve_execution
@@ -201,7 +203,7 @@ class AmazonAutoresearch:
             task=f"{folder.name}-{role}-{len(self.store.events())}";self.store.reserve(task,1)
             write_json(target/'context.json',context)
             before=artifacts.snapshot(target/'model',['model.py']) if source else {}
-            self.store.event('agent_submitted',{'task_id':task,'role':role,'input_hash':digest(context),
+            self.store.event('agent_submitted',{'task_id':task,'episode_id':folder.name,'role':role,'input_hash':digest(context),
                 'model_version':context.get('model_version'),'graph_version':self.store.version,
                 'visible_state_ref':artifacts.put(target/'context.json'),'source_snapshot':before})
             started=time.monotonic()
@@ -396,6 +398,9 @@ class AmazonAutoresearch:
             if version!=binding['base_model_id']:self._rescore(folder,version,cfg['development_seeds'])
         self._rescore(folder,binding['candidate_model_version'],cfg['development_seeds'])
         report=development_readout(self.study,pid);write_json(folder/'development-readout.json',report)
+        if self.config.get('trace_development_feedback'):
+            from .amazon_trace_feedback import commit
+            commit(self,folder,report,cfg)
         history=None
         if self.config.get('history_diagnostic'):
             from .amazon_history_context import development_history

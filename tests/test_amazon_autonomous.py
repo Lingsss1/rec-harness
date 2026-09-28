@@ -388,7 +388,9 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             def graph(root,pid):
                 s=Store(Path(root)/'memory');g={'task_id':'graph-task','protocol_hash':'protocol','graph_version':s.version,'nodes':[],'edges':[]};s.close()
                 write_json(Path(root)/'research-readouts'/(pid+'-graph.json'),g);return g
-            report={'protocol_hash':'protocol','summary':{'eligible_for_confirmation':confirmation},
+            report={'schema':'amazon-development-selection-v1','proposal_id':'fixture','plan_handoff_hash':'fixture',
+                'source_hashes':{},'source_receipts':{},'selection_policy_provenance':'fixture',
+                'protocol_hash':'protocol','summary':{'eligible_for_confirmation':confirmation},
                 'rows':[{'model_version':version,'dataset':'tiny','seed':42,'metrics':{'HR@10':.6 if version=='auto-round-1-model' else .5}}
                         for version in dict.fromkeys(['auto-round-1-model',*expected_controls])]}
             report['hash']=digest(report)

@@ -61,6 +61,10 @@ def collect_traces(campaign,*,roles=None,cutoff_seq=None):
             from .instruction_identity import from_archive
             instructions=from_archive(archive,artifacts)
             if instructions is not None:trace['instruction_identity']=instructions
+            if amazon and config.get('trace_development_feedback') and 'episode_id' in request:
+                from .adapters.amazon_trace_feedback import project
+                trace['episode_id']=request['episode_id']
+                trace['host_feedback']=project(events,request['episode_id'],cutoff,config['protocol_hash'],artifacts)
             if not amazon and 'episode_id' in request:
                 episode=request['episode_id'];trace['episode_id']=episode
                 feedback=[e for e in events if e['seq']<=cutoff and e['kind']=='round_completed'

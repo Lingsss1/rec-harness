@@ -6,6 +6,24 @@ from .measurement_discovery import validate_review
 from .store import Store
 
 
+def amazon_development_rows(visible):
+    """Match public rows to the host's verified protocol summaries, not raw job status."""
+    rows=visible.get('development_baseline',[]);receipts=visible.get('baseline_execution_evidence',[])
+    if not isinstance(rows,list) or not isinstance(receipts,list) or not rows or len(rows)!=len(receipts):return None
+    if not isinstance(visible.get('protocol_hash'),str) or not visible['protocol_hash']:return None
+    def key(row):return (row.get('dataset'),row.get('seed'))
+    if any(not isinstance(r,dict) for r in rows+receipts):return None
+    keys=[key(row) for row in rows];receipt_keys=[key(row) for row in receipts]
+    if any(not isinstance(dataset,str) or type(seed) is not int for dataset,seed in keys+receipt_keys):return None
+    if len(set(keys))!=len(keys) or len(set(receipt_keys))!=len(receipt_keys) or set(keys)!=set(receipt_keys):return None
+    for receipt in receipts:
+        if receipt.get('status')!='verified' or receipt.get('protocol_hash')!=visible.get('protocol_hash'):return None
+        for field in ['receipt_hash','manifest_hash']:
+            value=receipt.get(field)
+            if not isinstance(value,str) or len(value)!=64 or any(c not in '0123456789abcdef' for c in value):return None
+    return rows
+
+
 def request(context,budget):
     number(budget,'optimizer measurement development budget',0)
     original=expand_traces(context);evidence=[]
@@ -13,12 +31,13 @@ def request(context,budget):
         if trace.get('transport_status')!='success':continue
         visible=trace.get('visible_state',{});diagnostic=visible.get('diagnostic')
         if diagnostic and diagnostic.get('status')!='success':continue
-        rows=(visible.get('baseline') or {}).get('runs',[])
+        baseline=visible.get('baseline')
+        rows=baseline.get('runs',[]) if isinstance(baseline,dict) else []
         if rows and all(r.get('valid') is True for r in rows):
             rows=[{k:r[k] for k in ['run_id','seed','dataset','metrics','valid'] if k in r} for r in rows]
         else:
-            rows=visible.get('development_baseline',[]);receipts=visible.get('baseline_execution_evidence',[])
-            if not rows or len(rows)!=len(receipts) or not all(r.get('status')=='success' for r in receipts):continue
+            rows=amazon_development_rows(visible)
+            if rows is None:continue
         evidence.append({'trace_id':trace['trace_id'],'model_version':trace.get('model_version'),
             'trace_hash':digest(trace),'rows':rows,'diagnostic':diagnostic})
     value={'allowed_evidence_refs':[e['trace_id'] for e in evidence],'trace_evidence':evidence,

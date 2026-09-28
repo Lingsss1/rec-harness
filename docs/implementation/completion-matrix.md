@@ -2,6 +2,8 @@
 
 目标保持为完整方案实现及 Amazon NextItNet 对比优化。小型示例不构成完成证据。
 
+修复[Amazon 优化器转交证据准入](optimizer-amazon-evidence.md)：按实际 verified 摘要匹配品类/seed、协议和身份字段，并兼容旧 baseline 列表。真实 Amazon 研究 7 条轨迹中的 5 条可引用，真实小型适配器运行 12 条中的 10 条可引用；源研究不变，无新增角色或训练调用。
+
 新 optimizer_router 已经[真实 Codex 单次验收](../experiments/harness-router-codex-v1.md)：自行选择合法 Harness 补丁，主机校验/归档/图记录和无重复调用恢复通过。没有强制测量缺口；真实测量转交正例及其工具效用仍未验证。
 
 方案 5.5D 的[优化器→Tool Evolver 测量转交](optimizer-measurement-handoff.md)工程路径已补齐：同一次调用选择补丁或测量审查，主机门控、CAS 收据、独立工具阶段及后继复测；无工具槽/无可用额度保持未解决，不晋升空 Harness。该功能晚于 v15，真实新路由调用及效用验证仍待完成。

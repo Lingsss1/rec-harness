@@ -4,6 +4,8 @@
 
 主机从冻结决策轨迹构造测量请求，只接收成功角色调用中的有效公开基线数据；诊断执行失败不当作测量不足。通用来源保留有效 baseline runs，Amazon 来源要求开发基线及成功执行收据。输入绑定轨迹 hash、允许引用、测量开发预算和当前诊断，压缩轨迹先无损还原再检查。
 
+Amazon 摘要准入已按实际 `verified` 状态修正，并检查品类/seed 唯一对应、协议和收据身份字段；已有真实 Amazon 研究的只读准备验收，详见 [Amazon 证据准入](optimizer-amazon-evidence.md)。原始 success 作业状态不能代替该协议核验。
+
 测量分支复用现有 `validate_review`：必须引用给定证据，四类前置条件符合规则，仅提出一个有区分能力的测量，不能超出开发额度或重复已有输出。通过后，主机提交 `measurement_handoff_recorded`，将审查归档到 CAS 并创建 provisional MeasurementGap。引用的是轨迹而非伪造实验，因此 `experiment_refs` 保持空列表，实际源轨迹 hash 单独保留。
 
 该分支不生成 policy.json，不运行 Harness 验证器，不晋升 Harness。项目将测量缺口转交独立 Tool Evolver，源模型任务加入独立验证的排除列表；工具仍须通过原六阶段门槛，晋升后才启用并复测。没有 tool 槽、运行环境、更新额度或后继模型回合时，项目保留缺口并以 measurement_unresolved 停止。前置条件不成立则拒绝该优化器结果，不绕到工具生成。

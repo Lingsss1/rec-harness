@@ -5,6 +5,15 @@ CONTRACT='diagnostic-method-v1'
 FILENAME='tool-method.json'
 
 
+def freeze_plan(plan):
+    """New autonomous tasks require a definition; frozen legacy plans stay intact."""
+    result={**plan,'tool_method_contract':plan.get('tool_method_contract',CONTRACT)}
+    if result['tool_method_contract']!=CONTRACT:
+        raise ContractError('new autonomous tools require diagnostic-method-v1')
+    contract(result)
+    return result
+
+
 def contract(plan):
     value=plan.get('tool_method_contract')
     if value is None:return None

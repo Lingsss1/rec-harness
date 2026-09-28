@@ -46,7 +46,8 @@ class AmazonObservationToolTests(unittest.TestCase):
                     '    row=request["observations"]["activation_diagnostics"][0]\n'
                     '    values=list(row["measurements"].values())\n'
                     '    return {"measurements":{"spread":max(values)-min(values)},"limitations":row["limitations"]}\n')
-                return {'changed_files':['diagnostic.py'],'limitations':['fixture']}
+                from test_evolution_auto import tool_definition
+                return {'changed_files':['diagnostic.py']+tool_definition(context,directory),'limitations':['fixture']}
         def observations(controller,base,study):
             row={'observation_id':'fixture-activation','model_version':base,'dataset':'A','seed':42,
                  'measurements':{'norm-a':2,'norm-b':5},'limitations':['synthetic histories; no causal inference'],

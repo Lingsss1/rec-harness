@@ -50,7 +50,8 @@ class ToolHistoryTests(unittest.TestCase):
                 outer.assertEqual(context['context']['tool_history']['candidates'][0]['status'],'rejected')
                 model=Path(directory)/'model';model.mkdir(parents=True)
                 (model/'diagnostic.py').write_text('def measure(request): return {}\n')
-                return {'changed_files':['diagnostic.py']}
+                from test_evolution_auto import tool_definition
+                return {'changed_files':['diagnostic.py']+tool_definition(context,directory)}
         self.store.event('evolution_stopped',{'candidate_id':'old','status':'future'})
         auto=AutonomousEvolution(target,agent=Author());self.addCleanup(auto.store.close)
         c=auto.config;candidate=auto.evolution.propose(c['candidate_id'],'tool',c['context'],c['plan'],agent=auto.agent)

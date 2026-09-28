@@ -23,6 +23,9 @@ class ResearchProject:
         if type(config['continue_after_harness_rejection']) is not bool:raise ContractError('Harness rejection continuation must be boolean')
         if type(config['verify_successor_memory']) is not bool:raise ContractError('successor memory verification must be boolean')
         if type(config['enforce_tool_measurement_scope']) is not bool:raise ContractError('tool measurement scope enforcement must be boolean')
+        if 'tool' in config:
+            from .tool_method import freeze_plan
+            config['tool']['plan']=freeze_plan(config['tool']['plan'])
         scope=config.get('tool',{}).get('plan',{}).get('measurement_scope')
         if scope is not None:
             outputs=scope.get('supported_outputs') if isinstance(scope,dict) else None
@@ -106,6 +109,13 @@ class ResearchProject:
         if path.exists() and read_json(path)!=config:raise ContractError('project child configuration changed')
         write_json(path,config)
         frozen=any((campaign/name).exists() for name in ['campaign.json','amazon-auto.json','evolution-auto.json'])
+        if not frozen and config.get('adapter')=='research-evolution-v1':
+            # Parent plans were frozen at project creation. Do not apply new
+            # defaults to a legacy project's not-yet-created tool episode.
+            from .autonomous import configuration
+            from .evolution_auto import AutonomousEvolution
+            AutonomousEvolution.init(campaign,configuration(path),_freeze_tool_method=False)
+            frozen=True
         return autoresearch(campaign,None if frozen else path,agent=self.agent)
 
     def model_config(self,state,directory):

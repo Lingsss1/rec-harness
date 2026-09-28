@@ -16,6 +16,44 @@ class ToolMethodTests(unittest.TestCase):
             'positive_control':'[1, 3] yields 2','null_control':'[4, 4] yields 0',
             'independent_reference':'host scalar range','sources':[],'predecessor_implementation_hash':None}
 
+    def test_new_autonomous_defaults_are_frozen_without_mutating_input(self):
+        from rec_harness.evolution_auto import AutonomousEvolution
+        config=read_json(self.fixture.config());config['kind']='tool'
+        config['context']={}
+        root=self.fixture.root/'default-tool'
+        AutonomousEvolution.init(root,config)
+        frozen=read_json(root/'evolution-auto.json')
+        self.assertEqual(frozen['plan']['tool_method_contract'],CONTRACT)
+        self.assertNotIn('tool_method_contract',config['plan'])
+        # Resuming an already frozen legacy controller never injects defaults.
+        legacy=self.fixture.root/'legacy-tool'
+        AutonomousEvolution.init(legacy,config,_freeze_tool_method=False)
+        research=AutonomousEvolution(legacy,agent=object());self.addCleanup(research.store.close)
+        self.assertNotIn('tool_method_contract',research.config['plan'])
+        for value in [None,False,'unknown']:
+            config['plan']['tool_method_contract']=value
+            target=self.fixture.root/('invalid-'+str(value))
+            with self.assertRaisesRegex(ContractError,'require diagnostic'):
+                AutonomousEvolution.init(target,config)
+            self.assertFalse(target.exists())
+
+    def test_project_freezes_default_and_preserves_legacy_child_plan(self):
+        from rec_harness.project import ResearchProject
+        from unittest.mock import patch
+        import test_project
+        fixture=test_project.ProjectTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        config=read_json(fixture.config('tool'))
+        ResearchProject.init(fixture.campaign,config)
+        project=ResearchProject(fixture.campaign,agent=object());self.addCleanup(project.store.close)
+        self.assertEqual(project.config['tool']['plan']['tool_method_contract'],CONTRACT)
+        self.assertNotIn('tool_method_contract',config['tool']['plan'])
+        child={**config['tool'],'context':{}}
+        with patch('rec_harness.autonomous.autoresearch',return_value={'status':'fixture'}) as run:
+            directory=fixture.root/'legacy-child'
+            project.child(directory,child)
+        self.assertIsNone(run.call_args.args[1])
+        self.assertNotIn('tool_method_contract',read_json(directory/'campaign/evolution-auto.json')['plan'])
+
     def test_routes_require_definitions_sources_and_exact_predecessor(self):
         self.assertEqual(validate(self.card),self.card)
         for field in ['definition','complexity','independent_reference']:

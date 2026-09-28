@@ -9,6 +9,22 @@ from rec_harness.core import ContractError,read_json,write_json
 from rec_harness.evolution import Evolution,STAGES,validate_policy
 from rec_harness.store import Store
 
+def tool_definition(context,directory):
+    """Explicit author declaration for orchestration fixtures, not utility evidence."""
+    if 'tool_method_contract' not in context:return []
+    from rec_harness.tool_method import CONTRACT,FILENAME
+    predecessor=context['tool_method_contract']['inherited_implementation_hash']
+    write_json(Path(directory)/'model'/FILENAME,{
+        'schema':CONTRACT,'route':'existing_tool' if predecessor else 'original','measurement':'fixture measurement',
+        'definition':'Fixture scalar range: max(x) - min(x)',
+        'inputs':'finite aggregate values','complexity':'O(n) time',
+        'assumptions':['comparable scalar metrics'],'failure_modes':['not causal evidence'],
+        'positive_control':'[1,3] gives 2','null_control':'[1,1] gives 0',
+        'independent_reference':'host scalar range','sources':[],
+        'predecessor_implementation_hash':predecessor})
+    return [FILENAME]
+
+
 class Optimizer:
     calls=0
     def run(self,role,context,directory):
@@ -358,7 +374,7 @@ class EvolutionAutomationTests(unittest.TestCase):
                 assert 'runs' in contract['request']
                 target=Path(directory)/'model';target.mkdir(parents=True)
                 (target/'diagnostic.py').write_text('def measure(request):\n    values = [r["metrics"]["quality"] for r in request["runs"]]\n    return {"measurements": {"spread": max(values) - min(values)}, "limitations": ["fixture: aggregate range only"]}\n')
-                return {'changed_files':['diagnostic.py']}
+                return {'changed_files':['diagnostic.py']+tool_definition(context,directory)}
         agent=ToolAgent();result=autoresearch(self.campaign,path,agent=agent)
         self.assertEqual(result['status'],'promoted');self.assertEqual(result['budget']['charged_or_reserved'],7)
         store=Store(self.campaign/'memory')

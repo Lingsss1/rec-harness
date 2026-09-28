@@ -17,7 +17,8 @@ class ProjectAgent(ScriptedAgent):
         if role=='tool':
             model=Path(directory)/'model';model.mkdir(parents=True,exist_ok=True)
             (model/'diagnostic.py').write_text('def measure(request): return {}\n')
-            return {'changed_files':['diagnostic.py'],'implementation_checks':[],'limitations':['fixture']}
+            from test_evolution_auto import tool_definition
+            return {'changed_files':['diagnostic.py']+tool_definition(context,directory),'implementation_checks':[],'limitations':['fixture']}
         if role in {'optimizer','optimizer_router'}:
             trace=context['context']['decision_traces'][0]['trace_id']
             response={'patch_id':'patch','failure_pattern':'fixture','trace_refs':[trace],
@@ -201,7 +202,8 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual((self.campaign/'episodes/tool-2/campaign/versions/project-tool-2/helper.py').read_text(),'SCALE = 0.5\n')
         store=Store(self.campaign/'episodes/tool-2/campaign/memory')
         try:
-            graph=store.snapshot();edge=next(e for e in graph['edges'] if e['relation']=='BASED_ON')
+            graph=store.snapshot();versions={n['id'] for n in graph['nodes'] if n['type']=='ToolVersion'}
+            edge=next(e for e in graph['edges'] if e['relation']=='BASED_ON' and e['target'] in versions)
             inherited_version=next(n for n in graph['nodes'] if n['id']==edge['target'])
             self.assertEqual(inherited_version['attrs']['implementation_hash'],first_tool['implementation_hash'])
             self.assertEqual(inherited_version['attrs']['lifecycle_event'],'inherited_source')

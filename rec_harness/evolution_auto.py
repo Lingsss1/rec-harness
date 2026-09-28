@@ -7,7 +7,7 @@ from .jailed_agent import JailedCodexAgent
 
 class AutonomousEvolution:
     @staticmethod
-    def init(root,configuration):
+    def init(root,configuration,*,_freeze_tool_method=True):
         root=Path(root).resolve()
         if root.exists() and any(root.iterdir()):raise ContractError('evolution campaign directory must be empty')
         config=dict(configuration);identifier(config['candidate_id'])
@@ -39,6 +39,9 @@ class AutonomousEvolution:
             if not source_task_ids(config['context']).issubset(config['plan']['development_ids']):
                 raise ContractError('tool validation must exclude every optimizer source task')
         if config['kind']=='tool':
+            if _freeze_tool_method:
+                from .tool_method import freeze_plan
+                config['plan']=freeze_plan(config['plan'])
             if 'tool_history' in config.get('context',{}) and 'tool_history_sources' not in config:
                 raise ContractError('tool history must be frozen from committed sources')
             if 'tool_history_sources' in config:

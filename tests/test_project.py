@@ -187,11 +187,21 @@ class ProjectTests(unittest.TestCase):
         finally:store.close()
         final=self.campaign/'episodes/model-3/campaign'
         self.assertEqual({r['measurement'] for r in read_json(final/'campaign.json')['measurement_requirements']},{'spread','tail'})
+        tool=read_json(final/'campaign.json')['diagnostic_tool'];registration=tool['registration']
+        self.assertEqual(set(registration['validation_stages']),set(STAGES['tool']))
+        self.assertTrue(all(r['status']=='passed' and len(r['report_hash'])==64 for r in registration['validation_stages'].values()))
+        self.assertEqual(registration['source_tool_predecessor']['implementation_hash'],first_tool['implementation_hash'])
+        self.assertIsNone(registration['rollback_candidate_id'])
+        self.assertEqual(registration['declared_call_cost'],config['tool_runtime']['cost'])
         store=Store(final/'memory')
         try:
             observed=[e['payload'] for e in store.events() if e['kind']=='measurement_output_observed']
             self.assertEqual({r['measurement'] for r in observed},{'spread','tail'})
             self.assertTrue(all(r['tool_version']=='project-tool-2' for r in observed))
+            diagnostic=next(e['payload'] for e in store.events() if e['kind']=='diagnostic_completed')
+            self.assertEqual(diagnostic['tool_registration'],registration)
+            version=next(n for n in store.snapshot()['nodes'] if n['type']=='ToolVersion' and n['attrs'].get('version')=='project-tool-2')
+            self.assertEqual(version['attrs']['registration'],registration)
         finally:store.close()
         project=ResearchProject(self.campaign,agent=agent)
         try:self.assertEqual(len(project.verify()['verified_episodes']),5)

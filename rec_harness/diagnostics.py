@@ -23,10 +23,21 @@ def freeze_tool(options,artifacts):
         if 'diagnostic.py' not in candidate['implementation']:raise ContractError('diagnostic.py entry required')
         if candidate['implementation']!=active['implementation']:raise ContractError('active tool implementation differs')
         snapshot={name:artifacts.put(registry.artifacts.verify(ref)) for name,ref in candidate['implementation'].items()}
+        from .evolution import STAGES
+        stages={stage:{'status':'passed','report_hash':registry._accepted_stage(candidate,plan,stage)['report_hash']}
+                for stage in STAGES['tool']}
+        context=read_json(registry.root/'candidates'/candidate['candidate_id']/'context.json')
+        if digest(context)!=candidate['context_hash']:raise ContractError('tool registration context changed')
+        registration={'schema':'validated-diagnostic-registration-v1','entrypoint':'diagnostic.py:measure',
+            'contract':CONTRACT,'validated_conditions':plan['identity'],'validation_stages':stages,
+            'declared_call_cost':options['cost'],'cost_unit':'campaign budget units',
+            'rollback_candidate_id':(active.get('previous') or {}).get('candidate_id'),
+            'source_tool_predecessor':context.get('tool_predecessor'),
+            'scope':'Diagnostic validation under frozen conditions; not independent model-effect or mechanism evidence. Source ancestry does not establish a local rollback target.'}
         if registry.store.verify()['head']!=head:raise ContractError('tool registry changed during activation')
         worker=Path(__file__).with_name('diagnostic_worker.py')
         return {'candidate_id':candidate['candidate_id'],'implementation':snapshot,'implementation_hash':digest(snapshot),
-            'contract':CONTRACT,'plan_hash':candidate['plan_hash'],'registry_event_head':head,
+            'contract':CONTRACT,'plan_hash':candidate['plan_hash'],'registry_event_head':head,'registration':registration,
             'worker':artifacts.put(worker),'execution':options['execution'],'cost':options['cost'],'timeout':options['timeout']}
     finally:registry.store.close()
 
@@ -50,7 +61,8 @@ def record_graph(research,record):
     nodes=[node(observation,'Observation',{**record,'valid':record['status']=='success',
         'evidence_dependency_ids':[record['model_version']]},research.task,research.protocol_hash)]
     if tool_id not in existing:nodes.append(node(tool_id,'ToolVersion',{
-        'version':record['tool_version'],'implementation_hash':record['implementation_hash']},research.task,research.protocol_hash))
+        'version':record['tool_version'],'implementation_hash':record['implementation_hash'],
+        **({'registration':record['tool_registration']} if 'tool_registration' in record else {})},research.task,research.protocol_hash))
     research.store.patch({'base_version':research.store.version,'nodes':nodes,'edges':[
         edge(observation+'-measured',observation,tool_id,'MEASURED_BY',[observation],research.task,research.store.version+1),
         edge(observation+'-about',observation,record['model_version'],'ABOUT',[observation],research.task,research.store.version+1)]})
@@ -82,6 +94,7 @@ def measure(research,state):
     research.store.reserve(task,tool['cost']);status='invalid'
     record={'identity':identity,'tool_version':tool['candidate_id'],'implementation_hash':tool['implementation_hash'],
         'input_hash':digest(request),'model_version':state['incumbent'],
+        **({'tool_registration':tool['registration']} if 'registration' in tool else {}),
         'qualification':'tool measurement, not independent model evaluation or mechanism proof'}
     try:
         execution=tool['execution'];job=directory/('job-'+str(attempt))

@@ -48,6 +48,8 @@ class AutonomousEvolution:
                 history,excluded=collect(config.pop('tool_history_sources'))
                 config['context']={**context,'tool_history':history}
                 config['plan']={**config['plan'],'development_ids':sorted(set(config['plan']['development_ids'])|set(excluded))}
+                from .validation_preflight import preflight
+                preflight(config['plan'])
             from .agents import search_policy
             backend=dict(config.get('agent_backend',{}));configured=backend.get('web_search')
             modes=search_policy(configured)

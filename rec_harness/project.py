@@ -49,7 +49,10 @@ class ResearchProject:
         if (config.get('tool',{}).get('tool_history_sources') is not None
                 and config.get('max_tool_updates',1)>0 and config['max_model_episodes']>1):
             from .tool_history import collect
-            collect(config['tool']['tool_history_sources'])
+            history,excluded=collect(config['tool']['tool_history_sources'])
+            config['tool']['tool_history_sources']=[{**spec,'cutoff_seq':binding['cutoff_seq'],'event_head':binding['event_head']}
+                for spec,binding in zip(config['tool']['tool_history_sources'],history['sources'])]
+            config['tool']['plan']['development_ids']=sorted(set(config['tool']['plan']['development_ids'])|set(excluded))
         if 'tool_runtime' in config:
             from .diagnostics import validate_runtime
             validate_runtime(config['tool_runtime'])

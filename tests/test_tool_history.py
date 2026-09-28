@@ -89,3 +89,21 @@ class ToolHistoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError,'nonempty tool history'):
             ResearchProject.init(fixture.campaign,config)
         self.assertFalse(fixture.campaign.exists())
+
+    def test_project_freezes_history_cutoff_before_first_model(self):
+        import test_project
+        from rec_harness.project import ResearchProject
+        fixture=test_project.ProjectTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        config=read_json(fixture.config('tool'))
+        config['tool']['tool_history_sources']=[{'campaign':str(self.source)}]
+        cutoff=self.store.verify()['events']
+        ResearchProject.init(fixture.campaign,config)
+        frozen=read_json(fixture.campaign/'project.json')['tool']
+        self.assertEqual(frozen['tool_history_sources'][0]['cutoff_seq'],cutoff)
+        self.assertEqual(frozen['tool_history_sources'][0]['event_head'],self.store.verify()['head'])
+        self.assertIn('old-validation',frozen['plan']['development_ids'])
+        self.store.event('evolution_stopped',{'candidate_id':'old','status':'future'})
+        history,_=collect(frozen['tool_history_sources'])
+        self.assertEqual(history['candidates'][0]['status'],'rejected')
+        wrong={**frozen['tool_history_sources'][0],'event_head':'0'*64}
+        with self.assertRaisesRegex(ContractError,'event head changed'):collect([wrong])

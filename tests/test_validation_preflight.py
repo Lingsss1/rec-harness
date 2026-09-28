@@ -29,6 +29,26 @@ class ValidationPreflightTests(unittest.TestCase):
         suite['hash']=digest({k:v for k,v in suite.items() if k!='hash'});write_json(path,suite)
         with self.assertRaisesRegex(ContractError,'worker changed'):preflight(self.plan())
 
+    def test_online_condition_overlap_rejected_before_any_execution(self):
+        plan=self.plan();plan['development_ids']=['development']
+        with patch('rec_harness.agents.run_process',side_effect=AssertionError('execution forbidden')):
+            with self.assertRaisesRegex(ContractError,'overlap development/history'):preflight(plan)
+        plan['development_ids']=['confirmation']
+        result=preflight(plan)
+        self.assertEqual(result['checks'][0]['evaluation_ids'],['development'])
+
+    def test_nested_pipeline_condition_ids_follow_stage(self):
+        from rec_harness.validation_preflight import evaluation_ids
+        path=self.root/'nested.json'
+        write_json(path,{'suites':{'online':{'path':str(self.root/'suite/suite.json')}}})
+        self.assertEqual(evaluation_ids('rec_harness.tool_pipeline',path,'utility'),{'development'})
+        self.assertEqual(evaluation_ids('rec_harness.tool_pipeline',path,'cost_regression'),{'development'})
+
+    def test_command_cannot_switch_to_another_stage_after_preflight(self):
+        plan=self.plan();command=plan['stages']['utility']['command']
+        command[command.index('--stage')+1]='confirmation'
+        with self.assertRaisesRegex(ContractError,'command stage differs'):preflight(plan)
+
     def test_missing_dependency_and_wrong_plan_identity_rejected(self):
         plan=self.plan();plan['identity']={**plan['identity'],'tools':'wrong'}
         with self.assertRaisesRegex(ContractError,'plan identity'):preflight(plan)

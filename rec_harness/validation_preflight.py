@@ -58,6 +58,25 @@ def check_suite(module,path,stage=None):
     return suite
 
 
+def evaluation_ids(module,path,stage):
+    """Read the IDs the built-in validator will emit, including nested suites."""
+    path=Path(path);suite=read_json(path)
+    if module=='rec_harness.tool_pipeline':
+        name='reference' if stage in {'correctness','synthetic','robustness'} else 'shadow' if stage=='shadow' else 'online'
+        child={'reference':'tool_validation','shadow':'tool_shadow','online':'tool_online'}[name]
+        return evaluation_ids('rec_harness.'+child,suite['suites'][name]['path'],'utility' if stage=='cost_regression' else stage)
+    if module=='rec_harness.harness_pipeline':
+        name='prefix' if stage=='prefix_audit' else 'online'
+        child='harness_prefix' if name=='prefix' else 'online_validation'
+        return evaluation_ids('rec_harness.'+child,suite['suites'][name]['path'],stage)
+    if module=='rec_harness.tool_online':
+        return evaluation_ids('rec_harness.online_validation',path.parent/'episodes/suite.json','development' if stage=='utility' else stage)
+    cases=suite['cases']
+    if module in {'rec_harness.tool_validation','rec_harness.online_validation'}:
+        cases=[case for case in cases if case['stage']==stage]
+    return {case['id'] for case in cases}
+
+
 def preflight(plan):
     hashes=freeze_validator_files(plan['stages']);checks=[];seen=set()
     for stage,rule in plan['stages'].items():
@@ -65,6 +84,10 @@ def preflight(plan):
         if module not in SUPPORTED:
             checks.append({'stage':stage,'scope':'validator files only; no built-in suite audit'})
             continue
+        if '--stage' in command:
+            position=command.index('--stage')+1
+            if position>=len(command) or command[position]!=stage:
+                raise ContractError('validator command stage differs from plan stage')
         if '--suite' not in command:raise ContractError('built-in validator requires --suite for preflight')
         index=command.index('--suite')+1
         if index>=len(command) or '{' in command[index]:raise ContractError('preflight requires a concrete frozen suite path')
@@ -75,7 +98,11 @@ def preflight(plan):
             if module in {'rec_harness.tool_pipeline','rec_harness.tool_shadow','rec_harness.tool_online','rec_harness.tool_validation'} and 'tool_contract' in plan:
                 from .tool_pipeline import input_contract
                 if input_contract(suite)!=plan['tool_contract']:raise ContractError('validator suite differs from plan tool input contract')
-        checks.append({'stage':stage,'module':module,'suite':str(path),'suite_hash':file_hash(path),'scope':'frozen suite and bound inputs'})
+        ids=evaluation_ids(module,path,stage)
+        overlap=ids&set(plan.get('development_ids',[]))
+        if overlap:raise ContractError('validator evaluation IDs overlap development/history: '+', '.join(sorted(overlap)))
+        checks.append({'stage':stage,'module':module,'suite':str(path),'suite_hash':file_hash(path),
+            'evaluation_ids':sorted(ids),'scope':'frozen suite and bound inputs'})
     return {'status':'passed','validator_files_hash':digest(hashes),'checks':checks,
         'qualification':'Read-only readiness check; no candidate execution, Codex call, resource reservation or scientific utility result. External/custom validators receive file checks only.'}
 

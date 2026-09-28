@@ -16,6 +16,7 @@ def collect(sources):
             cutoff=source.get('cutoff_seq',len(events))
             if type(cutoff) is not int or not 0<cutoff<=len(events):raise ContractError('invalid tool history cutoff')
             events=events[:cutoff];head=events[-1]['hash']
+            if source.get('event_head',head)!=head:raise ContractError('tool history frozen event head changed')
             if head in seen:raise ContractError('duplicate tool history evidence prefix')
             seen.add(head);source_id='tool-history-'+digest([str(root),head])[:24]
             selected=source.get('candidate_ids')

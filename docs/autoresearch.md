@@ -616,3 +616,5 @@ Harness 演化可使用 `trace_sources` 收集多个 campaign 的独立冻结前
 验证阶段可用 `evaluation_mode` 冻结评价类型，区分固定候选选择、端到端候选生成和离线测量；类型不匹配的报告拒绝准入。现有内置在线比较报告明确标为端到端生成，详见[评价类型边界](implementation/evaluation-modes.md)。
 
 固定候选池的三组选择可使用[固定候选选择入口](implementation/fixed-selection.md)，每条件3次Codex调用；主机评分不进入角色请求，未知结果不自动重发。它使用预给观测与结果，不替代在线模型实验。
+
+Amazon工具可用[独立三组在线入口](implementation/amazon-tool-online.md)比较实际研究后的incumbent；它新建独立study并保留费用轴，尚未自动接入默认项目的六阶段工具pipeline。

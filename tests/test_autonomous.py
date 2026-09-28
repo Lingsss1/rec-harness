@@ -72,6 +72,67 @@ class AutonomousTests(unittest.TestCase):
         finally:store.close()
         self.assertEqual(autoresearch(self.campaign,agent=Faults())['budget'],result['budget'])
 
+    def test_transport_failure_stops_roles_until_explicit_repair(self):
+        for failed_role in ['evidence','knowledge','missing_cli']:
+            with self.subTest(role=failed_role):
+                self.campaign=self.root/failed_role;calls=[]
+                class Transport(ScriptedAgent):
+                    failed=False
+                    def run(self,role,context,directory):
+                        calls.append(role)
+                        if (role==failed_role or failed_role=='missing_cli' and role=='evidence') and not self.failed:
+                            self.failed=True
+                            if failed_role=='missing_cli':raise FileNotFoundError('codex executable missing')
+                            write_json(Path(directory)/'resources.json',{'status':'crash'})
+                            raise ContractError('service unavailable')
+                        return super().run(role,context,directory)
+                self.config['budget']=100;agent=Transport()
+                result=self.start(agent)
+                self.assertEqual(result['state']['stop_reason'],'role_transport_failure')
+                self.assertEqual(result['state']['round'],1)
+                observed_role='evidence' if failed_role=='missing_cli' else failed_role
+                self.assertEqual(calls.count(observed_role),1)
+                if failed_role=='knowledge':self.assertEqual(result['state']['incumbent'],'attempt-1')
+                count=len(calls)
+                self.assertEqual(autoresearch(self.campaign,agent=agent),result)
+                self.assertEqual(len(calls),count)
+                research=Research(self.campaign,agent=agent)
+                try:
+                    cost=research.store.budget()['charged_or_reserved']
+                    if failed_role=='evidence':
+                        import io,json
+                        from contextlib import redirect_stdout
+                        from rec_harness.cli import main
+                        output=io.StringIO()
+                        with redirect_stdout(output):main(['retry-transport',str(self.campaign),'--reason','service restored'])
+                        repair=json.loads(output.getvalue())
+                    else:repair=research.reopen_transport('service restored')
+                    self.assertEqual(repair['budget']['charged_or_reserved'],cost)
+                    # Simulate a lost state projection after the durable reopen event.
+                    write_json(self.campaign/'state.json',result['state'])
+                finally:research.store.close()
+                resumed=autoresearch(self.campaign,agent=agent)
+                self.assertEqual(resumed['state']['round'],3)
+                self.assertEqual(resumed['state']['stop_reason'],'max_rounds')
+                self.assertEqual(calls.count(observed_role),3)
+                self.assertGreater(resumed['budget']['charged_or_reserved'],cost)
+                self.assertEqual(autoresearch(self.campaign,agent=agent),resumed)
+
+    def test_transport_stop_recovers_when_round_publication_is_interrupted(self):
+        calls=[]
+        class Transport(ScriptedAgent):
+            def run(self,role,context,directory):
+                calls.append(role)
+                write_json(Path(directory)/'resources.json',{'status':'crash'})
+                raise ContractError('service unavailable')
+        agent=Transport()
+        with patch.object(Research,'_record_attempt',side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):self.start(agent)
+        result=autoresearch(self.campaign,agent=agent)
+        self.assertEqual(result['state']['stop_reason'],'role_transport_failure')
+        self.assertEqual(calls,['evidence'])
+        self.assertEqual(autoresearch(self.campaign,agent=agent),result)
+
     def test_insufficient_baseline_budget_stops_before_execution(self):
         self.config['budget']=1
         result=self.start(ScriptedAgent())

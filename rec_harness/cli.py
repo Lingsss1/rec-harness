@@ -50,6 +50,8 @@ def main(argv=None):
     p.add_argument("directory"); p.add_argument("--rounds", type=int)
     p = commands.add_parser("consolidate", help="retry graph knowledge without repeating training")
     p.add_argument("directory"); p.add_argument("attempt")
+    p = commands.add_parser('retry-transport',help='reopen a repaired generic campaign without erasing failed attempts')
+    p.add_argument('directory');p.add_argument('--reason',required=True)
     for name in ("status", "verify", "recover"):
         p = commands.add_parser(name); p.add_argument("directory")
     p = commands.add_parser("graph")
@@ -164,10 +166,11 @@ def main(argv=None):
             if 'harness_registry' in config:
                 config['harness_registry'] = str((config_path.parent / config['harness_registry']).resolve())
             result = {"campaign": str(Research.init(args.directory, config))}
-        elif args.command in {"run", "consolidate"}:
+        elif args.command in {"run", "consolidate", "retry-transport"}:
             research = Research(args.directory)
             try:
-                result = research.run(args.rounds) if args.command == "run" else research.consolidate(args.attempt)
+                if args.command=='retry-transport':result=research.reopen_transport(args.reason)
+                else:result = research.run(args.rounds) if args.command == "run" else research.consolidate(args.attempt)
             finally:
                 research.store.close()
         elif args.command == 'status':

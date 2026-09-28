@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .agents import CodexAgent, run_process
-from .core import Artifacts, ContractError, canonical, digest, file_hash, identifier, number, public_only, read_json, required, safe_file, validate_card, write_json
+from .core import Artifacts, ContractError, RoleTransportFailure, canonical, digest, file_hash, identifier, number, public_only, read_json, required, safe_file, validate_card, write_json
 from .store import Store
 from .evolution import validate_policy
 from .measurement_gaps import MeasurementDeferred
@@ -198,7 +198,7 @@ class Research:
         directory = self.root / "tasks" / task_id
         self.store.reserve(task_id, self.protocol["agent_cost"])
         started = time.time()
-        status = "crash"
+        status = "crash";failure_kind=None
         try:
             directory.mkdir(parents=True)
             if snapshot:
@@ -208,7 +208,15 @@ class Research:
             write_json(directory/'visible-state.json',context)
             self.store.event("agent_submitted", {"task_id": task_id, "role": role, "input_hash": frozen, "model_version": context.get("model_version"), "graph_version": self.store.version,
                 'visible_state_ref':self.artifacts.put(directory/'visible-state.json'),'source_snapshot':snapshot or {}})
-            response = self.agent.run(role, context, directory)
+            try:
+                response = self.agent.run(role, context, directory)
+            except (ContractError,OSError) as error:
+                receipt=directory/'resources.json'
+                terminal=read_json(receipt).get('status') if receipt.exists() else None
+                if isinstance(error,RoleTransportFailure) or terminal not in {None,'success'} or isinstance(error,OSError) and terminal is None:
+                    failure_kind='role_transport'
+                    raise RoleTransportFailure(role+' transport failed; repair the service before explicitly reopening research') from error
+                raise
             public_only(response)
             status = "success"
             return response, directory
@@ -216,6 +224,7 @@ class Research:
             # Agent calls use predeclared BCU; token and wall costs are separate measured fields.
             self.store.settle(task_id, self.protocol["agent_cost"], status)
             self.store.event("agent_completed", {"task_id": task_id, "status": status, "wall_seconds": time.time() - started,
+                                                   **({"failure_kind":failure_kind} if failure_kind else {}),
                                                    "archive": self._archive_directory(directory) if directory.exists() else {}})
 
     def context(self, role, state):
@@ -358,6 +367,9 @@ class Research:
                 self.store.patch(patch)
                 self.store.event('knowledge_consolidated',{'attempt':attempt,'graph_version':self.store.version,'retry':retry})
                 return True
+            except RoleTransportFailure as error:
+                self.store.event('knowledge_deferred',{'attempt':attempt,'reason':str(error),'failure_kind':'role_transport'})
+                return False
             except (ContractError,OSError,ValueError,KeyError,TypeError) as error:
                 self.store.event('knowledge_rejected',{'attempt':attempt,'retry':retry,'reason':str(error)})
                 context={**context,'validation_error':str(error),
@@ -387,6 +399,25 @@ class Research:
         result["verified_artifacts"] = len(checked)
         return result
 
+    def _transport_failed(self,attempt):
+        return any(event['kind']=='agent_completed' and event['payload'].get('failure_kind')=='role_transport'
+                   and event['payload']['task_id'].startswith(attempt+'-') for event in self.store.events())
+
+    def reopen_transport(self,reason):
+        if not isinstance(reason,str) or not reason.strip():raise ContractError('repair reason required')
+        with self.lock():
+            self.store.verify()
+            events=self.store.events()
+            transitions=[e for e in events if e['kind'] in {'round_completed','role_transport_reopened'}]
+            state=transitions[-1]['payload']['state'] if transitions else read_json(self.state_path)
+            if state.get('stop_reason')!='role_transport_failure':raise ContractError('campaign is not stopped for role transport')
+            if state['round']>=self.config['max_rounds']:raise ContractError('frozen round limit exhausted; a new campaign is required')
+            state={k:v for k,v in state.items() if k!='stop_reason'};state['status']='ready'
+            self.store.event('role_transport_reopened',{'reason':reason,'state':state,
+                'policy':'Retain failed attempts and costs; continue with a new round, not an automatic role retry.'})
+            write_json(self.state_path,state)
+            return {'state':state,'budget':self.store.budget()}
+
     def run(self, rounds=None):
         with self.lock():
             interrupted = self.store.recover()
@@ -396,7 +427,10 @@ class Research:
             if interrupted:
                 self.store.event("recovery", {"interrupted_task_ids": interrupted, "cost_policy": "retain reservation when actual unknown"})
             state = read_json(self.state_path)
-            if state.get('status')=='stopped' and state.get('stop_reason') in {'budget','max_rounds','measurement_required'}:
+            transitions=[e for e in self.store.events() if e['kind'] in {'round_completed','role_transport_reopened'}]
+            if transitions and (transitions[-1]['kind']=='role_transport_reopened' or transitions[-1]['payload']['state'].get('stop_reason')=='role_transport_failure'):
+                state=transitions[-1]['payload']['state'];write_json(self.state_path,state)
+            if state.get('status')=='stopped' and state.get('stop_reason') in {'budget','max_rounds','measurement_required','role_transport_failure'}:
                 return self._finish(state,state['stop_reason'])
             events = self.store.events()
             completed = {e["payload"]["attempt"] for e in events if e["kind"] == "round_completed"}
@@ -415,7 +449,9 @@ class Research:
                         saved=read_json(self.artifacts.verify(checkpoints[attempt]))
                         if saved['attempt']!=attempt or saved['state']!=old:
                             raise ContractError('decision checkpoint does not match started round')
-                        self._record_attempt(attempt,old,saved['before'],saved['after'],saved['evaluation'],saved['decision'],saved['dependencies'])
+                        recovered_decision=dict(saved['decision'])
+                        if self._transport_failed(attempt):recovered_decision['failure_kind']='role_transport'
+                        self._record_attempt(attempt,old,saved['before'],saved['after'],saved['evaluation'],recovered_decision,saved['dependencies'])
                         self.store.event('knowledge_deferred',{'attempt':attempt,'reason':'controller interrupted after committed decision; use consolidate to retry knowledge'})
                     if all((archived / name).exists() for name in ("node.json", "decision.json", "observations.json")):
                         decision = read_json(archived / "decision.json")
@@ -423,11 +459,13 @@ class Research:
                             state.update(incumbent=attempt, workspace=read_json(archived / "node.json")["workspace_after"], baseline=read_json(archived / "observations.json"))
                     else:
                         decision = {"selection": "crash", "conclusion_status": "unknown", "rationale": "controller interrupted; raw tasks and consumed costs retained"}
+                        if self._transport_failed(attempt):decision['failure_kind']='role_transport'
                         self._record_attempt(attempt, old, old["workspace"], old["workspace"], {"attempt": attempt, "valid": False, "score": None, "runs": []}, decision, [])
                     state["round"] = max(state["round"], old["round"] + 1)
+                    if self._transport_failed(attempt):state.update(status='stopped',stop_reason='role_transport_failure')
                     self.store.event("round_completed", {"attempt": attempt, "decision": decision, "state": state, "state_hash": digest(state)})
                     write_json(self.state_path, state)
-            if state.get('stop_reason')=='measurement_required':return self._finish(state,'measurement_required')
+            if state.get('stop_reason') in {'measurement_required','role_transport_failure'}:return self._finish(state,state['stop_reason'])
             if state["baseline"] is None:
                 if self.store.budget()['remaining']<len(self.protocol['seeds'])*self.protocol['evaluation_cost']:
                     return self._finish(state,'budget')
@@ -538,15 +576,18 @@ class Research:
                     decision = {"selection": "crash", "conclusion_status": "unknown", "rationale": str(error), "evidence_refs": [], "unresolved_explanations": ["execution failure; no mechanism refutation"]}
                     self.store.event("round_failed", {"attempt": attempt, "error": str(error)})
                     self.store.patch({"base_version": self.store.version, "nodes": [node(attempt + "-failure", "Failure", {"error": str(error), "evidence_dependency_ids": [attempt]}, self.task, self.protocol_hash)], "edges": []})
+                transport_failed=self._transport_failed(attempt)
+                if transport_failed:decision['failure_kind']='role_transport'
                 self._record_attempt(attempt, state, before, after, evaluation, decision, dependencies)
                 if decision["selection"] == "keep":
                     state.update(incumbent=attempt, workspace=after, baseline=evaluation)
                     self.store.event("gaps_need_recheck", {"new_model": attempt, "previous_model": context["model_version"]})
                 state.update(round=state["round"] + 1, status="ready")
                 if decision.get('measurement_required'):state.update(status='stopped',stop_reason='measurement_required')
+                if transport_failed:state.update(status='stopped',stop_reason='role_transport_failure')
                 self.store.event("round_completed", {"attempt": attempt, "decision": decision, "state_hash": digest(state), "state": state})
                 write_json(self.state_path, state)
-                if decision.get('measurement_required'):return self._finish(state,'measurement_required')
+                if state.get('stop_reason') in {'measurement_required','role_transport_failure'}:return self._finish(state,state['stop_reason'])
             return self._finish(state,'max_rounds' if state['round']>=self.config['max_rounds'] else stop_reason)
 
     def _finish(self,state,reason):

@@ -29,8 +29,7 @@ from .amazon_memory import validate_memory,validate_readout
 from .model_source_contract import review_source,MODULE_CALLS,TENSOR_METHODS
 
 
-class RoleTransportFailure(ContractError):
-    """Host/service failure that must not trigger a fresh research round."""
+from rec_harness.core import RoleTransportFailure
 
 
 class AmazonAutoresearch:

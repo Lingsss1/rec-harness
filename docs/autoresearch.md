@@ -501,3 +501,12 @@ python3 -m rec_harness amazon-restore-archive snapshot.json /path/to/artifacts/o
 上下文提供当前源码的实际方法目录。合同在 hypothesis 阶段检查并冻结，candidate 和所有新生成对照共享这个改动范围；源码 AST 的实际变化必须非空且位于声明方法内。experiment 校验和独立准入预检均执行这一约束；准入在启动任何 CPU 探针前检查全部新模型，不能只检查候选而漏掉对照。每个版本的范围核验结果进入其评审证据。
 
 已有 campaign 不回填配置或改写合同。显式配置 `structured_insertion_contract: false` 保留自由文本兼容入口，但如果主动提交该 JSON 合同，仍须遵守范围约束。方法范围正确不证明自然语言机制成立；原因果、评分、批次独立性和梯度检查仍执行，对照实验仍承担效果和归因判断。
+
+通用 campaign（含小型示例）的 Codex 传输失败现在同样停止整轮调度。失败调用收据及成本保留，重复 `autoresearch` 不会自动重试；知识角色失败时保留此前已经提交的模型选择。服务修复后，使用：
+
+```bash
+python3 -m rec_harness retry-transport /path/to/campaign --reason "说明已完成的服务修复"
+python3 -m rec_harness autoresearch /path/to/campaign
+```
+
+此入口保留失败轮次，按原冻结上限进入下一轮；不重放已经完成的角色，也不增加预算或轮次上限。达到原轮次上限时需另建 campaign。知识写入可另用既有 `consolidate` 显式补做，无须重训。Amazon campaign 仍使用 `amazon-retry-source` 或准入后的独立评审恢复入口。项目在子 campaign 传输停止期间保持原模型阶段，子任务修复重开后再恢复项目。

@@ -14,6 +14,10 @@ class ContractError(ValueError):
     pass
 
 
+class RoleTransportFailure(ContractError):
+    """Host/service failure requiring explicit repair before further roles."""
+
+
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 

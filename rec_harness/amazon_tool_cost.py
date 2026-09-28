@@ -95,7 +95,8 @@ def audit_utility(utility,suite_path):
                 if exposure['exposures']:raise ContractError('no-tool reference received a tool')
             elif report['passed'] and not any(e['measurement_status']=='success' and e['transport_completed'] for e in exposure['exposures']):
                 raise ContractError('Amazon tool measurement never reached a completed role')
-            for memory in [folder/'study/memory',folder/'campaign/memory',folder/'campaign/diagnostic-budget']:
+            probe_ledgers=[Path(item['directory']) for item in actual['costs'].get('activation_units',{}).get('ledgers',[])]
+            for memory in [folder/'study/memory',folder/'campaign/memory',folder/'campaign/diagnostic-budget',*probe_ledgers]:
                 if (memory/'memory.sqlite').exists():
                     memory=memory.resolve()
                     if memory in used:raise ContractError('Amazon groups share a ledger')
@@ -116,6 +117,13 @@ def audit_utility(utility,suite_path):
 def ledger_axis(memory):
     """Identify abandoned Amazon ledgers from their adjacent controller contract."""
     parent=Path(memory).parent
+    if parent.parent.name=='activation-probes':
+        root=parent.parent.parent;controller=read_json(root/'amazon-auto.json')
+        if digest(controller)!=read_json(root/'auto-lock.json')['config_hash']:raise ContractError('abandoned activation controller changed')
+        config=read_json(parent/'config.json');binding=read_json(parent/'binding.json')
+        if binding['config_hash']!=digest(config) or parent.name!=digest(config):raise ContractError('abandoned activation binding changed')
+        if config['budget']!=controller['activation_diagnostic']['cost']:raise ContractError('abandoned activation cost changed')
+        return 'activation_units',config['budget']
     if (parent/'study.json').exists():
         config=read_json(parent/'study.json')
         if digest(config)!=read_json(parent/'study-lock.json')['config_hash']:raise ContractError('abandoned study changed')

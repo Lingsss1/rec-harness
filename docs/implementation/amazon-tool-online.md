@@ -22,11 +22,11 @@ python -m rec_harness.amazon_tool_online run --suite /path/to/frozen-suite/suite
 
 每组使用相同模型、协议、种子及各轴额度，分别运行基线及研究。主机检查研究完成事件、incumbent、账本、训练收据及开发成绩一致，并核对三组评估候选集合和数据哈希相同。报告取终态incumbent的开发HR@10宏平均，分别计算候选工具相对两组对照的收益，主gain取两者较小值；不事后挑最高候选。工具组必须实际完成诊断且无诊断失败。
 
-报告保留role_calls、gpu_seconds、diagnostic_units三个费用轴，total_cost仅为它们按冻结权重折算的和。CPU准入/独立复算没有现成计费轴，其wall time不计入该数；它不是全部硬件开销。passed表示执行合同有效，正收益仍须由外层冻结门槛判断。报告类型是end_to_end_candidate_generation，不是固定候选选择。
+报告保留role_calls、gpu_seconds、diagnostic_units三个费用轴，total_cost仅为它们按冻结权重折算的和。启用激活采集时还有显式activation_units轴。CPU准入/独立复算没有现成计费轴，其wall time不计入该数；它不是全部硬件开销。passed表示执行合同有效，正收益仍须由外层冻结门槛判断。报告类型是end_to_end_candidate_generation，不是固定候选选择。
 
 已提交completed.json的组恢复时重新核对证据，不重新运行；started存在但未提交完成结果的组一律停止，不能因中断自动重启训练或角色。当前不支持组内自动续跑，包括完成后、完成标记写入前中断的情况。
 
-当前控制器配置只允许基础研究和聚合诊断，未接入历史记忆、激活/block-score采集选项。六阶段pipeline费用审计现已适配Amazon费用轴；见上述接入说明。不能把该入口的完成当成自主缺口发现、所有诊断合同在线效用或三循环整体完成。
+当前控制器配置支持基础研究、聚合诊断及[激活采集](amazon-online-activation.md)，历史记忆和block-score采集选项尚未接入。六阶段pipeline费用审计现已适配Amazon费用轴；见上述接入说明。不能把该入口的完成当成自主缺口发现、所有诊断合同在线效用或三循环整体完成。
 
 ## 验收
 

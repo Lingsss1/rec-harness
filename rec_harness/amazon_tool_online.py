@@ -23,14 +23,15 @@ STUDY_KEYS={'datasets','development_seeds','confirmation_seeds','model_versions'
             'gpu_ids','trusted_baselines_only','hidden_evaluation'}
 CONTROLLER_KEYS={'adapter','base_model_id','control_model_ids','max_rounds','role_call_limit','rescore_recipe',
                  'uid_registry','agent_backend','role_timeout','diagnostic_budget','generated_control_count',
-                 'structured_insertion_contract','require_method_sources','minimum_round_gpu_seconds'}
+                 'structured_insertion_contract','require_method_sources','minimum_round_gpu_seconds','activation_diagnostic'}
 
 
 def freeze_suite(specification,directory):
     path=Path(specification).resolve();spec=read_json(path);root=Path(directory).resolve()
     if root.exists() and any(root.iterdir()):raise ContractError('Amazon online suite directory must be empty')
     weights=spec['cost_weights']
-    if set(weights)!={'role_calls','gpu_seconds','diagnostic_units'}:raise ContractError('three explicit ledger cost weights required')
+    required_weights={'role_calls','gpu_seconds','diagnostic_units'}
+    if set(weights) not in [required_weights,required_weights|{'activation_units'}]:raise ContractError('explicit ledger cost weights required')
     for value in weights.values():
         if number(value,'ledger cost weight',0)<=0:raise ContractError('positive ledger cost weights required')
     runtime=copy.deepcopy(spec['tool_runtime'])
@@ -69,6 +70,17 @@ def freeze_suite(specification,directory):
         seeds=study['development_seeds']+study['confirmation_seeds']
         if any(type(seed) is not int or seed<0 for seed in seeds):raise ContractError('nonnegative integer seeds required')
         if not study['development_seeds'] or not study['confirmation_seeds'] or len(set(seeds))!=len(seeds):raise ContractError('disjoint nonempty study seed partitions required')
+        from .adapters.amazon_activation import validate_options
+        validate_options(config.get('activation_diagnostic'),study)
+        if config.get('activation_diagnostic'):
+            if 'activation_units' not in weights:raise ContractError('activation cost weight required')
+            options=config['activation_diagnostic']
+            calls=len(options.get('datasets',study['datasets']))*len(options.get('seeds',study['development_seeds']))*config['max_rounds']
+            if calls*options['cost']>options['budget']:raise ContractError('activation budget cannot cover frozen research rounds')
+            if set(options['settings'])!={'HIDDEN_UNITS','NUM_BLOCKS','KERNEL_SIZE','DROPOUT_RATE','MAXLEN'}:
+                raise ContractError('explicit activation model settings required')
+            if type(options['settings']['MAXLEN']) is not int or options['settings']['MAXLEN']<16:
+                raise ContractError('activation protocol requires MAXLEN at least 16')
         for dataset in study['datasets']:
             data_identity=[study['data_hashes'][dataset+'_'+split+'.txt'] for split in ['train','valid']]
             for seed in seeds:
@@ -101,6 +113,10 @@ def freeze_suite(specification,directory):
         'graph':digest('fresh independent study and controller stores per group'),
         'budget':digest([weights,[(c['study']['budget_gpu_seconds'],c['controller']['role_call_limit'],c['controller']['diagnostic_budget']) for c in cases]]),
         'protocol':digest([c['study'] for c in cases])}
+    if any(c['controller'].get('activation_diagnostic') for c in cases):
+        activation=[c['controller'].get('activation_diagnostic') for c in cases]
+        body['identity']['tools']=digest([body['identity']['tools'],activation])
+        body['identity']['budget']=digest([body['identity']['budget'],[o['budget'] if o else 0 for o in activation]])
     body['hash']=digest(body);write_json(root/'suite.json',body);return body
 
 
@@ -171,6 +187,9 @@ def read_result(root):
             diagnostics=Store(root/'campaign/diagnostic-budget',read_only=True)
             try:costs['diagnostic_units']=audit_cost(diagnostics,controller.config['diagnostic_budget'])
             finally:diagnostics.close()
+        if controller.config.get('activation_diagnostic'):
+            from .adapters.amazon_activation import audit_costs
+            costs['activation_units']=audit_costs(controller.root,controller.config['activation_diagnostic'])
         if any(value['pending'] for value in costs.values()):raise ContractError('Amazon online costs remain unsettled')
         return {'score':progress['rows'][-1]['development_score'],'incumbent':report['state']['incumbent'],
             'evaluation_conditions':evaluation_conditions,'agent_calls':calls,'diagnostic_calls':sum(e['kind']=='diagnostic_completed' for e in events),

@@ -16,4 +16,4 @@ python -m rec_harness.tool_pipeline freeze /path/to/pipeline.json /path/to/froze
 
 恢复沿用保守规则：Amazon直接在线入口和pipeline utility只有在所有已初始化组均提交完成记录、且证据复核一致时，才继续其余组。任何组结果未知都会停止，不自动重发研究调用或训练。费用阶段自身中断仍不在自动重启白名单中；已提交外层结果继续沿用原CAS恢复合同。
 
-新增6项Amazon费用/恢复测试和1项pipeline路由测试；合计43项相关测试通过，7.044秒，覆盖旧合成费用、pipeline、预检、Amazon对照、角色送达及外层恢复。测试中的训练结果、角色传输和部分审计是明确夹具；不是实际Codex/GPU验收。本轮没有真实角色调用、训练或晋升。证据位于rec-harness-runs/amazon-tool-pipeline-v1。真实Amazon完整六阶段运行、激活观测在线输入及后续安装包验收仍未完成。
+新增6项Amazon费用/恢复测试和1项pipeline路由测试；合计43项相关测试通过，7.044秒，覆盖旧合成费用、pipeline、预检、Amazon对照、角色送达及外层恢复。测试中的训练结果、角色传输和部分审计是明确夹具；不是实际Codex/GPU验收。本轮没有真实角色调用、训练或晋升。证据位于rec-harness-runs/amazon-tool-pipeline-v1。后续已补[激活观测及采集费用](amazon-online-activation.md)；真实Amazon完整六阶段运行和后续安装包验收仍未完成。

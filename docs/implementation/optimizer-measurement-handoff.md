@@ -12,4 +12,6 @@
 
 工程验收包含模型→优化器转交→工具验证→后继模型复测、项目提交后中断、测量收据提交但候选文件未写入时中断、无工具槽停止，以及数据条件不足拒绝。测试使用脚本角色、测量替身和固定验证报告，不构成真实自主缺口发现或工具效用证据。此项晚于 v15 安装包，尚未用新路由角色执行真实 Codex 验收。
 
+后续[真实选择合同验收](../experiments/harness-router-codex-v1.md)已完成一次 Codex 调用。角色自行选择 Harness 补丁，schema/主机范围校验、归档、图记录与无重复调用恢复通过。真实测量转交正例仍未验收，不因返回补丁而重试强求测量缺口。
+
 全量回归 419 项通过（21 项环境相关跳过）；随后补充的合同/恢复加强经转交定向 4 项及项目定向 13 项检查通过。日志为 `/tmp/rec-harness-optimizer-handoff-full-tests.log`、`/tmp/rec-harness-optimizer-handoff-final-targeted.log` 和 `/tmp/rec-harness-optimizer-handoff-project-final.log`。

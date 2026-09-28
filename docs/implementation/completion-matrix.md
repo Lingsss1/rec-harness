@@ -2,6 +2,8 @@
 
 目标保持为完整方案实现及 Amazon NextItNet 对比优化。小型示例不构成完成证据。
 
+新 optimizer_router 已经[真实 Codex 单次验收](../experiments/harness-router-codex-v1.md)：自行选择合法 Harness 补丁，主机校验/归档/图记录和无重复调用恢复通过。没有强制测量缺口；真实测量转交正例及其工具效用仍未验证。
+
 方案 5.5D 的[优化器→Tool Evolver 测量转交](optimizer-measurement-handoff.md)工程路径已补齐：同一次调用选择补丁或测量审查，主机门控、CAS 收据、独立工具阶段及后继复测；无工具槽/无可用额度保持未解决，不晋升空 Harness。该功能晚于 v15，真实新路由调用及效用验证仍待完成。
 
 最新[阶段范围核对](scope-audit.md)确认一个尚缺工程分支：方案 5.5D 要求优化器发现测量能力不足时转交 Tool Evolver，但当前 optimizer 仅支持 HarnessPatch，项目没有对应转交结果。下一项优先补齐此路径；既有工具/Harness 的零收益拒绝结果继续保留，不能把它们当作必须调到通过的故障。

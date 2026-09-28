@@ -696,3 +696,5 @@ Amazon 每轮新建上下文时，对本轮检索到的历史设计 GapCard 生�
 字段标记 origin=agent_hypothesis、checks_verified_by_this_report=false；身份核验不证明作者声称的检查真实发生。评审需对照提案和主机证据，在 unresolved_explanations 中保留未执行或缺乏支持的验证事项，知识角色也收到同一限制说明。此实现不自动解析自然语言为可执行诊断，也不新增角色调用。
 
 `implementation-author-handoff-acceptance-v1/acceptance.json` 对 v4 两轮真实 experiment 记录完成只读投影，候选和对照四份源码身份、原限制说明及完成事件绑定均通过，源账本未变。未让已结束角色重新消费字段。全量 377 项回归，357 通过、20 跳过；补充的控制器回归验证 evaluation/lead/knowledge 交接和恢复，篡改响应、重写接受上下文、改变源码及删除已提交报告均有拒绝测试。该改动晚于 v12 安装交付。
+
+复用恢复路径补充：旧单候选收据的 `source_hash` 同样用于核验 model.py，不能因缺少新的多文件哈希表而丢失源码绑定。恢复测试经真实来源事件/CAS 复制后调用同一交接入口，验证原限制说明保留以及复制后篡改源码拒绝。`implementation-author-reuse-acceptance-v1/acceptance.json` 对实际已完成的 amazon-input-offset-review-v4 复用 experiment 记录只读核验通过，原/目标事件导出与角色文件均不变，没有新增调用/训练/推理。全套 377 项回归再次通过，20 项环境相关跳过；不代表旧角色已读取新增字段。

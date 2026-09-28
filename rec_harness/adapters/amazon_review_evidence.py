@@ -32,6 +32,10 @@ def experiment_report(directory, events):
         raise ContractError('experiment report accepted identity changed')
     validate_schema(response,schema_for('experiment'))
     hashes=accepted.get('model_source_hashes',{})
+    # Older single-candidate roles bind the edited source under source_hash.
+    # Retain that binding when no multi-file receipt was needed.
+    if not hashes and accepted.get('source_hash'):
+        hashes={'model.py':accepted['source_hash']}
     for name,sha in hashes.items():
         if file_hash(safe_file(folder/'model',name))!=sha:
             raise ContractError('experiment report source changed')

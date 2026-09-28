@@ -73,7 +73,9 @@ class ReviewReuseTests(unittest.TestCase):
             store=Store(root/'original/memory');store.configure_budget(10)
             store.reserve('calls',3);store.settle('calls',3,'success')
             objects=Artifacts(root/'original/artifacts/objects')
-            for role,response in [('evidence',cards['gap']),('hypothesis',{k:cards[k] for k in ['method','proposal']}),('experiment',{'changed_files':['model.py']})]:
+            experiment_response={'changed_files':['model.py'],'implementation_checks':['shape check reported'],
+                                 'limitations':['No checkpoint intervention performed.']}
+            for role,response in [('evidence',cards['gap']),('hypothesis',{k:cards[k] for k in ['method','proposal']}),('experiment',experiment_response)]:
                 folder=source/role
                 for name,value in [('context.json',{'role':role}),('response.json',response),('request.json',{}),('schema.json',{}),('resources.json',{'status':'success'})]:
                     write_json(folder/name,value)
@@ -95,7 +97,15 @@ class ReviewReuseTests(unittest.TestCase):
             for role in ['evidence','hypothesis','experiment']:
                 self.assertEqual(verify_reused_role(target/role,read_json(target/role/'accepted.json')),
                                  read_json(target/role/'reuse.json'))
-            self.assertEqual(read_json(target/'experiment/reuse.json')['source_response_hash'],digest({'changed_files':['model.py']}))
+            self.assertEqual(read_json(target/'experiment/reuse.json')['source_response_hash'],digest(experiment_response))
+            from rec_harness.adapters.amazon_review_evidence import experiment_report
+            report=experiment_report(target,[])
+            self.assertEqual(report['reported_limitations'],experiment_response['limitations'])
+            self.assertEqual(report['source_hashes'],{'model.py':file_hash(model)})
+            self.assertFalse(report['checks_verified_by_this_report'])
+            copied=target/'experiment/model/model.py';copied.write_text('changed after reuse')
+            with self.assertRaisesRegex(ContractError,'source changed'):experiment_report(target,[])
+            copied.write_text(model.read_text())
             store=Store(root/'original/memory',read_only=True)
             self.assertEqual(store.verify(),before);store.close()
             write_json(source/'evidence/resources.json',{'status':'success','wall_seconds':0})

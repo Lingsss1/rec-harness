@@ -4,7 +4,7 @@
 
 无工具组四个基线训练及四次激活采集成功，evidence和hypothesis通过。experiment的两次真实返回均被源码准入拒绝：首次为 `unapproved callable: block`，重试为 `indirect calls prohibited`。原始差异仅在encode_sequence中对指定层应用0.95残差系数，分别使用 `enumerate(self.blocks)` 和 `self.blocks[i](x)`；检查器只识别直接遍历模块列表的调用，漏掉了这两种位置操作写法。框架保留失败并拒绝外层候选，主进程已退出；没有候选训练或三组在线效用结果。这不是科学负结果。
 
-修复限定于声明的 `nn.ModuleList`：支持枚举绑定的模块及标量索引调用；任意对象间接调用、切片/非整数索引、钩子注册仍拒绝。37项相关回归通过。四份未修改的原始返回源码通过新源码检查及CPU数值、梯度和张量合同，证据为 `amazon-block-dispatch-v1/acceptance.json`；无新增Codex或GPU训练，旧冻结代码与拒绝记录不改写。修复后的完整回归和新端到端验收仍待完成。以下为启动和前置阶段历史。
+修复限定于声明的 `nn.ModuleList`：支持枚举绑定的模块及标量索引调用；任意对象间接调用、切片/非整数索引、钩子注册仍拒绝。37项相关回归通过。四份未修改的原始返回源码通过新源码检查及CPU数值、梯度和张量合同，证据为 `amazon-block-dispatch-v1/acceptance.json`；无新增Codex或GPU训练，旧冻结代码与拒绝记录不改写。修复后完整源码回归642项全过、零跳过（173.027秒），新端到端验收仍待完成。`audit-failed-attempt.py`只读核对终态、四次角色提交、两次拒绝档案及37份账本，`stopped-attempt.json`为terminal_failure_audited；累计角色13、激活12、诊断1、开发50 BCU，GPU已计费/保留15165.271435秒，按冻结权重共328.754524 BCU，无待结算。含全部历史与解释器检查成本且不重复计费，历史未知预留不作实测GPU时间。以下为启动和前置阶段历史。
 
 v3在冻结源码 `f9c1584` 上启动，修复v2将虚拟环境Python解析为基础解释器的问题，并包含紧凑Amazon归档。640项源码测试已覆盖通过，两个真实CPU隔离诊断案例与独立参考一致；启动前及启动脚本均核对 `.venv-run/bin/python` 和GPU `[0,1,2,3]`。
 

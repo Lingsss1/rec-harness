@@ -42,6 +42,9 @@ class RoleRecoveryTests(unittest.TestCase):
                 self.runner._role(self.folder,'lead',{},validator=reject)
         self.assertEqual(self.calls,2)
         self.assertEqual(self.runner.store.budget()['charged_or_reserved'],2)
+        from rec_harness.adapters.amazon_auto_audit import verify_rejected_roles
+        from rec_harness.core import Artifacts
+        self.assertEqual(verify_rejected_roles(self.runner.store,Artifacts(self.root/'artifacts/objects')),2)
 
     def test_transport_failure_stops_without_retry_including_resume(self):
         for status in ['crash','timeout',None]:
@@ -52,6 +55,9 @@ class RoleRecoveryTests(unittest.TestCase):
                     calls.append(role)
                     write_json(target/'request.json',{'role':role})
                     if status:write_json(target/'resources.json',{'status':status})
+                    from rec_harness.generation_workspace import capture
+                    write_json(target/'model/draft.json',{'unfinished':True})
+                    capture(target,target)
                     raise ContractError('host or network unavailable')
                 before=self.runner.store.budget()['charged_or_reserved']
                 with patch.object(self.runner.agent,'run',side_effect=fail):
@@ -61,6 +67,18 @@ class RoleRecoveryTests(unittest.TestCase):
                 self.assertEqual(calls,['lead'])
                 self.assertEqual(self.runner.store.budget()['charged_or_reserved'],before+1)
                 self.assertFalse(read_json(folder/'lead/rejection.json')['retryable'])
+                from rec_harness.adapters.amazon_auto_audit import verify_rejected_roles
+                from rec_harness.core import Artifacts
+                artifacts=Artifacts(self.root/'artifacts/objects')
+                failures=[e for e in self.runner.store.events() if e['kind']=='role_rejected']
+                self.assertEqual(verify_rejected_roles(self.runner.store,artifacts),len(failures))
+                ref=failures[-1]['payload']['archive']['returned-workspace/model/draft.json']
+                self.assertEqual(read_json(artifacts.verify(ref)),{'unfinished':True})
+                # Editing the mutable role directory cannot rewrite its failure archive.
+                write_json(folder/'lead/returned-workspace/model/draft.json',{'changed':True})
+                self.assertEqual(read_json(artifacts.verify(ref)),{'unfinished':True})
+        artifacts.verify(ref).write_text('corrupt')
+        with self.assertRaisesRegex(ContractError,'corrupt artifact'):verify_rejected_roles(self.runner.store,artifacts)
 
     def test_existing_failed_transport_receipt_is_not_retried(self):
         write_json(self.folder/'lead/request.json',{'role':'lead'})

@@ -218,7 +218,12 @@ class AmazonAutoresearch:
                 self.store.settle(task,1,'failed')
                 retryable=transport_status()=='success'
                 write_json(target/'rejection.json',{'status':'rejected','reason':str(error),'retryable':retryable})
-                self.store.event('role_rejected',{'task':task,'role':role,'reason':str(error),'retryable':retryable})
+                from rec_harness.generation_workspace import archive_files
+                names=['context.json','request.json','response.json','schema.json','resources.json',
+                       'process.json','launch.json','stdout.jsonl','stderr.txt','literature-search.json','rejection.json']
+                failure_archive=artifacts.snapshot(target,[name for name in names if (target/name).is_file()]+archive_files(target))
+                self.store.event('role_rejected',{'task':task,'role':role,'reason':str(error),'retryable':retryable,
+                    'archive':failure_archive})
                 if not retryable:
                     raise RoleTransportFailure(role+' transport failed; repair the host and explicitly reopen before retrying') from error
                 context={**context,'validation_error':str(error),'repair_instruction':'Correct this role output; preserve frozen bindings.'}

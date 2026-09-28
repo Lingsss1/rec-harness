@@ -71,11 +71,32 @@ def verify_reopen_history(controller):
     return count
 
 
+def verify_rejected_roles(store,artifacts):
+    """Failure evidence is bound at rejection, before any optional repair."""
+    submitted={};count=0
+    for event in store.events():
+        value=event['payload']
+        if event['kind']=='agent_submitted':submitted[value['task_id']]=value
+        if event['kind']!='role_rejected' or 'archive' not in value:continue
+        source=submitted.get(value['task'])
+        if source is None or source['role']!=value['role']:raise ContractError('rejected role lacks matching submission')
+        refs=value['archive']
+        if not {'context.json','rejection.json'}.issubset(refs):raise ContractError('rejected role archive incomplete')
+        for ref in refs.values():artifacts.verify(ref)
+        if digest(read_json(artifacts.verify(refs['context.json'])))!=source['input_hash']:
+            raise ContractError('rejected role context differs from submission')
+        if read_json(artifacts.verify(refs['rejection.json']))!={'status':'rejected','reason':value['reason'],'retryable':value['retryable']}:
+            raise ContractError('rejected role receipt differs from event')
+        count+=1
+    return count
+
+
 def verify_campaign(controller):
     root=controller.root;config=read_json(root/'amazon-auto.json')
     if digest(config)!=read_json(root/'auto-lock.json')['config_hash']:raise ContractError('autonomous configuration changed')
     if digest(read_json(controller.study/'study.json'))!=config['study_config_hash']:raise ContractError('bound study changed')
     integrity=controller.store.verify();events=controller.store.events()
+    verify_rejected_roles(controller.store,controller.artifacts)
     ledger=Store(controller.study/'memory',read_only=True);artifacts=Artifacts(controller.study/'artifacts/objects')
     role_count=0;local_only=0;partial=0;checked=set();cycles=0;measurement_bindings=0;legacy_measurements=0;reused_roles=0
     try:

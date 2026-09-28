@@ -6,6 +6,26 @@ from .core import ContractError,read_json
 from .runtime import Research
 
 
+def resolve_plan_paths(plan,base):
+    """Resolve declared files; do not guess the meaning of custom argv values."""
+    from .validation_preflight import SUPPORTED
+    for rule in plan.get('stages',{}).values():
+        if 'validator_files' in rule:
+            rule['validator_files']=[str((base/value).resolve()) for value in rule['validator_files']]
+        command=rule.get('command',[])
+        if '-m' in command:
+            index=command.index('-m')+1
+            if index<len(command) and command[index] in SUPPORTED and '--suite' in command:
+                index=command.index('--suite')+1
+                if index<len(command) and '{' not in command[index]:
+                    command[index]=str((base/command[index]).resolve())
+        # A Python script argument is a declared entrypoint, unlike arbitrary flags.
+        if len(command)>1 and command[1].endswith('.py') and '{' not in command[1]:
+            command[1]=str((base/command[1]).resolve())
+        if command and '/' in command[0] and '{' not in command[0]:
+            command[0]=str((base/command[0]).resolve())
+
+
 def configuration(path):
     path=Path(path).resolve()
     def expand(value):
@@ -25,7 +45,13 @@ def configuration(path):
             if key in config:config[kind]=configuration(path.parent/config.pop(key))
     for key in ('source','study'):
         if key in config:config[key]=str((path.parent/config[key]).resolve())
+    backend=config.get('agent_backend',{})
+    for key in ('template','runtime_root'):
+        if key in backend:backend[key]=str((path.parent/backend[key]).resolve())
+    if 'uid_registry' in config:config['uid_registry']=str((path.parent/config['uid_registry']).resolve())
+    if 'plan' in config:resolve_plan_paths(config['plan'],path.parent)
     def execution_recipe(execution):
+        if 'uid_registry' in execution:execution['uid_registry']=str((path.parent/execution['uid_registry']).resolve())
         if 'recipe_file' in execution:
             if 'recipe' in execution:raise ContractError('supply recipe or recipe_file, not both')
             execution['recipe']=read_json((path.parent/execution.pop('recipe_file')).resolve())

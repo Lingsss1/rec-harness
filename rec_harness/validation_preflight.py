@@ -78,8 +78,12 @@ def preflight(plan):
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('configuration');args=parser.parse_args()
-    value=read_json(args.configuration)
-    try:result=preflight(value.get('plan',value))
+    try:
+        from .autonomous import configuration,resolve_plan_paths
+        value=read_json(args.configuration)
+        if 'plan' in value:value=configuration(args.configuration)['plan']
+        else:resolve_plan_paths(value,Path(args.configuration).resolve().parent)
+        result=preflight(value)
     except (ContractError,OSError,KeyError,TypeError,ValueError) as error:
         parser.exit(2,'validation preflight failed: '+str(error)+'\n')
     print(json.dumps(result,indent=2))

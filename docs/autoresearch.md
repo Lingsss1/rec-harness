@@ -194,7 +194,7 @@ python3 -m rec_harness amazon-memory-export /path/to/amazon-campaign /path/to/de
 }
 ```
 
-`model.json` 可使用前述小型示例配置；其源码路径按该文件所在目录解析。`tool.json`、`harness.json` 使用上一节的 `research-evolution-v1` 合同，分别配置六阶段工具验证与三阶段 Harness 验证。工具阶段可接入下文的 `tool_pipeline`，Harness 阶段使用前缀和独立在线验证。三轮是最大模型回合数，真实分支由缺口和验证结果决定，不保证每次都触发或晋升工具及 Harness。
+`model.json` 可使用前述小型示例配置；其源码路径按该文件所在目录解析。 通过 `model_config`、`tool_config`、`harness_config` 引入的子配置各自解析其目录下的 agent_backend.template/runtime_root、UID registry、validator_files、直接 Python 验证脚本及内置验证命令的 `--suite` 路径。命令占位符与自定义验证器普通参数不改写；裸可执行程序名仍按 PATH 查找。`validation_preflight` CLI 对演化配置采用相同解析规则，对独立 plan 使用 plan 文件目录。已冻结套件内部绑定的绝对路径不随搬迁重写，搬迁这些依赖仍须重新冻结套件。`tool.json`、`harness.json` 使用上一节的 `research-evolution-v1` 合同，分别配置六阶段工具验证与三阶段 Harness 验证。工具阶段可接入下文的 `tool_pipeline`，Harness 阶段使用前缀和独立在线验证。三轮是最大模型回合数，真实分支由缺口和验证结果决定，不保证每次都触发或晋升工具及 Harness。
 
 新项目还会对启用的工具/Harness 验证槽执行只读预检：内置验证器核对冻结套件、绑定输入与计划身份，工具在线套件核对当前 diagnostic worker。缺失或不兼容时在创建项目和调用角色之前拒绝。禁用槽不要求其依赖就绪。可单独检查演化配置或 plan JSON：
 

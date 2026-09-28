@@ -3,7 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from rec_harness.autonomous import autoresearch
-from rec_harness.core import read_json,write_json
+from rec_harness.core import ContractError,read_json,write_json
+from rec_harness.evolution import Evolution
 from rec_harness.project import ResearchProject
 from rec_harness.store import Store
 import test_project
@@ -87,3 +88,32 @@ class OptimizerHandoffTests(unittest.TestCase):
         report=autoresearch(self.campaign,self.configuration(tool=False),agent=ReferringAgent())
         self.assertEqual(report['state']['stop_reason'],'measurement_unresolved')
         self.assertIn('pending_gap',report['state'])
+
+    def test_handoff_cannot_be_promoted_or_silently_repair_forged_projection(self):
+        agent=ReferringAgent();autoresearch(self.campaign,self.configuration(tool=False),agent=agent)
+        root=self.campaign/'episodes/harness-1/campaign';config=read_json(root/'evolution-auto.json')
+        evolution=Evolution(root)
+        try:
+            before=evolution.store.verify();count=len(agent.calls)
+            with self.assertRaisesRegex(ContractError,'not a promotable implementation'):
+                evolution.promote(config['candidate_id'])
+            self.assertEqual(evolution.store.verify(),before)
+            marker=root/'candidates'/config['candidate_id']/'candidate.json';saved=read_json(marker)
+            committed=[e['payload'] for e in evolution.store.events() if e['kind']=='candidate_proposed'][0]
+            for bad in [{**saved,'measurement_gap':{**saved['measurement_gap'],'required_information':'forged'}},
+                        {**committed,'validator_hashes':{}}]:
+                write_json(marker,bad)
+                with self.assertRaisesRegex(ContractError,'projection changed'):
+                    evolution.propose(config['candidate_id'],config['kind'],config['context'],config['plan'],agent=agent)
+                self.assertEqual(read_json(marker),bad)
+                self.assertEqual(evolution.store.verify(),before)
+            write_json(marker,saved)
+            self.assertEqual(len(agent.calls),count);evolution.verify()
+        finally:evolution.store.close()
+
+    def test_corrupt_handoff_archive_blocks_tool_export(self):
+        from rec_harness.optimizer_handoff import load_context
+        autoresearch(self.campaign,self.configuration(tool=False),agent=ReferringAgent())
+        root=self.campaign/'episodes/harness-1/campaign';candidate=read_json(root/'candidates/project-harness-1/candidate.json')
+        (root/'objects'/candidate['proposal_ref']['sha256']).write_text('{}')
+        with self.assertRaisesRegex(ContractError,'corrupt artifact'):load_context(root)

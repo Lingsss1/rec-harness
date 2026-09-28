@@ -143,7 +143,7 @@ class Evolution:
                 marker=directory/'candidate.json'
                 if marker.exists():
                     current=read_json(marker)
-                    if current.get('status')!='proposed' and current!=saved:raise ContractError('measurement handoff projection changed')
+                    if current!=frozen and current!=saved:raise ContractError('measurement handoff projection changed')
                 write_json(directory/'candidate.json',saved)
                 return saved
             if digest(saved['implementation'])!=saved['implementation_hash']:

@@ -17,3 +17,5 @@ Amazon 摘要准入已按实际 `verified` 状态修正，并检查品类/seed �
 后续[真实选择合同验收](../experiments/harness-router-codex-v1.md)已完成一次 Codex 调用。角色自行选择 Harness 补丁，schema/主机范围校验、归档、图记录与无重复调用恢复通过。真实测量转交正例仍未验收，不因返回补丁而重试强求测量缺口。
 
 全量回归 419 项通过（21 项环境相关跳过）；随后补充的合同/恢复加强经转交定向 4 项及项目定向 13 项检查通过。日志为 `/tmp/rec-harness-optimizer-handoff-full-tests.log`、`/tmp/rec-harness-optimizer-handoff-final-targeted.log` 和 `/tmp/rec-harness-optimizer-handoff-project-final.log`。
+
+转交完整性补充：提交后的恢复只接受与原冻结 proposed 投影或已提交 measurement_required 投影完全一致的文件；不能仅把 status 改成 proposed 就绕过身份校验。回归验证改写缺口内容、改写校验器身份均拒绝且不覆盖文件、不追加事件或角色调用；promote 明确拒绝转交记录，损坏审查 CAS 阻止工具上下文导出。转交定向共 6 项通过，日志 `/tmp/rec-harness-handoff-integrity-tests.log`，未重复广泛回归或新增真实调用。

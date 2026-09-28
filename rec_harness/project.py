@@ -25,6 +25,11 @@ class ResearchProject:
             if kind in config and config[kind]['kind']!=kind:raise ContractError('evolution kind differs from project slot')
             limit=config.get('max_'+kind+'_updates',1)
             if type(limit) is not int or limit<0:raise ContractError('nonnegative evolution update limit required')
+        if 'tool_runtime' in config:
+            from .diagnostics import validate_runtime
+            validate_runtime(config['tool_runtime'])
+        elif 'tool' in config and config.get('max_tool_updates',1)>0 and config['max_model_episodes']>1:
+            raise ContractError('tool_runtime required for post-validation remeasurement')
         if 'tool' in config and not config['model'].get('measurement_requirements'):
             config['model'].setdefault('measurement_discovery',{'development_budget':config['tool']['plan']['budget']})
         if root.exists() and any(root.iterdir()):raise ContractError('project directory must be empty')

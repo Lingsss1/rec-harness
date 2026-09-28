@@ -146,6 +146,36 @@ python3 -m rec_harness amazon-memory-export /path/to/amazon-campaign /path/to/de
 
 ## 项目总调度
 
+这是模型、工具和 Harness 三个循环的联合入口。`examples/toy/autoresearch.json` 只启动模型循环；完整项目需要另外提供工具和 Harness 的冻结验证配置。不会用固定返回 `passed` 的演示验证器替代真实验证。
+
+项目配置结构如下；路径指向已准备好的子配置，工具运行环境与小型示例相同：
+
+```json
+{
+  "adapter": "research-project-v1",
+  "task_id": "my-research-project",
+  "max_model_episodes": 3,
+  "model_config": "model.json",
+  "tool_config": "tool.json",
+  "harness_config": "harness.json",
+  "max_tool_updates": 1,
+  "max_harness_updates": 1,
+  "tool_runtime": {
+    "execution": {
+      "recipe_file": "${REC_HARNESS_CPU_RECIPE}",
+      "python": "${REC_HARNESS_CPU_PYTHON}",
+      "uid_registry": "${REC_HARNESS_CPU_UIDS}"
+    },
+    "cost": 1,
+    "timeout": 120
+  }
+}
+```
+
+`model.json` 可使用前述小型示例配置；其源码路径按该文件所在目录解析。`tool.json`、`harness.json` 使用上一节的 `research-evolution-v1` 合同，分别配置六阶段工具验证与三阶段 Harness 验证。工具阶段可接入下文的 `tool_pipeline`，Harness 阶段使用前缀和独立在线验证。三轮是最大模型回合数，真实分支由缺口和验证结果决定，不保证每次都触发或晋升工具及 Harness。
+
+新项目在创建目录和发起研究调用前检查工具执行设置：可激活的工具槽必须提供 `tool_runtime`，费用须为非负有限数，超时须为正有限数，执行设置须含 recipe、解释器和 UID registry。这是配置检查；实际主机权限、recipe 内容和进程执行仍由隔离运行器验证。恢复旧冻结项目不修改其配置。
+
 `adapter: research-project-v1` 将模型、工具和 Harness 的入口连接为连续项目。配置含 `task_id`、`max_model_episodes`、`model_config`，以及可选 `tool_config`、`harness_config`（均是配置文件路径）。`max_tool_updates`、`max_harness_updates` 默认各为 1；工具更新还需 `tool_runtime`，其字段为 execution、cost、timeout，与 diagnostic_registry 的执行配置一致。两者的 execution 都可用 recipe_file 读取 JSON；相对路径以所属配置文件目录为准，不得同时提供 recipe 和 recipe_file。各子配置继续使用前述冻结协议和验证计划，项目调度器不能降低验收门槛。
 
 ```bash

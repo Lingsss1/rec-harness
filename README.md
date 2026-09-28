@@ -20,9 +20,20 @@
 
 ## 快速运行
 
-连续多轮、隔离评估及 NextItNet 自动研究使用 [`autoresearch` 单入口](docs/autoresearch.md)，已有[真实两轮验收](docs/autoresearch-acceptance.md)。
+连续多轮、隔离评估及 NextItNet 自动研究使用 [`autoresearch` 单入口](docs/autoresearch.md)，已有[真实两轮验收](docs/autoresearch-acceptance.md)。模型、工具和 Harness 三个循环联动使用其中的[项目总调度](docs/autoresearch.md#项目总调度)，不是单次 `run --rounds 1`。
 
 需要 Python 3.11+ 和已登录的 Codex CLI。Python 运行时无第三方依赖。
+
+在仓库根目录安装后，`rec-harness` 与 `python -m rec_harness` 是相同入口。示例配置位于源码仓库，安装 wheel 不会附带 `examples/`；请保留源码 checkout，并从其根目录使用下方相对路径。隔离运行还需按[运行指南](docs/runtime.md)准备 Codex jail 和 CPU recipe。
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install .
+python -m rec_harness --help
+```
+
+以下是单轮基础运行；连续自动研究的配置和恢复命令见[单入口说明](docs/autoresearch.md#小型示例)。
 
 ```bash
 python3 -m rec_harness init examples/toy/campaign.json /tmp/rec-harness-demo

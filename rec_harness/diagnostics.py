@@ -19,11 +19,21 @@ def runtime_contract():
         'constraints':'Do not modify training, weights or scoring. Define behavior for empty, malformed or insufficient inputs; reject unsupported cases instead of inventing measurements. Validation and promotion are performed independently by the host.'}
 
 
-def freeze_tool(options,artifacts):
-    required(options,['registry','identity','execution','cost','timeout'])
+def validate_runtime(options):
+    """Check execution settings before spending research or validation costs."""
+    required(options,['execution','cost','timeout'])
     number(options['cost'],'diagnostic cost',0);number(options['timeout'],'diagnostic timeout',0)
     if options['timeout']<=0:raise ContractError('positive diagnostic timeout required')
     required(options['execution'],['recipe','python','uid_registry'])
+    if not isinstance(options['execution']['recipe'],dict):raise ContractError('diagnostic recipe must be an object')
+    for key in ('python','uid_registry'):
+        if not isinstance(options['execution'][key],str) or not options['execution'][key].strip():
+            raise ContractError('diagnostic '+key+' must be a nonempty string')
+
+
+def freeze_tool(options,artifacts):
+    required(options,['registry','identity'])
+    validate_runtime(options)
     registry=Evolution(options['registry'])
     try:
         head=registry.store.verify()['head'];active=registry._active('tool')

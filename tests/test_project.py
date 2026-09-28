@@ -42,6 +42,27 @@ class DiscoverAgent(ProjectAgent):
 
 
 class ProjectTests(unittest.TestCase):
+    def test_invalid_tool_runtime_rejected_before_project_creation_or_calls(self):
+        import copy
+        original=read_json(self.config('tool'))
+        invalid=[None,{}, {'execution':{},'cost':1,'timeout':5}]
+        for key,value in [('cost',-1),('cost',True),('timeout',0),('timeout',float('inf'))]:
+            runtime=copy.deepcopy(original['tool_runtime']);runtime[key]=value;invalid.append(runtime)
+        for key,value in [('recipe',[]),('python',23),('uid_registry',' ')]:
+            runtime=copy.deepcopy(original['tool_runtime']);runtime['execution'][key]=value;invalid.append(runtime)
+        for runtime in invalid:
+            with self.subTest(runtime=runtime):
+                config=copy.deepcopy(original)
+                if runtime is None:config.pop('tool_runtime')
+                else:config['tool_runtime']=runtime
+                with patch.object(ProjectAgent,'run',side_effect=AssertionError('must not call Codex')):
+                    with self.assertRaises(ContractError):ResearchProject.init(self.campaign,config)
+                self.assertFalse(self.campaign.exists())
+        # A disabled tool slot cannot activate a successor and needs no runtime.
+        config=copy.deepcopy(original);config.pop('tool_runtime');config['max_tool_updates']=0
+        ResearchProject.init(self.campaign,config)
+        self.assertTrue((self.campaign/'project-lock.json').exists())
+
     def test_tool_rejects_undeclared_changes_or_deletion_of_inherited_files(self):
         source=self.root/'tool-source';source.mkdir()
         (source/'diagnostic.py').write_text('def measure(request): return {}\n')

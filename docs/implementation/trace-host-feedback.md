@@ -13,3 +13,5 @@ Amazon 后续实现：新任务冻结 `trace_development_feedback: true`，角�
 Amazon 轨迹按截止点和回合 ID 读取这条开发事件，并重新核验归档及分区，输出 `partition: development`。不读取最终选择、确认指标或 private-confirmation 文件，原 visible_state 不变。旧冻结任务缺少开关时不追加这种反馈，也不回填历史身份。review-only 旧资料不会被伪装成新的已提交开发事件。
 
 Amazon 相关 161 项回归：157 通过、4 项 Torch 环境跳过。覆盖实际初始化/流水线接入、确认与对照恢复，以及开发反馈截止点、重复提交、确认哨兵排除、非开发 seed/未知字段拒绝。旧流水线替身已补齐真实开发读出的 schema 和来源字段，校验门槛未放宽。本轮没有真实 Codex、训练或确认调用。
+
+后续[真实 Amazon 读出只读验收](../experiments/amazon-feedback-readonly-v1.md)通过：已完成研究的 8 行 seed 42 开发结果可在独立夹具账本完整导出，确认哨兵不进入反馈，非开发 seed 拒绝，原研究不变。这不替代新在线控制器验收。

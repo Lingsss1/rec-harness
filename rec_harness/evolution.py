@@ -70,6 +70,8 @@ def freeze_validator_files(stages):
     for rule in stages.values():
         command=rule['command']
         if not all(isinstance(arg,str) for arg in command):raise ContractError('validator arguments must be strings')
+        if len(command)>1 and command[1].endswith('.py') and '{' not in command[1] and not Path(command[1]).is_file():
+            raise ContractError('validator script entrypoint missing: '+command[1])
         declared=rule.get('validator_files',[])
         if not isinstance(declared,list) or not all(isinstance(p,str) for p in declared):
             raise ContractError('validator_files must be a list of paths')

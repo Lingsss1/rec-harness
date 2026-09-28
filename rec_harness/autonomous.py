@@ -50,6 +50,11 @@ def configuration(path):
         if key in backend:backend[key]=str((path.parent/backend[key]).resolve())
     if 'uid_registry' in config:config['uid_registry']=str((path.parent/config['uid_registry']).resolve())
     if 'plan' in config:resolve_plan_paths(config['plan'],path.parent)
+    if 'tool_followup_plans' in config:
+        if not isinstance(config['tool_followup_plans'],list):raise ContractError('tool_followup_plans must be a list')
+        for plan in config['tool_followup_plans']:
+            if not isinstance(plan,dict):raise ContractError('tool followup plan must be an object')
+            resolve_plan_paths(plan,path.parent)
     def execution_recipe(execution):
         if 'uid_registry' in execution:execution['uid_registry']=str((path.parent/execution['uid_registry']).resolve())
         if 'recipe_file' in execution:

@@ -28,12 +28,15 @@ class ResearchProject:
         if 'tool' in config:
             from .tool_method import freeze_plan
             config['tool']['plan']=freeze_plan(config['tool']['plan'])
-        scope=config.get('tool',{}).get('plan',{}).get('measurement_scope')
-        if scope is not None:
-            outputs=scope.get('supported_outputs') if isinstance(scope,dict) else None
-            if (not isinstance(outputs,dict) or not outputs
-                or not all(isinstance(k,str) and k.strip() and isinstance(v,str) and v.strip() for k,v in outputs.items())):
-                raise ContractError('tool measurement scope requires named outputs with definitions')
+        from .project_tool_plans import freeze as freeze_tool_plans,plans as tool_plans
+        freeze_tool_plans(config)
+        for plan in tool_plans(config) if 'tool' in config else []:
+            scope=plan.get('measurement_scope')
+            if scope is not None:
+                outputs=scope.get('supported_outputs') if isinstance(scope,dict) else None
+                if (not isinstance(outputs,dict) or not outputs
+                    or not all(isinstance(k,str) and k.strip() and isinstance(v,str) and v.strip() for k,v in outputs.items())):
+                    raise ContractError('tool measurement scope requires named outputs with definitions')
         identifier(config['task_id'])
         if config['model'].get('adapter') not in {None,'amazon-nextitnet-v1'}:raise ContractError('unsupported project model adapter')
         if config['model'].get('adapter')=='amazon-nextitnet-v1':
@@ -57,7 +60,8 @@ class ResearchProject:
             history,excluded=collect(config['tool']['tool_history_sources'])
             config['tool']['tool_history_sources']=[{**spec,'cutoff_seq':binding['cutoff_seq'],'event_head':binding['event_head']}
                 for spec,binding in zip(config['tool']['tool_history_sources'],history['sources'])]
-            config['tool']['plan']['development_ids']=sorted(set(config['tool']['plan']['development_ids'])|set(excluded))
+            for plan in tool_plans(config):
+                plan['development_ids']=sorted(set(plan['development_ids'])|set(excluded))
         if 'tool_runtime' in config:
             from .diagnostics import validate_runtime
             validate_runtime(config['tool_runtime'])
@@ -68,7 +72,10 @@ class ResearchProject:
         from .validation_preflight import preflight
         for kind in ['tool','harness']:
             if kind in config and config.get('max_'+kind+'_updates',1)>0 and config['max_model_episodes']>1:
-                preflight(config[kind]['plan'])
+                if kind=='tool' and 'tool_followup_plans' in config:
+                    from .project_tool_plans import preflight as preflight_tool_plans
+                    preflight_tool_plans(config)
+                else:preflight(config[kind]['plan'])
         if root.exists() and any(root.iterdir()):raise ContractError('project directory must be empty')
         root.mkdir(parents=True,exist_ok=True);artifacts=Artifacts(root/'objects')
         for kind in ['model','tool','harness']:
@@ -163,8 +170,14 @@ class ResearchProject:
             requirements[rule['measurement']]=rule
         if requirements:config['measurement_requirements']=list(requirements.values())
         if state.get('active_tool'):
+            from .project_tool_plans import select
+            active_plan=select(self.config,state['tool_updates']-1)
             config['diagnostic_registry']={**self.config['tool_runtime'],'registry':str(self.root/state['active_tool']),
-                'identity':self.config['tool']['plan']['identity']}
+                'identity':active_plan['identity']}
+        if ('tool_followup_plans' in self.config and 'measurement_discovery' in config
+                and state['tool_updates']<self.config.get('max_tool_updates',1)):
+            from .project_tool_plans import select
+            config['measurement_discovery']['development_budget']=select(self.config,state['tool_updates'])['budget']
         if state.get('active_harness'):
             config.pop('research_policy',None)
             config['harness_registry']=str(self.root/state['active_harness'])
@@ -186,6 +199,9 @@ class ResearchProject:
         config=self.template(kind,directory);config['adapter']='research-evolution-v1'
         config['candidate_id']=self.config['task_id']+'-'+kind+'-'+str(state[kind+'_updates']+1)
         config.pop('context',None);source=self.root/state['last_model']
+        if kind=='tool':
+            from .project_tool_plans import select
+            config['plan']=select(self.config,state['tool_updates'],verify=True)
         config['plan']['development_ids']=list(config['plan']['development_ids'])
         if kind=='tool':
             if self.config.get('inherit_tool_history'):
@@ -232,6 +248,10 @@ class ResearchProject:
                 config['harness_base_policy']=source_config.get('research_policy',{})
             if self.config.get('optimizer_measurement_handoff'):
                 config['optimizer_handoff_budget']=self.config.get('tool',config)['plan']['budget']
+                if ('tool_followup_plans' in self.config
+                        and state['tool_updates']<self.config.get('max_tool_updates',1)):
+                    from .project_tool_plans import select
+                    config['optimizer_handoff_budget']=select(self.config,state['tool_updates'])['budget']
         config['plan']['development_ids']=sorted(set(config['plan']['development_ids'])|set(ids))
         return config
 
@@ -271,7 +291,8 @@ class ResearchProject:
 
     def route_tool(self,state,gap):
         state['pending_gap']=gap
-        scope=self.config['tool']['plan'].get('measurement_scope')
+        from .project_tool_plans import select
+        scope=select(self.config,state['tool_updates']).get('measurement_scope')
         if (self.config.get('enforce_tool_measurement_scope') and scope is not None
                 and gap['required_information'] not in scope['supported_outputs']):
             state.update(status='stopped',stop_reason='measurement_contract_unsupported',

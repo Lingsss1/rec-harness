@@ -487,6 +487,8 @@ class Evolution:
             if event['kind'] in {'validation_stage_started','validation_stage_report_recorded'}:
                 key='cost_context_ref' if event['kind']=='validation_stage_started' else 'report_ref'
                 self.artifacts.verify(event['payload'][key]);count+=1
+            if event['kind']=='validation_stage_launched' and 'cost_context_ref' in event['payload']:
+                self.artifacts.verify(event['payload']['cost_context_ref']);count+=1
             if event['kind'] in {'candidate_implemented','measurement_handoff_recorded'} and event['payload'].get('proposal_ref'):
                 self.artifacts.verify(event['payload']['proposal_ref']);count+=1
             if event['kind'] in {'candidate_generation_recovered','candidate_generation_archived'}:

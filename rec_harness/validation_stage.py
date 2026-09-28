@@ -58,6 +58,17 @@ def report(evolution,candidate,plan,stage,runner):
             expected_launch={'candidate_id':candidate_id,'stage':stage,'request_hash':digest(starts[0]),
                 'reservation':f'{candidate_id}-validate-{stage}-{index}',
                 'process_directory':'process' if index==1 else 'process-resume-'+str(index)}
+            if 'cost_context_ref' in launch:
+                launch_cost=target/('controller-cost-resume-'+str(index)+'.json')
+                value=read_json(artifacts.verify(launch['cost_context_ref']))
+                from .cost_audit import verify_cost_prefix
+                verify_cost_prefix(store,value)
+                if launch_cost.exists() and read_json(launch_cost)!=value:
+                    raise ValidationRecoveryRequired('validation invocation cost prefix changed')
+                write_json(launch_cost,value)
+                expected_launch.update(cost_context_ref=launch['cost_context_ref'],argv=[s.format_map({
+                    'python':sys.executable,'candidate':str(target/'candidate'),'output':str(result),
+                    'cost_context':str(launch_cost)}) for s in rule['command']])
             if launch!=expected_launch:
                 raise ValidationRecoveryRequired('validation launch binding changed')
         try:assert_stopped(target)
@@ -70,6 +81,7 @@ def report(evolution,candidate,plan,stage,runner):
             safe=(module in {'rec_harness.tool_validation','rec_harness.tool_shadow'} or
                   module=='rec_harness.tool_pipeline' and stage in {'correctness','synthetic','robustness','shadow'})
             online=(module=='rec_harness.online_validation' and stage in {'development','confirmation'} or
+                    module=='rec_harness.harness_pipeline' and stage in {'development','confirmation'} or
                     module=='rec_harness.tool_online' and stage in {'utility','confirmation'} or
                     module=='rec_harness.tool_pipeline' and stage=='utility')
             if not (safe or online):raise ValidationRecoveryRequired('unfinished validator has no safe automatic resume contract')
@@ -96,8 +108,15 @@ def report(evolution,candidate,plan,stage,runner):
             start={**expected,'cost_context_ref':artifacts.put(cost_context)}
             store.event('validation_stage_started',start);starts=[start]
         process_directory='process' if index==1 else 'process-resume-'+str(index)
-        store.event('validation_stage_launched',{'candidate_id':candidate_id,'stage':stage,
-            'request_hash':digest(starts[0]),'reservation':reservation,'process_directory':process_directory})
+        launch={'candidate_id':candidate_id,'stage':stage,
+            'request_hash':digest(starts[0]),'reservation':reservation,'process_directory':process_directory}
+        if index>1:
+            launch_cost=target/('controller-cost-resume-'+str(index)+'.json')
+            write_json(launch_cost,freeze_cost_prefix(store,plan['budget']))
+            argv=[s.format_map({'python':sys.executable,'candidate':str(target/'candidate'),
+                'output':str(result),'cost_context':str(launch_cost)}) for s in rule['command']]
+            launch.update(cost_context_ref=artifacts.put(launch_cost),argv=argv)
+        store.event('validation_stage_launched',launch)
         process=runner(argv,target,target/process_directory,timeout=rule['timeout'])
         status=process['status']
         if status!='success':raise ContractError('independent validator failed')

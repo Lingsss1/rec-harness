@@ -16,7 +16,7 @@
 
 - 最新真实传输验收：[v18 工具检索与草稿归档](../experiments/tool-literature-transport-v1.md)：1 次 Codex 调用、零重试，实际搜索/打开来源，指令、日志、返回源码和 CAS 绑定通过，无新增调用恢复通过。没有运行验证阶梯或晋升；不是自主发现缺口或正效用证据。
 
-- 最新源码回归：外层验证恢复变更共527项，完整发现运行523项通过、4项显式OS测试跳过（135.359秒）；随后独立启用并通过这4项（6.209秒），共527项通过。`outer-validation-recovery-v1/acceptance.json`、源码清单及两份日志记录覆盖边界，公开边界检查通过。没有新增Codex调用或Amazon训练；这两轮恢复变更尚未进入下列v23安装包。
+- 最新源码回归：Harness pipeline恢复费用变更共534项全部通过、零跳过，200.911秒，包含Torch及显式Linux隔离测试。`harness-pipeline-recovery-v1/acceptance.json`、源码清单及原始日志记录覆盖边界，公开边界检查通过。没有新增Codex调用或Amazon训练；这些恢复变更尚未进入下列v23安装包。
 - 最新安装交付：[v23](install-acceptance-v23.md)，冻结`4544e15`：131个模块与原生源码逐字节一致，14个入口通过；安装环境519项测试全过、零跳过，125个实际加载模块来自安装目录，7项历史核验与源码一致。包含多来源轨迹、淘汰续接及公开观测工具、shadow、在线输出观测。本次没有新增Codex调用或Amazon训练。
 - 最新已完成真实 Amazon 优化：[v3](../experiments/amazon-next-autoresearch-v3.md)。开发平均 HR@10 增加 0.012750；独立初始化确认增加 0.013125，主机选中候选。确认使用相同验证用户，不是最终测试；该研究已封存，不使用确认结果继续调优。
 - 最近真实工程验收：[多文件 CPU 执行](../experiments/multifile-diagnostic-jail-v1.md)与[诊断提交中断恢复](../experiments/diagnostic-recovery-jail-v1.md)。没有新增 Codex 调用或训练，也不增加工具效用结论。
@@ -47,7 +47,7 @@
 
 ## 接续工作
 
-接通[在线比较组间恢复](online-group-recovery.md)：直接策略/工具在线验证及工具pipeline utility，在已有研究组全部具有已提交终态和完整费用账本时复用这些组，继续剩余比较。组内未知结果和Harness pipeline费用前缀仍不自动重启。24项定向工程测试通过；三份真实历史共7组只读预检通过，事件链不变，无新增研究调用。晚于527项完整回归及v23安装包。
+接通[在线比较组间恢复](online-group-recovery.md)：直接策略/工具在线验证、工具pipeline utility和Harness pipeline development/confirmation，在已有研究组全部具有已提交终态和完整费用账本时复用这些组，继续剩余比较。每次调用冻结独立费用快照，Harness报告累计所有恢复调用费用。组内未知结果及prefix_audit仍不自动重启。37项相关工程测试通过；此前三份真实历史共7组只读预检通过，事件链不变，无新增研究调用。晚于v23安装包。
 
 修复[reference/shadow案例及外层阶段中断恢复](tool-validation-case-recovery.md)：输入绑定后复用成功CPU收据，未知结果禁止自动重跑，结果从CAS核对。外层Evolution保留阶段目录与案例身份，先归档报告再判定门槛；支持安全恢复的内置验证器继续剩余案例，其他未知进程保留待处理状态，不记作科学淘汰。直接案例及外层Evolution分别完成真实CPU验收；外层在两个真实验证器进程间复用成功收据，总计两个案例、合计5 BCU。项目入口另有两项新增恢复回归，相关模块8项通过；不代表任意SIGKILL恢复或在线验证器安全重启。均晚于v23安装包。
 

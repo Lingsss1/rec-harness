@@ -109,3 +109,41 @@ class OnlineStageRecoveryTests(unittest.TestCase):
                     self.assertTrue(result['passed']);self.assertFalse(result['online'])
                     self.assertEqual(result['total_cost'],26);self.assertEqual(worker.call_count,2)
                     self.assertEqual(store.budget()['charged_or_reserved'],2)
+
+    def test_harness_pipeline_repeated_resume_freezes_each_invocation_cost(self):
+        import test_harness_pipeline
+        from rec_harness.harness_pipeline import run_validation as pipeline
+        from rec_harness.online_validation import run_validation as online,episode
+        from rec_harness.cost_audit import verify_cost_prefix
+        fixture=test_harness_pipeline.HarnessPipelineTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        rule=self.plan['stages']['development']
+        rule['command']=['{python}','-m','rec_harness.harness_pipeline','run','--cost-context','{cost_context}']
+        target=self.evolution.root/'candidates/candidate/validation/development'
+        previous={'identity':fixture.online['identity'],'pipeline_hash':read_json(fixture.suite)['hash']}
+        write_json(target.parent/'prefix_audit/accepted.json',{'report':previous,'report_hash':digest(previous),
+            'implementation_hash':self.candidate['implementation_hash']})
+        calls=[]
+        class Agent(test_online_validation.PairedAgent):
+            def run(self,role,context,directory):
+                calls.append(role);return super().run(role,context,directory)
+        def online_with_agent(*args,**kwargs):
+            return online(*args,**kwargs,agent_factory=lambda *_:Agent())
+        def runner(argv,cwd,directory,**kwargs):
+            pipeline(fixture.suite,'development',cwd/'candidate',cwd/'result.json',argv[-1])
+            write_json(directory/'process.json',{'status':'success'});return {'status':'success'}
+        def interrupt(*args,**kwargs):
+            episode(*args,**kwargs);raise KeyboardInterrupt()
+        with patch('rec_harness.toy_isolated.evaluate',side_effect=self.fixture.evaluate),patch('rec_harness.online_validation.run_validation',side_effect=online_with_agent):
+            for _ in range(2):
+                with patch('rec_harness.online_validation.episode',side_effect=interrupt):
+                    with self.assertRaises(KeyboardInterrupt):self.run_stage(runner)
+                self.assertEqual(len(calls),6)
+            result=self.run_stage(runner)
+        self.assertEqual(len(calls),12);self.assertFalse(result['online'])
+        self.assertEqual(result['stage_cost'],16);self.assertEqual(result['total_cost'],19)
+        self.assertEqual(self.evolution.store.budget()['charged_or_reserved'],3)
+        for index,name in enumerate(['controller-cost.json','controller-cost-resume-2.json','controller-cost-resume-3.json'],1):
+            prefix=read_json(target/name)
+            self.assertEqual(verify_cost_prefix(self.evolution.store,prefix),index)
+            self.assertEqual(prefix['pending'],1)
+        self.assertEqual(self.run_stage(lambda *a,**kw:self.fail('relaunch')),result)

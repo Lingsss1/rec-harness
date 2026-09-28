@@ -712,3 +712,5 @@ Amazon 每轮新建上下文时，对本轮检索到的历史设计 GapCard 生�
 知识角色可追加本轮解释，以 SUPERSEDES、BASED_ON、ALTERNATIVE_TO 指向历史解释。边必须来自新增节点，声明当前 task、agent_hypothesis/provisional，并引用至少一个本轮 local_evidence 开发 Experiment/Observation。禁止借此改写旧节点、让旧解释相互重连或建立跨任务 SUPPORTS/CONTRADICTS。基线历史诊断附加图时保留这些节点，已接受评审的旧上下文不追补字段。
 
 `historical-explanation-acceptance-v1/acceptance.json` 在 v4 真实第二轮视图中只读定位到第一轮的两条旧解释，来源图、角色输入和事件导出不变；没有回写新关系，也未重新调用旧角色。回归以实际 Store.patch 验证新 provisional 修订关系可提交、旧解释保持原样、缺少当前事实及跨任务直接反证拒绝。全套 381 项测试，361 通过、20 跳过；随后收紧事实类型约束的修订测试和 20 项控制器回归通过。真实角色主动修订及其研究效用仍待验收。
+
+修订范围门槛进一步核对本轮事实的 task/protocol/valid，以及历史事实的 task 和 derived_development_comparison 类型；历史解释显式属于确认分区时不提供给角色。其他任务事实、失败记录和确认事实不能凑成本轮修订依据。真实两条旧解释经收紧后仍符合范围，见同目录 `scope-verification.json`，源事件不变。381 项全量回归通过，20 项跳过。

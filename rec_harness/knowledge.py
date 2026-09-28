@@ -12,6 +12,9 @@ def validate_knowledge_patch(patch, graph):
     current_facts={item['id'] for item in graph['nodes'] if item['id'] not in historical
                    and item['type'] in {'Experiment','Observation'}
                    and item['attrs'].get('origin')=='local_evidence'
+                   and item['attrs'].get('valid') is True
+                   and item['attrs'].get('task_id')==task
+                   and item['attrs'].get('protocol_hash')==protocol
                    and item['attrs'].get('partition')=='development'}
     for item in patch['nodes']:
         attrs=item['attrs']

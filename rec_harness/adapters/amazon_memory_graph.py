@@ -13,6 +13,8 @@ def prior_explanations(graph, snapshot, entries):
         prefix=task+'-'+readout[:16]
         fact=known.get(prefix+'-development')
         if (not fact or fact['type']!='Experiment' or
+            fact['attrs'].get('task_id')!=task or
+            fact['attrs'].get('kind')!='derived_development_comparison' or
             fact['attrs'].get('partition')!='development' or
             fact['attrs'].get('valid') is not True or
             fact['attrs'].get('origin')!='local_evidence' or
@@ -22,6 +24,7 @@ def prior_explanations(graph, snapshot, entries):
         for item in snapshot['nodes']:
             attrs=item['attrs']
             if (attrs.get('task_id')!=task or attrs.get('protocol_hash')!=graph['protocol_hash']
+                or attrs.get('partition') not in {None,'development'}
                 or attrs.get('origin')!='agent_hypothesis'):continue
             if item['type']=='Claim' and attrs.get('status')=='provisional':
                 selected[item['id']]=item

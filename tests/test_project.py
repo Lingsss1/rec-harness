@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from rec_harness.autonomous import autoresearch
-from rec_harness.core import Artifacts,read_json,write_json
+from rec_harness.core import Artifacts,ContractError,read_json,write_json
 from rec_harness.evolution import STAGES
 from rec_harness.project import ResearchProject
 from test_runtime import ROOT,ScriptedAgent
@@ -65,6 +65,32 @@ class ProjectTests(unittest.TestCase):
     def cpu(self,directory,*args,**kwargs):
         path=Path(directory)/'results/measurement.json';write_json(path,{'measurements':{'spread':0.5},'limitations':['fixture']})
         return {'process':{'status':'success'},'collection':{'artifacts':{'measurement.json':kwargs['artifacts'].put(path)}}}
+
+    def test_transport_stopped_child_cannot_trigger_evolution_or_finish_project(self):
+        config=read_json(self.config('harness'));ResearchProject.init(self.campaign,config)
+        project=ResearchProject(self.campaign,agent=self.agent)
+        try:
+            result={'state':{'status':'stopped','stop_reason':'role_transport_failure','round':1}}
+            with patch.object(project,'child',return_value=result) as child:
+                for _ in range(2):
+                    with self.assertRaisesRegex(ContractError,'explicitly reopen the child'):project.run()
+                self.assertEqual(child.call_count,2)
+                self.assertTrue(all(call.args[0].name=='model-1' for call in child.call_args_list))
+            state=read_json(self.campaign/'state.json')
+            self.assertEqual(state['phase'],'model');self.assertEqual(state['status'],'ready')
+            events=project.store.events()
+            self.assertEqual(sum(e['kind']=='project_child_transport_stopped' for e in events),1)
+            self.assertFalse(any(e['kind']=='project_transition' and 'episode' in e['payload'] for e in events))
+            # Repair can return through the same model phase; stop this fixture
+            # just before it would invoke the external optimizer.
+            original=project.transition
+            def stop_after_model(state,episode=None):
+                original(state,episode)
+                raise KeyboardInterrupt()
+            with patch.object(project,'child',return_value={'state':{'stop_reason':'max_rounds'}}),patch.object(project,'transition',side_effect=stop_after_model):
+                with self.assertRaises(KeyboardInterrupt):project.run()
+            self.assertEqual(read_json(self.campaign/'state.json')['phase'],'harness')
+        finally:project.store.close()
 
     def test_model_gap_tool_validation_new_episode_and_remeasurement(self):
         with patch('rec_harness.diagnostics.run_cpu_job',side_effect=self.cpu):

@@ -16,6 +16,8 @@ def inspect_status(directory):
         if (root/'project.json').exists():kinds={'project_transition'}
         elif (root/'amazon-auto.json').exists():kinds={'auto_round_completed','auto_round_reopened'}
         transitions=[event for event in events if event['kind'] in kinds]
+        attention=[event for event in events if event['kind']=='project_child_transport_stopped'
+                   and (not transitions or event['seq']>transitions[-1]['seq'])]
         state=published;source='state.json';projection='not_event_bound'
         event_hash=None
         if transitions:
@@ -35,6 +37,7 @@ def inspect_status(directory):
         return {'state':state,'budget':store.budget(),'graph_version':store.version,
                 'state_source':source,'state_projection':projection,'state_event_hash':event_hash,
                 'integrity':integrity,'process_status':'not_inspected',
+                'attention':attention[-1]['payload'] if attention else None,
                 'qualification':'Read-only committed snapshot. A differing state file may reflect interrupted publication or a concurrent writer; no repair performed. Published stop labels are not event-bound. Workflow state does not establish process liveness.'}
     finally:
         if store.db.in_transaction:store.db.execute('ROLLBACK')

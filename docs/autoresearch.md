@@ -166,6 +166,8 @@ python3 -m rec_harness verify /path/to/project
 
 查询当前工作流状态使用 `python3 -m rec_harness status /path/to/campaign`。命令以只读事务读取账本，不恢复任务、不重写事件导出。Amazon 轮次及项目阶段优先采用已提交状态事件；状态文件缺失或与事件快照不同会显式报告。既有 Amazon 控制器在最后一个轮次事件后发布的 stopped/stop_reason 保留为明确标注的文件层终态，不当作事件事实。`process_status: not_inspected` 表示该命令没有核验进程存活；不能仅据 ready/stopped 文件判断是否应重启。通用旧控制器没有适配的状态事件时仍返回 state.json，并标记 not_event_bound。
 
+Amazon 角色传输故障会以 `role_transport_failure` 停止整个 campaign，重复 `autoresearch` 不会通过新一轮重复调用故障服务。若失败尚未进入准入，修复主机/服务后使用 `amazon-retry-source <campaign> --reason "具体修复"` 再恢复；重开事件绑定原文件，首次恢复时将失败角色移入 `*-transport-archive-*`，保留已成功角色及全部费用，归档前拒绝文件变更。准入后的评审故障仍使用 `amazon-review-development` 的既有专门恢复流程，不允许回退重做来源设计。项目子 campaign 遇到此故障时不会转入工具/Harness；先显式修复重开子 campaign，再恢复原项目。项目 `status` 的 attention 给出待处理子目录，状态查询不执行修复。
+
 本入口实现顺序模型研究闭环、预声明测量覆盖要求触发、工具/Harness 候选生命周期与通用/Amazon 项目总调度。自主发现缺口的真实正例和在线收益、自主工具候选的多条件在线收益验收、三循环真实联动收益验收、经验迁移收益实验、论文引用的内容级验证、任意任务适配和多 worker 分布式调度仍未完成。
 
 ### 工具影子验证与三组在线效用

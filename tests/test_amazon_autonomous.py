@@ -71,6 +71,49 @@ class RoleRecoveryTests(unittest.TestCase):
         self.assertEqual(self.calls,0)
         self.assertEqual(self.runner.store.budget()['charged_or_reserved'],0)
 
+    def test_transport_failure_stops_campaign_and_explicit_repair_retains_cost(self):
+        from contextlib import nullcontext
+        from rec_harness.core import Artifacts
+        r=self.runner;r.root=self.root;r.artifacts=Artifacts(self.root/'artifacts/objects')
+        r.study=self.root/'study';ledger=Store(r.study/'memory');ledger.configure_budget(10000);ledger.close()
+        config={'model_versions':{}}
+        write_json(r.study/'study.json',config)
+        write_json(r.study/'study-lock.json',{'config_hash':digest(config)})
+        r.config={'max_rounds':3,'role_call_limit':12};r.lock=lambda:nullcontext()
+        write_json(r.root/'state.json',{'round':0,'incumbent':'base','status':'ready'})
+        original=r.agent.run;calls=[]
+        def transport(role,context,target):
+            calls.append(role)
+            if len(calls)==1:
+                write_json(target/'request.json',{'role':role})
+                write_json(target/'resources.json',{'status':'crash'})
+                raise ContractError('service unavailable')
+            return original(role,context,target)
+        def run_round(state,folder):
+            r._role(folder,'lead',{})
+            return {'selected':False}
+        with patch.object(r.agent,'run',side_effect=transport),patch.object(r,'_round',side_effect=run_round):
+            result=r.run()
+            self.assertEqual(result['state']['stop_reason'],'role_transport_failure')
+            self.assertEqual(result['state']['round'],1)
+            self.assertEqual(result['rounds'][0]['failure_kind'],'role_transport')
+            before=r.store.verify();cost=r.store.budget()
+            self.assertEqual(r.run(),result)
+            self.assertEqual(r.store.verify(),before);self.assertEqual(r.store.budget(),cost)
+            self.assertEqual(calls,['lead'])
+            repair=r.reopen_source_failure('service repaired')
+            self.assertEqual(repair['transport_roles'],['lead'])
+            resumed=r.run()
+            self.assertEqual(resumed['state']['round'],3)
+            self.assertEqual(resumed['state']['stop_reason'],'max_rounds')
+            self.assertEqual(len(calls),4)  # One failed call plus three completed rounds.
+            self.assertEqual(r.store.budget()['charged_or_reserved'],4)
+            archives=list((r.root/'rounds/round-1').glob('lead-transport-archive-*'))
+            self.assertEqual(len(archives),1)
+            self.assertFalse(read_json(archives[0]/'rejection.json')['retryable'])
+            from rec_harness.adapters.amazon_auto_audit import verify_reopen_history
+            self.assertEqual(verify_reopen_history(r),1)
+
     def test_transport_receipt_recovers_after_controller_loss(self):
         original=write_json
         def interrupt(path,value):

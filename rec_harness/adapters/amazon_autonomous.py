@@ -18,6 +18,8 @@ from .amazon_report import audit_job
 from .amazon_plan import register_plan
 from .amazon_admission import admit_plan
 from .amazon_phases import run_phase
+
+
 from .amazon_study import run_study
 from .amazon_selection import development_readout,release_confirmation
 from .amazon_research_graph import ingest_development
@@ -25,6 +27,10 @@ from .amazon_cycle import finalize_cycle
 from .amazon_rescore import rescore_job
 from .amazon_memory import validate_memory,validate_readout
 from .model_source_contract import review_source,MODULE_CALLS,TENSOR_METHODS
+
+
+class RoleTransportFailure(ContractError):
+    """Host/service failure that must not trigger a fresh research round."""
 
 
 class AmazonAutoresearch:
@@ -123,6 +129,21 @@ class AmazonAutoresearch:
     def _role(self,folder,role,context,source=None,validator=None):
         target=folder/role
         artifacts=Artifacts(self.store.root.parent/'artifacts/objects')
+        transitions=[e for e in self.store.events() if e['kind'] in {'auto_round_completed','auto_round_reopened'}]
+        if transitions and transitions[-1]['kind']=='auto_round_reopened':
+            repair=transitions[-1]['payload']
+            archive=folder/(role+'-transport-archive-'+repair['failed_event_hash'][:16])
+            if (folder.name=='round-'+str(repair['state']['round']+1) and
+                role in repair.get('transport_roles',[]) and target.exists() and not archive.exists()):
+                expected={name[len(role)+1:]:ref for name,ref in repair['prior_artifacts'].items()
+                          if name.startswith(role+'/')}
+                actual={str(path.relative_to(target)) for path in target.rglob('*') if path.is_file()}
+                if actual!=set(expected):raise ContractError('transport repair artifacts changed')
+                for name,ref in expected.items():
+                    artifacts.verify(ref)
+                    if file_hash(safe_file(target,name))!=ref['sha256']:
+                        raise ContractError('transport repair artifacts changed')
+                target.rename(archive)
         def complete(task,wall_seconds):
             if any(e['kind']=='role_completed' and e['payload']['task']==task for e in self.store.events()):return
             self.store.event('role_completed',{'task':task,'role':role,**read_json(target/'accepted.json'),
@@ -158,7 +179,7 @@ class AmazonAutoresearch:
             return response
         if ((target/'rejection.json').exists() and
             read_json(target/'rejection.json').get('retryable') is False) or transport_status() not in (None,'success'):
-            raise ContractError(role+' transport failed; repair the host and explicitly reopen before retrying')
+            raise RoleTransportFailure(role+' transport failed; repair the host and explicitly reopen before retrying')
         previous=len(list(folder.glob(role+'-rejected-*')))
         for retry in range(max(0,2-previous)):
             if target.exists() and (target/'request.json').exists():
@@ -197,7 +218,7 @@ class AmazonAutoresearch:
                 write_json(target/'rejection.json',{'status':'rejected','reason':str(error),'retryable':retryable})
                 self.store.event('role_rejected',{'task':task,'role':role,'reason':str(error),'retryable':retryable})
                 if not retryable:
-                    raise ContractError(role+' transport failed; repair the host and explicitly reopen before retrying') from error
+                    raise RoleTransportFailure(role+' transport failed; repair the host and explicitly reopen before retrying') from error
                 context={**context,'validation_error':str(error),'repair_instruction':'Correct this role output; preserve frozen bindings.'}
         raise ContractError(role+' failed after automatic retry')
 
@@ -514,7 +535,7 @@ class AmazonAutoresearch:
                     self.artifacts.verify(ref)
                     if file_hash(source_root/name)!=ref['sha256']:raise ContractError('reopened controller source changed')
             reason=state.get('stop_reason','max_rounds')
-            while state['round']<self.config['max_rounds'] and reason!='measurement_required':
+            while state['round']<self.config['max_rounds'] and reason not in {'measurement_required','role_transport_failure'}:
                 ledger=Store(self.study/'memory')
                 try:
                     from .amazon_campaign import campaign_guard
@@ -535,10 +556,13 @@ class AmazonAutoresearch:
                     result={'status':'deferred','reason':str(error),'selected':False};reason='measurement_required'
                     self.store.event('auto_round_deferred',{'round':state['round']+1,**result})
                 except (ContractError,OSError,ValueError,KeyError,TypeError) as error:
-                    result={'status':'failed','reason':str(error)};write_json(folder/'failure.json',result)
+                    result={'status':'failed','reason':str(error)}
+                    if isinstance(error,RoleTransportFailure):
+                        result['failure_kind']='role_transport';reason='role_transport_failure'
+                    write_json(folder/'failure.json',result)
                     self.store.event('auto_round_failed',{'round':state['round']+1,**result})
                 state={**state,'round':state['round']+1,'status':'ready'}
-                if reason=='measurement_required':state.update(status='stopped',stop_reason=reason)
+                if reason in {'measurement_required','role_transport_failure'}:state.update(status='stopped',stop_reason=reason)
                 self.store.event('auto_round_completed',{'result':result,'state':state})
                 write_json(self.root/'state.json',state)
             state={**state,'status':'stopped','stop_reason':reason};write_json(self.root/'state.json',state)
@@ -576,6 +600,13 @@ class AmazonAutoresearch:
                 'prior_artifacts':self.artifacts.snapshot(folder,[str(p.relative_to(folder)) for p in folder.rglob('*') if p.is_file()]),
                 'controller_sources':source_refs,'retained_role_cost':self.store.budget()['charged_or_reserved'],
                 'state':{'incumbent':state['incumbent'],'round':state['round']-1,'status':'ready'}}
+            record['transport_roles']=[]
+            for path in folder.glob('*/rejection.json'):
+                if '-transport-archive-' in path.parent.name or (path.parent/'accepted.json').exists():continue
+                receipt=path.parent/'resources.json'
+                status=read_json(receipt).get('status') if receipt.exists() else None
+                if read_json(path).get('retryable') is False or status not in {None,'success'}:
+                    record['transport_roles'].append(path.parent.name)
             self.store.event('auto_round_reopened',record)
             write_json(self.root/'state.json',record['state'])
             return record

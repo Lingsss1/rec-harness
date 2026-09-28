@@ -166,6 +166,13 @@ class ResearchProject:
                 directory=self.root/'episodes'/(kind+'-'+str(index))
                 config=self.model_config(state,directory) if kind=='model' else self.evolve_config(state,directory,kind)
                 result=self.child(directory,config)
+                if kind=='model' and result['state'].get('stop_reason')=='role_transport_failure':
+                    failure={'campaign':str(directory/'campaign'),'result_hash':digest(result),
+                             'reason':'role_transport_failure'}
+                    prior=[event['payload'] for event in self.store.events() if event['kind']=='project_child_transport_stopped']
+                    if not prior or prior[-1]!=failure:
+                        self.store.event('project_child_transport_stopped',failure)
+                    raise ContractError('model role transport failed; repair and explicitly reopen the child before resuming project: '+failure['campaign'])
                 episode={'kind':kind,'index':index,'campaign':str(directory/'campaign'),'result_hash':digest(result)}
                 relative=str((directory/'campaign').relative_to(self.root))
                 if kind=='model':

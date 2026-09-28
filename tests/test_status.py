@@ -59,3 +59,10 @@ class StatusTests(unittest.TestCase):
             value=inspect_status(root)
             self.assertEqual(value['state'],state)
             self.assertEqual(value['state_source'],'committed_event')
+            store=Store(root/'memory')
+            failure={'campaign':'model-1','reason':'role_transport_failure'}
+            store.event('project_child_transport_stopped',failure)
+            self.assertEqual(inspect_status(root)['attention'],failure)
+            store.event('project_transition',{'state':{**state,'phase':'model'}})
+            self.assertIsNone(inspect_status(root)['attention'])
+            store.close()

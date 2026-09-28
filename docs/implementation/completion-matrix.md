@@ -10,6 +10,7 @@
 - 最新安装交付：[v16](install-acceptance-v16.md)，冻结 `79a31ca`。428 项中 407 通过、21 跳过，另 9 项 Torch CPU 合同全部通过。后续工具生成接口、多文件 worker 与诊断提交中断恢复尚未纳入该包。
 - 最新已完成真实 Amazon 优化：[v3](../experiments/amazon-next-autoresearch-v3.md)。开发平均 HR@10 增加 0.012750；独立初始化确认增加 0.013125，主机选中候选。确认使用相同验证用户，不是最终测试；该研究已封存，不使用确认结果继续调优。
 - 最近真实工程验收：[多文件 CPU 执行](../experiments/multifile-diagnostic-jail-v1.md)与[诊断提交中断恢复](../experiments/diagnostic-recovery-jail-v1.md)。没有新增 Codex 调用或训练，也不增加工具效用结论。
+- 最新工具在线验收：[新 worker 三组比较](../experiments/tool-authoring-online-v1.md)，18 次真实角色零重试，候选相对两组对照收益均为 0、在线费用 32，不晋升；18 条指令/主机反馈轨迹和无新增执行恢复审计通过。仅一个合成任务族，真实自主缺口发现和更广效用范围仍未完成。
 
 ## 方案覆盖与证据边界
 

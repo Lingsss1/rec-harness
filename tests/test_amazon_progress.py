@@ -67,3 +67,29 @@ class ProgressTests(unittest.TestCase):
         row=progress_report(self.campaign)['rows'][0]
         self.assertIsNone(row['development_score']);self.assertEqual(row['status'],'failed')
         self.assertEqual(row['costs']['role_calls_charged_or_reserved'],1)
+
+    def test_pending_costs_are_frozen_at_completion_not_replaced_by_later_settlement(self):
+        self.controller.reserve('pending-role',2);self.ledger.reserve('pending-job',20)
+        self.complete(1)
+        self.controller.settle('pending-role',1,'success');self.ledger.settle('pending-job',7,'success')
+        row=progress_report(self.campaign)['rows'][0]
+        self.assertEqual(row['costs']['role_calls_charged_or_reserved'],3)
+        self.assertEqual(row['costs']['study_gpu_seconds_charged_or_reserved'],24)
+        self.assertEqual(row['costs']['role_pending_reservations'],1)
+        self.assertEqual(row['costs']['study_pending_reservations'],1)
+        self.assertEqual(self.controller.budget()['charged_or_reserved'],2)
+        self.assertEqual(self.ledger.budget()['charged_or_reserved'],11)
+
+    def test_reopening_same_round_retains_failed_attempt_and_new_completion(self):
+        self.controller.reserve('failed-call',1);self.controller.settle('failed-call',1,'crash')
+        self.controller.event('auto_round_completed',{'state':{'round':1,'incumbent':'base'},
+            'result':{'status':'failed','failure_kind':'role_transport'}})
+        self.controller.event('auto_round_reopened',{'state':{'round':0,'incumbent':'base'}})
+        self.complete(1,selected=True)
+        rows=progress_report(self.campaign)['rows']
+        self.assertEqual([row['round'] for row in rows],[1,1])
+        self.assertLess(rows[0]['completion_sequence'],rows[1]['completion_sequence'])
+        self.assertNotEqual(rows[0]['event_hash'],rows[1]['event_hash'])
+        self.assertEqual([row['development_score'] for row in rows],[None,.9])
+        self.assertEqual([row['costs']['role_calls_charged_or_reserved'] for row in rows],[1,2])
+        self.assertIsNone(rows[0]['costs']['study_pending_reservations'])

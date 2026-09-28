@@ -33,7 +33,7 @@ def progress_report(directory):
         for event in controller.events():
             if event['kind']!='auto_round_completed':continue
             payload=event['payload'];state=payload['state'];result=payload['result']
-            row={'round':state['round'],'event_hash':event['hash'],'incumbent':state['incumbent'],
+            row={'round':state['round'],'completion_sequence':event['seq'],'event_hash':event['hash'],'incumbent':state['incumbent'],
                  'candidate':result.get('candidate'),'selected':result.get('selected',False),
                  'status':result.get('status','completed'),'failure_kind':result.get('failure_kind'),
                  'development_score':None,'development_readout_hash':None}
@@ -51,13 +51,15 @@ def progress_report(directory):
                     pending.discard(value['task_id'])
             prefix.update(charged_or_reserved=sum(charges.values()),pending=len(pending))
             roles=verify_cost_prefix(controller,prefix)
-            gpu=None
+            gpu=None;gpu_pending=None
             if 'cost_prefixes' in payload:
                 bound=payload['cost_prefixes']
                 if bound['roles']!=dict(prefix,qualification=bound['roles'].get('qualification')):
                     raise ContractError('round role cost prefix differs from completion boundary')
                 gpu=verify_cost_prefix(study,bound['study_gpu_seconds'])
+                gpu_pending=bound['study_gpu_seconds']['pending']
             row['costs']={'role_calls_charged_or_reserved':roles,'study_gpu_seconds_charged_or_reserved':gpu,
+                          'role_pending_reservations':prefix['pending'],'study_pending_reservations':gpu_pending,
                           'study_cost_status':'recorded' if gpu is not None else 'historical_boundary_unavailable'}
             if result.get('cycle_identity'):
                 cycle=cycles.get(result['cycle_identity'])

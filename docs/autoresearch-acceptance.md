@@ -716,3 +716,5 @@ Amazon 每轮新建上下文时，对本轮检索到的历史设计 GapCard 生�
 修订范围门槛进一步核对本轮事实的 task/protocol/valid，以及历史事实的 task 和 derived_development_comparison 类型；历史解释显式属于确认分区时不提供给角色。其他任务事实、失败记录和确认事实不能凑成本轮修订依据。真实两条旧解释经收紧后仍符合范围，见同目录 `scope-verification.json`，源事件不变。381 项全量回归通过，20 项跳过。
 
 首次独立真实知识角色验收 `historical-explanation-codex-v1` 返回一条 provisional Claim 和 BASED_ON 关系，但关系缺少 created_at；旧角色验证放行后，Store 在提交前拒绝。失败调用 1 次及原始输出保留，副本未应用修订，原研究图不变。这暴露了角色合同与图提交合同不一致：现在角色验证前移检查完整边字段、合法标识/关系及重复边，通用和 Amazon 知识提示均列出必要关系元数据。缺字段和重复边回归通过，381 项全套测试通过、20 跳过。尚需重跑实际角色验收。
+
+修复版真实重跑 `historical-explanation-codex-v2/acceptance.json` 已通过，冻结 `f075d021a0e7282d833170faffbd5337c1bf2406`。Codex 在独立图副本新增一条 provisional Claim 和一条 BASED_ON 关系，指向第一轮的机制不可辨识解释；完整关系通过角色合同及实际 Store.patch。旧原图和两轮账本 hash 保持不变，禁止新调用后精确恢复成功。新增成功调用 1 次，继承首轮失败 1 次，累计 2 次；没有新增训练、推理或读取确认/最终结果。它证明真实角色能维护有来源的跨轮解释关联，并保留未完成诊断的限制；不声称推翻了旧机制或提高在线研究收益。

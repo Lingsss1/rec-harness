@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from rec_harness.core import Artifacts,ContractError,digest,write_json
+from rec_harness.core import Artifacts,ContractError,digest,read_json,write_json
 from rec_harness.diagnostics import measure,validate_measurement
 from rec_harness.runtime import node
 from rec_harness.store import Store
@@ -43,6 +43,58 @@ class DiagnosticTests(unittest.TestCase):
             result=measure(self.research,self.state)
             self.assertEqual(result['status'],'invalid');self.assertNotIn('output',result)
             self.assertEqual(measure(self.research,self.state),result);self.assertEqual(runner.call_count,1)
+
+    def receipt_execute(self,directory,recipe,files,entry,arguments,**kwargs):
+        receipt=self.execute(directory)
+        write_json(Path(directory)/'request.json',{'inputs':files,'recipe':recipe,'entry':entry,'arguments':arguments})
+        write_json(Path(directory)/'process/process.json',receipt['process'])
+        write_json(Path(directory)/'receipt.json',receipt)
+        return receipt
+
+    def test_completed_process_recovers_before_measurement_commit_without_recharge(self):
+        original=self.research.store.event
+        def interrupt(kind,value):
+            if kind=='diagnostic_completed':raise KeyboardInterrupt()
+            return original(kind,value)
+        with patch('rec_harness.diagnostics.run_cpu_job',side_effect=self.receipt_execute) as runner:
+            with patch.object(self.research.store,'event',side_effect=interrupt):
+                with self.assertRaises(KeyboardInterrupt):measure(self.research,self.state)
+            self.assertEqual(runner.call_count,1)
+        # Recovery reads the verified artifact, not this mutable convenience copy.
+        result_path=next((self.research.root/'research_archive/diagnostics').glob('*/job-1/results/measurement.json'))
+        write_json(result_path,{'measurements':{'spread':999},'limitations':[]})
+        before=self.research.store.budget()
+        with patch('rec_harness.diagnostics.run_cpu_job',side_effect=AssertionError('must not execute')):
+            result=measure(self.research,self.state)
+            self.assertEqual(result['output']['measurements'],{'spread':0.5})
+            committed=self.research.store.verify()
+            self.assertEqual(measure(self.research,self.state),result)
+            self.assertEqual(self.research.store.verify(),committed)
+        self.assertEqual(self.research.store.budget(),before)
+        self.assertEqual(before['charged_or_reserved'],1)
+        self.assertEqual(sum(e['kind']=='diagnostic_submitted' for e in self.research.store.events()),1)
+
+    def test_unknown_process_outcome_never_relaunches(self):
+        with patch('rec_harness.diagnostics.run_cpu_job',side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):measure(self.research,self.state)
+        before=self.research.store.verify();budget=self.research.store.budget()
+        with patch('rec_harness.diagnostics.run_cpu_job',side_effect=AssertionError('must not execute')):
+            with self.assertRaises(FileNotFoundError):measure(self.research,self.state)
+        self.assertEqual(self.research.store.verify(),before)
+        self.assertEqual(self.research.store.budget(),budget)
+
+    def test_recovery_rejects_changed_process_inputs_without_new_charge(self):
+        with patch('rec_harness.diagnostics.run_cpu_job',side_effect=self.receipt_execute):
+            with patch.object(self.research.store,'settle',side_effect=KeyboardInterrupt()):
+                with self.assertRaises(KeyboardInterrupt):measure(self.research,self.state)
+        self.research.store.recover()
+        request=next((self.research.root/'research_archive/diagnostics').glob('*/job-1/request.json'))
+        write_json(request,{**read_json(request),'arguments':['changed']})
+        before=self.research.store.verify();budget=self.research.store.budget()
+        with patch('rec_harness.diagnostics.run_cpu_job',side_effect=AssertionError('must not execute')):
+            with self.assertRaisesRegex(ContractError,'binding changed'):measure(self.research,self.state)
+        self.assertEqual(self.research.store.verify(),before)
+        self.assertEqual(self.research.store.budget(),budget)
 
     def test_host_rejects_nonfinite_or_authoritative_candidate_fields(self):
         for value in [{'measurements':{'x':float('nan')},'limitations':[]},

@@ -1,7 +1,7 @@
 """Freeze validated tool versions, execute in CPU jails, retain versioned measurements."""
 from pathlib import Path
 from .core import ContractError,digest,file_hash,number,public_only,read_json,required,write_json
-from .cpu_job import run_cpu_job
+from .cpu_job import run_cpu_job,recover_completed_cpu_job
 from .evolution import Evolution
 
 CONTRACT='public-aggregate-measurement-v1'
@@ -106,22 +106,40 @@ def measure(research,state):
     files={'request.json':{'path':str(directory/'request.json'),'sha256':file_hash(directory/'request.json')},
         'worker.py':{'path':str(research.artifacts.verify(tool['worker'])),'sha256':tool['worker']['sha256']}}
     for name,ref in tool['implementation'].items():files['tool/'+name]={'path':str(research.artifacts.verify(ref)),'sha256':ref['sha256']}
-    attempt=len(list(directory.glob('job-*')))+1;task='diagnostic-'+identity[:24]+'-'+str(attempt)
-    research.store.reserve(task,tool['cost']);status='invalid'
+    execution=tool['execution']
+    submissions=[e['payload'] for e in research.store.events() if e['kind']=='diagnostic_submitted' and e['payload']['identity']==identity]
+    receipt=None
+    if submissions:
+        submitted=submissions[-1];attempt=submitted['attempt'];task=submitted['task_id']
+        if submitted['request_hash']!=digest({'files':files,'execution':execution}):
+            raise ContractError('diagnostic recovery inputs changed')
+        job=directory/('job-'+str(attempt))
+        # Only a completed, stopped, input-bound process can be reused. Unknown
+        # outcomes are never silently converted into another diagnostic call.
+        receipt=recover_completed_cpu_job(job,execution['recipe'],files,'worker.py',[],artifacts=research.artifacts)
+    else:
+        if list(directory.glob('job-*')):raise ContractError('uncommitted legacy diagnostic attempt requires review')
+        attempt=1;task='diagnostic-'+identity[:24]+'-1';job=directory/'job-1'
+        research.store.reserve(task,tool['cost'])
+        research.store.event('diagnostic_submitted',{'identity':identity,'attempt':attempt,'task_id':task,
+            'request_hash':digest({'files':files,'execution':execution})})
+    status='invalid'
     record={'identity':identity,'tool_version':tool['candidate_id'],'implementation_hash':tool['implementation_hash'],
         'input_hash':digest(request),'model_version':state['incumbent'],
         **({'tool_registration':tool['registration']} if 'registration' in tool else {}),
         'qualification':'tool measurement, not independent model evaluation or mechanism proof'}
     try:
-        execution=tool['execution'];job=directory/('job-'+str(attempt))
-        receipt=run_cpu_job(job,execution['recipe'],files,'worker.py',[],python=execution['python'],
-            uid_registry=execution['uid_registry'],artifacts=research.artifacts,timeout=tool['timeout'])
+        if receipt is None:
+            receipt=run_cpu_job(job,execution['recipe'],files,'worker.py',[],python=execution['python'],
+                uid_registry=execution['uid_registry'],artifacts=research.artifacts,timeout=tool['timeout'])
         if receipt['process']['status']!='success':raise ContractError('isolated diagnostic failed')
-        record['output']=validate_measurement(read_json(job/'results/measurement.json'))
+        record['output']=validate_measurement(read_json(research.artifacts.verify(receipt['collection']['artifacts']['measurement.json'])))
         record['artifacts']=receipt['collection']['artifacts'];status='success'
     except (ContractError,OSError,ValueError,KeyError,TypeError) as error:
         record['error']=str(error)
-    finally:research.store.settle(task,tool['cost'],status)
+    finally:
+        if not any(e['kind']=='budget_settled' and e['payload']['task_id']==task for e in research.store.events()):
+            research.store.settle(task,tool['cost'],status)
     record['status']=status;research.store.event('diagnostic_completed',record)
     record_graph(research,record)
     return record

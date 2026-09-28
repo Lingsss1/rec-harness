@@ -6,7 +6,7 @@
 
 ## 当前交付与模型结果
 
-- 最新源码全量回归：433 项，412 通过、21 环境相关跳过；日志 `/tmp/diagnostic-recovery-full.log`，覆盖源码 `8130886`（之后仅增加验收文档）。
+- 最新源码[完整环境回归](full-environment-regression-v1.md)：438 项全部通过、零跳过，覆盖 `e2f9a2e`；Torch、进程恢复和显式 Linux OS 隔离检查均实际执行。
 - 最新安装交付：[v16](install-acceptance-v16.md)，冻结 `79a31ca`。428 项中 407 通过、21 跳过，另 9 项 Torch CPU 合同全部通过。后续工具生成接口、多文件 worker 与诊断提交中断恢复尚未纳入该包。
 - 最新已完成真实 Amazon 优化：[v3](../experiments/amazon-next-autoresearch-v3.md)。开发平均 HR@10 增加 0.012750；独立初始化确认增加 0.013125，主机选中候选。确认使用相同验证用户，不是最终测试；该研究已封存，不使用确认结果继续调优。
 - 最近真实工程验收：[多文件 CPU 执行](../experiments/multifile-diagnostic-jail-v1.md)与[诊断提交中断恢复](../experiments/diagnostic-recovery-jail-v1.md)。没有新增 Codex 调用或训练，也不增加工具效用结论。

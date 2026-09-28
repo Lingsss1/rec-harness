@@ -13,3 +13,5 @@ Codex 仅提交一次，无重试，传输耗时约 102.442 秒。控制器账�
 `acceptance.json`、`validation-resume.json` 和 `receipt-manifest.json` 保存检查与 14 份文件的绑定。首版恢复审计脚本误把 validate 返回的整个接受记录与内部 report 比较而断言失败，原脚本留在 `audit-first.py`；修正比较对象后通过，没有重新生成或验证。`acceptance.json` 阶段字段 `report_hash` 是整个接受记录的 hash；补充收据 `stage_hashes` 明确分别保存 accepted_record_hash 与 validator_report_hash，避免混淆。
 
 这次验收补充真实生成接口、指令档案和离线参考执行证据，不证明自主测量转交、真实决策效用、机制解释或模型提升。
+
+后续[影子验收](tool-authoring-shadow-v1.md)已完成两个真实开发条件的四次 CPU 测量，候选进入 shadow_validated。本文收据仍表示离线检查点；没有工具晋升或在线效用结论。

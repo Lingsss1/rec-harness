@@ -10,6 +10,21 @@ from rec_harness.measurement_gaps import MeasurementDeferred
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_review_preserves_tool_scope_without_runtime_paths(self):
+        from rec_harness.diagnostics import measure
+        registration={'schema':'validated-diagnostic-registration-v1',
+            'validated_conditions':{'protocol':'frozen-protocol'},
+            'usage':{'interpretation':'aggregate measurement only'}}
+        self.research.config['diagnostic_tool']['registration']=registration
+        with patch('rec_harness.diagnostics.run_cpu_job',side_effect=lambda *a,**kw:test_diagnostics.DiagnosticTests.execute(self,*a,**kw)):
+            diagnostic=measure(self.research,self.state)
+        context={'diagnostic':{**diagnostic,'private_path':'excluded'}}
+        request=review_context(self.research,self.state,context,self.gap)
+        self.assertEqual(request['diagnostic']['tool_registration'],registration)
+        self.assertEqual(request['diagnostic']['output'],diagnostic['output'])
+        self.assertNotIn('private_path',str(request))
+        self.assertNotIn('artifacts',request['diagnostic'])
+
     def test_existing_baseline_metric_is_not_a_missing_measurement(self):
         request=review_context(self.research,self.state,self.context,self.gap)
         request['baseline']=[{'metrics':{'HR@10':0.2}},{'metrics':{'HR@10':0.3}}]

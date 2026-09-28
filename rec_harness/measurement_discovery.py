@@ -28,7 +28,7 @@ def review_context(research,state,context,gap):
     request={'task_id':research.task,'model_version':state['incumbent'],'protocol_hash':research.protocol_hash,
         'gap':gap,'baseline':rows,'allowed_evidence_refs':refs,
         **{key:context[key] for key in ['activation_diagnostics','block_score_diagnostics'] if context.get(key)},
-        'diagnostic':({k:diagnostic[k] for k in ['status','tool_version','implementation_hash','output'] if k in diagnostic} if diagnostic else None),
+        'diagnostic':({k:diagnostic[k] for k in ['status','tool_version','implementation_hash','output','tool_registration'] if k in diagnostic} if diagnostic else None),
         'measurement_contract':{'development_budget':config['development_budget'],'budget_unit':'tool-development BCU; not GPU seconds or model-training budget',
             'available_artifacts':['public development aggregate rows','model source supplied to role'],
             'requirements_limit':1,'prerequisite_values':'Each prerequisite needs status and rationale grounded in available evidence. Unresolved preconditions prohibit a measurement gap. Only invocation/implementation may be not_applicable when no diagnostic is configured.',

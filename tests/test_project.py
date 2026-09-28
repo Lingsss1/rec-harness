@@ -193,6 +193,7 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(registration['source_tool_predecessor']['implementation_hash'],first_tool['implementation_hash'])
         self.assertIsNone(registration['rollback_candidate_id'])
         self.assertEqual(registration['declared_call_cost'],config['tool_runtime']['cost'])
+        self.assertEqual(set(registration['usage']),{'execution','input','output','interpretation'})
         store=Store(final/'memory')
         try:
             observed=[e['payload'] for e in store.events() if e['kind']=='measurement_output_observed']

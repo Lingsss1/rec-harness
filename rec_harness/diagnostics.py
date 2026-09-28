@@ -30,6 +30,10 @@ def freeze_tool(options,artifacts):
         if digest(context)!=candidate['context_hash']:raise ContractError('tool registration context changed')
         registration={'schema':'validated-diagnostic-registration-v1','entrypoint':'diagnostic.py:measure',
             'contract':CONTRACT,'validated_conditions':plan['identity'],'validation_stages':stages,
+            'usage':{'execution':'The controller automatically measures the current incumbent before research roles; use the committed diagnostic output and its limitations.',
+                'input':'task_id, model_version, protocol_hash, runs of seed/valid/metrics and optional dataset; public development aggregates only',
+                'output':'measurements: nonempty mapping of quantity names to finite numbers; limitations: list of strings',
+                'interpretation':'Check model_version and validation conditions before use. Missing quantities may warrant measurement review; invocation failure must be repaired first. A measurement alone does not establish model improvement or mechanism causality.'},
             'declared_call_cost':options['cost'],'cost_unit':'campaign budget units',
             'rollback_candidate_id':(active.get('previous') or {}).get('candidate_id'),
             'source_tool_predecessor':context.get('tool_predecessor'),

@@ -28,7 +28,7 @@ def freeze_suite(specification,directory):
         suites[kind]={'path':str(source),'sha256':file_hash(source)}
     for stage in ['correctness','synthetic','robustness']:validate_suite(read_json(suites['reference']['path']),stage)
     shadow=read_json(suites['shadow']['path']);online=read_json(suites['online']['path'])
-    if shadow.get('schema')!='amazon-tool-shadow-v1' or online.get('schema')!='online-tool-suite-v1':
+    if shadow.get('schema')!='amazon-tool-shadow-v1' or online.get('schema') not in {'online-tool-suite-v1','amazon-online-tool-suite-v1'}:
         raise ContractError('pipeline requires frozen shadow and online suites')
     if len(contracts)!=1:raise ContractError('pipeline stages must share the tool input contract')
     body={'schema':'tool-validation-pipeline-v1','suites':suites,'identity':identity,'tool_files':files}
@@ -43,6 +43,13 @@ def load_suite(path):
     for ref in suite['suites'].values():
         if file_hash(ref['path'])!=ref['sha256']:raise ContractError('bound pipeline stage suite changed')
     return suite
+
+
+def online_module(suite):
+    schema=read_json(suite['suites']['online']['path']).get('schema')
+    if schema=='online-tool-suite-v1':return 'tool_online'
+    if schema=='amazon-online-tool-suite-v1':return 'amazon_tool_online'
+    raise ContractError('unsupported pipeline online suite')
 
 
 def accepted_report(directory,stage,implementation_hash):
@@ -62,11 +69,17 @@ def run_validation(suite_path,stage,candidate,output,cost_context=None):
         from .tool_shadow import run_validation as run
         report=run(refs['shadow']['path'],candidate,output)
     elif stage=='utility':
-        from .tool_online import run_validation as run
+        if online_module(suite)=='amazon_tool_online':
+            from .amazon_tool_online import run_validation as run
+        else:
+            from .tool_online import run_validation as run
         report=run(refs['online']['path'],candidate,output,'utility')
     else:
         from .core import Artifacts
-        from .tool_cost import run_validation as run
+        if online_module(suite)=='amazon_tool_online':
+            from .amazon_tool_cost import run_validation as run
+        else:
+            from .tool_cost import run_validation as run
         if cost_context is None:raise ContractError('cost stage requires controller cost context')
         if output.parent.name!='cost_regression':raise ContractError('cost stage must use standard evolution stage directory')
         directory=output.parent.parent

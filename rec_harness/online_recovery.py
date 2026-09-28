@@ -11,6 +11,15 @@ def completed_groups(target,module,stage):
     the model controller may turn an interrupted round into a failed attempt.
     Such a change would alter a paired comparison's frozen research trajectory.
     """
+    amazon=target/'amazon-tool-online'
+    if module=='rec_harness.amazon_tool_online' or module=='rec_harness.tool_pipeline' and amazon.exists():
+        from .amazon_tool_online import read_result,GROUPS
+        for folder in sorted(amazon.glob('*/*')):
+            if not folder.is_dir() or folder.parent.name in {'objects','candidate','existing'}:continue
+            if folder.name not in GROUPS:raise ContractError('unexpected Amazon comparison directory')
+            if not (folder/'completed.json').is_file():raise ContractError('Amazon comparison group outcome unknown')
+            if read_json(folder/'completed.json')!=read_result(folder):raise ContractError('completed Amazon comparison changed')
+        return
     tool=module in {'rec_harness.tool_online','rec_harness.tool_pipeline'}
     root=target/('tool-online-episodes' if tool else 'online-episodes')
     groups={'no_tool','existing_tool','candidate_tool'} if tool else {'baseline','candidate'}

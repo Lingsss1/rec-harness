@@ -82,7 +82,7 @@ def report(evolution,candidate,plan,stage,runner):
                   module=='rec_harness.tool_pipeline' and stage in {'correctness','synthetic','robustness','shadow'})
             online=(module=='rec_harness.online_validation' and stage in {'development','confirmation'} or
                     module=='rec_harness.harness_pipeline' and stage in {'development','confirmation'} or
-                    module=='rec_harness.tool_online' and stage in {'utility','confirmation'} or
+                    module in {'rec_harness.tool_online','rec_harness.amazon_tool_online'} and stage in {'utility','confirmation'} or
                     module=='rec_harness.tool_pipeline' and stage=='utility')
             prefix=module in {'rec_harness.harness_prefix','rec_harness.harness_pipeline'} and stage=='prefix_audit'
             if not (safe or online or prefix):raise ValidationRecoveryRequired('unfinished validator has no safe automatic resume contract')

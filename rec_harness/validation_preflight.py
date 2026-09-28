@@ -15,9 +15,9 @@ def check_suite(module,path,stage=None):
     if module in {'rec_harness.online_validation','rec_harness.harness_prefix','rec_harness.tool_online'}:
         if not (path.parent/'objects').is_dir():raise ContractError('validation artifact directory missing')
     if module=='rec_harness.tool_pipeline':
-        from .tool_pipeline import load_suite,input_contract
+        from .tool_pipeline import load_suite,input_contract,online_module
         suite=load_suite(path)
-        modules={'reference':'tool_validation','shadow':'tool_shadow','online':'tool_online'}
+        modules={'reference':'tool_validation','shadow':'tool_shadow','online':online_module(suite)}
         for name,ref in suite['suites'].items():
             child=check_suite('rec_harness.'+modules[name],ref['path'])
             if child['identity']!=suite['identity']:raise ContractError('pipeline child identity differs')
@@ -66,7 +66,8 @@ def evaluation_ids(module,path,stage):
     path=Path(path);suite=read_json(path)
     if module=='rec_harness.tool_pipeline':
         name='reference' if stage in {'correctness','synthetic','robustness'} else 'shadow' if stage=='shadow' else 'online'
-        child={'reference':'tool_validation','shadow':'tool_shadow','online':'tool_online'}[name]
+        from .tool_pipeline import online_module
+        child={'reference':'tool_validation','shadow':'tool_shadow','online':online_module(suite)}[name]
         return evaluation_ids('rec_harness.'+child,suite['suites'][name]['path'],'utility' if stage=='cost_regression' else stage)
     if module=='rec_harness.harness_pipeline':
         name='prefix' if stage=='prefix_audit' else 'online'

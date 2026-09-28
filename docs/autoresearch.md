@@ -617,4 +617,4 @@ Harness 演化可使用 `trace_sources` 收集多个 campaign 的独立冻结前
 
 固定候选池的三组选择可使用[固定候选选择入口](implementation/fixed-selection.md)，每条件3次Codex调用；主机评分不进入角色请求，未知结果不自动重发。它使用预给观测与结果，不替代在线模型实验。
 
-Amazon工具可用[独立三组在线入口](implementation/amazon-tool-online.md)比较实际研究后的incumbent；它新建独立study并保留费用轴，尚未自动接入默认项目的六阶段工具pipeline。
+Amazon工具可用[独立三组在线入口](implementation/amazon-tool-online.md)比较实际研究后的incumbent；它新建独立study并保留费用轴，六阶段tool_pipeline现可按所配置套件类型接入，详见[Amazon工具pipeline](implementation/amazon-tool-pipeline.md)。

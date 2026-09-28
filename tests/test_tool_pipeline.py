@@ -67,3 +67,21 @@ class PipelineTests(unittest.TestCase):
         write_json(self.root/'online.json',online)
         result=freeze_suite(self.root/'spec.json',self.root/'matched')
         self.assertEqual(result['tool_contract'],OBSERVATION_CONTRACT)
+
+    def test_amazon_online_routes_utility_and_cost_to_amazon_auditor(self):
+        online=read_json(self.root/'online.json');online['schema']='amazon-online-tool-suite-v1'
+        write_json(self.root/'online.json',online)
+        freeze_suite(self.root/'spec.json',self.root/'amazon-suite')
+        report={'identity':{'suite':'fixture'}}
+        with patch('rec_harness.amazon_tool_online.run_validation',return_value=report) as run:
+            self.assertEqual(run_validation(self.root/'amazon-suite/suite.json','utility',self.candidate,self.root/'utility/result.json'),report)
+            self.assertEqual(run.call_args.args[-1],'utility')
+        directory=self.root/'amazon-evolution/candidates/tool/validation'
+        snapshot=Artifacts(self.root/'objects').snapshot(self.candidate,['diagnostic.py'])
+        for stage in ['correctness','synthetic','robustness','shadow','utility']:
+            write_json(directory/stage/'accepted.json',{'report':report,'report_hash':digest(report),'implementation_hash':digest(snapshot)})
+        write_json(directory/'utility/result.json',report)
+        with patch('rec_harness.amazon_tool_cost.run_validation',return_value=report) as cost:
+            self.assertEqual(run_validation(self.root/'amazon-suite/suite.json','cost_regression',self.candidate,directory/'cost_regression/result.json','prefix.json'),report)
+            self.assertEqual(len(cost.call_args.args[3]),4)
+            self.assertEqual(cost.call_args.kwargs['suite_path'],str(self.root/'online.json'))

@@ -11,3 +11,5 @@
 执行补充：worker 将已冻结并放入 jail 的工具目录加入 Python 模块搜索路径，允许入口导入同目录的辅助模块；入口模块也先注册到 `sys.modules`，支持依赖模块注册的 Python 行为（例如带延迟类型注解的 dataclass）。原加载方式只执行单文件 spec，没有提供这两项运行条件，多文件归档测试无法覆盖此执行缺口。
 
 真实 Python 子进程测试在临时目录中调用同一个 worker，组合 `helper.py` 导入和 dataclass，验证测量结果为独立已知的范围值 3。测试使用隔离 Python 模式，但不冒充 CPU jail 权限隔离验收。生产 CLI 仍固定读取 `/inputs`、写入 `/output`；新 worker 的文件 hash 随新工具冻结，旧任务不替换已冻结 worker。
+
+后续[实际 CPU jail 验收](../experiments/multifile-diagnostic-jail-v1.md)已覆盖两组输入、非 root/输入只读检查、结果收集、费用和无重复执行读取；均通过。它补充执行链证据，不增加自主工具效用结论。

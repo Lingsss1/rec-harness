@@ -7,6 +7,41 @@ from rec_harness.adapters.amazon_memory import export_development_memory,validat
 from rec_harness.core import ContractError,digest,write_json
 
 class DevelopmentMemoryTests(unittest.TestCase):
+    def test_paper_provenance_survives_export_and_context_without_becoming_verified(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);campaign=root/'campaign';study={'development_seeds':[42]}
+            write_json(root/'study/study.json',study)
+            config={'study':str(root/'study'),'study_config_hash':digest(study),'protocol_hash':'p',
+                    'task_id':'source','require_method_sources':True}
+            write_json(campaign/'amazon-auto.json',config)
+            folder=campaign/'rounds/round-1'
+            method={'origin':'paper_claim','sources':['https://example.org/fictional-paper.pdf']}
+            write_json(folder/'handoff.json',{'cards':{'method':method}})
+            write_json(folder/'private-confirmation.json',{'private_result':'DO_NOT_EXPORT'})
+            first=export_development_memory(campaign,root/'memory.json')
+            self.assertEqual(first['schema'],'amazon-development-memory-v2')
+            self.assertEqual(first,export_development_memory(campaign,root/'repeat.json'))
+            validate_memory(first,'p',[42]);self.assertNotIn('DO_NOT_EXPORT',str(first))
+            entry=first['entries'][0];provenance=entry['method_source_provenance']
+            self.assertEqual(provenance['method_hash'],digest(method))
+            self.assertEqual(provenance['sources'][0]['verification_status'],'agent_reported_unverified')
+            self.assertEqual(provenance['sources'][0]['source_version'],'unknown')
+            _,context=compact_development_context([],first['entries'],'p',[42])
+            self.assertEqual(context[0]['method_source_provenance'],provenance)
+            for change in ['verified','different_citation','missing','v1']:
+                bad=copy.deepcopy(first)
+                if change=='verified':bad['entries'][0]['method_source_provenance']['sources'][0]['verification_status']='verified'
+                if change=='different_citation':bad['entries'][0]['design']['method']['sources']=['https://example.org/other.pdf']
+                if change=='missing':bad['entries'][0].pop('method_source_provenance')
+                if change=='v1':bad['schema']='amazon-development-memory-v1'
+                bad['hash']=digest({k:v for k,v in bad.items() if k!='hash'})
+                with self.assertRaises(ContractError):validate_memory(bad,'p',[42])
+            # Historical tasks retain their original export shape and citation strings.
+            config.pop('require_method_sources');write_json(campaign/'amazon-auto.json',config)
+            legacy=export_development_memory(campaign,root/'legacy.json')
+            self.assertEqual(legacy['schema'],'amazon-development-memory-v1')
+            self.assertNotIn('method_source_provenance',legacy['entries'][0]);validate_memory(legacy,'p',[42])
+
     def test_gap_applicability_rechecks_promoted_models_without_transferring_status(self):
         entries=[{'round':'r1','design':{'gap':{'gap_id':'gap','model_version':'old',
             'protocol_hash':'p','status':'supported','alternative_explanations':['training']}}},

@@ -1,6 +1,21 @@
 """Export only development research memory for subsequent autonomous campaigns."""
 from pathlib import Path
-from rec_harness.core import ContractError,digest,read_json,write_json
+from rec_harness.core import ContractError,digest,read_json,write_json,validate_method_sources
+
+
+def method_source_provenance(design):
+    """Preserve reported citations, not inferred graph or document evidence."""
+    if not isinstance(design,dict):raise ContractError('source design must be an object')
+    method=design.get('method',{})
+    if not isinstance(method,dict):raise ContractError('source method must be an object')
+    if method.get('origin')!='paper_claim':return None
+    if 'sources' not in method:raise ContractError('paper source list required')
+    validate_method_sources(method)
+    return {'schema':'reported-method-sources-v1','method_hash':digest(method),
+        'sources':[{'citation':citation,'citation_hash':digest(citation),
+                    'verification_status':'agent_reported_unverified','source_version':'unknown',
+                    'retrieved_content_ref':None} for citation in dict.fromkeys(method['sources'])],
+        'qualification':'Derived from the source design card; not an independently verified paper, graph snapshot, target experiment or mechanism claim.'}
 
 
 def gap_applicability(entries, model_version, protocol_hash):
@@ -50,16 +65,21 @@ def execution_failure(folder,events):
 
 
 def validate_memory(pack,protocol,development_seeds=None):
-    if set(pack)!={'schema','protocol_hash','entries','hash'} or pack['schema']!='amazon-development-memory-v1':
+    if set(pack)!={'schema','protocol_hash','entries','hash'} or pack['schema'] not in {'amazon-development-memory-v1','amazon-development-memory-v2'}:
         raise ContractError('invalid development memory schema')
     if pack['protocol_hash']!=protocol or pack['hash']!=digest({k:v for k,v in pack.items() if k!='hash'}):
         raise ContractError('development memory identity mismatch')
     if not isinstance(pack['entries'],list):raise ContractError('development memory entries required')
     allowed={'round','design','development','development_decision','provisional_knowledge','execution_failure'}
+    if pack['schema']=='amazon-development-memory-v2':allowed.add('method_source_provenance')
     for entry in pack['entries']:
         if not isinstance(entry,dict) or not set(entry)<=allowed or 'round' not in entry:
             raise ContractError('non-development field in research memory')
         if 'development' in entry:validate_readout(entry['development'],protocol,development_seeds)
+        if pack['schema']=='amazon-development-memory-v2':
+            expected=method_source_provenance(entry.get('design',{}))
+            if entry.get('method_source_provenance')!=expected:
+                raise ContractError('method source provenance differs from design card')
     return pack
 
 
@@ -165,6 +185,10 @@ def export_development_memory(campaign,output):
             entry['development']=value
         failure=execution_failure(folder,events)
         if failure is not None:entry['execution_failure']=failure
+        if config.get('require_method_sources'):
+            provenance=method_source_provenance(entry.get('design',{}))
+            if provenance is not None:entry['method_source_provenance']=provenance
         if len(entry)>1:entries.append(entry)
-    pack={'schema':'amazon-development-memory-v1','protocol_hash':config['protocol_hash'],'entries':entries}
+    schema='amazon-development-memory-v2' if any('method_source_provenance' in e for e in entries) else 'amazon-development-memory-v1'
+    pack={'schema':schema,'protocol_hash':config['protocol_hash'],'entries':entries}
     pack['hash']=digest(pack);validate_memory(pack,config['protocol_hash']);write_json(output,pack);return pack

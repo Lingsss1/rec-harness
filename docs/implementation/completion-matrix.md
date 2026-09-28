@@ -39,7 +39,9 @@
 
 ## 接续工作
 
-通用图记忆新增[来源转移 v4](source-memory-transfer.md)，保留 Method→Source 及未核验/版本未知状态，容量门控仍按完整闭包执行。普通图继续导出 v3，旧包不改写；Amazon 独立开发记忆格式未由此扩展。
+Amazon 独立开发记忆已补齐[来源信息 v2](amazon-source-memory.md)：从设计卡绑定原始引用及未核验/版本未知状态，导入时重算并核对，确认信息不导出。它不是论文正文核验，也不伪造原始图快照。
+
+通用图记忆新增[来源转移 v4](source-memory-transfer.md)，保留 Method→Source 及未核验/版本未知状态，容量门控仍按完整闭包执行。普通图继续导出 v3，旧包不改写；Amazon 使用上述独立的来源信息 v2。
 
 新任务已补齐[方法—来源图关联](method-source-graph.md)：通用模型及 Amazon 开发图创建 Source/DERIVED_FROM，并保留论文方法的 origin。原始引用可追溯，内容与版本仍显式未核验；来源不充当本地实验或机制支持。
 

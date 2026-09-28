@@ -97,7 +97,7 @@ Claim 需要 `status,scope,evidence_refs`。supported 至少两个不同 indepen
 
 配置顶层 `memory_presentation` 可选 `graph`（默认）或 `flat`，随 campaign manifest 冻结。控制器内部保留原始图，在每次 agent 调用前转换呈现并归档实际输入；各研究角色分别执行对应检索。flat 将节点与关系转成统一记录列表，保留每条关系、来源、反证和检索元数据。两种形式都带 `information_hash`，`memory_view.restore` 可无损还原并校验。`python3 -m rec_harness graph DIRECTORY bundle-pair --task T --protocol P --role evaluation --version V` 可从同一次冻结检索导出两个视图，用于相同证据前缀的配对决策实验。它只控制信息与呈现，不保证字节数/token 数相等；完整在线运行分支后也不保证证据继续相同，不能直接宣称等信息收益。
 
-旧记忆通过 `migrate DIRECTORY LEGACY_DIRECTORY --task T --protocol P` 幂等导入。五种旧文件的原文保留为LegacyRecord，精确文件字节（包括lessons envelope及文件修订）进入CAS：results.tsv和episodes.jsonl生成Experiment标识与Observation摘要，failures.jsonl生成Failure，lessons.json生成Claim，strategy.json生成非历史证据的Context。支持lessons列表及`{"lessons": [...]}`封装。
+旧记忆通过 `migrate DIRECTORY LEGACY_DIRECTORY --task T --protocol P` 幂等导入。五种旧文件的原文保留为LegacyRecord，精确文件字节（包括lessons envelope及文件修订）进入CAS：results.tsv和episodes.jsonl生成Experiment标识与Observation摘要，failures.jsonl生成Failure，lessons.json生成Claim，strategy.json生成非历史证据的Context。支持lessons列表及`{"lessons": [...]}`封装。 失败记录的`superseded_by`若能解析为同任务/协议的已有Experiment，会追加该Experiment→ADDRESSES→Failure关联，并保留原文引用和未核验标记；不能据此认定执行成功或故障已修复。目标后来导入时可补边，原Failure及历史快照不改写。自引用和其他任务同名ID不解析。
 
 同任务/协议下相同显式experiment_id或run_id共用一个实验标识，各来源摘要独立保留，不以重复日志增加独立样本。源文件没有实验ID时仅建立明确标为unidentified的记录标识。所有旧实验均`valid=false`、`effect_gate_passed=false`、`independent_run_id=null`；原来声称的validity、seed列表、confidence和confirmed状态仅作为reported字段保存，不继承科学资格。lesson的支持和反证关系保留，缺失引用写为unresolved而不生成假实验；后续导入实际源记录可补齐引用，旧图版本和原文不变。父实验存在时保留报告的设计血缘，失败只作执行证据。
 

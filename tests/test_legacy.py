@@ -106,6 +106,42 @@ class LegacyMigrationTests(unittest.TestCase):
         self.assertEqual(current['attrs']['unresolved_external_refs'], [])
         self.assertEqual(current['attrs']['status'], 'legacy_unverified')
 
+    def test_reported_repair_resolves_later_without_upgrading_failure_evidence(self):
+        value={'failure_id':'oom-1','experiment_id':'failed','kind':'oom','status':'reported_fixed',
+               'reproduction':'train --batch 4096','superseded_by':'repair-run'}
+        (self.source/'failures.jsonl').write_text(canonical(value)+'\n')
+        self.import_all();old_version=self.store.version
+        old=next(n for n in self.store.snapshot()['nodes'] if n['type']=='Failure')
+        self.assertEqual(old['attrs']['reported_repair_refs'],['repair-run'])
+        self.assertEqual(old['attrs']['reported_status'],'reported_fixed')
+        self.assertEqual(old['attrs']['status'],'legacy_unverified')
+        (self.source/'episodes.jsonl').write_text(canonical({'experiment_id':'repair-run','status':'success'})+'\n')
+        self.import_all();graph=self.store.snapshot()
+        current=next(n for n in graph['nodes'] if n['id']==old['id'])
+        self.assertEqual(current,old)
+        relation=next(e for e in graph['edges'] if e['relation']=='ADDRESSES')
+        source=next(n for n in graph['nodes'] if n['id']==relation['source'])
+        self.assertEqual(source['attrs']['legacy_experiment_id'],'repair-run')
+        self.assertFalse(source['attrs']['valid'])
+        self.assertEqual(relation['target'],old['id'])
+        self.assertEqual(relation['attrs']['status'],'legacy_unverified')
+        self.assertIn('unverified',relation['attrs']['qualification'])
+        self.assertEqual(relation['attrs']['legacy_source_record_ids'],[current['attrs']['source_record_id']])
+        self.assertEqual(next(n for n in self.store.snapshot(old_version)['nodes'] if n['id']==old['id']),old)
+        before=self.store.verify();self.import_all();self.assertEqual(self.store.verify(),before)
+
+    def test_repair_references_do_not_cross_tasks_or_resolve_to_self(self):
+        (self.source/'episodes.jsonl').write_text(canonical({'experiment_id':'repair-run'})+'\n')
+        import_legacy(self.store,self.source,'other-task','unknown')
+        (self.source/'episodes.jsonl').unlink()
+        values=[{'experiment_id':'failed','superseded_by':'repair-run'},
+                {'experiment_id':'self','superseded_by':'self'}]
+        (self.source/'failures.jsonl').write_text(''.join(canonical(v)+'\n' for v in values))
+        self.import_all();graph=self.store.snapshot()
+        self.assertFalse(any(e['relation']=='ADDRESSES' for e in graph['edges']))
+        self.assertEqual({tuple(n['attrs']['reported_repair_refs']) for n in graph['nodes'] if n['type']=='Failure'},
+                         {('repair-run',),('self',)})
+
     def test_concurrent_source_change_cannot_mismatch_archived_bytes_and_projection(self):
         path = self.source / 'lessons.json'
         write_json(path, [{'lesson': 'before'}]); original = path.read_bytes()

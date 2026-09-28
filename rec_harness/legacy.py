@@ -88,7 +88,8 @@ def import_legacy(store, source, task_id, protocol_hash='unknown'):
             # bytes and earlier graph snapshot, and never upgrade scientific status.
             fresh[key] = candidate
         return key
-    def link(source_id, target_id, kind, suffix, source_record=None):
+    def link(source_id, target_id, kind, suffix, source_record=None,qualification=None):
+        qualification=qualification or 'reported parent relation; no weight transfer or metric comparability asserted'
         key = 'legacy-edge-' + digest([task_id, protocol_hash, source_id, target_id, suffix])[:32]
         existing=relations.get(key) or known_edge_records.get(key)
         if existing:
@@ -96,13 +97,13 @@ def import_legacy(store, source, task_id, protocol_hash='unknown'):
                 relations[key]={**existing,'attrs':{**existing['attrs'],
                     'legacy_source_record_ids':sorted(set(existing['attrs'].get('legacy_source_record_ids',[])+[source_record])),
                     'revision_id':str(store.version+1),
-                    'qualification':'reported parent relation; no weight transfer or metric comparability asserted'}}
+                    'qualification':qualification}}
             return
         item = edge(key, source_id, target_id, kind, [], task_id, store.version + 1)
         item['attrs'].update(origin='legacy_unverified', status='legacy_unverified')
         if source_record:
             item['attrs'].update(legacy_source_record_ids=[source_record],
-                qualification='reported parent relation; no weight transfer or metric comparability asserted')
+                qualification=qualification)
         relations[key] = item
     def external_identity(value):
         supplied = value.get('experiment_id') or value.get('run_id')
@@ -142,12 +143,20 @@ def import_legacy(store, source, task_id, protocol_hash='unknown'):
             if parent is not None and str(parent) in anchors and anchors[str(parent)] != anchor:
                 link(anchor, anchors[str(parent)], 'DERIVED_FROM', 'reported-parent',raw_id)
         elif name == 'failures.jsonl':
+            repair=value.get('superseded_by')
+            repair_id=str(repair) if isinstance(repair,(str,int)) and not isinstance(repair,bool) and repair!='' else None
+            repair_anchor=anchors.get(repair_id) if repair_id!=external_id else None
             add(key, 'Failure', {'source_record_id': raw_id,
+                'legacy_failure_id':value.get('failure_id'),'reported_status':value.get('status'),
+                'reported_repair_refs':[repair_id] if repair_id is not None else [],
                 'failure_kind': value.get('kind', 'unknown'), 'signature': value.get('signature'),
                 'scope': value.get('scope', 'unknown'), 'reproduction': value.get('reproduction'),
                 'reported_likely_cause': value.get('likely_cause'), 'avoid': value.get('avoid'),
                 'execution_evidence_only': True, 'superseded_by_external_id': value.get('superseded_by')})
             if anchor: link(anchor, key, 'HAS_FAILURE', 'failure')
+            if repair_anchor:
+                link(repair_anchor,key,'ADDRESSES','reported-repair',raw_id,
+                    'legacy superseded_by reports a possible repair; execution success and causal resolution are unverified')
         elif name == 'lessons.json':
             supports, counters = value.get('supporting_episode_ids', []), value.get('counterevidence_episode_ids', [])
             if not isinstance(supports, list) or not isinstance(counters, list):

@@ -614,3 +614,5 @@ python3 -m rec_harness amazon-progress /path/to/amazon-campaign
 Harness 演化可使用 `trace_sources` 收集多个 campaign 的独立冻结前缀，避免手工拼接及本地角色 ID 冲突。所有来源任务必须排除在独立验证之外；项目模板和测量转交保留完整来源集合，详见[多来源轨迹入口](implementation/multi-trace-sources.md)。
 
 验证阶段可用 `evaluation_mode` 冻结评价类型，区分固定候选选择、端到端候选生成和离线测量；类型不匹配的报告拒绝准入。现有内置在线比较报告明确标为端到端生成，详见[评价类型边界](implementation/evaluation-modes.md)。
+
+固定候选池的三组选择可使用[固定候选选择入口](implementation/fixed-selection.md)，每条件3次Codex调用；主机评分不进入角色请求，未知结果不自动重发。它使用预给观测与结果，不替代在线模型实验。

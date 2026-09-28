@@ -10,8 +10,8 @@
 
 - 最新真实传输验收：[v18 工具检索与草稿归档](../experiments/tool-literature-transport-v1.md)：1 次 Codex 调用、零重试，实际搜索/打开来源，指令、日志、返回源码和 CAS 绑定通过，无新增调用恢复通过。没有运行验证阶梯或晋升；不是自主发现缺口或正效用证据。
 
-- 最新完整回归：[v19 安装环境](install-acceptance-v19.md)中 454 项全部通过、零跳过，覆盖冻结 `e32b428`；Torch、进程恢复和显式 Linux OS 隔离检查均实际执行。[v18](install-acceptance-v18.md)保留为历史证据。
-- 最新安装交付：[v19](install-acceptance-v19.md)，126 模块及原生源码与安装文件一致，120 个实际加载项目模块来自安装目录。来源准入、来源图、两类来源记忆和导出冻结锁均已纳入；真实 Amazon 历史记忆只读导出通过。
+- 最新完整回归：[v20 安装环境](install-acceptance-v20.md)中 465 项全部通过、零跳过，覆盖冻结 `7dbe6a2`；Torch、进程恢复和 Linux OS 隔离检查实际执行。[v19](install-acceptance-v19.md)保留为历史证据。
+- 最新安装交付：[v20](install-acceptance-v20.md)，127 模块及原生源码与安装文件一致，121 个实际加载项目模块来自安装目录。显式 Skill、两条测量证据转交及启动预检均已纳入；真实联合项目 19 条轨迹与冻结源码输出一致，Amazon 历史记忆只读导出通过。
 - 最新已完成真实 Amazon 优化：[v3](../experiments/amazon-next-autoresearch-v3.md)。开发平均 HR@10 增加 0.012750；独立初始化确认增加 0.013125，主机选中候选。确认使用相同验证用户，不是最终测试；该研究已封存，不使用确认结果继续调优。
 - 最近真实工程验收：[多文件 CPU 执行](../experiments/multifile-diagnostic-jail-v1.md)与[诊断提交中断恢复](../experiments/diagnostic-recovery-jail-v1.md)。没有新增 Codex 调用或训练，也不增加工具效用结论。
 - 最新工具在线验收：[新 worker 三组比较](../experiments/tool-authoring-online-v1.md)，18 次真实角色零重试，候选相对两组对照收益均为 0、在线费用 32，不晋升；18 条指令/主机反馈轨迹和无新增执行恢复审计通过。仅一个合成任务族，真实自主缺口发现和更广效用范围仍未完成。
@@ -47,7 +47,7 @@
 
 补齐[自主测量审查→工具开发的原始输入转交](measurement-review-handoff.md)，保留当时已提交的公开激活/block-score 证据并校验前缀，避免工具作者仅看到基础评分。工具运行时输入能力仍受原冻结合同限制；未新增真实 Codex 调用。
 
-新增[显式研究 Skill 传输](explicit-role-skills.md)，正文随配置冻结并进入实际提示词，优化器可核对内容版本；未配置的旧收据保持兼容。本项在 v19 安装包之后，尚未纳入该包。
+新增[显式研究 Skill 传输](explicit-role-skills.md)，正文随配置冻结并进入实际提示词，优化器可核对内容版本；未配置的旧收据保持兼容。本项已纳入 v20 安装包验收。
 
 Amazon 开发记忆导出已增加[控制器冻结锁校验](amazon-memory-lock.md)，在读取 study 前拒绝配置变更或缺锁。真实 Amazon v3 两次只读导出与原记忆完全一致，源配置与事件链未变化。
 

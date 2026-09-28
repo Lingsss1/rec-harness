@@ -1,6 +1,6 @@
 import unittest
 from pathlib import Path
-from rec_harness.core import ContractError,read_json,write_json
+from rec_harness.core import ContractError,digest,read_json,write_json
 from rec_harness.evolution import Evolution,STAGES
 from rec_harness.tool_method import CONTRACT,FILENAME,validate
 import test_evolution_auto
@@ -67,6 +67,17 @@ class ToolMethodTests(unittest.TestCase):
         author=Author();evolution=Evolution(self.fixture.campaign);self.addCleanup(evolution.store.close)
         result=evolution.run('method','tool',{},plan,agent=author)
         self.assertEqual(result['status'],'promoted');self.assertEqual(author.calls,1)
+        graph=evolution.store.snapshot()
+        method=next(n for n in graph['nodes'] if n['type']=='Method')
+        self.assertEqual(method['attrs']['definition'],self.card['definition'])
+        self.assertEqual(method['attrs']['origin'],'agent_hypothesis')
+        self.assertFalse(method['attrs']['independent_unit'])
+        self.assertFalse(any(n['type']=='Claim' for n in graph['nodes']))
+        bundle=evolution.store.bundle('method',digest(plan),'tool',query='spread')
+        self.assertTrue(any(n['id']==method['id'] for n in bundle['nodes']))
+        before=evolution.store.verify()
+        self.assertEqual(evolution.run('method','tool',{},plan,agent=author),result)
+        self.assertEqual(evolution.store.verify(),before);self.assertEqual(author.calls,1)
         candidate=evolution.verified_candidate('method')
         self.assertNotIn(FILENAME,candidate['implementation'])
         self.assertEqual(read_json(evolution.artifacts.verify(candidate['proposal_ref'])),self.card)
@@ -80,3 +91,25 @@ class ToolMethodTests(unittest.TestCase):
         changed=read_json(projection);changed['proposal_ref']={}
         write_json(projection,changed)
         with self.assertRaisesRegex(ContractError,'proposal projection'):evolution.verified_candidate('method')
+
+    def test_paper_method_graph_keeps_unverified_sources_and_deduplicates_citations(self):
+        from rec_harness.evolution_graph import lifecycle_graph
+        card={**self.card,'route':'paper','sources':[
+            {'locator':'doi:fixture','method_mapping':'Equation 1'},
+            {'locator':'doi:fixture','method_mapping':'Equation 1'},
+            {'locator':'doi:fixture','method_mapping':'Section 2'}]}
+        events=[{'kind':'candidate_proposed','hash':'a'*64,'created_at':'1','payload':{
+            'candidate_id':'paper','plan_hash':'plan','context_hash':'context','kind':'tool','source_hash':None}},
+            {'kind':'candidate_implemented','hash':'b'*64,'created_at':'2','payload':{
+                'candidate_id':'paper','implementation_hash':'code','proposal_ref':{'sha256':'card'}}}]
+        graph=lifecycle_graph(events,proposals={'paper':card})
+        source=next(n for n in graph['nodes'] if n['type']=='Source')
+        self.assertEqual(sum(n['type']=='Source' for n in graph['nodes']),1)
+        self.assertEqual(source['attrs']['verification_status'],'agent_reported_unverified')
+        self.assertIsNone(source['attrs']['retrieved_content_ref'])
+        method=next(n for n in graph['nodes'] if n['type']=='Method')
+        self.assertEqual(method['attrs']['origin'],'paper_claim')
+        edge=next(e for e in graph['edges'] if e['relation']=='DERIVED_FROM')
+        self.assertEqual(edge['attrs']['method_mappings'],['Equation 1','Section 2'])
+        self.assertEqual(edge['attrs']['evidence_refs'],[source['id']])
+        self.assertEqual(graph,lifecycle_graph(events,proposals={'paper':card}))

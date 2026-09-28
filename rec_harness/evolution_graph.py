@@ -69,6 +69,27 @@ def lifecycle_graph(events,contexts=None,proposals=None):
                 node(identity,'Observation',{'kind':'evolution_implementation','implementation_hash':value['implementation_hash']},candidate,protocol,event)
                 link(identity,parent,'ABOUT',event,candidate)
                 proposal=(proposals or {}).get(candidate)
+                if category=='tool' and proposal is not None:
+                    from .tool_method import validate
+                    validate(proposal,nodes[parent]['attrs'].get('source_hash'))
+                    method='evolution-method-'+event['hash'][:32]
+                    node(method,'Method',{**proposal,'proposal_ref':value['proposal_ref'],
+                        'status':'provisional','verification_status':'author_declared_unverified'},candidate,protocol,event)
+                    origin='paper_claim' if proposal['route']=='paper' else 'agent_hypothesis'
+                    nodes[method]['attrs']['origin']=origin
+                    link(parent,method,'BASED_ON',event,candidate)['attrs']['origin']='agent_hypothesis'
+                    citations={}
+                    for source in proposal['sources']:
+                        mappings=citations.setdefault(source['locator'],[])
+                        if source['method_mapping'] not in mappings:mappings.append(source['method_mapping'])
+                    for citation,mappings in citations.items():
+                        source='evolution-method-source-'+digest([candidate,protocol,citation])[:32]
+                        node(source,'Source',{'citation':citation,'citation_hash':digest(citation),
+                            'verification_status':'agent_reported_unverified','source_version':'unknown',
+                            'retrieved_content_ref':None},candidate,protocol,event)
+                        nodes[source]['attrs']['origin']='paper_claim'
+                        relationship=link(method,source,'DERIVED_FROM',event,candidate)
+                        relationship['attrs'].update(origin='paper_claim',method_mappings=mappings,evidence_refs=[source])
                 if category=='harness' and proposal is not None:
                     hypothesis='evolution-failure-'+event['hash'][:32]
                     node(hypothesis,'DecisionFailureHypothesis',{

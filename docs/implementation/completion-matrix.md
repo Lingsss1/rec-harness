@@ -16,8 +16,8 @@
 
 - 最新真实传输验收：[v18 工具检索与草稿归档](../experiments/tool-literature-transport-v1.md)：1 次 Codex 调用、零重试，实际搜索/打开来源，指令、日志、返回源码和 CAS 绑定通过，无新增调用恢复通过。没有运行验证阶梯或晋升；不是自主发现缺口或正效用证据。
 
-- 最新完整回归：冻结实现 `e7538d1` 的487项源码测试全部通过、零跳过，90.912秒，含Torch及Linux OS检查（`full-regression-e7538d1/acceptance.json`）。最新安装包仍为下列v21，不含其后的工具送达与多任务合同变更。
-- 最新安装交付：[v21](install-acceptance-v21.md)，128 个模块及原生源码与安装文件一致，14 个入口及14项安装环境针对性测试通过；两个真实项目报表与源码输出一致。包含测量范围准入、后继记忆绑定、项目报表和配置路径解析。
+- 最新完整回归：冻结实现 `e7538d1` 的487项源码测试全部通过、零跳过，90.912秒，含Torch及Linux OS检查（`full-regression-e7538d1/acceptance.json`）。该实现已纳入下列v22安装包。
+- 最新安装交付：[v22](install-acceptance-v22.md)，128个模块与原生源码逐字节一致，14个入口及22项安装环境测试通过，72个实际加载模块来自安装目录；四项历史输出与源码一致。包含通用/Amazon工具送达与多任务合同。完整487项回归在源码环境执行。
 - 最新已完成真实 Amazon 优化：[v3](../experiments/amazon-next-autoresearch-v3.md)。开发平均 HR@10 增加 0.012750；独立初始化确认增加 0.013125，主机选中候选。确认使用相同验证用户，不是最终测试；该研究已封存，不使用确认结果继续调优。
 - 最近真实工程验收：[多文件 CPU 执行](../experiments/multifile-diagnostic-jail-v1.md)与[诊断提交中断恢复](../experiments/diagnostic-recovery-jail-v1.md)。没有新增 Codex 调用或训练，也不增加工具效用结论。
 - 最新工具在线验收：[新 worker 三组比较](../experiments/tool-authoring-online-v1.md)，18 次真实角色零重试，候选相对两组对照收益均为 0、在线费用 32，不晋升；18 条指令/主机反馈轨迹和无新增执行恢复审计通过。仅一个合成任务族，真实自主缺口发现和更广效用范围仍未完成。

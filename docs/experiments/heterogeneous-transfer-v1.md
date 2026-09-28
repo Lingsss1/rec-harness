@@ -17,3 +17,5 @@
 `source-acceptance.json` 核对6条决策轨迹、源事件头、成本与冻结记忆。禁止Agent及评估执行后，终态恢复的报告、事件与费用不变。公开源记忆导出7个节点，hash为 `6737532c9a7c73f6d705cc34389758b5e3e12e3b4f6ff9abe43fe38bd722e864`。系统已自动启动目标开发Fresh组；还不能由源完成推导迁移有效。
 
 同期当前源码完整回归487项通过、零跳过，90.912秒，包括Torch与Linux OS测试；证据为 `full-regression-e7538d1/acceptance.json`。这不是安装包完整回归，也不替代本次真实目标比较。
+
+目标开发Fresh组已完成6次角色，10 BCU；`development-fresh-acceptance.json` 核对6条轨迹、来源节点暴露为0以及终态恢复零调用/零训练。Experienced组已自动启动，配对差值仍待两组最终结果产生后计算。

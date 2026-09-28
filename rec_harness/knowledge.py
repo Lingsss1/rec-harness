@@ -1,5 +1,6 @@
 """Append-only, scoped interpretation boundary shared by research adapters."""
-from .core import ContractError
+from .core import ContractError,required,identifier
+from .store import RELATIONS
 
 
 def validate_knowledge_patch(patch, graph):
@@ -17,6 +18,7 @@ def validate_knowledge_patch(patch, graph):
                    and item['attrs'].get('protocol_hash')==protocol
                    and item['attrs'].get('partition')=='development'}
     for item in patch['nodes']:
+        required(item,['id','type','attrs']);identifier(item['id'])
         attrs=item['attrs']
         if item['type'] not in {'Claim','GapHypothesis','MeasurementGap'} or item['id'] in known or item['id'] in new_ids:
             raise ContractError('knowledge may only append new explanation nodes')
@@ -27,7 +29,13 @@ def validate_knowledge_patch(patch, graph):
         if not set(attrs.get('evidence_refs',[])).issubset(known):
             raise ContractError('knowledge references evidence outside development context')
         new_ids.add(item['id'])
+    edge_ids={item['id'] for item in graph.get('edges',[])}
     for relation in patch['edges']:
+        required(relation,['id','source','target','relation','attrs']);identifier(relation['id'])
+        required(relation['attrs'],['scope','evidence_refs','origin','status','created_at','revision_id'])
+        if relation['relation'] not in RELATIONS or relation['id'] in edge_ids:
+            raise ContractError('invalid or duplicate knowledge relation')
+        edge_ids.add(relation['id'])
         if relation['source'] not in known|new_ids or relation['target'] not in known|new_ids or not set(relation['attrs'].get('evidence_refs',[])).issubset(known|new_ids):
             raise ContractError('knowledge edge leaves supplied development context')
         if relation['source'] in historical or relation['target'] in historical:

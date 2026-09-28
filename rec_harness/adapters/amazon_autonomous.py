@@ -488,6 +488,8 @@ class AmazonAutoresearch:
             'patch_contract':{'base_version':graph['graph_version'],'fields':['base_version','nodes','edges'],
                 'allowed_node_types':['Claim','GapHypothesis','MeasurementGap'],'origin':'agent_hypothesis',
                 'task_id':graph['task_id'],'protocol_hash':cfg['protocol_hash'],'status':'provisional',
+                'edge_fields':['id','source','target','relation','attrs'],
+                'edge_attrs_required':['scope','evidence_refs','origin','status','created_at','revision_id'],
                 'evidence_refs':[n['id'] for n in graph['nodes']]},
             'instructions':['Append new provisional explanations only. Every node attrs must include task_id/protocol_hash/origin; Claims additionally need scope/status/evidence_refs.',
                             'Evidence refs must be supplied graph node IDs, never file paths. Retain all negative slices; empty patch is valid.',

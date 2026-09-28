@@ -202,6 +202,8 @@ class CodexAgent:
                     "origin": "agent_hypothesis", "status": "provisional", "scope": "current task, model, protocol and seeds",
                     "evidence_refs": ["existing Experiment node IDs only"], "statement": "bounded interpretation"}},
                 "allowed_node_types": ["Claim", "GapHypothesis", "MeasurementGap"],
+                "edge_fields": ["id", "source", "target", "relation", "attrs"],
+                "edge_attrs_required": ["scope", "evidence_refs", "origin", "status", "created_at", "revision_id"],
                 "allowed_origins": ["paper_claim", "agent_hypothesis", "local_evidence", "legacy_unverified"],
                 "instructions": "Return patch_json as a JSON encoded object using EXACT field names. nodes and edges are arrays. Empty edges is valid. No add_nodes/base_graph_snapshot_id aliases. No factual or metric node creation."}}
 

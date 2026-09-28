@@ -32,6 +32,11 @@ class PriorExplanationTests(unittest.TestCase):
             revision['attrs'].update(origin='agent_hypothesis',status='provisional')
             patch={'base_version':store.version,'nodes':[claim],'edges':[revision]}
             validate_knowledge_patch(patch,view)
+            for field in ['created_at','revision_id']:
+                invalid=copy.deepcopy(patch);invalid['edges'][0]['attrs'].pop(field)
+                with self.assertRaisesRegex(ContractError,'missing '+field):validate_knowledge_patch(invalid,view)
+            invalid=copy.deepcopy(patch);invalid['edges'].append(copy.deepcopy(revision))
+            with self.assertRaisesRegex(ContractError,'duplicate'):validate_knowledge_patch(invalid,view)
             for field,value in [('relation','CONTRADICTS'),('source','current-fact')]:
                 invalid=copy.deepcopy(patch);invalid['edges'][0][field]=value
                 with self.assertRaisesRegex(ContractError,'scoped provisional'):validate_knowledge_patch(invalid,view)

@@ -6,6 +6,8 @@
 
 ## 当前交付与模型结果
 
+- 最新真实传输验收：[v18 工具检索与草稿归档](../experiments/tool-literature-transport-v1.md)：1 次 Codex 调用、零重试，实际搜索/打开来源，指令、日志、返回源码和 CAS 绑定通过，无新增调用恢复通过。没有运行验证阶梯或晋升；不是自主发现缺口或正效用证据。
+
 - 最新完整回归：[v18 安装环境](install-acceptance-v18.md)中 447 项全部通过、零跳过，覆盖冻结 `9eee9a1`；Torch、进程恢复和显式 Linux OS 隔离检查均实际执行。[v17](install-acceptance-v17.md)及此前[源码环境 438 项](full-environment-regression-v1.md)保留为历史证据。
 - 最新安装交付：[v18](install-acceptance-v18.md)，125 模块及原生源码与安装文件一致，119 个实际加载项目模块来自安装目录。项目预检、搜索轨迹、生成与草稿归档、Amazon 失败轨迹等后续变更均已纳入。
 - 最新已完成真实 Amazon 优化：[v3](../experiments/amazon-next-autoresearch-v3.md)。开发平均 HR@10 增加 0.012750；独立初始化确认增加 0.013125，主机选中候选。确认使用相同验证用户，不是最终测试；该研究已封存，不使用确认结果继续调优。
@@ -41,7 +43,7 @@ Amazon 新拒绝记录已接入[优化器失败轨迹](rejected-role-traces.md)�
 
 Amazon 失败角色已补齐[拒绝事件即时归档](amazon-rejection-archive.md)，包括返回草稿；校验提交输入与拒绝原因绑定，不依赖后续人工重开。旧历史拒绝事件不补造档案，新路径经过模拟角色和恢复测试。
 
-失败生成的原始产物继续补齐：[返回工作区草稿](returned-agent-workspace.md)在隔离执行结束后、响应准入前单独保留，覆盖非法 JSON 和未完成源码。草稿不作为可训练或可晋升实现；仍需新真实调用验收该新增传输路径。
+失败生成的原始产物继续补齐：[返回工作区草稿](returned-agent-workspace.md)在隔离执行结束后、响应准入前单独保留，覆盖非法 JSON 和未完成源码。草稿不作为可训练或可晋升实现；新增成功传输路径已有上述真实工具调用验收，失败/超时分支仍由工程测试覆盖。
 
 工具/Harness 生成档案已补齐[正常及失败调用的事件/CAS 绑定](evolution-generation-archive.md)。新工具演化任务默认冻结启用 Codex 内置搜索，显式禁用仍生效；工具来源记录使用实际响应合同支持的源码说明与 limitations。历史配置和收据不回写，真实论文路线及内容级核验仍待验收。
 

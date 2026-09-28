@@ -6,8 +6,25 @@
 
 终态验收脚本检查两轮角色与周期归档、实际角色收到的训练前后合同、长期图中的非独立合同观测、第二轮的上一轮记忆/缺口复查、由第一轮决定的 incumbent、独立排名一致性，以及禁止新增调用/训练/评分后的精确恢复。
 
-当前状态：已启动。控制器 PID 40976、start_ticks 5892124878；观察器 PID 41036、start_ticks 5892128180。两者 boot_id 为 `17e9114f-f060-4b1d-b1dc-db95f3d07e7d`，启动时身份已核验。当前进度文件为 freeze_execution，尚无完整训练、角色周期或终态通过证据。终态以 `controller-result.json`、`watch-result.json` 和 `terminal-acceptance.json` 为准，不能以启动记录认定完成。
+当前状态：两轮及终态审计全部通过。`controller-result.json` 为 completed，`watch-result.json` 和 `terminal-acceptance.json` 为 passed。控制器 PID 40976、start_ticks 5892124878；观察器 PID 41036、start_ticks 5892128180，最终均已退出为 Z。两者 boot_id 为 `17e9114f-f060-4b1d-b1dc-db95f3d07e7d`。
 
-后续进度：基线已完成，合成开发 HR@10 为 0.09375；32 用户独立复评分的排名差异为零。第一轮 evidence 角色已完成，hypothesis 已提交。`first-context-acceptance.json` 将实际 evidence 上下文和响应绑定到完成事件，核验角色输入含 verified 的训练前后合同及 gap_applicability。第一轮没有前序本 campaign GapCard，检查列表为空是预期情况；第二轮记忆交接仍待执行。该阶段记录不代表两轮终态通过。
+| 验收项 | 结果 |
+| --- | --- |
+| 真实 Codex 角色 | 两轮共 12 次，零重试，零失败轮次 |
+| 训练/独立评分 | 五个开发任务，每个 32 用户，排名差异均为零 |
+| 主指标与决定 | 五份模型 HR@10 均为 0.09375，两轮均 discard |
+| 后继 incumbent | legacy_incumbent；确认及最终测试均未执行 |
+| 角色/周期归档 | 12 角色、2 周期、106 产物通过核验 |
+| 精确恢复 | 禁止新增角色、训练和评分后重复运行，结果及审计完全相同 |
+| 本次 GPU 秒 | 481.51804726570845 |
+| 继承 / 累计 GPU 秒 | 592.9974888265133 / 1074.5155360922217 |
 
-第一轮已完成六角色闭环：候选、全局系数对照和基线 HR@10 均为 0.09375，独立评分均为 32 用户零排名差异。evaluation/lead 均 discard，机制结论 unknown，没有执行确认分支。第二轮 evidence 已完成，`cross-round-acceptance.json` 将实际上下文/响应绑定到角色完成事件：一份前序读出、对应 discard 决策、原知识响应及旧 GapCard 复查完整进入第二轮，incumbent 仍为 legacy_incumbent，当前缺口状态未继承旧状态。第一轮知识角色收到三条 non-independent 训练合同观测。该证据验证真实轮次交接，不代表第二轮或终态恢复已通过。
+第一轮测试上下文分歧条件化系数，对照为可学习全局系数；第二轮改为最近三条历史上下文，对照为最早三条历史上下文。第二轮部分次要指标变化，未改变主要指标门槛；evaluation/lead 均保持 discard、机制结论 unknown。提案中的额外 checkpoint 内替换诊断未在本验收执行，不能声称完成机制归因。
+
+`first-context-acceptance.json` 和 `cross-round-acceptance.json` 绑定实际角色上下文、响应和完成事件。一份前序读出、对应 discard 决策、原知识响应及旧 GapCard 复查完整进入第二轮，当前缺口状态未继承旧状态。终态审计覆盖两轮 evidence/hypothesis 的基线训练前后合同、evaluation/lead 的候选/对照合同，以及每轮知识角色可见的三条非独立合同观测。
+
+`final-call-report.json`/`.md` 记录调用节奏：首末跨度 1295.916 秒、最短间隔 47.107 秒、中位 68.876 秒、闭区间 60 秒峰值 2 次。这是框架提交次数，不推断内部 API 次数或服务限制。
+
+开发读出 hash 分别为 `7bc2c84e6977a68ea1c2295a454d0bfbe427c2fc7c4487535e4138a9a40b7b56` 和 `a1807efb1c838b430224cf73c381cbcbd394aeed85286289b7d0d75470ad7b80`。控制器终态 50 个事件，head `9bbbe3b6985bd2337e9d38608a08b33f660b1096e19740bf271586cd4aac69aa`；study 44 个事件、graph version 11，head `554a4e6d0fac8aed518449686820e57c6f12925455d12f829a536a026c7f1963`。
+
+该结果证明当前实现的真实多轮运行、证据交接与恢复，不证明图记忆或诊断带来收益，也不覆盖模型晋升后跨模型缺口实际重测。本轮控制器始终使用冻结代码，原有真实 Amazon 研究和最终测试口径未改动。

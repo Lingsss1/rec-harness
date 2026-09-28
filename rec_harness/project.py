@@ -14,6 +14,7 @@ class ResearchProject:
         root=Path(root).resolve();config=copy.deepcopy(configuration)
         config.setdefault('measurement_lineage',True)
         config.setdefault('inherit_tool_source',True)
+        config.setdefault('inherit_harness_policy',True)
         identifier(config['task_id'])
         if config['model'].get('adapter') not in {None,'amazon-nextitnet-v1'}:raise ContractError('unsupported project model adapter')
         if config['model'].get('adapter')=='amazon-nextitnet-v1':
@@ -137,7 +138,10 @@ class ResearchProject:
                 finally:previous.store.close()
         else:
             config['trace_source']={'campaign':str(source)}
-            ids=[read_json(source/('amazon-auto.json' if (source/'amazon-auto.json').exists() else 'campaign.json'))['task_id']]
+            source_config=read_json(source/('amazon-auto.json' if (source/'amazon-auto.json').exists() else 'campaign.json'))
+            ids=[source_config['task_id']]
+            if self.config.get('inherit_harness_policy'):
+                config['harness_base_policy']=source_config.get('research_policy',{})
         config['plan']['development_ids']=sorted(set(config['plan']['development_ids'])|set(ids))
         return config
 

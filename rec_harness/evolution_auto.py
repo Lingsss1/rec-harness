@@ -35,6 +35,12 @@ class AutonomousEvolution:
                 if config['kind']!='tool' or digest(config.get('source_snapshot'))!=config['tool_predecessor']['implementation_hash']:
                     raise ContractError('tool predecessor differs from inherited implementation')
                 config['context']={**config['context'],'tool_predecessor':config['tool_predecessor']}
+            if 'harness_base_policy' in config:
+                from .evolution import validate_policy
+                if config['kind']!='harness':raise ContractError('base policy requires Harness evolution')
+                validate_policy(config['harness_base_policy'])
+                config['context']={**config['context'],'base_policy':config['harness_base_policy'],
+                    'patch_semantics':'Apply patch_diff to base_policy: replace supplied top-level fields, merge supplied prompt roles, preserve omitted fields. Validators evaluate the complete resulting policy.'}
             write_json(root/'evolution-auto.json',config)
             write_json(root/'auto-lock.json',{'config_hash':digest(config)})
             write_json(root/'state.json',{'candidate_id':config['candidate_id'],'kind':config['kind'],'status':'ready'})

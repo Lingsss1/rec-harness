@@ -41,6 +41,38 @@ class DiscoverAgent(ProjectAgent):
 
 
 class ProjectTests(unittest.TestCase):
+    def test_successive_harness_patches_preserve_current_policy_and_other_prompts(self):
+        path=self.config('harness');config=read_json(path)
+        config.update(max_model_episodes=3,max_harness_updates=2)
+        config['model']['research_policy']={'prompts':{'evidence':'Existing evidence guidance'}}
+        write_json(path,config);bases=[]
+        class IncrementalOptimizer(ProjectAgent):
+            def run(agent,role,context,directory):
+                response=super().run(role,context,directory)
+                if role=='optimizer':
+                    bases.append(context['context']['base_policy'])
+                    if len(bases)==2:
+                        response.update(editable_scope=['prompts.lead'],patch_diff=json.dumps({'prompts':{'lead':'Check contrary evidence'}}))
+                return response
+        agent=IncrementalOptimizer()
+        report=autoresearch(self.campaign,path,agent=agent)
+        self.assertEqual([e['kind'] for e in report['episodes']],['model','harness','model','harness','model'])
+        expected={'prompts':{'evidence':'Existing evidence guidance'},'retrieval_limit':25}
+        self.assertEqual(bases,[{'prompts':{'evidence':'Existing evidence guidance'}},expected])
+        final=read_json(self.campaign/'episodes/model-3/campaign/campaign.json')['research_policy']
+        self.assertEqual(final,{'retrieval_limit':25,'prompts':{'evidence':'Existing evidence guidance','lead':'Check contrary evidence'}})
+        second=self.campaign/'episodes/harness-2/campaign'
+        candidate=read_json(second/'candidates/project-harness-2/candidate.json')
+        from rec_harness.core import Artifacts
+        artifacts=Artifacts(second/'objects')
+        self.assertEqual(read_json(artifacts.verify(candidate['implementation']['policy.json'])),final)
+        proposal=read_json(artifacts.verify(candidate['proposal_ref']))
+        self.assertEqual(json.loads(proposal['patch_diff']),{'prompts':{'lead':'Check contrary evidence'}})
+        self.assertEqual(autoresearch(self.campaign,agent=agent),report);self.assertEqual(len(bases),2)
+        project=ResearchProject(self.campaign,agent=agent)
+        try:self.assertEqual(len(project.verify()['verified_episodes']),5)
+        finally:project.store.close()
+
     def test_two_tool_updates_inherit_validated_source_and_remeasure_all_obligations(self):
         path=self.config('tool');config=read_json(path)
         config.update(max_model_episodes=3,max_tool_updates=2)

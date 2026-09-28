@@ -214,6 +214,10 @@ class Evolution:
                     if not response['trace_refs'] or not set(response['trace_refs']).issubset(known):raise ContractError('optimizer cites traces outside its frozen prefix')
                 policy = json.loads(response["patch_diff"])
                 validate_patch_scope(response["editable_scope"],policy)
+                if 'base_policy' in context:
+                    baseline=context['base_policy'];validate_policy(baseline)
+                    policy={**baseline,**policy,**({'prompts':{**baseline.get('prompts',{}),**policy['prompts']}} if 'prompts' in policy else {})}
+                    validate_policy(policy)
                 # Preserve the rationale independently of the executable policy.
                 # Scripted transports need not write their own response receipt.
                 public_only(response)

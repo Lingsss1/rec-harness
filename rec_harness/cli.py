@@ -44,6 +44,8 @@ def main(argv=None):
     p.add_argument('directory');p.add_argument('--config',help='initial public task configuration; omit on resume')
     p = commands.add_parser('activation-probe',help='run or recover an isolated local NextItNet activation probe')
     p.add_argument('config');p.add_argument('directory')
+    p = commands.add_parser('evolution-sync-graph',help='project committed evolution lifecycle into graph memory')
+    p.add_argument('directory')
     p = commands.add_parser('amazon-progress',help='read committed incumbent development scores and cost boundaries')
     p.add_argument('directory')
     p = commands.add_parser("init", help="freeze public workspace, evaluator and protocol")
@@ -175,6 +177,12 @@ def main(argv=None):
                 else:result = research.run(args.rounds) if args.command == "run" else research.consolidate(args.attempt)
             finally:
                 research.store.close()
+        elif args.command == 'evolution-sync-graph':
+            from .evolution_graph import sync_lifecycle
+            evolution=Evolution(args.directory)
+            try:
+                with evolution.lock():result=sync_lifecycle(evolution.store)
+            finally:evolution.store.close()
         elif args.command == 'amazon-progress':
             from .adapters.amazon_progress import progress_report
             result=progress_report(args.directory)

@@ -239,7 +239,12 @@ class Evolution:
             if frozen['kind']!=kind or frozen['plan_hash']!=digest(plan) or frozen['context_hash']!=digest(context) or frozen.get('source_hash')!=digest(source):
                 raise ContractError('frozen evolution episode changed')
         stopped=[e['payload'] for e in self.store.events() if e['kind']=='evolution_stopped' and e['payload']['candidate_id']==candidate_id]
-        if stopped:return stopped[-1]
+        from .evolution_graph import sync_lifecycle
+        graph_requested=any(e['kind']=='evolution_graph_requested' and e['payload']['candidate_id']==candidate_id for e in self.store.events())
+        if stopped:
+            if graph_requested:sync_lifecycle(self.store)
+            return stopped[-1]
+        if not graph_requested:self.store.event('evolution_graph_requested',{'candidate_id':candidate_id})
         try:
             candidate=self.propose(candidate_id,kind,context,plan,agent=agent,source=source)
             for stage in STAGES[kind]:
@@ -251,7 +256,10 @@ class Evolution:
         except (ContractError,OSError,ValueError,KeyError) as error:
             result={'candidate_id':candidate_id,'kind':kind,'status':'rejected','reason':str(error)}
         result['budget']=self.store.budget()
-        self.store.event('evolution_stopped',result);write_json(directory/'run-report.json',result)
+        self.store.event('evolution_stopped',result)
+        from .evolution_graph import sync_lifecycle
+        sync_lifecycle(self.store)
+        write_json(directory/'run-report.json',result)
         return result
 
     @serialized
@@ -422,6 +430,9 @@ class Evolution:
         for kind in STAGES:
             active=self._active(kind)
             if active:self.verified_candidate(active['candidate_id'])
+        if any(e['kind']=='evolution_graph_requested' for e in self.store.events()) and any(e['kind']=='evolution_stopped' for e in self.store.events()):
+            from .evolution_graph import sync_lifecycle
+            sync_lifecycle(self.store,check_only=True)
         return {**integrity,'verified_artifacts':count}
 
     @serialized
@@ -434,4 +445,7 @@ class Evolution:
             raise ContractError("no active promoted version")
         self.store.event("candidate_rollback", {"kind":kind,"from": active["candidate_id"], "to": active["previous"]["candidate_id"] if active['previous'] else None})
         write_json(path, active["previous"])
+        if any(e["kind"]=="evolution_graph_requested" for e in self.store.events()):
+            from .evolution_graph import sync_lifecycle
+            sync_lifecycle(self.store)
         return active["previous"]

@@ -8,6 +8,7 @@ from rec_harness.autonomous import autoresearch
 from rec_harness.core import Artifacts,ContractError,read_json,write_json
 from rec_harness.evolution import STAGES
 from rec_harness.project import ResearchProject
+from rec_harness.store import Store
 from test_runtime import ROOT,ScriptedAgent
 
 
@@ -97,6 +98,12 @@ class ProjectTests(unittest.TestCase):
             report=autoresearch(self.campaign,self.config('tool'),agent=self.agent)
             self.assertEqual([r['kind'] for r in report['episodes']],['model','tool','model'])
             self.assertEqual(report['state']['tool_updates'],1)
+            tool_store=Store(self.campaign/'episodes/tool-1/campaign/memory')
+            try:
+                tool_graph=tool_store.snapshot()
+                self.assertTrue(any(n['type']=='MeasurementGap' for n in tool_graph['nodes']))
+                self.assertTrue(any(e['relation']=='ADDRESSES' for e in tool_graph['edges']))
+            finally:tool_store.close()
             first=read_json(self.campaign/'episodes/model-1/campaign/run-report.json')
             second=read_json(self.campaign/'episodes/model-2/campaign/run-report.json')
             self.assertEqual(first['state']['stop_reason'],'measurement_required')

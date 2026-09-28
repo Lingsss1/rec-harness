@@ -19,6 +19,17 @@ class Optimizer:
             'regression_risks':['fixture'],'validation_plan':'frozen','rollback_version':'base'}
 
 class EvolutionAutomationTests(unittest.TestCase):
+    def test_invalid_plan_stops_without_inventing_candidate_graph(self):
+        evolution=Evolution(self.campaign)
+        try:
+            evolution.store.configure_budget(12)
+            result=evolution.run('invalid','tool',{}, {},agent=self.agent)
+            self.assertEqual(result['status'],'rejected')
+            self.assertEqual(self.agent.calls,0)
+            self.assertEqual(evolution.store.snapshot()['nodes'],[])
+            evolution.verify()
+        finally:evolution.store.close()
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name);self.campaign=self.root/'campaign';self.agent=Optimizer()
@@ -170,6 +181,21 @@ class EvolutionAutomationTests(unittest.TestCase):
         self.assertEqual(autoresearch(self.campaign,agent=agent),result)
         self.assertEqual(agent.calls,1)
 
+    def test_graph_projection_recovers_after_terminal_event_without_new_generation(self):
+        from rec_harness import evolution_graph
+        with patch.object(evolution_graph,'sync_lifecycle',side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):autoresearch(self.campaign,self.config(),agent=self.agent)
+        count=self.agent.calls
+        result=autoresearch(self.campaign,agent=self.agent)
+        self.assertEqual(result['status'],'promoted');self.assertEqual(self.agent.calls,count)
+        evolution=Evolution(self.campaign)
+        try:
+            self.assertTrue(evolution.store.snapshot()['nodes']);evolution.verify()
+            before=evolution.store.verify()
+            evolution_graph.sync_lifecycle(evolution.store)
+            self.assertEqual(evolution.store.verify(),before)
+        finally:evolution.store.close()
+
     def test_rejected_scientific_validation_cannot_be_retried_into_promotion(self):
         result=autoresearch(self.campaign,self.config(reject='development'),agent=self.agent)
         self.assertEqual(result['status'],'rejected');self.assertEqual(result['budget']['charged_or_reserved'],3)
@@ -206,6 +232,14 @@ class EvolutionAutomationTests(unittest.TestCase):
                 return {'changed_files':['diagnostic.py']}
         agent=ToolAgent();result=autoresearch(self.campaign,path,agent=agent)
         self.assertEqual(result['status'],'promoted');self.assertEqual(result['budget']['charged_or_reserved'],7)
+        store=Store(self.campaign/'memory')
+        try:
+            graph=store.snapshot();types=[n['type'] for n in graph['nodes']]
+            self.assertEqual(types.count('ToolCandidate'),1);self.assertEqual(types.count('ToolValidation'),6)
+            self.assertEqual(types.count('ToolVersion'),1);self.assertNotIn('Claim',types)
+            self.assertTrue(all(n['attrs']['independent_unit'] is False for n in graph['nodes']))
+            self.assertTrue(any(e['relation']=='PROMOTED_FROM' for e in graph['edges']))
+        finally:store.close()
         self.assertEqual(autoresearch(self.campaign,agent=agent),result);self.assertEqual(agent.calls,1)
         from rec_harness.diagnostics import freeze_tool
         from rec_harness.core import Artifacts
@@ -228,6 +262,7 @@ class EvolutionAutomationTests(unittest.TestCase):
         autoresearch(self.campaign,self.config(),agent=self.agent)
         evolution=Evolution(self.campaign);self.addCleanup(evolution.store.close)
         self.assertIsNone(evolution.rollback('harness'))
+        self.assertTrue(any(n['attrs'].get('kind')=='evolution_rollback' for n in evolution.store.snapshot()['nodes']))
         policy,provenance=load_active_policy(self.campaign,None)
         self.assertEqual(policy,{});self.assertEqual(provenance['status'],'builtin_after_rollback')
         self.assertEqual(read_json(self.campaign/'versions/candidate/policy.json'),{'retrieval_limit':25})

@@ -4,10 +4,24 @@ from pathlib import Path
 from .core import Artifacts,ContractError,digest,file_hash,read_json,write_json
 from .cost_audit import audit_cost,verify_cost_prefix
 from .evolution import STAGES
-from .online_validation import load_suite as load_online
 from .process_identity import assert_stopped
 from .store import Store
 from .tool_pipeline import accepted_report
+
+
+def online_module(path):
+    schema=read_json(path).get('schema')
+    if schema=='amazon-online-harness-suite-v1':return 'amazon_harness_online'
+    if schema=='online-harness-suite-v1':return 'online_validation'
+    raise ContractError('unsupported Harness online suite')
+
+
+def load_online(path):
+    if online_module(path)=='amazon_harness_online':
+        from .amazon_harness_online import load_suite
+    else:
+        from .online_validation import load_suite
+    return load_suite(path)
 
 
 def prefix_suite(path):
@@ -16,6 +30,9 @@ def prefix_suite(path):
         raise ContractError('prefix suite changed')
     objects=Artifacts(Path(path).parent/'objects')
     if not body['cases']:raise ContractError('empty prefix suite')
+    if body.get('adapter')=='amazon-nextitnet-v1':
+        from .adapters.amazon_execution import code_identity
+        if body.get('code_hashes')!=code_identity():raise ContractError('Amazon prefix implementation changed')
     for case in body['cases']:
         if digest(case['context'])!=case['input_hash']:raise ContractError('prefix input changed')
         for ref in case['source'].values():objects.verify(ref)
@@ -25,6 +42,19 @@ def prefix_suite(path):
 def check_compatibility(prefix,online):
     if prefix['identity']!=online['identity'] or prefix['baseline_policy']!=online['baseline_policy']:
         raise ContractError('prefix and online reference identities differ')
+    if online['schema']=='amazon-online-harness-suite-v1':
+        from .amazon_prefix import conditions
+        if prefix.get('adapter')!='amazon-nextitnet-v1':raise ContractError('Amazon Harness requires Amazon source prefixes')
+        models={c['controller']['agent_backend']['model'] for c in online['cases']}
+        if models!={prefix['agent_backend']['model']}:raise ContractError('prefix and online base models differ')
+        used=set(prefix['source_conditions'])
+        if not used:raise ContractError('Amazon prefix lacks source conditions')
+        ids={prefix['trace_source']['task_id']}|{c['id'] for c in prefix['cases']}
+        for case in online['cases']:
+            if case['id'] in ids or used.intersection(conditions(case['study'])):
+                raise ContractError('Amazon online conditions overlap prefix source')
+        return
+    if prefix.get('adapter')=='amazon-nextitnet-v1':raise ContractError('Amazon prefix requires Amazon online comparison')
     models={c['config']['codex']['model'] for c in online['cases']}
     if models!={prefix['agent_backend']['model']}:raise ContractError('prefix and online base models differ')
     used=set();ids={prefix['trace_source']['task_id']}|{c['id'] for c in prefix['cases']}
@@ -61,7 +91,7 @@ def load_suite(path):
     return suite
 
 
-def costs(directory,stage,cost_context):
+def costs(directory,stage,cost_context,*,cost_weights=None):
     """Audit actual child ledgers, retaining abandoned attempts without double counting."""
     ledgers=[]
     for previous in STAGES['harness'][:STAGES['harness'].index(stage)+1]:
@@ -80,9 +110,18 @@ def costs(directory,stage,cost_context):
         if resolved in seen:raise ContractError('duplicate Harness child cost ledger')
         seen.add(resolved);store=Store(path)
         try:
-            cost=audit_cost(store,store.budget()['limit'])
+            if cost_weights is None:axis,limit='development_bcu',None
+            else:
+                from .amazon_tool_cost import ledger_axis
+                axis,limit=ledger_axis(path)
+            cost=audit_cost(store,store.budget()['limit'] if limit is None else limit)
             if cost['pending']:raise ContractError('Harness validation child still pending')
-            rows.append({'directory':resolved,'cost':cost})
+            row={'directory':resolved,'cost':cost}
+            if cost_weights is not None:
+                if axis!='development_bcu' and axis not in cost_weights:raise ContractError('Harness ledger lacks frozen cost weight')
+                weight=1 if axis=='development_bcu' else cost_weights[axis]
+                row.update(axis=axis,weight=weight,weighted_cost=weight*cost['charged_or_reserved'])
+            rows.append(row)
         finally:store.close()
     if not rows:raise ContractError('Harness stage produced no auditable child costs')
     prefix=read_json(cost_context)
@@ -91,7 +130,7 @@ def costs(directory,stage,cost_context):
     try:parent=verify_cost_prefix(store,prefix)
     finally:store.close()
     return {'children':rows,'controller_cost_prefix':prefix,
-        'total_cost':parent+sum(row['cost']['charged_or_reserved'] for row in rows)}
+        'total_cost':parent+sum(row.get('weighted_cost',row['cost']['charged_or_reserved']) for row in rows)}
 
 
 def run_validation(suite_path,stage,candidate,output,cost_context):
@@ -109,10 +148,20 @@ def run_validation(suite_path,stage,candidate,output,cost_context):
         from .harness_prefix import run_validation as run
         report=run(suite['suites']['prefix']['path'],candidate,raw)
     else:
-        from .online_validation import run_validation as run
+        if online_module(suite['suites']['online']['path'])=='amazon_harness_online':
+            from .amazon_harness_online import run_validation as run
+        else:
+            from .online_validation import run_validation as run
         report=run(suite['suites']['online']['path'],candidate,raw,stage)
     if report['identity']!=suite['identity']:raise ContractError('Harness stage identity differs')
-    audit=costs(directory,stage,cost_context)
+    weights=None
+    if online_module(suite['suites']['online']['path'])=='amazon_harness_online':
+        from .amazon_harness_online import audit_report
+        online,_=load_online(suite['suites']['online']['path']);weights=online['cost_weights']
+        for previous in STAGES['harness'][1:STAGES['harness'].index(stage)+1]:
+            audited=audit_report(suite['suites']['online']['path'],directory/previous/'raw-result.json')
+            if not audited['online']:raise ContractError('Harness pipeline requires real Amazon transports')
+    audit=costs(directory,stage,cost_context,cost_weights=weights)
     report={**report,'stage_cost':report['total_cost'],'total_cost':audit['total_cost'],
         'cost_audit':audit,'pipeline_hash':suite['hash'],'raw_report_sha256':file_hash(raw)}
     write_json(output,report);return report

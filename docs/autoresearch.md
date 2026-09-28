@@ -129,7 +129,7 @@ Amazon 工具验证已有[三组在线入口](implementation/amazon-tool-online.
 
 若实验只比较固定候选之间的选择，使用[固定候选选择入口](implementation/fixed-selection.md)；其预先提供的观测和分数与上述端到端模型生成分别报告。运行入口是否完整、候选是否有效，分别由执行收据和独立效用结果判断。
 
-Harness 的 Amazon 独立开发/确认可使用 [Amazon 配对入口](implementation/amazon-harness-online.md)。Amazon 的前缀及累计费用 pipeline 尚待接入。
+Harness 的 Amazon 独立开发/确认可使用 [Amazon 配对入口](implementation/amazon-harness-online.md)。前缀审计、开发、确认及累计费用已接入 [Amazon 三阶段 pipeline](implementation/amazon-harness-pipeline.md)。
 
 Harness 的开发/确认阶段已有隔离 toy 在线配对验证器。先创建规格文件：`cases` 列表中的每项含唯一 `id`、`stage`（development 或 confirmation）和模型研究 `config` 路径，另可指定 `baseline_policy`。任务必须使用 `isolated-toy-v1`、`jailed_codex` 和显式 `codex.model`，各 case 的数据/seed 条件不能重复，包括训练 seed 与另一 case 验证 seed 的重叠；改写 data_version 标签不会创建独立数据。验证器冻结模型及评估器源码，计算 base_llm/tools/start/graph/budget/protocol 配对身份。开发与确认使用同一冻结 suite 的不同条件。
 

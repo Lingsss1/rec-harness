@@ -68,6 +68,10 @@ def historical_bundle(graph,original,limit):
 
 def replay_context(case,policy,baseline):
     context=copy.deepcopy(case['context'])
+    if case.get('adapter')=='amazon-nextitnet-v1':
+        if policy.get('retrieval_limit')!=baseline.get('retrieval_limit'):
+            raise ContractError('Amazon prefix cannot reconstruct changed historical memory retrieval')
+        return context
     if policy.get('retrieval_limit',24)==baseline.get('retrieval_limit',24):return context
     if not case.get('graph'):raise ContractError('retrieval replay requires exact historical graph')
     view=context['evidence'];original=restore(view) if 'presentation' in view else view
@@ -80,6 +84,9 @@ def freeze_suite(specification,directory):
     path=Path(specification).resolve();spec=read_json(path);root=Path(directory).resolve()
     if root.exists() and any(root.iterdir()):raise ContractError('prefix suite directory must be empty')
     campaign=(path.parent/spec['campaign']).resolve()
+    if (campaign/'amazon-auto.json').exists():
+        from .amazon_prefix import freeze_suite as freeze_amazon
+        return freeze_amazon(path,root,spec)
     if not (campaign/'campaign.json').exists():raise ContractError('prefix replay currently requires generic research traces')
     roles=spec.get('roles',sorted(ROLES))
     if not roles or not set(roles).issubset(ROLES):raise ContractError('unsupported prefix role')
@@ -111,6 +118,9 @@ def run_validation(suite_path,candidate,output,*,agent_factory=None,memory_conte
     path=Path(suite_path).resolve();suite=read_json(path)
     if suite.get('schema')!='harness-prefix-suite-v1' or suite['hash']!=digest({k:v for k,v in suite.items() if k!='hash'}):
         raise ContractError('prefix suite changed')
+    if suite.get('adapter')=='amazon-nextitnet-v1':
+        from .adapters.amazon_execution import code_identity
+        if suite['code_hashes']!=code_identity():raise ContractError('Amazon prefix implementation changed')
     policy=read_json(Path(candidate)/'policy.json');validate_policy(policy)
     baseline=suite['baseline_policy'];roles={c['role'] for c in suite['cases']}
     memory_pairs={}
@@ -169,7 +179,11 @@ def run_validation(suite_path,candidate,output,*,agent_factory=None,memory_conte
                                 options=suite['agent_backend']
                                 agent=agent_factory(case,group) if agent_factory else JailedCodexAgent(options['template'],options['runtime_root'],model=options['model'],timeout=options.get('timeout',300),prompts=patch.get('prompts'),web_search='disabled',role_skills=options.get('role_skills'))
                                 response=agent.run(case['role'],context,job)
-                                write_json(job/'replay-response.json',response);check_response(case['role'],context,response)
+                                write_json(job/'replay-response.json',response)
+                                if case.get('adapter')=='amazon-nextitnet-v1':
+                                    from .amazon_prefix import check_response as check_amazon
+                                    check_amazon(case,context,response)
+                                else:check_response(case['role'],context,response)
                                 result['passed']=True
                             except (ContractError,OSError,ValueError,KeyError,TypeError) as error:result['error']=str(error)
                             finally:settle_once(store,task,suite['call_cost'],'accepted' if result['passed'] else 'rejected')

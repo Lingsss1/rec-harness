@@ -74,7 +74,8 @@ def evaluation_ids(module,path,stage):
         return evaluation_ids('rec_harness.'+child,suite['suites'][name]['path'],'utility' if stage=='cost_regression' else stage)
     if module=='rec_harness.harness_pipeline':
         name='prefix' if stage=='prefix_audit' else 'online'
-        child='harness_prefix' if name=='prefix' else 'online_validation'
+        from .harness_pipeline import online_module
+        child='harness_prefix' if name=='prefix' else online_module(suite['suites'][name]['path'])
         return evaluation_ids('rec_harness.'+child,suite['suites'][name]['path'],stage)
     if module=='rec_harness.tool_online':
         return evaluation_ids('rec_harness.online_validation',path.parent/'episodes/suite.json','development' if stage=='utility' else stage)

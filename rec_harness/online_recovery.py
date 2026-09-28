@@ -11,10 +11,11 @@ def completed_groups(target,module,stage):
     the model controller may turn an interrupted round into a failed attempt.
     Such a change would alter a paired comparison's frozen research trajectory.
     """
-    amazon=target/('amazon-harness-online' if module=='rec_harness.amazon_harness_online' else 'amazon-tool-online')
-    if module in {'rec_harness.amazon_tool_online','rec_harness.amazon_harness_online'} or module=='rec_harness.tool_pipeline' and amazon.exists():
+    amazon_harness=module=='rec_harness.amazon_harness_online' or module=='rec_harness.harness_pipeline' and (target/'amazon-harness-online').exists()
+    amazon=target/('amazon-harness-online' if amazon_harness else 'amazon-tool-online')
+    if amazon_harness or module=='rec_harness.amazon_tool_online' or module=='rec_harness.tool_pipeline' and amazon.exists():
         from .amazon_tool_online import read_result,GROUPS
-        if module=='rec_harness.amazon_harness_online':
+        if amazon_harness:
             from .amazon_harness_online import GROUPS
         for folder in sorted(amazon.glob('*/*')):
             if not folder.is_dir() or folder.parent.name in {'objects','candidate','existing'}:continue

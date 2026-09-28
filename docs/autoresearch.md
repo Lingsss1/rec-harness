@@ -140,7 +140,7 @@ python3 -m rec_harness amazon-memory-export /path/to/amazon-campaign /path/to/de
 
 通用模型入口使用 `initial_memory_files`。初始化将经验证的记忆包复制至当前 CAS，在第一次模型评估前导入独立目标图；来源结论保留为待目标验证的类比。重复恢复不重复导入，也不把来源证据当作目标实验。
 
-当前通用导出格式为 `memory-policy-v3`，读取端兼容 v2。v3 将公开 Proposal
+普通通用图导出为 `memory-policy-v3`；包含方法来源元数据或 Method→Source 关系时导出 `memory-policy-v4`，读取端兼容 v2/v3/v4。v4 保留原始引用及未核验状态，不将来源升级为目标证据。v3 将公开 Proposal
 节点及 `USES` 关系纳入证据闭包，避免实际研究中 Claim 引用 Proposal、Proposal
 连接 Gap/Method 时被整组排除。字段白名单仍排除源码、权重和原始用户数据；
 目标图中的 Proposal 降为 Source，不能直接执行或作为已证实的目标证据。

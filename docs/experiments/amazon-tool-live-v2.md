@@ -7,3 +7,9 @@ v1因准备脚本错误继承GPU4、5而被主机停止；没有终态模型训�
 v1的原账本在确认自有进程全部结束后保留未知预留费用。v2以SQLite只读备份保留这些账本，并核对源事件头与金额：16 BCU，加3600未知预留GPU秒；按1/60权重为76 BCU。保留目录为新候选的validation-attempts/prior-v1，沿用pipeline费用审计，避免漏计或退款。副本仅用于费用，未复制GPU任务、checkpoint或旧研究输入到新比较组。
 
 配置、prepare.py、retain-costs.py、启动断言、继承费用核验及运行日志保存在rec-harness-runs/amazon-tool-live-v2。v1原始配置与结果保持原样。v2已启动；终态必须以该目录result.json、实际收据和后续独立审计判断，当前不宣称完整六阶段通过或工具收益。该研究仍是操作者定义的聚合测量需求，不是自主发现缺口或最终测试。
+
+## 已完成的阶段验收
+
+一次真实Codex工具作者调用成功，耗时129.342秒。correctness、synthetic、robustness各两个CPU案例，shadow为两个历史开发条件各重复两次，共十次隔离执行。四阶段全部通过，分别计费2、2、2、4 BCU。`audit-completed-stages.py`独立复算均值、最小值和极差，并核对冻结源码、输入、隔离收据、CAS及费用；`completed-stages-acceptance.json`状态为passed。该审计没有新增调用或实验。
+
+在线无工具组的四个基线训练均已提交success完成收据，四次基线激活采集也均成功，费用审计为4 activation BCU、零待结算，见`baseline-activation-acceptance.json`。首轮evidence角色已成功完成，后续研究仍在运行。这些结果证明前置执行完成，尚不构成三组在线效用、成本阶段或晋升验收。最终状态仍以本页前述终态文件为准。

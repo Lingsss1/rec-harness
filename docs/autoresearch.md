@@ -125,6 +125,10 @@ suite 含 identity、tool_files（必须含 diagnostic.py）、budget、case_cos
 
 `plan` 保留现有 evolve 验证合同：工具依次经过 correctness、synthetic、robustness、shadow、utility、cost_regression；Harness 依次经过 prefix_audit、development、confirmation。每阶段使用冻结的独立 validator 命令及验收阈值。内置 `-m rec_harness...` 验证器还冻结整个包的 Python 源码；外部模块须以阶段的 `validator_files` 列出本地依赖。验证前校验文件哈希，变更会在执行和扣费前被拒绝。这不替代解释器、第三方依赖与系统环境锁。验证程序由操作者提供，候选不能修改；声明 `online: true` 本身不能证明真实在线收益，必须由验证程序实际执行独立实验并保留证据。下述在线配对与三组工具验证器支持隔离 toy 任务；任意任务适配仍待扩展。
 
+Amazon 工具验证已有[三组在线入口](implementation/amazon-tool-online.md)：为无工具、现有工具和候选工具分别运行独立研究，复核训练、角色传输、诊断送达及费用。它已接入[六阶段 pipeline](implementation/amazon-tool-pipeline.md)，可配置三组相同的[开发集激活采集](implementation/amazon-online-activation.md)。配置示例位于 `examples/amazon-tool-online/`。真实验收进度见 [Amazon 工具 v2](experiments/amazon-tool-live-v2.md)。
+
+若实验只比较固定候选之间的选择，使用[固定候选选择入口](implementation/fixed-selection.md)；其预先提供的观测和分数与上述端到端模型生成分别报告。运行入口是否完整、候选是否有效，分别由执行收据和独立效用结果判断。
+
 Harness 的开发/确认阶段已有隔离 toy 在线配对验证器。先创建规格文件：`cases` 列表中的每项含唯一 `id`、`stage`（development 或 confirmation）和模型研究 `config` 路径，另可指定 `baseline_policy`。任务必须使用 `isolated-toy-v1`、`jailed_codex` 和显式 `codex.model`，各 case 的数据/seed 条件不能重复，包括训练 seed 与另一 case 验证 seed 的重叠；改写 data_version 标签不会创建独立数据。验证器冻结模型及评估器源码，计算 base_llm/tools/start/graph/budget/protocol 配对身份。开发与确认使用同一冻结 suite 的不同条件。
 
 ```bash

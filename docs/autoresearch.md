@@ -176,7 +176,7 @@ python3 -m rec_harness amazon-memory-export /path/to/amazon-campaign /path/to/de
 
 新建自主工具任务和项目默认冻结 `"tool_method_contract": "diagnostic-method-v1"`，要求生成角色提交独立方法卡，区分旧工具优化、论文适配和自主设计，并将测量定义与来源对应关系归档到注册信息。字段、兼容性和验证边界见[工具方法卡](implementation/tool-method-card.md)。未启用的既有冻结计划不追写卡片，旧项目尚未创建的子任务也沿用父项目合同。低层 Evolution API 保留显式计划行为。
 
-连续工具更新可配置 `tool_followup_plans`，在项目启动前冻结第二轮及后续轮的独立验证计划、预算和条件身份；第一轮仍使用 `tool.plan`。配置与提前检查见[工具验证计划序列](implementation/tool-plan-schedule.md)。
+连续工具更新可配置 `tool_followup_plans`，在项目启动前冻结第二轮及后续轮的独立验证计划、预算和条件身份；第一轮仍使用 `tool.plan`。配置与提前检查见[工具验证计划序列](implementation/tool-plan-schedule.md)。 配置该列表的新项目默认在合法数值淘汰后使用下一轮计划继续工具研究，直到晋升或计划耗尽；可设 `continue_after_tool_rejection: false` 关闭，见[有界续接](implementation/tool-rejection-continuation.md)。
 
 新项目默认继承本项目已提交工具回合的历史（`inherit_tool_history: true`），并排除历史开发及验证条件。后续工具需要独立验证条件；旧冻结项目保持原行为。
 

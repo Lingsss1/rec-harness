@@ -22,6 +22,10 @@ class ResearchProject:
         config.setdefault('enforce_tool_measurement_scope',True)
         config.setdefault('verify_successor_memory',True)
         config.setdefault('continue_after_harness_rejection',True)
+        config.setdefault('continue_after_tool_rejection','tool_followup_plans' in config)
+        if type(config['continue_after_tool_rejection']) is not bool:raise ContractError('tool rejection continuation must be boolean')
+        if config['continue_after_tool_rejection'] and 'tool_followup_plans' not in config:
+            raise ContractError('tool rejection continuation requires predeclared tool_followup_plans')
         if type(config['continue_after_harness_rejection']) is not bool:raise ContractError('Harness rejection continuation must be boolean')
         if type(config['verify_successor_memory']) is not bool:raise ContractError('successor memory verification must be boolean')
         if type(config['enforce_tool_measurement_scope']) is not bool:raise ContractError('tool measurement scope enforcement must be boolean')
@@ -351,6 +355,15 @@ class ResearchProject:
                         'phase':'model','model_index':state['model_index']+1}
                     state.pop('pending_gap',None)
                     state.pop('pending_optimizer_handoff',None)
+                elif (kind=='tool' and result.get('rejection_kind')=='validation_gate'
+                      and self.config.get('continue_after_tool_rejection')):
+                    # A rejected candidate consumes its frozen plan. Keep the
+                    # unresolved gap and stable tool, then use the next plan.
+                    state={**state,'tool_updates':state['tool_updates']+1}
+                    if (state['tool_updates']<self.config.get('max_tool_updates',1)
+                            and state['model_index']<self.config['max_model_episodes']):
+                        self.route_tool(state,state['pending_gap'])
+                    else:state.update(status='stopped',stop_reason='tool_rejected')
                 elif (kind=='harness' and result.get('rejection_kind')=='validation_gate'
                       and self.config.get('continue_after_harness_rejection')
                       and state['model_index']<self.config['max_model_episodes']):

@@ -103,6 +103,8 @@ class JailedCodexAgent:
         # CLI's external-sandbox mode is permitted only behind verified chroot+UID drop.
         request = {'role': role, 'argv': argv, 'prompt': prompt, 'context': context,
                    'isolation': {'kind': 'chroot-unprivileged', 'uid': uid, 'run_id': run_id}}
+        from .instruction_identity import manifest
+        request['instruction_identity']=manifest(prompt,schema)
         write_json(directory / 'request.json', request)
         launch = [sys.executable, '-m', 'rec_harness.isolation', 'enter', str(jail), '--uid', str(uid), '--', *argv]
         # The isolated UID has no passwd entry. Resolve Codex's home to the

@@ -10,6 +10,31 @@ from test_runtime import ROOT,ScriptedAgent
 
 
 class DecisionTraceTests(unittest.TestCase):
+    def test_archived_instruction_identity_reaches_actual_trace(self):
+        from rec_harness.agents import schema_for
+        from rec_harness.core import write_json
+        from rec_harness.instruction_identity import manifest
+        class RecordedAgent(ScriptedAgent):
+            def run(self,role,context,directory):
+                result=super().run(role,context,directory)
+                prompt='fixture '+role;schema=schema_for(role)
+                request=read_json(Path(directory)/'request.json')
+                write_json(Path(directory)/'request.json',{**request,'prompt':prompt,'instruction_identity':manifest(prompt,schema)})
+                write_json(Path(directory)/'schema.json',schema)
+                return result
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/'campaign';config=read_json(ROOT/'examples/toy/campaign.json')
+            config.update(source=str(ROOT/'examples/toy'),max_rounds=1)
+            Research.init(root,config);research=Research(root,agent=RecordedAgent())
+            try:
+                research.run();traces=collect_traces(root)['decision_traces']
+                self.assertEqual(len(traces),6)
+                for trace in traces:
+                    value=trace['instruction_identity']
+                    self.assertEqual(value['prompt_hash'],manifest('fixture '+trace['role'],schema_for(trace['role']))['prompt_hash'])
+                    research.artifacts.verify(value['request_ref']);research.artifacts.verify(value['schema_ref'])
+            finally:research.store.close()
+
     def test_prefix_references_actual_inputs_and_excludes_later_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)/'campaign';config=read_json(ROOT/'examples/toy/campaign.json')

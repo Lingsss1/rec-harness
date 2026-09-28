@@ -58,6 +58,9 @@ def collect_traces(campaign,*,roles=None,cutoff_seq=None):
                                  'token_usage':resources.get('token_usage')},
                 'submitted_event':start['hash'],'completed_event':event['hash'],
                 'qualification':'visible input and role output; transport success is not scientific or protocol validation'}
+            from .instruction_identity import from_archive
+            instructions=from_archive(archive,artifacts)
+            if instructions is not None:trace['instruction_identity']=instructions
             public_only(trace);traces.append(trace)
         if not traces:raise ContractError('no committed decision traces in requested prefix')
         if store.verify()!=integrity:raise ContractError('trace source changed while freezing')

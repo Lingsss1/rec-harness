@@ -224,7 +224,9 @@ class CodexAgent:
         if self.model:
             argv += ["--model", self.model]
         argv += ["-"]
-        write_json(directory / "request.json", {"argv": argv, "role": role, "context": context, "prompt": prompt})
+        from .instruction_identity import manifest
+        write_json(directory / "request.json", {"argv": argv, "role": role, "context": context, "prompt": prompt,
+            "instruction_identity":manifest(prompt,schema)})
         result = run_process(argv, directory, directory, stdin=prompt, timeout=self.timeout)
         usage = None
         for line in (directory / "stdout.jsonl").read_text().splitlines():

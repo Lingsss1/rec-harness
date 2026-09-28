@@ -6,6 +6,8 @@
 
 ## 当前交付与模型结果
 
+- [不同合成任务的经验迁移 v1](../experiments/heterogeneous-transfer-v1.md)已冻结并启动：源分段任务→目标周期任务，开发与确认各做Fresh/Experienced配对，正常路径预计30次串行Codex角色。当前源阶段运行中，未产生迁移收益结论；旧Amazon研究保持封存。
+
 - [晋升后真实 CPU 复测](../experiments/project-successor-cpu-v1.md)完成工程验收，实际输出送达 evidence 与 measurement；修复了精简测量审查输入导致送达审计报错的问题。角色/晋升仍为夹具，不算自主发现或正效用；无新增 Codex 调用，终态恢复零执行。此修复晚于 v21。
 
 - [工具分支受控真实验收 v1](../experiments/joint-tool-project-v1.md)已走通模型暂停→真实工具生成→6 次离线与4 次影子执行→三组在线比较→零增益拒绝。20 次角色调用、51 BCU，完整性与终态无新增执行恢复通过。缺口由操作者预声明，不计为自主发现；确认及返回模型复测未执行。

@@ -41,6 +41,48 @@ class DiscoverAgent(ProjectAgent):
 
 
 class ProjectTests(unittest.TestCase):
+    def test_tool_then_harness_preserve_all_three_states_across_interruption(self):
+        config=read_json(self.config('tool'))
+        config['harness']=read_json(self.config('harness'))['harness']
+        config['max_model_episodes']=3
+        path=self.root/'combined.json';write_json(path,config)
+        calls=[]
+        class RecordingAgent(ProjectAgent):
+            def run(agent,role,context,directory):
+                calls.append(role)
+                return super().run(role,context,directory)
+        agent=RecordingAgent();transition=ResearchProject.transition
+        def interrupt_after_harness(project,state,episode=None):
+            transition(project,state,episode)
+            if episode and episode['kind']=='harness':raise KeyboardInterrupt()
+        with patch('rec_harness.diagnostics.run_cpu_job',side_effect=self.cpu):
+            with patch.object(ResearchProject,'transition',interrupt_after_harness):
+                with self.assertRaises(KeyboardInterrupt):autoresearch(self.campaign,path,agent=agent)
+            before=list(calls)
+            report=autoresearch(self.campaign,agent=agent)
+            self.assertEqual([e['kind'] for e in report['episodes']],['model','tool','model','harness','model'])
+            self.assertNotIn('tool',calls[len(before):]);self.assertNotIn('optimizer',calls[len(before):])
+            count=len(calls)
+            self.assertEqual(autoresearch(self.campaign,agent=agent),report)
+            self.assertEqual(len(calls),count)
+        final=self.campaign/'episodes/model-3/campaign'
+        prior=self.campaign/'episodes/model-2/campaign'
+        final_config=read_json(final/'campaign.json')
+        self.assertEqual(final_config['research_policy'],{'retrieval_limit':25})
+        self.assertEqual(final_config['diagnostic_tool']['candidate_id'],'project-tool-1')
+        self.assertEqual(final_config['measurement_requirements'],read_json(prior/'campaign.json')['measurement_requirements'])
+        self.assertEqual(read_json(final/'research_archive/manifest.json')['root_workspace'],read_json(prior/'state.json')['workspace'])
+        store=Store(final/'memory')
+        try:
+            coverage=[e['payload'] for e in store.events() if e['kind']=='measurement_output_observed']
+            self.assertEqual(len(coverage),1)
+            self.assertEqual(coverage[0]['tool_version'],'project-tool-1')
+            self.assertEqual(coverage[0]['source_measurement_gap_ids'],[report['state']['measurement_obligations'][0]['measurement_gap_id']])
+        finally:store.close()
+        project=ResearchProject(self.campaign,agent=agent)
+        try:self.assertEqual(len(project.verify()['verified_episodes']),5)
+        finally:project.store.close()
+
     def test_successive_harness_patches_preserve_current_policy_and_other_prompts(self):
         path=self.config('harness');config=read_json(path)
         config.update(max_model_episodes=3,max_harness_updates=2)

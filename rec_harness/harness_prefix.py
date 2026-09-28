@@ -160,7 +160,7 @@ def run_validation(suite_path,candidate,output,*,agent_factory=None,memory_conte
                         result={'key':key,'passed':False,'input_hash':digest(context)}
                         try:
                             options=suite['agent_backend']
-                            agent=agent_factory(case,group) if agent_factory else JailedCodexAgent(options['template'],options['runtime_root'],model=options['model'],timeout=options.get('timeout',300),prompts=patch.get('prompts'),web_search='disabled')
+                            agent=agent_factory(case,group) if agent_factory else JailedCodexAgent(options['template'],options['runtime_root'],model=options['model'],timeout=options.get('timeout',300),prompts=patch.get('prompts'),web_search='disabled',role_skills=options.get('role_skills'))
                             response=agent.run(case['role'],context,job)
                             write_json(job/'replay-response.json',response);check_response(case['role'],context,response)
                             result['passed']=True

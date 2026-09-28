@@ -17,11 +17,13 @@ from .core import ContractError, digest, public_only, read_json, safe_file, writ
 
 
 class JailedCodexAgent:
-    def __init__(self, template, runtime_root, *, model=None, timeout=300, auth_root='/root/.codex',prompts=None,web_search=None):
+    def __init__(self, template, runtime_root, *, model=None, timeout=300, auth_root='/root/.codex',prompts=None,web_search=None,role_skills=None):
         self.template = Path(template).resolve()
         self.runtime_root = Path(runtime_root).resolve()
         self.model, self.timeout = model, timeout
         self.auth_root = Path(auth_root)
+        from .instruction_identity import role_skills as validate_role_skills
+        self.role_skills=validate_role_skills(role_skills,ROLES)
         self.prompts=dict(prompts or {})
         self.web_search=search_policy(web_search)
         if not (self.template / 'jail-manifest.json').is_file():
@@ -29,12 +31,13 @@ class JailedCodexAgent:
 
     def role_prompt(self,role):
         if role not in ROLES:raise ContractError('unknown research role')
+        from .instruction_identity import skill_suffix
         return (f'You are the rec-harness {role} agent. {ROLES[role]}\n'+self.prompts.get(role,'')+'\n'
                   'Read /workspace/context.json and inspect /workspace/model when supplied. '
                   'This is an OS-isolated public research workspace. Do not read credentials or unrelated paths. '
                   'Do not spawn other agents or execute GPU training. Return exactly the required JSON schema. '
                   'For changes, paths are relative to model/. Preserve the frozen protocol and unrelated code. '
-                  + search_instruction(self.web_search[role],role))
+                  + search_instruction(self.web_search[role],role)+skill_suffix(self.role_skills.get(role,[])))
 
     def run(self, role, context, directory):
         if role not in ROLES or os.geteuid() != 0:
@@ -104,7 +107,9 @@ class JailedCodexAgent:
         request = {'role': role, 'argv': argv, 'prompt': prompt, 'context': context,
                    'isolation': {'kind': 'chroot-unprivileged', 'uid': uid, 'run_id': run_id}}
         from .instruction_identity import manifest
-        request['instruction_identity']=manifest(prompt,schema)
+        skills=self.role_skills.get(role,[])
+        request['instruction_identity']=manifest(prompt,schema,skills)
+        if skills:request['role_skills']=skills
         write_json(directory / 'request.json', request)
         launch = [sys.executable, '-m', 'rec_harness.isolation', 'enter', str(jail), '--uid', str(uid), '--', *argv]
         # The isolated UID has no passwd entry. Resolve Codex's home to the

@@ -77,7 +77,11 @@ def collect_traces(campaign,*,roles=None,cutoff_seq=None):
                     'qualification':'Unadmitted role output; not a selected scientific action or evidence that the model or method failed.'}
             from .instruction_identity import from_archive
             instructions=from_archive(archive,artifacts)
-            if instructions is not None:trace['instruction_identity']=instructions
+            if instructions is not None:
+                trace['instruction_identity']=instructions
+                if 'explicit_skills' in instructions:
+                    trace['skill_versions']={'explicit':instructions['explicit_skills'],
+                        'availability':'explicit prompt content verified; automatic discovery and execution unknown'}
             from .literature import from_archive as literature_from_archive
             literature=literature_from_archive(archive,artifacts)
             if literature is not None:trace['literature_search']=literature

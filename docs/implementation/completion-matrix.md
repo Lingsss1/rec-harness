@@ -27,7 +27,7 @@
 | §5.1–5.3：研究方法候选、独立效用门槛、版本发布 | 独立 Evolution、验证器冻结、费用、晋升/回滚与图投影；[生命周期图](evolution-lifecycle-graph.md) | 不能用固定报告测试代替在线效用，也不能把拒绝候选算作已部署改进 |
 | §5.4A–C：自主测量审查→工具生成→六阶段验证 | 真实历史测量审查返回 sufficient；独立真实工具候选通过离线/影子后因效用零拒绝；[转交](optimizer-measurement-handoff.md)、[生成接口](tool-authoring-contract.md) | 真实自主发现缺口并完成工具转交的实例未验收；已有真实工具缺口由操作者提供；多条件可辨识性与效用仍不足 |
 | §5.4D：发布、前驱、使用说明、缺口复测、恢复 | [源码继承](successive-tools.md)、[注册信息](tool-registration.md)、[测量血缘](measurement-lineage.md)、[诊断恢复](diagnostic-recovery.md)；真实多文件及中断恢复通过 | 测量输出覆盖不等于语义缺口解决，不等于模型机制证据 |
-| §5.5A–C：外部优化器与完整可见轨迹 | 冻结原始角色输入、输出与来源快照；[无损共享](optimizer-trace-sharing.md)、真实 Codex 增量补丁；稳定内核不可修改 | `decision_traces.py` 对 Skill 版本仍显式记为未记录；精确版本与要求的其余轨迹字段覆盖需要继续审计 |
+| §5.5A–C：外部优化器与完整可见轨迹 | 冻结原始角色输入、输出与来源快照；[无损共享](optimizer-trace-sharing.md)、真实 Codex 增量补丁；稳定内核不可修改 | [显式 Skill 内容与版本](explicit-role-skills.md)已实现传输及归档核验；CLI 自动发现与执行仍未知，不能声称所有 Skill 已追踪 |
 | §5.5D：HarnessPatch 或 MeasurementGap 分流 | [工程转交](optimizer-measurement-handoff.md)已实现；一次真实 optimizer_router 自行选择补丁；[Amazon 证据准入](optimizer-amazon-evidence.md)通过真实历史只读检查 | 真实测量转交分支仍未验收；不能重试直至出现想要的分支 |
 | §5.5E–F：前缀、独立开发、确认、版本和图 | 真实优化器、8 次前缀与12 次开发角色调用，效用零而拒绝；[连续策略](successive-harness.md)、生命周期图与恢复工程测试通过 | 实际候选未进入确认；多任务族确认和分别归因的收益未验证 |
 | §5.6：三个循环的项目调度 | 模型→工具→模型→Harness→模型，以及优化器转交分支；连续两次工具/策略更新、身份继承、缺口复测和中断恢复测试 | 脚本角色联合调度不等于真实三循环共同收益 |
@@ -38,6 +38,8 @@
 §6 的 TokenMixer 场景在方案中明确标为假设示例，不将其记成真实完成实验。跨主机分布式调度也不因历史清单提到它而自动扩张为本次必交付条件。
 
 ## 接续工作
+
+新增[显式研究 Skill 传输](explicit-role-skills.md)，正文随配置冻结并进入实际提示词，优化器可核对内容版本；未配置的旧收据保持兼容。本项在 v19 安装包之后，尚未纳入该包。
 
 Amazon 开发记忆导出已增加[控制器冻结锁校验](amazon-memory-lock.md)，在读取 study 前拒绝配置变更或缺锁。真实 Amazon v3 两次只读导出与原记忆完全一致，源配置与事件链未变化。
 

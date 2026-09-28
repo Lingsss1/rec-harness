@@ -13,14 +13,15 @@ class DecisionTraceTests(unittest.TestCase):
     def test_archived_instruction_identity_reaches_actual_trace(self):
         from rec_harness.agents import schema_for
         from rec_harness.core import write_json
-        from rec_harness.instruction_identity import manifest
+        from rec_harness.instruction_identity import manifest,skill_suffix
         from rec_harness.agents import search_receipt
         class RecordedAgent(ScriptedAgent):
             def run(self,role,context,directory):
                 result=super().run(role,context,directory)
-                prompt='fixture '+role;schema=schema_for(role)
+                skills=[{'name':'hypothesis-check','content':'Check alternatives.'}] if role=='hypothesis' else []
+                prompt='fixture '+role+skill_suffix(skills);schema=schema_for(role)
                 request=read_json(Path(directory)/'request.json')
-                write_json(Path(directory)/'request.json',{**request,'prompt':prompt,'instruction_identity':manifest(prompt,schema)})
+                write_json(Path(directory)/'request.json',{**request,'prompt':prompt,'instruction_identity':manifest(prompt,schema,skills),**({'role_skills':skills} if skills else {})})
                 write_json(Path(directory)/'schema.json',schema)
                 (Path(directory)/'stdout.jsonl').write_text('{"type":"item.completed","item":{"type":"web_search","query":"fixture"}}\n' if role=='hypothesis' else '')
                 search_receipt(directory,'live' if role=='hypothesis' else 'disabled',result)
@@ -34,7 +35,10 @@ class DecisionTraceTests(unittest.TestCase):
                 self.assertEqual(len(traces),6)
                 for trace in traces:
                     value=trace['instruction_identity']
-                    self.assertEqual(value['prompt_hash'],manifest('fixture '+trace['role'],schema_for(trace['role']))['prompt_hash'])
+                    skills=[{'name':'hypothesis-check','content':'Check alternatives.'}] if trace['role']=='hypothesis' else []
+                    self.assertEqual(value['prompt_hash'],manifest('fixture '+trace['role']+skill_suffix(skills),schema_for(trace['role']),skills)['prompt_hash'])
+                    if skills:self.assertEqual(trace['skill_versions']['explicit'],value['explicit_skills'])
+                    else:self.assertEqual(trace['skill_versions'],{'availability':'not recorded by transport'})
                     research.artifacts.verify(value['request_ref']);research.artifacts.verify(value['schema_ref'])
                     search=trace['literature_search']
                     self.assertEqual(search['search_observed'],trace['role']=='hypothesis')

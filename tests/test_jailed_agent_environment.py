@@ -11,9 +11,15 @@ class JailedAgentEnvironmentTests(unittest.TestCase):
     def test_empty_parent_environment_still_sets_staged_home_and_retains_failed_receipt(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);template=root/'template';write_json(template/'jail-manifest.json',{})
-            agent=JailedCodexAgent(template,root/'jails',auth_root=root/'empty-auth')
+            skills=[{'name':'evaluation-boundaries','content':'Separate host measurements from interpretations.'}]
+            agent=JailedCodexAgent(template,root/'jails',auth_root=root/'empty-auth',role_skills={'evaluation':skills})
             receipt={'status':'crash','returncode':1,'wall_seconds':0.1}
             def launch(argv,cwd,directory,**kwargs):
+                request=read_json(directory/'request.json')
+                self.assertEqual(request['prompt'],kwargs['stdin'])
+                self.assertIn(skills[0]['content'],kwargs['stdin'])
+                self.assertEqual(request['role_skills'],skills)
+                self.assertEqual(request['instruction_identity']['schema'],'role-instruction-identity-v2')
                 self.assertEqual(kwargs['env']['HOME'],'/root')
                 self.assertEqual(kwargs['env']['CODEX_HOME'],'/root/.codex')
                 jail=Path(argv[4])

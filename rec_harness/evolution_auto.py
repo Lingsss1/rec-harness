@@ -80,7 +80,7 @@ class AutonomousEvolution:
         self.evolution=Evolution(root);self.store=self.evolution.store
         options=self.config.get('agent_backend',{})
         self.agent=agent or JailedCodexAgent(options['template'],options['runtime_root'],
-                                            model=options.get('model'),timeout=options.get('timeout',300),web_search=options.get('web_search'))
+                                            model=options.get('model'),timeout=options.get('timeout',300),web_search=options.get('web_search'),role_skills=options.get('role_skills'))
 
     def run(self):
         c=self.config

@@ -21,6 +21,24 @@ python3 -m rec_harness autoresearch /path/to/campaign
 
 示例冻结 24 BCU、最多 3 轮。基线成本 2，每轮 6 个角色加 2 个 seed，并为知识修复预留 1 BCU，通常完成 2 轮后自动停机。BCU 是配置的工作成本，不是美元或 GPU 秒。调用超时、非法提案和失败训练保留成本与证据；知识格式错误可自动修复一次。控制器中断的未完成通用轮次保留为失败轨迹，随后开始新轮；不会把未完成实验冒充成功。`max_rounds` 是整个 campaign 的上限。
 
+## 显式研究 Skill
+
+可在通用模型配置的 `codex.role_skills` 中按角色提供冻结指令；Amazon 和工具/Harness 演化使用 `agent_backend.role_skills`。前缀验证套件也使用其 `agent_backend.role_skills`。例如：
+
+```json
+{
+  "role_skills": {
+    "hypothesis": [
+      {"name": "competing-explanations", "content": "List competing explanations and a discriminating experiment before proposing the change."}
+    ]
+  }
+}
+```
+
+这里只接受显式正文，不读取主机路径或自动展开 Skill 的附属文件。名称在同一角色内唯一，版本由正文内容 hash 标识；正文随 campaign 配置冻结，并完整进入实际提示词和请求归档。它们是从属于冻结协议的研究指令，不能改变评分、权限和主机准入规则。需要修改正文时创建新 campaign。
+
+优化器轨迹核对请求、响应 schema、提示词与 Skill 内容的一致性，记录显式 Skill 版本。未配置时保留原指令收据和旧轨迹语义。此记录证明传入的内容，不证明模型逐条执行；Codex 自动发现的 Skill 和执行情况仍标为未知。提供的内容应是本任务允许发送的公开研究指令，不放入凭据或私有数据。
+
 ## Amazon NextItNet
 
 该适配器在已初始化、冻结协议并有完整 incumbent 配对结果的 Amazon study 上运行。创建 study 和历史成本接续见 [运行指南](runtime.md)。

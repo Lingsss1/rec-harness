@@ -46,7 +46,7 @@ class Research:
             from .jailed_agent import JailedCodexAgent
             backend=self.config['agent_backend'];options=self.config.get('codex',{})
             self.agent=JailedCodexAgent(backend['template'],backend['runtime_root'],
-                model=options.get('model'),timeout=options.get('timeout',300),web_search=options.get('web_search'),prompts=self.config.get('research_policy',{}).get('prompts'))
+                model=options.get('model'),timeout=options.get('timeout',300),web_search=options.get('web_search'),role_skills=options.get('role_skills'),prompts=self.config.get('research_policy',{}).get('prompts'))
         else:
             self.agent=CodexAgent(**self.config.get("codex", {}), prompts=self.config.get("research_policy", {}).get("prompts"))
         self.store.configure_budget(self.config["budget"])

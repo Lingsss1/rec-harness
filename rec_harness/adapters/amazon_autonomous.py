@@ -112,7 +112,7 @@ class AmazonAutoresearch:
         self.task=self.config['task_id'];self.protocol_hash=self.config['protocol_hash']
         self.artifacts=Artifacts(self.root/'artifacts/objects');backend=self.config['agent_backend']
         self.agent=(agent or JailedCodexAgent(backend['template'],backend['runtime_root'],timeout=self.config.get('role_timeout',300),
-            model=backend.get('model'),web_search=backend.get('web_search'),prompts=self.config.get('research_policy',{}).get('prompts'))) if load_agent else None
+            model=backend.get('model'),web_search=backend.get('web_search'),role_skills=backend.get('role_skills'),prompts=self.config.get('research_policy',{}).get('prompts'))) if load_agent else None
         if digest(read_json(self.study/'study.json'))!=self.config['study_config_hash']:raise ContractError('bound study changed')
 
     def close(self):self.store.close()

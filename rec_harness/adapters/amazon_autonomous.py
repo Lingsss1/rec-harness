@@ -548,6 +548,26 @@ class AmazonAutoresearch:
         cycle=finalize_cycle(self.study,pid,folder)
         return lead,cycle
 
+    def _recover_round_terminal(self,state):
+        events=self.store.events()
+        transitions=[e for e in events if e['kind'] in {'auto_round_completed','auto_round_reopened'}]
+        cutoff=transitions[-1]['seq'] if transitions else 0
+        pending=[e for e in events if e['seq']>cutoff and e['kind'] in {'auto_round_deferred','auto_round_failed'}
+                 and e['payload']['round']==state['round']+1]
+        if not pending:return state
+        if len({digest({'kind':e['kind'],'payload':e['payload']}) for e in pending})!=1:
+            raise ContractError('conflicting committed round terminal outcomes')
+        event=pending[-1];result={key:value for key,value in event['payload'].items() if key!='round'}
+        state={**state,'round':state['round']+1,'status':'ready'}
+        if event['kind']=='auto_round_deferred':state.update(status='stopped',stop_reason='measurement_required')
+        elif result.get('failure_kind')=='role_transport':state.update(status='stopped',stop_reason='role_transport_failure')
+        if event['kind']=='auto_round_failed':write_json(self.root/'rounds'/('round-'+str(state['round']))/'failure.json',result)
+        from .amazon_progress import round_costs
+        self.store.event('auto_round_completed',{'result':result,'state':state,'cost_prefixes':round_costs(self),
+            'recovered_terminal_event':event['hash']})
+        write_json(self.root/'state.json',state)
+        return state
+
     def run(self):
         if self.config.get('review_only'):raise ContractError('review-only controller cannot run training or generate designs')
         with self.lock():
@@ -561,6 +581,7 @@ class AmazonAutoresearch:
                 for name,ref in transitions[-1]['payload']['controller_sources'].items():
                     self.artifacts.verify(ref)
                     if file_hash(source_root/name)!=ref['sha256']:raise ContractError('reopened controller source changed')
+            state=self._recover_round_terminal(state)
             reason=state.get('stop_reason','max_rounds')
             while state['round']<self.config['max_rounds'] and reason not in {'measurement_required','role_transport_failure'}:
                 ledger=Store(self.study/'memory')

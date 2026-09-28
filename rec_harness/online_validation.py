@@ -28,6 +28,8 @@ def freeze_suite(specification,directory):
         if config.get('adapter') is not None or config.get('execution',{}).get('kind')!='isolated-toy-v1':
             raise ContractError('online Harness validator currently requires host-scored isolated toy research')
         from .toy_isolated import validate_task
+        from .toy_observations import freeze_options
+        freeze_options(config)
         if 'synthetic_task' in config['protocol']:
             if config['protocol']['synthetic_task'] is None:raise ContractError('explicit synthetic task cannot be null')
             validate_task(config['protocol']['synthetic_task'])

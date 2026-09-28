@@ -71,6 +71,8 @@ class Research:
         if 'diagnostic_tool' in config:raise ContractError('diagnostic_tool is controller-owned; supply diagnostic_registry')
         if config.get('execution',{}).get('kind') not in {None,'isolated-toy-v1'}:
             raise ContractError('unsupported execution backend; refusing implicit fallback')
+        from .toy_observations import freeze_options
+        freeze_options(config)
         if 'synthetic_task' in config['protocol']:
             from .toy_isolated import validate_task
             if config.get('execution',{}).get('kind')!='isolated-toy-v1':raise ContractError('synthetic task requires isolated host scoring')
@@ -238,12 +240,14 @@ class Research:
     def context(self, role, state):
         from .diagnostics import measure
         from .measurement_gaps import triage
-        diagnostic=measure(self,state) if role=='evidence' else None
+        from .toy_observations import context as observation_context
+        observations=observation_context(state) if self.protocol.get('output_activation_observations') else {}
+        diagnostic=(measure(self,state,observations=observations) if observations else measure(self,state)) if role=='evidence' else None
         measurement_gaps=[];measurement_failure=None
         if role=='evidence':
             try:measurement_gaps=triage(self,state,diagnostic)
             except MeasurementDeferred as error:measurement_failure=str(error)
-        return {"task_id": self.task, "model_version": state["incumbent"], "protocol_hash": self.protocol_hash,
+        return {**observations,"task_id": self.task, "model_version": state["incumbent"], "protocol_hash": self.protocol_hash,
                 **({'method_source_contract':METHOD_SOURCE_CONTRACT} if self.config.get('require_method_sources') else {}),
                 "protocol": self.protocol, "budget": self.store.budget(), "harness_version": self.config["harness_version"],
                 "evidence": self.store.bundle(self.task, self.protocol_hash, role, limit=self.config.get("research_policy", {}).get("retrieval_limit", 24)), "baseline": state["baseline"],
@@ -260,7 +264,7 @@ class Research:
         except (KeyError, ValueError) as error:
             raise ContractError(f"invalid command placeholder: {error}") from error
 
-    def evaluate(self, attempt, snapshot, baseline=None):
+    def evaluate(self, attempt, snapshot, baseline=None,*,observation_model=None):
         runs = []
         existing = {n["id"] for n in self.store.snapshot()["nodes"]}
         if attempt not in existing:
@@ -311,6 +315,15 @@ class Research:
                         required(metrics, [self.protocol["metric"]])
                         score = number(metrics[self.protocol["metric"]], "public score")
                         guardrails = all(name in metrics and number(metrics[name], name) <= number(maximum, name) for name, maximum in self.protocol["guardrails"].items())
+                        if self.protocol.get('output_activation_observations') and guardrails:
+                            from .toy_observations import from_receipts,DATASET
+                            if file_hash(Path(__file__).with_name('toy_observations.py'))!=self.config['execution']['output_observation_producer_hash']:
+                                raise ContractError('output observation producer changed')
+                            checked_metrics,observation=from_receipts(execution,self.artifacts,self.protocol,seed,observation_model or attempt,run_id)
+                            if checked_metrics!=metrics:raise ContractError('output observations differ from host metrics')
+                            summary_path=directory/'output-activation.json';write_json(summary_path,observation)
+                            result.update(dataset=DATASET,output_activation_observation=observation,
+                                output_activation_ref=self.artifacts.put(summary_path))
                         result.update(status="success" if guardrails else "invalid", valid=guardrails, score=score, metrics=metrics,
                                       failure_kind=None if guardrails else "guardrail")
             except (ContractError, OSError, ValueError) as error:
@@ -332,6 +345,11 @@ class Research:
                           "artifact_refs": result["artifact_refs"], "evidence_dependency_ids": [attempt]}, self.task, self.protocol_hash)]
             edges = [edge(run_id + "-evaluates", run_id, attempt, "EVALUATES", [run_id], self.task, self.store.version + 1),
                      edge(run_id + "-produces", run_id, observation_id, "PRODUCES", [run_id], self.task, self.store.version + 1)]
+            if result['valid'] and 'output_activation_observation' in result:
+                output_observation=result['output_activation_observation'];output_id=output_observation['observation_id']
+                nodes.append(node(output_id,'Observation',{**output_observation,'valid':True,
+                    'summary_ref':result['output_activation_ref'],'evidence_dependency_ids':[run_id]},self.task,self.protocol_hash))
+                edges.append(edge(run_id+'-produces-output',run_id,output_id,'PRODUCES',[run_id],self.task,self.store.version+1))
             if not result["valid"]:
                 failure_id = run_id + "-failure"
                 nodes.append(node(failure_id, "Failure", {"failure_kind": result.get("failure_kind"), "evidence_dependency_ids": [attempt]}, self.task, self.protocol_hash))
@@ -482,7 +500,8 @@ class Research:
                 # Each retry is a new immutable attempt, never overwriting a partial baseline.
                 suffix = len(list((self.root / "research_archive" / "attempts").glob("baseline-*")))
                 baseline_id = f"baseline-{suffix}"
-                state["baseline"] = self.evaluate(baseline_id, state["workspace"])
+                observation_options={'observation_model':state['incumbent']} if self.protocol.get('output_activation_observations') else {}
+                state["baseline"] = self.evaluate(baseline_id, state["workspace"],**observation_options)
                 if not state["baseline"]["valid"]:
                     raise ContractError("baseline failed frozen checks; see archived runs")
                 write_json(self.state_path, state)

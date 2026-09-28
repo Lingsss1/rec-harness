@@ -82,6 +82,8 @@ Amazon 也支持下述 `diagnostic_registry` 与 `measurement_requirements`。�
 
 工具计划显式选用 `public-observation-measurement-v2` 后，还可读取当前开发模型已提交的激活/block-score聚合观测；来源、范围、输入归档与恢复均受主机校验。旧合同输入不变，独立验证仍须覆盖新输入。见[公开观测工具合同](implementation/observation-tool-contract.md)。
 
+小型在线验收可在协议中启用 `output_activation_observations: true`，由主机从已有预测收据生成当前模型的标量输出统计量，为v2工具提供逐轮观测；三组对照保持相同基础观测，额外工具调用单独计费。见[在线输出观测](implementation/online-output-observations.md)，该功能不代表Amazon隐藏层诊断在线效用已获验证。
+
 `verify` 和 `recover` 已识别 Amazon campaign，无需初始化 Codex 服务。verify 核对控制器/绑定 study 事件链、角色内容与绑定、已提交开发周期及 CAS，并单列旧角色记录缺少完整事件绑定的情况；它不替代逐 GPU 作业或私有确认结果审计。恢复在控制器锁下检查角色和诊断工作进程，保留未知实际成本的预留费用。
 
 可选 `history_diagnostic: true` 在假设生成前提供基线开发历史长度分布，并在候选开发完成后提供配对分桶结果。仅使用已审计开发 seed，事件/CAS 绑定输入并支持精确恢复；不会新增模型推理。具体字段边界和真实分布见 [开发历史诊断](experiments/amazon-baseline-history.md)。

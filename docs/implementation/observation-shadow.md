@@ -29,4 +29,4 @@ reference、shadow、online 三个套件必须声明相同输入合同才能组�
 
 本次27项相关测试通过，覆盖新来源链、修改拒绝、截止/回滚、两条件执行及恢复、pipeline合同一致性和已有工具流程。测试使用模拟训练收据和CPU启动器，不算真实影子实验。
 
-真实只读核验位于 `rec-harness-runs/observation-shadow-input-v1`：从既有 activation-role 与 block-score-context 研究提取5条公开观测，重复前缀重建一致，源账本不变。两个来源共享同一模型与seed，不声称两个独立条件；未新增Codex调用、工具执行或训练。在线套件自动产生这些模型观测的能力仍待补齐。
+真实只读核验位于 `rec-harness-runs/observation-shadow-input-v1`：从既有 activation-role 与 block-score-context 研究提取5条公开观测，重复前缀重建一致，源账本不变。两个来源共享同一模型与seed，不声称两个独立条件；未新增Codex调用、工具执行或训练。后续[在线输出观测](online-output-observations.md)已覆盖合成任务标量输出，不代表Amazon内部诊断的在线验证已完成。

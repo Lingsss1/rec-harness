@@ -153,22 +153,31 @@ def run_validation(suite_path,candidate,output,*,agent_factory=None,memory_conte
                         result=records[-1]
                         for ref in result.get('artifacts',{}).values():objects.verify(ref)
                     else:
-                        folder=root/'cases'/key;attempt=len(list(folder.glob('attempt-*')))+1;job=folder/('attempt-'+str(attempt))
-                        job.mkdir(parents=True,exist_ok=True)
-                        if case['source']:inputs.restore(case['source'],job/'model')
-                        task='prefix-'+digest([key,attempt])[:32];store.reserve(task,suite['call_cost'])
-                        result={'key':key,'passed':False,'input_hash':digest(context)}
-                        try:
-                            options=suite['agent_backend']
-                            agent=agent_factory(case,group) if agent_factory else JailedCodexAgent(options['template'],options['runtime_root'],model=options['model'],timeout=options.get('timeout',300),prompts=patch.get('prompts'),web_search='disabled',role_skills=options.get('role_skills'))
-                            response=agent.run(case['role'],context,job)
-                            write_json(job/'replay-response.json',response);check_response(case['role'],context,response)
-                            result['passed']=True
-                        except (ContractError,OSError,ValueError,KeyError,TypeError) as error:result['error']=str(error)
-                        finally:store.settle(task,suite['call_cost'],'accepted' if result['passed'] else 'rejected')
-                        write_json(job/'replay-context.json',context)
-                        names=[name for name in ['replay-context.json','replay-response.json','request.json','resources.json','literature-search.json','stdout.jsonl'] if (job/name).is_file()]
-                        result['artifacts']=objects.snapshot(job,names);store.event('prefix_replay_completed',result)
+                        from .prefix_recovery import prepare
+                        from .validation_case import settle_once
+                        folder=root/'cases'/key;job=folder/'attempt-1'
+                        call_binding={'context':context,'source':case['source'],'policy':patch,'role':case['role'],'validation':binding}
+                        task,result=prepare(store,objects,folder,key,call_binding)
+                        if result is None:
+                            job.mkdir(parents=True,exist_ok=True)
+                            if case['source']:inputs.restore(case['source'],job/'model')
+                            store.reserve(task,suite['call_cost'])
+                            submission={'key':key,'task_id':task,'binding_hash':digest(call_binding)}
+                            store.event('prefix_replay_submitted',submission)
+                            result={'key':key,'passed':False,'input_hash':digest(context)}
+                            try:
+                                options=suite['agent_backend']
+                                agent=agent_factory(case,group) if agent_factory else JailedCodexAgent(options['template'],options['runtime_root'],model=options['model'],timeout=options.get('timeout',300),prompts=patch.get('prompts'),web_search='disabled',role_skills=options.get('role_skills'))
+                                response=agent.run(case['role'],context,job)
+                                write_json(job/'replay-response.json',response);check_response(case['role'],context,response)
+                                result['passed']=True
+                            except (ContractError,OSError,ValueError,KeyError,TypeError) as error:result['error']=str(error)
+                            finally:settle_once(store,task,suite['call_cost'],'accepted' if result['passed'] else 'rejected')
+                            write_json(job/'replay-context.json',context)
+                            names=[name for name in ['replay-context.json','replay-response.json','request.json','resources.json','literature-search.json','stdout.jsonl'] if (job/name).is_file()]
+                            result['artifacts']=objects.snapshot(job,names)
+                            store.event('prefix_replay_result_recorded',{'key':key,'request_hash':digest(submission),'result':result})
+                        store.event('prefix_replay_completed',result)
                     pair[group]=result
                 rows.append({'evaluation_id':case['id'],**pair})
             if not rows:raise ContractError('empty prefix suite')

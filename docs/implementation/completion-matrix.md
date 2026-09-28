@@ -47,7 +47,9 @@
 
 ## 接续工作
 
-接通[在线比较组间恢复](online-group-recovery.md)：直接策略/工具在线验证、工具pipeline utility和Harness pipeline development/confirmation，在已有研究组全部具有已提交终态和完整费用账本时复用这些组，继续剩余比较。每次调用冻结独立费用快照，Harness报告累计所有恢复调用费用。组内未知结果及prefix_audit仍不自动重启。37项相关工程测试通过；此前三份真实历史共7组只读预检通过，事件链不变，无新增研究调用。晚于v23安装包。
+接通[前缀审计恢复](prefix-recovery.md)：固定调用身份并先提交结果档案，完成事件前中断可复用原结果；未知结果不自动重发。Evolution直接前缀验证及Harness pipeline prefix_audit在启动前核对未完成调用。当前新增恢复测试为脚本角色工程验证，无新增Codex调用；晚于534项完整回归和v23安装包。
+
+接通[在线比较组间恢复](online-group-recovery.md)：直接策略/工具在线验证、工具pipeline utility和Harness pipeline development/confirmation，在已有研究组全部具有已提交终态和完整费用账本时复用这些组，继续剩余比较。每次调用冻结独立费用快照，Harness报告累计所有恢复调用费用。组内未知结果仍不自动重启，prefix_audit使用上项独立合同。37项相关工程测试通过；此前三份真实历史共7组只读预检通过，事件链不变，无新增研究调用。晚于v23安装包。
 
 修复[reference/shadow案例及外层阶段中断恢复](tool-validation-case-recovery.md)：输入绑定后复用成功CPU收据，未知结果禁止自动重跑，结果从CAS核对。外层Evolution保留阶段目录与案例身份，先归档报告再判定门槛；支持安全恢复的内置验证器继续剩余案例，其他未知进程保留待处理状态，不记作科学淘汰。直接案例及外层Evolution分别完成真实CPU验收；外层在两个真实验证器进程间复用成功收据，总计两个案例、合计5 BCU。项目入口另有两项新增恢复回归，相关模块8项通过；不代表任意SIGKILL恢复或在线验证器安全重启。均晚于v23安装包。
 

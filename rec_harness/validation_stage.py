@@ -84,9 +84,13 @@ def report(evolution,candidate,plan,stage,runner):
                     module=='rec_harness.harness_pipeline' and stage in {'development','confirmation'} or
                     module=='rec_harness.tool_online' and stage in {'utility','confirmation'} or
                     module=='rec_harness.tool_pipeline' and stage=='utility')
-            if not (safe or online):raise ValidationRecoveryRequired('unfinished validator has no safe automatic resume contract')
+            prefix=module in {'rec_harness.harness_prefix','rec_harness.harness_pipeline'} and stage=='prefix_audit'
+            if not (safe or online or prefix):raise ValidationRecoveryRequired('unfinished validator has no safe automatic resume contract')
             try:
-                if online:
+                if prefix:
+                    from .prefix_recovery import preflight
+                    preflight(target)
+                elif online:
                     from .online_recovery import completed_groups
                     completed_groups(target,module,stage)
                 else:recoverable_cases(target)

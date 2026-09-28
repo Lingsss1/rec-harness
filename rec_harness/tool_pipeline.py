@@ -4,23 +4,35 @@ from pathlib import Path
 from .core import ContractError,digest,file_hash,read_json,write_json
 from .evolution import STAGES
 from .tool_validation import validate_suite
+from .diagnostic_inputs import CONTRACT,CONTRACTS
+
+
+def input_contract(suite):
+    contract=suite.get('tool_contract',suite.get('tool_runtime',{}).get('contract',CONTRACT))
+    if contract not in CONTRACTS:raise ContractError('unsupported validation tool contract')
+    if suite.get('tool_runtime',{}).get('contract',contract)!=contract:
+        raise ContractError('validation tool runtime contract differs')
+    return contract
 
 
 def freeze_suite(specification,directory):
     path=Path(specification).resolve();spec=read_json(path);root=Path(directory).resolve()
     if root.exists() and any(root.iterdir()):raise ContractError('pipeline directory must be empty')
-    suites={};identity=None;files=None
+    suites={};identity=None;files=None;contracts=set()
     for kind in ['reference','shadow','online']:
         source=(path.parent/spec[kind]).resolve();body=read_json(source)
         if identity is None:identity=body['identity'];files=body['tool_files']
         if body['identity']!=identity or body['tool_files']!=files:
             raise ContractError('pipeline stages must share frozen identity and tool files')
+        contracts.add(input_contract(body))
         suites[kind]={'path':str(source),'sha256':file_hash(source)}
     for stage in ['correctness','synthetic','robustness']:validate_suite(read_json(suites['reference']['path']),stage)
     shadow=read_json(suites['shadow']['path']);online=read_json(suites['online']['path'])
     if shadow.get('schema')!='amazon-tool-shadow-v1' or online.get('schema')!='online-tool-suite-v1':
         raise ContractError('pipeline requires frozen shadow and online suites')
+    if len(contracts)!=1:raise ContractError('pipeline stages must share the tool input contract')
     body={'schema':'tool-validation-pipeline-v1','suites':suites,'identity':identity,'tool_files':files}
+    if next(iter(contracts))!=CONTRACT:body['tool_contract']=next(iter(contracts))
     body['hash']=digest(body);write_json(root/'suite.json',body);return body
 
 

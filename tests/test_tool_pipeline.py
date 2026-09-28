@@ -54,3 +54,16 @@ class PipelineTests(unittest.TestCase):
         shadow=read_json(self.root/'shadow.json');shadow['identity']={'different':'fixture'};write_json(self.root/'shadow.json',shadow)
         with self.assertRaisesRegex(ContractError,'share frozen identity'):
             freeze_suite(self.root/'spec.json',self.root/'bad-suite')
+
+    def test_observation_contract_must_match_all_validation_stages(self):
+        from rec_harness.diagnostic_inputs import OBSERVATION_CONTRACT
+        shadow=read_json(self.root/'shadow.json');shadow['tool_contract']=OBSERVATION_CONTRACT
+        write_json(self.root/'shadow.json',shadow)
+        with self.assertRaisesRegex(ContractError,'input contract'):
+            freeze_suite(self.root/'spec.json',self.root/'mismatched')
+        reference=read_json(self.root/'reference.json');reference['tool_contract']=OBSERVATION_CONTRACT
+        write_json(self.root/'reference.json',reference)
+        online=read_json(self.root/'online.json');online['tool_runtime']={'contract':OBSERVATION_CONTRACT}
+        write_json(self.root/'online.json',online)
+        result=freeze_suite(self.root/'spec.json',self.root/'matched')
+        self.assertEqual(result['tool_contract'],OBSERVATION_CONTRACT)

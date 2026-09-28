@@ -5,6 +5,7 @@ from pathlib import Path
 from .core import Artifacts,ContractError,digest,file_hash,identifier,number,read_json,write_json
 from .cpu_job import run_cpu_job
 from .diagnostics import validate_measurement
+from .diagnostic_inputs import CONTRACT,OBSERVATION_CONTRACT,CONTRACTS
 from .process_identity import assert_stopped
 from .store import Store
 from .adapters.amazon_controls import load_config
@@ -15,6 +16,8 @@ def freeze_suite(specification,directory):
     path=Path(specification).resolve();spec=read_json(path);study=(path.parent/spec['study']).resolve()
     config=load_config(study);root=Path(directory).resolve()
     if root.exists() and any(root.iterdir()):raise ContractError('shadow suite directory must be empty')
+    contract=spec.get('tool_contract',CONTRACT)
+    if contract not in CONTRACTS:raise ContractError('unsupported shadow tool contract')
     cases=[];ids=set();conditions=set()
     for case in spec['conditions']:
         identifier(case['id'])
@@ -29,8 +32,16 @@ def freeze_suite(specification,directory):
             job_id=f'{version}-{dataset}-{seed}'
             receipts[job_id]={'completed_hash':digest(result),'manifest_hash':digest(manifest)}
             runs.append({'dataset':dataset,'seed':seed,'valid':True,'metrics':result['metrics']})
-        cases.append({'id':case['id'],'condition_hash':condition,'source_receipts':receipts,
-            'input':{'task_id':'tool-shadow','model_version':version,'protocol_hash':config['protocol_hash'],'runs':runs}})
+        frozen={'id':case['id'],'condition_hash':condition,'source_receipts':receipts,
+            'input':{'task_id':'tool-shadow','model_version':version,'protocol_hash':config['protocol_hash'],'runs':runs}}
+        if contract==OBSERVATION_CONTRACT:
+            from .shadow_observations import collect
+            source=case.get('observation_source')
+            if not isinstance(source,dict) or 'campaign' not in source:raise ContractError('v2 shadow requires an observation_source per condition')
+            source={**source,'campaign':str((path.parent/source['campaign']).resolve())}
+            frozen['input'],frozen['observation_source']=collect(source,study,config,version,runs)
+        elif 'observation_source' in case:raise ContractError('observation_source requires v2 shadow contract')
+        cases.append(frozen)
     if len(cases)<2:raise ContractError('shadow requires at least two distinct audited conditions')
     for key in ['budget','case_cost','repeat_tolerance','timeout']:number(spec[key],key,0)
     if spec['timeout']<=0:raise ContractError('positive shadow timeout required')
@@ -40,6 +51,7 @@ def freeze_suite(specification,directory):
     body={key:spec[key] for key in ['identity','execution','tool_files','budget','case_cost','repeat_tolerance','timeout','measurement_bounds']}
     body.update(schema='amazon-tool-shadow-v1',study=str(study),study_config_hash=digest(read_json(study/'study.json')),cases=cases,
         qualification='read-only development aggregates; repeatability and applicability, not decision utility')
+    if contract==OBSERVATION_CONTRACT:body.update(tool_contract=contract)
     body['hash']=digest(body);write_json(root/'suite.json',body);return body
 
 
@@ -49,6 +61,8 @@ def audit_inputs(suite):
     study=Path(suite['study'])
     if digest(read_json(study/'study.json'))!=suite['study_config_hash']:raise ContractError('bound shadow study changed')
     config=load_config(study)
+    contract=suite.get('tool_contract',CONTRACT)
+    if contract not in CONTRACTS:raise ContractError('unsupported shadow tool contract')
     if len(suite['cases'])<2:raise ContractError('two shadow conditions required')
     identities=set();ids=set()
     for case in suite['cases']:
@@ -68,6 +82,13 @@ def audit_inputs(suite):
             ref=case['source_receipts'][f"{version}-{row['dataset']}-{row['seed']}"]
             if digest(result)!=ref['completed_hash'] or digest(manifest)!=ref['manifest_hash'] or result['metrics']!=row['metrics']:
                 raise ContractError('shadow aggregate differs from audited job')
+        if contract==OBSERVATION_CONTRACT:
+            from .shadow_observations import collect
+            source=case['observation_source']
+            expected,binding=collect({key:source[key] for key in ['campaign','observation_ids','cutoff_seq']},study,config,version,rows)
+            if expected!=request or binding!=source:raise ContractError('shadow observation prefix changed')
+        elif 'observation_source' in case or 'observations' in request:
+            raise ContractError('observation inputs require v2 shadow contract')
 
 
 def run_validation(suite_path,candidate,output):

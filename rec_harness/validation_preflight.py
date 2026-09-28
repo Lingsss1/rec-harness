@@ -15,13 +15,14 @@ def check_suite(module,path,stage=None):
     if module in {'rec_harness.online_validation','rec_harness.harness_prefix','rec_harness.tool_online'}:
         if not (path.parent/'objects').is_dir():raise ContractError('validation artifact directory missing')
     if module=='rec_harness.tool_pipeline':
-        from .tool_pipeline import load_suite
+        from .tool_pipeline import load_suite,input_contract
         suite=load_suite(path)
         modules={'reference':'tool_validation','shadow':'tool_shadow','online':'tool_online'}
         for name,ref in suite['suites'].items():
             child=check_suite('rec_harness.'+modules[name],ref['path'])
             if child['identity']!=suite['identity']:raise ContractError('pipeline child identity differs')
             if child['tool_files']!=suite['tool_files']:raise ContractError('pipeline child tool files differ')
+            if input_contract(child)!=input_contract(suite):raise ContractError('pipeline child input contract differs')
     elif module=='rec_harness.harness_pipeline':
         from .harness_pipeline import load_suite
         for ref in read_json(path)['suites'].values():
@@ -71,6 +72,9 @@ def preflight(plan):
         if key not in seen:
             suite=check_suite(module,path,key[2]);seen.add(key)
             if suite['identity']!=plan['identity']:raise ContractError('validator suite differs from plan identity')
+            if module in {'rec_harness.tool_pipeline','rec_harness.tool_shadow','rec_harness.tool_online','rec_harness.tool_validation'} and 'tool_contract' in plan:
+                from .tool_pipeline import input_contract
+                if input_contract(suite)!=plan['tool_contract']:raise ContractError('validator suite differs from plan tool input contract')
         checks.append({'stage':stage,'module':module,'suite':str(path),'suite_hash':file_hash(path),'scope':'frozen suite and bound inputs'})
     return {'status':'passed','validator_files_hash':digest(hashes),'checks':checks,
         'qualification':'Read-only readiness check; no candidate execution, Codex call, resource reservation or scientific utility result. External/custom validators receive file checks only.'}

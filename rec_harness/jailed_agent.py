@@ -112,6 +112,8 @@ class JailedCodexAgent:
         environment={**os.environ,'HOME':'/root','CODEX_HOME':'/root/.codex'}
         result = run_process(launch, Path(__file__).resolve().parents[1], directory,
                              stdin=prompt, timeout=self.timeout,env=environment)
+        from .generation_workspace import capture
+        capture(workspace,directory)
         search_receipt(directory, self.web_search[role])
         if result['status'] != 'success':
             write_json(directory / 'resources.json', {**result, 'token_usage': None, 'isolation': request['isolation']})

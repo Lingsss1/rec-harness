@@ -215,9 +215,10 @@ class Evolution:
                 'role':role,'input_hash':digest(request_context)})
         status = "crash"
         def record_generation():
+            from .generation_workspace import archive_files
             names=['context.json','request.json','schema.json','response.json','resources.json',
                    'stdout.jsonl','stderr.txt','literature-search.json','prompt.txt','launch.json','process.json']
-            receipts=self.artifacts.snapshot(task_dir,[name for name in names if (task_dir/name).is_file()])
+            receipts=self.artifacts.snapshot(task_dir,[name for name in names if (task_dir/name).is_file()]+archive_files(task_dir))
             record={'candidate_id':candidate_id,'task_id':task_id,'role':role,'receipts':receipts,
                     'scope':'Original available generation files; missing files are not inferred and transport output is not validation evidence.'}
             prior=[e['payload'] for e in self.store.events() if e['kind']=='candidate_generation_archived'

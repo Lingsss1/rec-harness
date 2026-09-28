@@ -18,6 +18,8 @@ class JailedAgentEnvironmentTests(unittest.TestCase):
                 self.assertEqual(kwargs['env']['CODEX_HOME'],'/root/.codex')
                 jail=Path(argv[4])
                 self.assertTrue((jail/'root/.codex').is_dir())
+                write_json(jail/'workspace/model/draft.py',{'draft':'unfinished'})
+                (jail/'workspace/response.json').write_text('invalid unfinished JSON')
                 (directory/'stdout.jsonl').write_text('')
                 return receipt
             with patch.dict('os.environ',{},clear=True),patch('os.geteuid',return_value=0), \
@@ -30,3 +32,6 @@ class JailedAgentEnvironmentTests(unittest.TestCase):
             self.assertEqual(retained['returncode'],1)
             self.assertIsNone(retained['token_usage'])
             self.assertEqual(retained['isolation'],read_json(root/'role/request.json')['isolation'])
+            self.assertEqual((root/'role/returned-workspace/response.json').read_text(),'invalid unfinished JSON')
+            self.assertEqual(read_json(root/'role/returned-workspace/model/draft.py'),{'draft':'unfinished'})
+            self.assertFalse((root/'role/model/draft.py').exists())

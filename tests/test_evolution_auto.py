@@ -50,6 +50,9 @@ class EvolutionAutomationTests(unittest.TestCase):
                         (directory/'stdout.jsonl').write_text('{"type":"item.completed","item":{"type":"web_search","query":"fixture"}}\n')
                         (directory/'stderr.txt').write_text('fixture diagnostic')
                         search_receipt(directory,'live',None if failure else response)
+                        from rec_harness.generation_workspace import capture
+                        write_json(directory/'model/draft.json',{'unadmitted':'fixture'})
+                        capture(directory,directory)
                         if failure:raise ContractError('fixture transport failure')
                         return response
                 agent=Recorded();result=autoresearch(campaign,self.config(),agent=agent)
@@ -60,6 +63,8 @@ class EvolutionAutomationTests(unittest.TestCase):
                     self.assertEqual(len(records),1);record=records[0]['payload']
                     self.assertEqual(record['role'],'optimizer')
                     self.assertIn('stdout.jsonl',record['receipts']);self.assertIn('literature-search.json',record['receipts'])
+                    self.assertIn('returned-workspace/model/draft.json',record['receipts'])
+                    self.assertIn('returned-workspace/manifest.json',record['receipts'])
                     if not failure:
                         implemented=next(e for e in evolution.store.events() if e['kind']=='candidate_implemented')
                         self.assertLess(records[0]['seq'],implemented['seq'])

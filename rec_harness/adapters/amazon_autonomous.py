@@ -147,9 +147,10 @@ class AmazonAutoresearch:
                 target.rename(archive)
         def complete(task,wall_seconds):
             if any(e['kind']=='role_completed' and e['payload']['task']==task for e in self.store.events()):return
+            from rec_harness.generation_workspace import archive_files
             self.store.event('role_completed',{'task':task,'role':role,**read_json(target/'accepted.json'),
                 'task_id':task,'status':'success','wall_seconds':wall_seconds,
-                'archive':artifacts.snapshot(target,[name for name in ['context.json','request.json','response.json','resources.json','schema.json','literature-search.json','stdout.jsonl'] if (target/name).exists()]+['model/'+name for name in read_json(target/'accepted.json').get('model_source_hashes',{})])})
+                'archive':artifacts.snapshot(target,[name for name in ['context.json','request.json','response.json','resources.json','schema.json','literature-search.json','stdout.jsonl'] if (target/name).exists()]+['model/'+name for name in read_json(target/'accepted.json').get('model_source_hashes',{})]+archive_files(target))})
         def accept(response):
             record={'response_hash':digest(response),'context_hash':digest(read_json(target/'context.json'))}
             if (target/'model/model.py').exists():record['source_hash']=file_hash(target/'model/model.py')

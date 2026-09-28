@@ -5,7 +5,8 @@ import fcntl
 from .core import ContractError, canonical, digest, identifier, public_only, read_json, write_json
 from .runtime import node, edge
 
-SCHEMA = 'memory-policy-v3'
+SCHEMA = 'memory-policy-v4'
+SOURCE_FIELDS = {'citation_hash','verification_status','source_version','qualification'}
 ROOT_TYPES = {'Claim', 'GapHypothesis', 'Method', 'Source'}
 ALLOWED_TYPES = ROOT_TYPES | {'Experiment', 'Observation', 'Failure', 'Component', 'Context', 'ModelVersion', 'Proposal'}
 TEXT_FIELDS = set('task_id protocol_hash origin status statement mechanism cost title url citation '
@@ -18,19 +19,24 @@ SCOPE_FIELDS = {'task_id', 'model_version', 'dataset', 'protocol_hash', 'conditi
 RELATIONS = {'SUPPORTS', 'CONTRADICTS', 'ALTERNATIVE_TO', 'SUPPORTED_BY', 'BASED_ON', 'LOCATED_AT', 'TARGETS', 'USES'}
 
 
-def project_node(original):
+def project_node(original, *, source_metadata=False):
     if original['type'] not in ALLOWED_TYPES:
         raise ContractError('node type not transferable')
     attrs = original['attrs']
     if attrs['origin'] == 'legacy_unverified' or any(k in attrs for k in ('source_package_hash', 'source_node', 'transfer_status')):
         raise ContractError('unverified or transferred provenance cannot be exported')
     projected = {}
-    for key in TEXT_FIELDS & attrs.keys():
+    text_fields=TEXT_FIELDS | (SOURCE_FIELDS if source_metadata and original['type']=='Source' else set())
+    for key in text_fields & attrs.keys():
         if attrs[key] is None:
             continue
         if not isinstance(attrs[key], str) or len(attrs[key]) > 8192:
             raise ContractError('transfer text field invalid')
         projected[key] = attrs[key]
+    if source_metadata and original['type']=='Source' and 'retrieved_content_ref' in attrs:
+        # This transfer format contains no external document bytes/CAS bundle.
+        # Preserve explicit absence only; do not emit an unresolvable content ref.
+        if attrs['retrieved_content_ref'] is None:projected['retrieved_content_ref']=None
     for key in LIST_FIELDS & attrs.keys():
         if not isinstance(attrs[key], list) or any(not isinstance(v, str) or len(v) > 2048 for v in attrs[key]):
             raise ContractError('transfer list field invalid')
@@ -82,11 +88,17 @@ def export_memory(store, path, *, task_id, protocol_hash, version=None, limit=10
     snapshot = store.snapshot(version)
     scoped = {n['id']: n for n in snapshot['nodes']
               if (n['attrs']['task_id'], n['attrs']['protocol_hash']) == (task_id, protocol_hash)}
+    types={n['id']:n['type'] for n in snapshot['nodes']}
+    def source_relation(relation):
+        return relation['relation']=='DERIVED_FROM' and types.get(relation['source'])=='Method' and types.get(relation['target'])=='Source'
+    source_metadata=any(n['type']=='Source' and SOURCE_FIELDS & n['attrs'].keys() for n in scoped.values()) or any(
+        source_relation(e) and (e['source'] in scoped or e['target'] in scoped) for e in snapshot['edges'])
+    schema=SCHEMA if source_metadata else 'memory-policy-v3'
     projected = {}
     for key, original in scoped.items():
-        try: projected[key] = project_node(original)
+        try: projected[key] = project_node(original,source_metadata=source_metadata)
         except ContractError: continue
-    relations = [e for e in snapshot['edges'] if e['relation'] in RELATIONS
+    relations = [e for e in snapshot['edges'] if (e['relation'] in RELATIONS or source_metadata and source_relation(e))
                  and (e['source'] in scoped or e['target'] in scoped)]
     chosen, skipped = set(), {'ineligible_or_incomplete': sum(n['type'] in ROOT_TYPES and k not in projected for k, n in scoped.items()), 'capacity': 0}
     roots = sorted((k for k, n in projected.items() if n['type'] in ROOT_TYPES),
@@ -121,7 +133,7 @@ def export_memory(store, path, *, task_id, protocol_hash, version=None, limit=10
         chosen = candidate
     nodes, edges = contents(chosen)
     cutoff = events[cutoff_seq - 1] if cutoff_seq else None
-    body = {'schema': SCHEMA, 'source_task': task_id, 'source_protocol': protocol_hash,
+    body = {'schema': schema, 'source_task': task_id, 'source_protocol': protocol_hash,
             'source_graph_version': version, 'source_graph_hash': snapshot['hash'],
             'source_cutoff': {'seq': cutoff_seq, 'hash': cutoff['hash'] if cutoff else '0' * 64,
                               'created_at': cutoff['created_at'] if cutoff else None},
@@ -139,7 +151,7 @@ def validate_package(package):
               'source_cutoff', 'capacity', 'nodes', 'edges', 'omitted_roots', 'policy', 'hash'}
     if set(package) != fields:
         raise ContractError('unexpected memory package fields')
-    if package.get('schema') not in {'memory-policy-v2', SCHEMA}:
+    if package.get('schema') not in {'memory-policy-v2','memory-policy-v3', SCHEMA}:
         raise ContractError('unsupported memory schema; re-export with current policy')
     if digest({k: v for k, v in package.items() if k != 'hash'}) != package['hash']:
         raise ContractError('memory package hash mismatch')
@@ -162,7 +174,7 @@ def validate_package(package):
     for item in nodes:
         if package['schema']=='memory-policy-v2' and item['type']=='Proposal':
             raise ContractError('Proposal requires memory-policy-v3')
-        if project_node(item) != item:
+        if project_node(item,source_metadata=package['schema']==SCHEMA) != item:
             raise ContractError('unapproved transfer field')
         attrs = item['attrs']
         if (attrs['task_id'], attrs['protocol_hash']) != (package['source_task'], package['source_protocol']):
@@ -174,7 +186,9 @@ def validate_package(package):
             raise ContractError('USES requires memory-policy-v3')
         if set(relation) != {'id', 'source', 'target', 'relation', 'evidence_refs'}:
             raise ContractError('unexpected memory relation fields')
-        if relation['relation'] not in RELATIONS or not ({relation['source'], relation['target']} | set(relation['evidence_refs'])).issubset(by_id):
+        derived_source=(package['schema']==SCHEMA and relation['relation']=='DERIVED_FROM'
+            and by_id.get(relation['source'],{}).get('type')=='Method' and by_id.get(relation['target'],{}).get('type')=='Source')
+        if (relation['relation'] not in RELATIONS and not derived_source) or not ({relation['source'], relation['target']} | set(relation['evidence_refs'])).issubset(by_id):
             raise ContractError('package relation closure incomplete')
 
 

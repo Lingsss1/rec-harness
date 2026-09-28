@@ -10,6 +10,30 @@ from rec_harness.store import Store
 
 
 class MemoryPolicyTests(unittest.TestCase):
+    def test_source_lineage_and_unverified_status_survive_bounded_transfer(self):
+        from rec_harness.method_sources import graph_records
+        self.assertEqual(self.export()['schema'],'memory-policy-v3')
+        method={'origin':'paper_claim','sources':['https://example.org/fictional-paper.pdf'],'mechanism':'fixture'}
+        nodes,edges=graph_records(method,'cited-method','A','p',2)
+        self.source.patch({'base_version':1,'nodes':[node('cited-method','Method',method,'A','p','paper_claim'),*nodes],'edges':edges})
+        package=self.export();validate_package(package)
+        self.assertEqual(package['schema'],'memory-policy-v4')
+        reference=next(n for n in package['nodes'] if n['id']==nodes[0]['id'])
+        self.assertEqual(reference['attrs']['verification_status'],'agent_reported_unverified')
+        self.assertEqual(reference['attrs']['source_version'],'unknown')
+        self.assertIsNone(reference['attrs']['retrieved_content_ref'])
+        self.assertTrue(any(e['relation']=='DERIVED_FROM' and e['source']=='cited-method' and e['target']==reference['id'] for e in package['edges']))
+        import_memory(self.target,self.package,'B','q')
+        transferred=next(n for n in self.target.snapshot()['nodes'] if n['attrs']['source_node']['id']==reference['id'])
+        self.assertEqual(transferred['attrs']['source_node'],reference)
+        self.assertEqual(transferred['attrs']['status'],'unknown')
+        self.assertEqual(transferred['attrs']['transfer_status'],'analogy_requires_target_validation')
+        self.assertTrue(any(e['target']==transferred['id'] and e['attrs']['source_relation']=='DERIVED_FROM' for e in self.target.snapshot()['edges']))
+        before=self.target.verify();import_memory(self.target,self.package,'B','q');self.assertEqual(self.target.verify(),before)
+        self.assertEqual(self.export(limit=1)['nodes'],[])  # Do not detach source from method to fit capacity.
+        package['schema']='memory-policy-v3';package['hash']=digest({k:v for k,v in package.items() if k!='hash'})
+        with self.assertRaises(ContractError):validate_package(package)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)

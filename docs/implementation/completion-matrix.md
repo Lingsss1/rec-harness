@@ -39,6 +39,8 @@
 
 ## 接续工作
 
+通用图记忆新增[来源转移 v4](source-memory-transfer.md)，保留 Method→Source 及未核验/版本未知状态，容量门控仍按完整闭包执行。普通图继续导出 v3，旧包不改写；Amazon 独立开发记忆格式未由此扩展。
+
 新任务已补齐[方法—来源图关联](method-source-graph.md)：通用模型及 Amazon 开发图创建 Source/DERIVED_FROM，并保留论文方法的 origin。原始引用可追溯，内容与版本仍显式未核验；来源不充当本地实验或机制支持。
 
 新模型任务已增加[方法卡来源准入](method-source-admission.md)：无可定位来源的 `paper_claim` 在实现前拒绝，来源不足的想法仍可作为 Agent 假设研究。此门槛只校验标识，不等于论文内容级验证；旧冻结合同保持兼容。

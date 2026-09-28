@@ -164,6 +164,7 @@ class Evolution:
                 if 'implementation' in current:
                     if (current['implementation']!=saved['implementation'] or current['implementation_hash']!=saved['implementation_hash']):
                         raise ContractError('candidate projection implementation differs')
+                    self._verify_proposal(current)
                     return current
             write_json(marker,saved)
             return saved
@@ -189,7 +190,9 @@ class Evolution:
         if kind=='tool':
             from .tool_method import contract
             method_contract=contract(plan)
-            if method_contract is not None:request_context['tool_method_contract']=method_contract
+            if method_contract is not None:
+                request_context['tool_method_contract']={**method_contract,
+                    'inherited_implementation_hash':digest(source) if source else None}
         submissions=[e['payload'] for e in self.store.events()
                      if e['kind']=='candidate_generation_submitted' and e['payload']['candidate_id']==candidate_id]
         recovered=bool(submissions)

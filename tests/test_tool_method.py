@@ -91,6 +91,37 @@ class ToolMethodTests(unittest.TestCase):
         changed=read_json(projection);changed['proposal_ref']={}
         write_json(projection,changed)
         with self.assertRaisesRegex(ContractError,'proposal projection'):evolution.verified_candidate('method')
+        with self.assertRaisesRegex(ContractError,'proposal projection'):
+            evolution.propose('method','tool',{},plan,agent=author)
+        self.assertEqual(author.calls,1)
+
+    def test_existing_tool_author_receives_exact_source_hash_and_preserves_helpers(self):
+        plan=read_json(self.fixture.config())['plan'];rule=next(iter(plan['stages'].values()))
+        plan['stages']={stage:dict(rule) for stage in STAGES['tool']};plan['tool_method_contract']=CONTRACT
+        evolution=Evolution(self.fixture.campaign);self.addCleanup(evolution.store.close)
+        source_dir=self.fixture.root/'source';source_dir.mkdir()
+        (source_dir/'diagnostic.py').write_text('def measure(request): return {}\n')
+        (source_dir/'helper.py').write_text('VERSION=1\n')
+        source=evolution.artifacts.snapshot(source_dir,['diagnostic.py','helper.py'])
+        outer=self
+        class Author:
+            calls=0
+            def run(self,role,context,directory):
+                self.calls+=1
+                inherited=context['tool_method_contract']['inherited_implementation_hash']
+                outer.assertEqual(inherited,digest(source))
+                card={**outer.card,'route':'existing_tool','predecessor_implementation_hash':inherited}
+                model=Path(directory)/'model';outer.assertTrue((model/'helper.py').exists())
+                (model/'diagnostic.py').write_text('from helper import VERSION\ndef measure(request): return {}\n')
+                write_json(model/FILENAME,card)
+                return {'changed_files':['diagnostic.py',FILENAME]}
+        agent=Author();candidate=evolution.propose('inherited','tool',{},plan,agent=agent,source=source)
+        self.assertEqual(candidate['implementation']['helper.py'],source['helper.py'])
+        card=read_json(evolution.artifacts.verify(candidate['proposal_ref']))
+        self.assertEqual(card['predecessor_implementation_hash'],digest(source))
+        self.assertNotIn(FILENAME,candidate['implementation'])
+        self.assertEqual(evolution.propose('inherited','tool',{},plan,agent=agent,source=source),candidate)
+        self.assertEqual(agent.calls,1)
 
     def test_paper_method_graph_keeps_unverified_sources_and_deduplicates_citations(self):
         from rec_harness.evolution_graph import lifecycle_graph

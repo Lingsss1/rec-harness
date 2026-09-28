@@ -12,4 +12,8 @@ v1的原账本在确认自有进程全部结束后保留未知预留费用。v2�
 
 一次真实Codex工具作者调用成功，耗时129.342秒。correctness、synthetic、robustness各两个CPU案例，shadow为两个历史开发条件各重复两次，共十次隔离执行。四阶段全部通过，分别计费2、2、2、4 BCU。`audit-completed-stages.py`独立复算均值、最小值和极差，并核对冻结源码、输入、隔离收据、CAS及费用；`completed-stages-acceptance.json`状态为passed。该审计没有新增调用或实验。
 
-在线无工具组的四个基线训练均已提交success完成收据，四次基线激活采集也均成功，费用审计为4 activation BCU、零待结算，见`baseline-activation-acceptance.json`。首轮evidence角色已成功完成，后续研究仍在运行。这些结果证明前置执行完成，尚不构成三组在线效用、成本阶段或晋升验收。最终状态仍以本页前述终态文件为准。
+在线无工具组的四个基线训练均已提交success完成收据，四次基线激活采集也均成功，费用审计为4 activation BCU、零待结算，见`baseline-activation-acceptance.json`。
+
+无工具组现已完成一轮全部六个角色及十二次开发训练（四个基线、四个候选、四个机制对照），以max_rounds结束。基线平均HR@10为0.5565，候选为0.548，差值−0.0085，未获确认资格，最终保留legacy_incumbent。六次真实角色传输均成功，无生成诊断工具调用。`audit-first-group.py`核对冻结配置、终态与报告、角色档案CAS及传输收据、控制器事件链和完成记录，`first-group-acceptance.json`为passed；审计没有新增调用。
+
+首组审计中的费用来自已提交完成记录，不能替代最终study/GPU账本及三组加权费用复核。已有工具组已启动，候选工具组尚待执行。当前仍不构成三组在线效用、成本阶段或晋升验收；最终状态以本页前述终态文件为准。

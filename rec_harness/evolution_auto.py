@@ -33,6 +33,13 @@ class AutonomousEvolution:
             config['context']=load_context(config.pop('optimizer_measurement_source'))
             if config['context']['source']['task_id'] not in config['plan']['development_ids']:
                 raise ContractError('tool validation must exclude optimizer source task')
+        if config['kind']=='tool':
+            from .diagnostics import CONTRACT,runtime_contract
+            if config['plan'].get('tool_contract')==CONTRACT:
+                context=config.get('context',{});contract=runtime_contract()
+                if 'diagnostic_contract' in context and context['diagnostic_contract']!=contract:
+                    raise ContractError('diagnostic authoring contract differs from runtime')
+                config['context']={**context,'diagnostic_contract':contract}
         root.mkdir(parents=True,exist_ok=True);evolution=Evolution(root)
         try:
             if 'source' in config:

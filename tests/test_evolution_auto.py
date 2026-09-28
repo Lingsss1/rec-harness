@@ -257,8 +257,12 @@ class EvolutionAutomationTests(unittest.TestCase):
             calls=0
             def run(self,role,context,directory):
                 self.calls+=1;assert role=='tool'
+                contract=context['context']['diagnostic_contract']
+                assert contract['entrypoint']=='diagnostic.py:measure(request)'
+                assert set(contract['response'])=={'measurements','limitations'}
+                assert 'runs' in contract['request']
                 target=Path(directory)/'model';target.mkdir(parents=True)
-                (target/'diagnostic.py').write_text('def measure(values): return sum(values)\n')
+                (target/'diagnostic.py').write_text('def measure(request):\n    values = [r["metrics"]["quality"] for r in request["runs"]]\n    return {"measurements": {"spread": max(values) - min(values)}, "limitations": ["fixture: aggregate range only"]}\n')
                 return {'changed_files':['diagnostic.py']}
         agent=ToolAgent();result=autoresearch(self.campaign,path,agent=agent)
         self.assertEqual(result['status'],'promoted');self.assertEqual(result['budget']['charged_or_reserved'],7)
@@ -278,6 +282,16 @@ class EvolutionAutomationTests(unittest.TestCase):
             'execution':{'recipe':{},'python':'python3','uid_registry':'unused'},'cost':1,'timeout':5},artifacts)
         self.assertEqual(frozen['candidate_id'],'candidate')
         for ref in frozen['implementation'].values():artifacts.verify(ref)
+
+    def test_new_tool_cannot_override_runtime_authoring_contract(self):
+        from rec_harness.evolution_auto import AutonomousEvolution
+        config=read_json(self.config());config['kind']='tool'
+        config['plan']['tool_contract']='public-aggregate-measurement-v1'
+        config['context']['diagnostic_contract']={'entrypoint':'wrong.py:run'}
+        with self.assertRaisesRegex(ContractError,'authoring contract differs'):
+            AutonomousEvolution.init(self.campaign,config)
+        self.assertFalse((self.campaign/'auto-lock.json').exists())
+        self.assertEqual(self.agent.calls,0)
 
     def test_promoted_prompt_reaches_jailed_role_prompt(self):
         from rec_harness.jailed_agent import JailedCodexAgent

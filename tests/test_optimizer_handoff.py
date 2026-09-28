@@ -57,6 +57,7 @@ class OptimizerHandoffTests(unittest.TestCase):
         finally:store.close()
         context=read_json(self.campaign/'episodes/tool-1/campaign/candidates/project-tool-1/context.json')
         self.assertIn('optimizer_event_hash',context['source'])
+        self.assertEqual(context['diagnostic_contract']['entrypoint'],'diagnostic.py:measure(request)')
         self.assertEqual(context['measurement_gap']['experiment_refs'],[])
         final=read_json(self.campaign/'episodes/model-2/campaign/campaign.json')
         self.assertEqual(final['measurement_requirements'][0]['measurement'],'spread')

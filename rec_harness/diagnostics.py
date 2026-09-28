@@ -7,6 +7,18 @@ from .evolution import Evolution
 CONTRACT='public-aggregate-measurement-v1'
 
 
+def runtime_contract():
+    """Public authoring contract for newly initialized diagnostic candidates."""
+    return {'contract':CONTRACT,'entrypoint':'diagnostic.py:measure(request)',
+        'request':{'task_id':'string','model_version':'string','protocol_hash':'string',
+            'runs':'list of objects: seed, valid, metrics mapping; dataset present when available'},
+        'response':{'measurements':'nonempty mapping of quantity names (1–128 characters) to finite numbers',
+            'limitations':'list of strings; report unsupported inputs and interpretation limits'},
+        'execution':'The controller imports diagnostic.py in a CPU jail and calls measure once with the request object; return the response object, do not write result files.',
+        'available_inputs':'Only supplied public development aggregate rows. No raw interactions, user IDs, rankings, checkpoints, or model internals are supplied by this contract.',
+        'constraints':'Do not modify training, weights or scoring. Define behavior for empty, malformed or insufficient inputs; reject unsupported cases instead of inventing measurements. Validation and promotion are performed independently by the host.'}
+
+
 def freeze_tool(options,artifacts):
     required(options,['registry','identity','execution','cost','timeout'])
     number(options['cost'],'diagnostic cost',0);number(options['timeout'],'diagnostic timeout',0)

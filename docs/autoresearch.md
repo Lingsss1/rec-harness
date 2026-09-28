@@ -196,6 +196,14 @@ python3 -m rec_harness amazon-memory-export /path/to/amazon-campaign /path/to/de
 
 `model.json` 可使用前述小型示例配置；其源码路径按该文件所在目录解析。`tool.json`、`harness.json` 使用上一节的 `research-evolution-v1` 合同，分别配置六阶段工具验证与三阶段 Harness 验证。工具阶段可接入下文的 `tool_pipeline`，Harness 阶段使用前缀和独立在线验证。三轮是最大模型回合数，真实分支由缺口和验证结果决定，不保证每次都触发或晋升工具及 Harness。
 
+新项目还会对启用的工具/Harness 验证槽执行只读预检：内置验证器核对冻结套件、绑定输入与计划身份，工具在线套件核对当前 diagnostic worker。缺失或不兼容时在创建项目和调用角色之前拒绝。禁用槽不要求其依赖就绪。可单独检查演化配置或 plan JSON：
+
+```bash
+python3 -m rec_harness.validation_preflight /path/to/evolution.json
+```
+
+预检通过只代表已检查项在检查时一致，不执行候选，不证明主机权限、服务连通性、任意工具语义或科学效用。自定义验证器只做文件依赖检查；验证阶段仍须执行原有完整门槛。旧冻结套件不自动升级，工作进程不兼容时应创建新套件。
+
 新项目在创建目录和发起研究调用前检查工具执行设置：可激活的工具槽必须提供 `tool_runtime`，费用须为非负有限数，超时须为正有限数，执行设置须含 recipe、解释器和 UID registry。这是配置检查；实际主机权限、recipe 内容和进程执行仍由隔离运行器验证。恢复旧冻结项目不修改其配置。
 
 `adapter: research-project-v1` 将模型、工具和 Harness 的入口连接为连续项目。配置含 `task_id`、`max_model_episodes`、`model_config`，以及可选 `tool_config`、`harness_config`（均是配置文件路径）。`max_tool_updates`、`max_harness_updates` 默认各为 1；工具更新还需 `tool_runtime`，其字段为 execution、cost、timeout，与 diagnostic_registry 的执行配置一致。两者的 execution 都可用 recipe_file 读取 JSON；相对路径以所属配置文件目录为准，不得同时提供 recipe 和 recipe_file。各子配置继续使用前述冻结协议和验证计划，项目调度器不能降低验收门槛。

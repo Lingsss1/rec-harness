@@ -32,6 +32,10 @@ class ResearchProject:
             raise ContractError('tool_runtime required for post-validation remeasurement')
         if 'tool' in config and not config['model'].get('measurement_requirements'):
             config['model'].setdefault('measurement_discovery',{'development_budget':config['tool']['plan']['budget']})
+        from .validation_preflight import preflight
+        for kind in ['tool','harness']:
+            if kind in config and config.get('max_'+kind+'_updates',1)>0 and config['max_model_episodes']>1:
+                preflight(config[kind]['plan'])
         if root.exists() and any(root.iterdir()):raise ContractError('project directory must be empty')
         root.mkdir(parents=True,exist_ok=True);artifacts=Artifacts(root/'objects')
         for kind in ['model','tool','harness']:

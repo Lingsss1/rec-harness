@@ -333,7 +333,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                     if role=='hypothesis':
                         self_test.assertEqual(context['bindings']['controls'],expected_controls)
                         if extra_control:self_test.assertEqual(context['development_controls'][0]['model_version'],'mechanism_control')
-                        response['method']['method_id']='method'
+                        response['method'].update(method_id='method',origin='agent_hypothesis',sources=[])
                         response['proposal'].update({k:v for k,v in context['bindings'].items() if k!='candidate_model_version'})
                         response['proposal'].update(gap_ids=['gap'],method_ids=['method'],budget=9000)
                         if context.get('insertion_contract_format'):

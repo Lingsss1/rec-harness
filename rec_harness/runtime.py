@@ -16,6 +16,7 @@ from .core import Artifacts, ContractError, RoleTransportFailure, canonical, dig
 from .store import Store
 from .evolution import validate_policy
 from .measurement_gaps import MeasurementDeferred
+from .core import METHOD_SOURCE_CONTRACT
 
 
 def edge(edge_id, source, target, relation, evidence, task, revision):
@@ -126,6 +127,8 @@ class Research:
         validate_policy(config.get("research_policy", {}))
         config["harness_version"] = "0.1.0:" + digest(config.get("research_policy", {}))[:12]
         config.setdefault("max_rounds", 1)
+        config.setdefault('require_method_sources',True)
+        if type(config['require_method_sources']) is not bool:raise ContractError('require_method_sources must be boolean')
         if type(config['max_rounds']) is not int or config['max_rounds']<1:
             raise ContractError('max_rounds must be a positive lifetime limit')
         if type(config.get('max_role_retries',0)) is not int or not 0<=config.get('max_role_retries',0)<=3:
@@ -236,6 +239,7 @@ class Research:
             try:measurement_gaps=triage(self,state,diagnostic)
             except MeasurementDeferred as error:measurement_failure=str(error)
         return {"task_id": self.task, "model_version": state["incumbent"], "protocol_hash": self.protocol_hash,
+                **({'method_source_contract':METHOD_SOURCE_CONTRACT} if self.config.get('require_method_sources') else {}),
                 "protocol": self.protocol, "budget": self.store.budget(), "harness_version": self.config["harness_version"],
                 "evidence": self.store.bundle(self.task, self.protocol_hash, role, limit=self.config.get("research_policy", {}).get("retrieval_limit", 24)), "baseline": state["baseline"],
                 'execution_contract':self.config.get('task_contract',{}),
@@ -512,7 +516,7 @@ class Research:
                     block_model_proposal(self,attempt,gap,context['measurement_gaps'])
                     generated, _ = self._agent("hypothesis", {**self.context('hypothesis', state), "gap": gap}, attempt, before)
                     method, proposal = generated["method"], generated["proposal"]
-                    validate_card("method", method)
+                    validate_card("method", method,require_method_sources=self.config.get('require_method_sources',False))
                     validate_card("proposal", proposal)
                     if proposal["base_model_id"] != state["incumbent"] or proposal["train_protocol_hash"] != self.protocol_hash or proposal["seeds"] != self.protocol["seeds"]:
                         raise ContractError("proposal changed frozen model/protocol/seeds")

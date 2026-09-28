@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from rec_harness.agents import schema_for,validate_schema
+from rec_harness.core import METHOD_SOURCE_CONTRACT
 from rec_harness.core import Artifacts,ContractError,digest,file_hash,read_json,write_json,validate_card,identifier,safe_file
 from rec_harness.jailed_agent import JailedCodexAgent
 from rec_harness.knowledge import validate_knowledge_patch
@@ -44,6 +45,8 @@ class AmazonAutoresearch:
             if not review_only:raise ContractError('review predecessor requires review-only entry point')
             config['review_predecessor']=str(Path(config['review_predecessor']).resolve())
         config.setdefault('structured_insertion_contract',True)
+        config.setdefault('require_method_sources',True)
+        if type(config['require_method_sources']) is not bool:raise ContractError('require_method_sources must be boolean')
         if type(config['structured_insertion_contract']) is not bool:raise ContractError('structured_insertion_contract must be boolean')
         study=load_config(config['study']);identifier(config['task_id'])
         if type(config.get('max_rounds')) is not int or config['max_rounds']<1:raise ContractError('positive max_rounds required')
@@ -333,6 +336,7 @@ class AmazonAutoresearch:
                 'allowed_methods':method_catalog(Path(cfg['model_versions'][base]['path']).read_text()),
                 'instructions':'Proposal.insertion_contract MUST be a JSON-encoded object with exactly schema, allowed_methods (nonempty subset of this catalog), rationale. Declare all methods the candidate AND generated controls may change, including initialization. Experiment edits outside these methods or comment-only changes are rejected before CPU admission. Other proposal fields explain the mechanism and falsification; method scope is not causal proof.'}
         return {**diagnostics,'task_id':self.config['task_id'],'model_version':base,'protocol_hash':cfg['protocol_hash'],
+            **({'method_source_contract':METHOD_SOURCE_CONTRACT} if self.config.get('require_method_sources') else {}),
             'protocol':cfg['protocol'],'seeds':cfg['development_seeds']+cfg['confirmation_seeds'],
             'development_baseline':rows,'baseline_execution_evidence':execution_evidence,
             'development_controls':control_rows,'control_execution_evidence':control_execution,
@@ -373,7 +377,7 @@ class AmazonAutoresearch:
                 context,gap,folder.name,lambda request:self._role(folder,'measurement',request,source,lambda response,_:validate_review(request,response)))
         block_model_proposal(self,folder.name,gap,context.get('measurement_gaps',[]))
         def proposal_check(value,_):
-            validate_card('method',value['method']);validate_card('proposal',value['proposal']);p=value['proposal']
+            validate_card('method',value['method'],require_method_sources=self.config.get('require_method_sources',False));validate_card('proposal',value['proposal']);p=value['proposal']
             for key in ['proposal_id','base_model_id','controls','train_protocol_hash','seeds']:
                 if p[key]!=binding[key]:raise ContractError('proposal binding mismatch: '+key+' must equal the literal JSON value '+json.dumps(binding[key]))
             if p['gap_ids']!=[gap['gap_id']] or p['method_ids']!=[value['method']['method_id']]:raise ContractError('unresolved proposal references')

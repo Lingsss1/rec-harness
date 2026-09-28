@@ -177,13 +177,38 @@ CARD_FIELDS = {
 }
 
 
-def validate_card(kind, card):
+METHOD_SOURCE_CONTRACT = {
+    'schema':'locatable-method-sources-v1',
+    'requirement':'Each paper_claim source must be a nonempty citation string containing a specific HTTP(S) URL, DOI or arXiv identifier. Include version/section where available. Missing sources require agent_hypothesis, not an invented citation.',
+    'qualification':'Identifier syntax only; source existence, primary-source status, content, version and applicability remain unverified.'}
+
+
+def validate_method_sources(card):
+    from urllib.parse import urlsplit
+    sources=card['sources']
+    if not isinstance(sources,list) or any(not isinstance(s,str) or not s.strip() for s in sources):
+        raise ContractError('method sources must be a list of nonempty citation strings')
+    if card['origin']!='paper_claim':return
+    if not sources:raise ContractError('paper_claim requires locatable sources; otherwise use agent_hypothesis')
+    for citation in sources:
+        located=bool(re.search(r'\b10\.\d{4,9}/[^\s]+',citation,re.I) or
+                     re.search(r'\barxiv\s*:\s*(?:\d{4}\.\d{4,5}(?:v\d+)?|[a-z][\w.-]*/\d{7}(?:v\d+)?)\b',citation,re.I))
+        for raw in re.findall(r'https?://[^\s<>]+',citation,re.I):
+            try:
+                url=urlsplit(raw.rstrip('.,;)]'))
+                located=located or bool(url.hostname and not url.username and url.path.strip('/'))
+            except ValueError:continue
+        if not located:raise ContractError('paper_claim source lacks a specific URL, DOI or arXiv identifier')
+
+
+def validate_card(kind, card, *, require_method_sources=False):
     required(card, CARD_FIELDS[kind].split())
     public_only(card)
     if kind == "gap" and card["status"] not in {"proposed", "supported", "contradicted", "mitigated", "unknown"}:
         raise ContractError("invalid gap status")
     if kind == "method" and card["origin"] not in {"paper_claim", "agent_hypothesis", "local_evidence"}:
         raise ContractError("invalid method provenance")
+    if kind == 'method' and require_method_sources:validate_method_sources(card)
     if kind == "proposal":
         if card["action"] not in {"add", "remove", "replace", "move", "reconnect", "objective", "training_method"}:
             raise ContractError("invalid proposal action")

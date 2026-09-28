@@ -6,6 +6,8 @@
 
 ## 当前交付与模型结果
 
+- 新增[真实联合项目 v1](../experiments/joint-project-v1.md)：两类新验证套件准备通过，首个模型回合已完成并自动进入 Harness 前缀验证；尚未完成项目结果验收，不计为三个循环完整实跑或收益证据。
+
 - 最新真实传输验收：[v18 工具检索与草稿归档](../experiments/tool-literature-transport-v1.md)：1 次 Codex 调用、零重试，实际搜索/打开来源，指令、日志、返回源码和 CAS 绑定通过，无新增调用恢复通过。没有运行验证阶梯或晋升；不是自主发现缺口或正效用证据。
 
 - 最新完整回归：[v19 安装环境](install-acceptance-v19.md)中 454 项全部通过、零跳过，覆盖冻结 `e32b428`；Torch、进程恢复和显式 Linux OS 隔离检查均实际执行。[v18](install-acceptance-v18.md)保留为历史证据。

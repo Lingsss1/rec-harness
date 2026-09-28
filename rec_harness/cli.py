@@ -48,6 +48,8 @@ def main(argv=None):
     p.add_argument('directory')
     p = commands.add_parser('amazon-progress',help='read committed incumbent development scores and cost boundaries')
     p.add_argument('directory')
+    p = commands.add_parser('project-report',help='read project and nested validation call counts and separate ledger costs')
+    p.add_argument('directory');p.add_argument('--format',choices=['json','markdown'],default='json')
     p = commands.add_parser("init", help="freeze public workspace, evaluator and protocol")
     p.add_argument("config"); p.add_argument("directory")
     p = commands.add_parser("run", help="run research roles via codex exec")
@@ -186,6 +188,10 @@ def main(argv=None):
         elif args.command == 'amazon-progress':
             from .adapters.amazon_progress import progress_report
             result=progress_report(args.directory)
+        elif args.command == 'project-report':
+            from .project_report import project_report,markdown_report
+            result=project_report(args.directory)
+            if args.format=='markdown':print(markdown_report(result));return 0
         elif args.command == 'status':
             from .status import inspect_status
             result=inspect_status(args.directory)

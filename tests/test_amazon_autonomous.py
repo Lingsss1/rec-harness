@@ -358,7 +358,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                         else:
                             self_test.assertEqual(context['visible_model_source']['sha256'],file_hash(target/'model/model.py'))
                             self_test.assertEqual(context['visible_model_source']['model_version'],context['model_version'])
-                        response.update(selection='keep' if confirmation else 'discard',conclusion_status='unknown',evidence_refs=['report'])
+                        response.update(selection='keep' if confirmation else 'discard',conclusion_status='unknown',evidence_refs=[report['hash']])
                     if role=='knowledge':
                         self_test.assertEqual(context['implementation_author_report']['reported_limitations'],sample(schema_for('experiment'))['limitations'])
                         self_test.assertFalse(context['implementation_author_report']['checks_verified_by_this_report'])
@@ -388,7 +388,10 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             def graph(root,pid):
                 s=Store(Path(root)/'memory');g={'task_id':'graph-task','protocol_hash':'protocol','graph_version':s.version,'nodes':[],'edges':[]};s.close()
                 write_json(Path(root)/'research-readouts'/(pid+'-graph.json'),g);return g
-            report={'hash':'report','protocol_hash':'protocol','summary':{'eligible_for_confirmation':confirmation}}
+            report={'protocol_hash':'protocol','summary':{'eligible_for_confirmation':confirmation},
+                'rows':[{'model_version':version,'dataset':'tiny','seed':42,'metrics':{'HR@10':.6 if version=='auto-round-1-model' else .5}}
+                        for version in dict.fromkeys(['auto-round-1-model',*expected_controls])]}
+            report['hash']=digest(report)
             def audited_job(root,config,version,dataset,seed):
                 value=.6 if (extra_control or generated_control) and seed in [17,83] and version!='legacy_incumbent' else .5
                 if (extra_control or generated_control) and seed in [17,83] and version==control_id:value=control_metric
@@ -422,6 +425,11 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             self.assertEqual(control_run.call_count,2 if interrupt_control else int(confirmation))
             if history:history_call.assert_called_once()
             self.assertEqual(result['role_calls']['charged_or_reserved'],expected_roles)
+            from rec_harness.adapters.amazon_progress import progress_report
+            progress=progress_report(campaign)['rows'][-1]
+            self.assertEqual(progress['incumbent'],result['state']['incumbent'])
+            self.assertEqual(progress['costs']['role_calls_charged_or_reserved'],expected_roles)
+            self.assertEqual(progress['costs']['study_cost_status'],'recorded')
             self.assertEqual((campaign/'rounds/round-1/private-confirmation.json').exists(),confirmation)
             if extra_control or generated_control:
                 private=read_json(campaign/'rounds/round-1/private-confirmation.json')

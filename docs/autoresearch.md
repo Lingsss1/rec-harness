@@ -510,3 +510,13 @@ python3 -m rec_harness autoresearch /path/to/campaign
 ```
 
 此入口保留失败轮次，按原冻结上限进入下一轮；不重放已经完成的角色，也不增加预算或轮次上限。达到原轮次上限时需另建 campaign。知识写入可另用既有 `consolidate` 显式补做，无须重训。Amazon campaign 仍使用 `amazon-retry-source` 或准入后的独立评审恢复入口。项目在子 campaign 传输停止期间保持原模型阶段，子任务修复重开后再恢复项目。
+
+查看已提交轮次的实际 incumbent 开发成绩及成本边界：
+
+```bash
+python3 -m rec_harness amazon-progress /path/to/amazon-campaign
+```
+
+`rows` 按完成事件顺序保留每次尝试（包括失败及重开前的尝试）。成绩取当轮实际 incumbent 的开发结果，按数据集与开发 seeds 聚合；不以事后最高候选代替当时选择，不读取确认或最终测试成绩。失败轮次没有已提交开发读出时成绩为 null。
+
+新轮次在完成事件中绑定角色账本和 study GPU 账本的成本前缀，查询时重新核验。两种单位分开列出，均保留继承成本与失败支出；这不是含外部诊断/演化账本的项目总费用。历史角色费用可以按其事件前缀重建，但缺少轮末 GPU 前缀时明确标为 `historical_boundary_unavailable`，不会拿当前总费用回填历史点。查询为只读，不启动服务、训练或恢复账本。

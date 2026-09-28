@@ -562,7 +562,8 @@ class AmazonAutoresearch:
                     self.store.event('auto_round_failed',{'round':state['round']+1,**result})
                 state={**state,'round':state['round']+1,'status':'ready'}
                 if reason in {'measurement_required','role_transport_failure'}:state.update(status='stopped',stop_reason=reason)
-                self.store.event('auto_round_completed',{'result':result,'state':state})
+                from .amazon_progress import round_costs
+                self.store.event('auto_round_completed',{'result':result,'state':state,'cost_prefixes':round_costs(self)})
                 write_json(self.root/'state.json',state)
             state={**state,'status':'stopped','stop_reason':reason};write_json(self.root/'state.json',state)
             rounds=[e['payload']['result'] for e in self.store.events() if e['kind']=='auto_round_completed']

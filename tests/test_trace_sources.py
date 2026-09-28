@@ -106,6 +106,24 @@ class TraceSourcesTests(unittest.TestCase):
         self.assertEqual(source_task_ids(frozen['context']),{'left','right','project-model-1'})
         self.assertTrue(source_task_ids(frozen['context']).issubset(frozen['plan']['development_ids']))
 
+    def test_project_rejects_invalid_history_before_any_role_or_directory(self):
+        import test_project
+        from rec_harness.project import ResearchProject
+        original=read_json(test_project.ProjectTests.config(self,'harness'))
+        for sources,ambiguous in [(self.sources,True),([],False),
+                                  ([self.sources[0],self.sources[0]],False)]:
+            with self.subTest(sources=sources,ambiguous=ambiguous):
+                config=copy.deepcopy(original)
+                config['harness']['trace_sources']=sources
+                if ambiguous:config['harness']['trace_source']=self.sources[0]
+                target=self.root/'invalid-project'
+                with self.assertRaises(ContractError):ResearchProject.init(target,config)
+                self.assertFalse(target.exists())
+        config=copy.deepcopy(original)
+        config['harness']['trace_sources']=[{'campaign':str(self.root/'missing-history')}]
+        config['max_harness_updates']=0
+        ResearchProject.init(self.root/'disabled-project',config)
+
     def test_project_referral_carries_all_source_exclusions_to_tool(self):
         import test_project
         from test_optimizer_handoff import ReferringAgent

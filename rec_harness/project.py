@@ -19,6 +19,8 @@ class ResearchProject:
         config.setdefault('optimizer_measurement_handoff',True)
         config.setdefault('enforce_tool_measurement_scope',True)
         config.setdefault('verify_successor_memory',True)
+        config.setdefault('continue_after_harness_rejection',True)
+        if type(config['continue_after_harness_rejection']) is not bool:raise ContractError('Harness rejection continuation must be boolean')
         if type(config['verify_successor_memory']) is not bool:raise ContractError('successor memory verification must be boolean')
         if type(config['enforce_tool_measurement_scope']) is not bool:raise ContractError('tool measurement scope enforcement must be boolean')
         scope=config.get('tool',{}).get('plan',{}).get('measurement_scope')
@@ -36,6 +38,14 @@ class ResearchProject:
             if kind in config and config[kind]['kind']!=kind:raise ContractError('evolution kind differs from project slot')
             limit=config.get('max_'+kind+'_updates',1)
             if type(limit) is not int or limit<0:raise ContractError('nonnegative evolution update limit required')
+        harness=config.get('harness',{})
+        if 'trace_source' in harness and 'trace_sources' in harness:
+            raise ContractError('supply trace_source or trace_sources, not both')
+        if 'trace_sources' in harness and config.get('max_harness_updates',1)>0 and config['max_model_episodes']>1:
+            from .decision_traces import collect_trace_set
+            # Verify external history before spending calls on the first model.
+            # Evolution still freezes its own prefix when that episode starts.
+            collect_trace_set(harness['trace_sources'])
         if 'tool_runtime' in config:
             from .diagnostics import validate_runtime
             validate_runtime(config['tool_runtime'])
@@ -295,6 +305,13 @@ class ResearchProject:
                         'phase':'model','model_index':state['model_index']+1}
                     state.pop('pending_gap',None)
                     state.pop('pending_optimizer_handoff',None)
+                elif (kind=='harness' and result.get('rejection_kind')=='validation_gate'
+                      and self.config.get('continue_after_harness_rejection')
+                      and state['model_index']<self.config['max_model_episodes']):
+                    # Consume this attempt, retain any previously active policy,
+                    # and continue from the last model without retrying the patch.
+                    state={**state,'harness_updates':state['harness_updates']+1,
+                        'phase':'model','model_index':state['model_index']+1}
                 else:state={**state,'status':'stopped','stop_reason':kind+'_rejected'}
                 self.transition(state,episode)
             write_json(self.root/'state.json',state)

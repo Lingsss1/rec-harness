@@ -220,6 +220,8 @@ python3 -m rec_harness verify /path/to/project
 
 模型回合因测量覆盖不足停止时，调度器从已提交 MeasurementGap 创建工具候选，并将触发实验加入开发排除列表。工具通过全部阶段后才注册到新模型回合，保留测量要求并重新测量；失败候选使项目以 tool_rejected 停止。正常模型回合结束后，如配置了 Harness 优化，则从真实决策轨迹生成候选，通过验证后在新回合启用。旧回合不热更新。
 
+新项目默认 `continue_after_harness_rejection: true`：Harness 的合法独立报告未过数值门槛时，消耗一次 `max_harness_updates` 额度，沿用原有策略进入下一模型回合。执行或报告合同失败仍停止；工具缺口也不会被忽略。设为 `false` 可遇拒即停，缺少该字段的旧冻结项目保持旧行为。详见[淘汰后的续接与恢复](implementation/harness-rejection-continuation.md)。
+
 后继回合继承当前 incumbent 源码、原冻结评估器，以及投影后的来源经验包，使用独立目标图。每次子回合结果与状态迁移一并提交到项目事件链；中断发生在子回合完成后、项目提交前时，恢复复用子回合结果。费用保留在各子 campaign 的账本中，外层验证成本与其内部验证回合不能重复求和。项目主目录的预算账本不代表子回合总成本。
 
 新项目还默认冻结三个连续演化设置：`measurement_lineage: true` 保留原测量缺口 ID，并把后继实际输出关联到已提交诊断；`inherit_tool_source: true` 让第二次及后续工具开发继承当前已验证源码；`inherit_harness_policy: true` 将最小 Harness 补丁应用到当前策略，保留未修改字段与其他角色提示词。旧项目缺少这些字段时仍按原冻结配置恢复，不能通过修改 project.json 就地改变历史语义。

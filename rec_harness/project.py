@@ -16,6 +16,14 @@ class ResearchProject:
         config.setdefault('inherit_tool_source',True)
         config.setdefault('inherit_harness_policy',True)
         config.setdefault('optimizer_measurement_handoff',True)
+        config.setdefault('enforce_tool_measurement_scope',True)
+        if type(config['enforce_tool_measurement_scope']) is not bool:raise ContractError('tool measurement scope enforcement must be boolean')
+        scope=config.get('tool',{}).get('plan',{}).get('measurement_scope')
+        if scope is not None:
+            outputs=scope.get('supported_outputs') if isinstance(scope,dict) else None
+            if (not isinstance(outputs,dict) or not outputs
+                or not all(isinstance(k,str) and k.strip() and isinstance(v,str) and v.strip() for k,v in outputs.items())):
+                raise ContractError('tool measurement scope requires named outputs with definitions')
         identifier(config['task_id'])
         if config['model'].get('adapter') not in {None,'amazon-nextitnet-v1'}:raise ContractError('unsupported project model adapter')
         if config['model'].get('adapter')=='amazon-nextitnet-v1':
@@ -195,6 +203,18 @@ class ResearchProject:
             finally:child.store.close()
         return {**integrity,'verified_episodes':checked}
 
+    def route_tool(self,state,gap):
+        state['pending_gap']=gap
+        scope=self.config['tool']['plan'].get('measurement_scope')
+        if (self.config.get('enforce_tool_measurement_scope') and scope is not None
+                and gap['required_information'] not in scope['supported_outputs']):
+            state.update(status='stopped',stop_reason='measurement_contract_unsupported',
+                measurement_contract_mismatch={'required_information':gap['required_information'],
+                    'supported_outputs':sorted(scope['supported_outputs']),'scope_hash':digest(scope),
+                    'qualification':'The frozen validator does not declare this output. Gap retained; no tool was generated or scientifically rejected. A matching validation contract is needed in a new project.'})
+            return
+        state['phase']='tool'
+
     def run(self):
         with self.lock():
             state=[e['payload']['state'] for e in self.store.events() if e['kind']=='project_transition'][-1]
@@ -220,7 +240,7 @@ class ResearchProject:
                         finally:store.close()
                         if gaps and state['model_index']<self.config['max_model_episodes'] and 'tool' in self.config and state['tool_updates']<self.config.get('max_tool_updates',1):
                             if 'tool_runtime' not in self.config:raise ContractError('tool_runtime required for post-validation remeasurement')
-                            state.update(phase='tool',pending_gap=gaps[0])
+                            self.route_tool(state,gaps[0])
                         else:state.update(status='stopped',stop_reason='measurement_unresolved')
                     elif state['model_index']>=self.config['max_model_episodes']:
                         state.update(status='stopped',stop_reason='model_episode_limit')
@@ -232,7 +252,7 @@ class ResearchProject:
                         'pending_gap':result['measurement_gap'],'pending_optimizer_handoff':relative}
                     if ('tool' in self.config and 'tool_runtime' in self.config
                         and state['tool_updates']<self.config.get('max_tool_updates',1)
-                        and state['model_index']<self.config['max_model_episodes']):state.update(phase='tool')
+                        and state['model_index']<self.config['max_model_episodes']):self.route_tool(state,state['pending_gap'])
                     else:state.update(status='stopped',stop_reason='measurement_unresolved')
                 elif result['status']=='promoted':
                     if kind=='tool':

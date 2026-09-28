@@ -214,6 +214,8 @@ python3 -m rec_harness autoresearch /path/to/project
 python3 -m rec_harness verify /path/to/project
 ```
 
+工具计划可声明 `measurement_scope.supported_outputs`，例如 `{"metric_spread":"maximum minus minimum over valid rows"}`。新项目默认冻结 `enforce_tool_measurement_scope: true`：自主或优化器发现的测量名称不在声明范围时，以 `measurement_contract_unsupported` 停止并保留缺口，不调用工具生成。这只检查名称，不代替定义和效用验证。旧冻结项目缺少该字段时保持原逻辑；未声明范围的计划沿用原验证路径，不推断为任意测量均可支持。详见[工具范围准入](implementation/tool-measurement-scope.md)。
+
 模型回合因测量覆盖不足停止时，调度器从已提交 MeasurementGap 创建工具候选，并将触发实验加入开发排除列表。工具通过全部阶段后才注册到新模型回合，保留测量要求并重新测量；失败候选使项目以 tool_rejected 停止。正常模型回合结束后，如配置了 Harness 优化，则从真实决策轨迹生成候选，通过验证后在新回合启用。旧回合不热更新。
 
 后继回合继承当前 incumbent 源码、原冻结评估器，以及投影后的来源经验包，使用独立目标图。每次子回合结果与状态迁移一并提交到项目事件链；中断发生在子回合完成后、项目提交前时，恢复复用子回合结果。费用保留在各子 campaign 的账本中，外层验证成本与其内部验证回合不能重复求和。项目主目录的预算账本不代表子回合总成本。

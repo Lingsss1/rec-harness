@@ -1,6 +1,6 @@
 # 不同合成任务合同的真实经验迁移 v1
 
-运行目录 `rec-harness-runs/heterogeneous-transfer-v1`，源码冻结于 `e7538d125f37954c21c2e6ffa8289af36032249e`。源阶段已完成，目标开发比较正在运行；尚无最终迁移收益或负迁移结论。
+运行目录 `rec-harness-runs/heterogeneous-transfer-v1`，源码冻结于 `e7538d125f37954c21c2e6ffa8289af36032249e`。源阶段和目标开发比较已完成；开发增益为0，独立确认仍在运行，尚无最终结论。
 
 在首次角色调用前冻结：源 A 为 piecewise-v1，seeds3201/3202；目标 B 为 periodic-v1，开发seeds3301/3302，确认seeds3401/3402。各条件96条训练、120条验证、噪声标准差0.1。每个研究回合最多一轮、12 BCU、0次格式重试；源6次角色、目标开发/确认各两组每组6次，正常路径预计30次串行Codex调用。实际失败与费用保留，不重试以取得正收益。
 
@@ -19,3 +19,14 @@
 同期当前源码完整回归487项通过、零跳过，90.912秒，包括Torch与Linux OS测试；证据为 `full-regression-e7538d1/acceptance.json`。这不是安装包完整回归，也不替代本次真实目标比较。
 
 目标开发Fresh组已完成6次角色，10 BCU；`development-fresh-acceptance.json` 核对6条轨迹、来源节点暴露为0以及终态恢复零调用/零训练。Experienced组已自动启动，配对差值仍待两组最终结果产生后计算。
+
+## 开发配对结果
+
+| 组别 | 最终 quality | incumbent | Codex角色 | BCU | evidence实际源节点 |
+|---|---:|---|---:|---:|---:|
+| Fresh | 0.7856231324551504 | root | 6 | 10 | 0 |
+| Experienced | 0.7856231324551504 | root | 6 | 10 | 7 |
+
+开发配对增益为0，单个条件的负迁移指示为0；不能推断总体无负迁移风险。源成本10 BCU另计，开发阶段连同源成本为30 BCU。两组均未达到模型保留门槛，零效应是对本次完整研究策略的观察，不把未晋升候选的最好指标当作最终收益。
+
+`development-assignment-acceptance.json` 从提交前CAS输入核对源记忆实际送达与配对条件一致；两个group验收各核对6条角色轨迹。`development-stage-acceptance.json` 在禁止Codex与训练执行的情况下重跑完整阶段，报告精确一致、无新增执行。确认阶段按预声明计划继续，顺序为Experienced→Fresh，没有根据开发符号修改条件或候选。

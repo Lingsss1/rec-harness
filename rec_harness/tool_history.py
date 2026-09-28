@@ -66,3 +66,26 @@ def collect(sources):
         'qualification':'Prior tool author declarations and gate outcomes only. Missing method cards remain unknown. No scores, raw outputs or validation examples. Prior conditions are excluded from new validation; these records do not prove current-task utility.'}
     public_only(result)
     return result,sorted(excluded)
+
+
+def project_sources(project):
+    """Only committed project tool episodes, bounded by their terminal reports."""
+    sources=[];seen=set()
+    for event in project.store.events():
+        entry=event['payload'].get('episode') if event['kind']=='project_transition' else None
+        if not entry or entry['kind']!='tool':continue
+        root=Path(entry['campaign']).resolve()
+        if not root.is_relative_to(project.root/'episodes'):raise ContractError('tool history child outside project')
+        report=read_json(root/'run-report.json')
+        if digest(report)!=entry['result_hash']:raise ContractError('tool history project report changed')
+        store=Store(root/'memory',read_only=True)
+        try:
+            store.verify()
+            matches=[e for e in store.events() if e['kind']=='evolution_stopped' and digest(e['payload'])==entry['result_hash']]
+            if not matches:raise ContractError('tool history has no committed terminal report')
+            terminal=matches[0]
+        finally:store.close()
+        if root in seen:continue
+        seen.add(root)
+        sources.append({'campaign':str(root),'cutoff_seq':terminal['seq'],'event_head':terminal['hash']})
+    return sources

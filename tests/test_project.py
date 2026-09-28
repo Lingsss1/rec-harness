@@ -163,6 +163,11 @@ class ProjectTests(unittest.TestCase):
     def test_two_tool_updates_inherit_validated_source_and_remeasure_all_obligations(self):
         path=self.config('tool');config=read_json(path)
         config.update(max_model_episodes=3,max_tool_updates=2)
+        # Independent condition IDs per fixture episode; constant scores only
+        # exercise orchestration, not actual held-out utility.
+        for rule in config['tool']['plan']['stages'].values():
+            script=Path(rule['command'][1])
+            script.write_text(script.read_text()+"\nimport json\np=Path(sys.argv[1])\nr=json.loads(p.read_text())\nc=next(q.name for q in p.parents if q.parent.name=='candidates')\nr['evaluation_ids']=[c+'-'+i for i in r['evaluation_ids']]\np.write_text(json.dumps(r))\n")
         first=config['model']['measurement_requirements'][0]
         config['model']['measurement_requirements'].append({**first,'measurement':'tail'})
         write_json(path,config)
@@ -197,6 +202,11 @@ class ProjectTests(unittest.TestCase):
         second_tool=read_json(self.campaign/'episodes/tool-2/campaign/evolution-auto.json')
         self.assertEqual(second_tool['context']['tool_predecessor']['implementation_hash'],first_tool['implementation_hash'])
         self.assertEqual(second_tool['source_snapshot'],first_tool['implementation'])
+        history=second_tool['context']['tool_history']
+        self.assertEqual(history['candidates'][0]['candidate_id'],'project-tool-1')
+        self.assertEqual(history['candidates'][0]['status'],'promoted')
+        self.assertEqual(history['candidates'][0]['method_card']['schema'],'diagnostic-method-v1')
+        self.assertIn('project-tool-1-utility-a',second_tool['plan']['development_ids'])
         published=read_json(self.campaign/'episodes/tool-2/campaign/candidates/project-tool-2/candidate.json')
         self.assertEqual(published['implementation']['helper.py'],first_tool['implementation']['helper.py'])
         self.assertEqual((self.campaign/'episodes/tool-2/campaign/versions/project-tool-2/helper.py').read_text(),'SCALE = 0.5\n')
@@ -232,6 +242,7 @@ class ProjectTests(unittest.TestCase):
         finally:project.store.close()
         from rec_harness.evolution_auto import AutonomousEvolution
         bad=dict(second_tool);bad.pop('source_snapshot')
+        bad['context']={k:v for k,v in bad['context'].items() if k!='tool_history'}
         changed=self.root/'changed-source';changed.mkdir()
         (changed/'diagnostic.py').write_text('def measure(request): return {}\n')
         bad.update(source=str(changed),model_files=['diagnostic.py'])

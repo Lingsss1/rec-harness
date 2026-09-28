@@ -15,6 +15,8 @@ class ResearchProject:
         root=Path(root).resolve();config=copy.deepcopy(configuration)
         config.setdefault('measurement_lineage',True)
         config.setdefault('inherit_tool_source',True)
+        config.setdefault('inherit_tool_history',True)
+        if type(config['inherit_tool_history']) is not bool:raise ContractError('tool history inheritance must be boolean')
         config.setdefault('inherit_harness_policy',True)
         config.setdefault('optimizer_measurement_handoff',True)
         config.setdefault('enforce_tool_measurement_scope',True)
@@ -186,6 +188,12 @@ class ResearchProject:
         config.pop('context',None);source=self.root/state['last_model']
         config['plan']['development_ids']=list(config['plan']['development_ids'])
         if kind=='tool':
+            if self.config.get('inherit_tool_history'):
+                from .tool_history import project_sources
+                sources=list(config.get('tool_history_sources',[]))
+                known={Path(item['campaign']).resolve() for item in sources}
+                sources.extend(item for item in project_sources(self) if Path(item['campaign']).resolve() not in known)
+                if sources:config['tool_history_sources']=sources
             config['measurement_source']={'campaign':str(source),'gap_id':state['pending_gap']['measurement_gap_id']}
             ids=state['pending_gap']['experiment_refs']
             if state.get('pending_optimizer_handoff'):

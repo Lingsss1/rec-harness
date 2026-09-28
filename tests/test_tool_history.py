@@ -12,7 +12,7 @@ import test_tool_method
 class ToolHistoryTests(unittest.TestCase):
     def setUp(self):
         fixture=test_tool_method.ToolMethodTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
-        self.fixture=fixture;self.root=fixture.fixture.root;self.source=self.root/'history'
+        self.fixture=fixture;self.root=fixture.fixture.root;self.source=self.root/'episodes/history'
         self.store=Store(self.source/'memory');self.addCleanup(self.store.close)
         self.objects=Artifacts(self.source/'objects');self.plan={'development_ids':['old-development']}
         write_json(self.source/'candidates/old/plan.json',self.plan)
@@ -22,6 +22,38 @@ class ToolHistoryTests(unittest.TestCase):
         self.store.event('validation_rejected',{'candidate_id':'old','stage':'utility','rejection_kind':'validation_gate',
             'report':report,'report_hash':digest(report)})
         self.store.event('evolution_stopped',{'candidate_id':'old','status':'rejected'})
+
+    def test_project_history_uses_committed_terminal_prefix_and_checks_report(self):
+        from types import SimpleNamespace
+        from rec_harness.tool_history import project_sources
+        project=SimpleNamespace(root=self.root,store=Store(self.root/'project-memory'))
+        self.addCleanup(project.store.close)
+        report={'candidate_id':'old','status':'rejected'}
+        write_json(self.source/'run-report.json',report)
+        entry={'kind':'tool','campaign':str(self.source),'result_hash':digest(report)}
+        # An uncommitted directory is not an input to the next author.
+        self.assertEqual(project_sources(project),[])
+        project.store.event('project_transition',{'episode':entry})
+        sources=project_sources(project)
+        before=self.store.verify()
+        self.store.event('evolution_stopped',{'candidate_id':'old','status':'future'})
+        self.assertEqual(project_sources(project),sources)
+        history,_=collect(sources)
+        self.assertEqual(history['candidates'][0]['status'],'rejected')
+        self.assertEqual(sources[0]['cutoff_seq'],before['events'])
+        write_json(self.source/'run-report.json',{'status':'forged'})
+        with self.assertRaisesRegex(ContractError,'report changed'):project_sources(project)
+
+    def test_project_history_rejects_uncommitted_terminal_report(self):
+        from types import SimpleNamespace
+        from rec_harness.tool_history import project_sources
+        project=SimpleNamespace(root=self.root,store=Store(self.root/'project-memory'))
+        self.addCleanup(project.store.close)
+        report={'candidate_id':'old','status':'invented'}
+        write_json(self.source/'run-report.json',report)
+        project.store.event('project_transition',{'episode':{
+            'kind':'tool','campaign':str(self.source),'result_hash':digest(report)}})
+        with self.assertRaisesRegex(ContractError,'committed terminal'):project_sources(project)
 
     def test_freeze_excludes_scores_future_events_and_duplicate_sources(self):
         before=self.store.verify();cutoff=before['events']

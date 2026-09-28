@@ -27,6 +27,12 @@ def lifecycle_graph(events,contexts=None,proposals=None):
             context=(contexts or {}).get(candidate)
             if context is not None:
                 if digest(context)!=value['context_hash']:raise ContractError('evolution graph context changed')
+                predecessor=context.get('tool_predecessor')
+                if predecessor and value['kind']=='tool':
+                    source_id='evolution-source-tool-'+digest([candidate,predecessor])[:32]
+                    node(source_id,'ToolVersion',{**predecessor,'lifecycle_event':'inherited_source',
+                        'qualification':'Validated source inherited from a predecessor campaign; not a promotion in this campaign.'},candidate,value['plan_hash'],event)
+                    link(identity,source_id,'BASED_ON',event,candidate)
                 gap=context.get('measurement_gap')
                 required={'measurement_gap_id','blocked_decision','required_information',
                           'competing_explanations','experiment_refs','current_tools_and_versions'}

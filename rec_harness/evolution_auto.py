@@ -31,6 +31,10 @@ class AutonomousEvolution:
         try:
             if 'source' in config:
                 config['source_snapshot']=evolution.artifacts.snapshot(config.pop('source'),config.pop('model_files'))
+            if config.get('tool_predecessor'):
+                if config['kind']!='tool' or digest(config.get('source_snapshot'))!=config['tool_predecessor']['implementation_hash']:
+                    raise ContractError('tool predecessor differs from inherited implementation')
+                config['context']={**config['context'],'tool_predecessor':config['tool_predecessor']}
             write_json(root/'evolution-auto.json',config)
             write_json(root/'auto-lock.json',{'config_hash':digest(config)})
             write_json(root/'state.json',{'candidate_id':config['candidate_id'],'kind':config['kind'],'status':'ready'})

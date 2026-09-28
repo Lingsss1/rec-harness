@@ -41,6 +41,66 @@ class DiscoverAgent(ProjectAgent):
 
 
 class ProjectTests(unittest.TestCase):
+    def test_two_tool_updates_inherit_validated_source_and_remeasure_all_obligations(self):
+        path=self.config('tool');config=read_json(path)
+        config.update(max_model_episodes=3,max_tool_updates=2)
+        first=config['model']['measurement_requirements'][0]
+        config['model']['measurement_requirements'].append({**first,'measurement':'tail'})
+        write_json(path,config)
+        inherited=[]
+        class ExtendingAgent(ProjectAgent):
+            def run(agent,role,context,directory):
+                if role=='tool':
+                    source=Path(directory)/'model/diagnostic.py'
+                    inherited.append(source.read_text() if source.exists() else None)
+                    response=super().run(role,context,directory)
+                    source.write_text(source.read_text()+'# generation '+str(len(inherited))+'\n')
+                    return response
+                return super().run(role,context,directory)
+        def measure(directory,*args,**kwargs):
+            values={'spread':0.5}
+            if 'model-3' in Path(directory).parts:values['tail']=0.25
+            output=Path(directory)/'results/measurement.json'
+            write_json(output,{'measurements':values,'limitations':['fixture']})
+            return {'process':{'status':'success'},'collection':{'artifacts':{'measurement.json':kwargs['artifacts'].put(output)}}}
+        agent=ExtendingAgent()
+        with patch('rec_harness.diagnostics.run_cpu_job',side_effect=measure):
+            report=autoresearch(self.campaign,path,agent=agent)
+            self.assertEqual([e['kind'] for e in report['episodes']],['model','tool','model','tool','model'])
+            self.assertEqual(autoresearch(self.campaign,agent=agent),report)
+        self.assertEqual(len(inherited),2);self.assertIsNone(inherited[0])
+        self.assertIn('# generation 1',inherited[1])
+        first_tool=read_json(self.campaign/'episodes/tool-1/campaign/candidates/project-tool-1/candidate.json')
+        second_tool=read_json(self.campaign/'episodes/tool-2/campaign/evolution-auto.json')
+        self.assertEqual(second_tool['context']['tool_predecessor']['implementation_hash'],first_tool['implementation_hash'])
+        self.assertEqual(second_tool['source_snapshot'],first_tool['implementation'])
+        store=Store(self.campaign/'episodes/tool-2/campaign/memory')
+        try:
+            graph=store.snapshot();edge=next(e for e in graph['edges'] if e['relation']=='BASED_ON')
+            inherited_version=next(n for n in graph['nodes'] if n['id']==edge['target'])
+            self.assertEqual(inherited_version['attrs']['implementation_hash'],first_tool['implementation_hash'])
+            self.assertEqual(inherited_version['attrs']['lifecycle_event'],'inherited_source')
+        finally:store.close()
+        final=self.campaign/'episodes/model-3/campaign'
+        self.assertEqual({r['measurement'] for r in read_json(final/'campaign.json')['measurement_requirements']},{'spread','tail'})
+        store=Store(final/'memory')
+        try:
+            observed=[e['payload'] for e in store.events() if e['kind']=='measurement_output_observed']
+            self.assertEqual({r['measurement'] for r in observed},{'spread','tail'})
+            self.assertTrue(all(r['tool_version']=='project-tool-2' for r in observed))
+        finally:store.close()
+        project=ResearchProject(self.campaign,agent=agent)
+        try:self.assertEqual(len(project.verify()['verified_episodes']),5)
+        finally:project.store.close()
+        from rec_harness.evolution_auto import AutonomousEvolution
+        bad=dict(second_tool);bad.pop('source_snapshot')
+        changed=self.root/'changed-source';changed.mkdir()
+        (changed/'diagnostic.py').write_text('def measure(request): return {}\n')
+        bad.update(source=str(changed),model_files=['diagnostic.py'])
+        with self.assertRaisesRegex(ContractError,'predecessor differs'):
+            AutonomousEvolution.init(self.root/'bad-inheritance',bad)
+        self.assertFalse((self.root/'bad-inheritance/auto-lock.json').exists())
+
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name)
         self.campaign=self.root/'project';self.agent=ProjectAgent()

@@ -13,6 +13,7 @@ class ResearchProject:
     def init(root,configuration):
         root=Path(root).resolve();config=copy.deepcopy(configuration)
         config.setdefault('measurement_lineage',True)
+        config.setdefault('inherit_tool_source',True)
         identifier(config['task_id'])
         if config['model'].get('adapter') not in {None,'amazon-nextitnet-v1'}:raise ContractError('unsupported project model adapter')
         if config['model'].get('adapter')=='amazon-nextitnet-v1':
@@ -121,6 +122,19 @@ class ResearchProject:
         if kind=='tool':
             config['measurement_source']={'campaign':str(source),'gap_id':state['pending_gap']['measurement_gap_id']}
             ids=state['pending_gap']['experiment_refs']
+            if state.get('active_tool') and self.config.get('inherit_tool_source'):
+                from .evolution import Evolution
+                previous=Evolution(self.root/state['active_tool'])
+                try:
+                    previous.verify();active=previous._active('tool')
+                    if active is None:raise ContractError('previous project tool is no longer active')
+                    candidate=previous.verified_candidate(active['candidate_id'])
+                    inherited=directory/'previous-tool-source'
+                    previous.artifacts.restore(candidate['implementation'],inherited)
+                    config['source']=str(inherited);config['model_files']=sorted(candidate['implementation'])
+                    config['tool_predecessor']={'candidate_id':candidate['candidate_id'],
+                        'implementation_hash':candidate['implementation_hash'],'plan_hash':candidate['plan_hash']}
+                finally:previous.store.close()
         else:
             config['trace_source']={'campaign':str(source)}
             ids=[read_json(source/('amazon-auto.json' if (source/'amazon-auto.json').exists() else 'campaign.json'))['task_id']]

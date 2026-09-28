@@ -1,13 +1,13 @@
 # 当前实现与验收状态
 
-本表在源码 `857c7b7` 上整理，目标仍是完整方案实现及 Amazon NextItNet 对比优化。它取代原清单中相互冲突的“最新”和“运行中”描述；[历史记录原文](completion-history-through-857c7b7.md)保留各次证据及当时限制，不再用作当前待办表。
+本表首次在源码 `857c7b7` 上整理，后续按验收更新，目标仍是完整方案实现及 Amazon NextItNet 对比优化。它取代原清单中相互冲突的“最新”和“运行中”描述；[历史记录原文](completion-history-through-857c7b7.md)保留各次证据及当时限制，不再用作当前待办表。
 
 **整体尚未完成。** 工程闭环、真实运行合同和科学效用分别判断。脚本角色与固定验证报告只能证明调度/门控；零收益候选按规则拒绝是有效验收结果，不能要求修改到晋升。最终测试口径按用户要求暂缓，不能在完成声明中悄然计为已完成。
 
 ## 当前交付与模型结果
 
-- 最新源码[完整环境回归](full-environment-regression-v1.md)：438 项全部通过、零跳过，覆盖 `e2f9a2e`；Torch、进程恢复和显式 Linux OS 隔离检查均实际执行。
-- 最新安装交付：[v16](install-acceptance-v16.md)，冻结 `79a31ca`。428 项中 407 通过、21 跳过，另 9 项 Torch CPU 合同全部通过。后续工具生成接口、多文件 worker 与诊断提交中断恢复尚未纳入该包。
+- 最新完整回归：[v17 安装环境](install-acceptance-v17.md)中 439 项全部通过、零跳过，覆盖冻结 `b9a4c0d`；Torch、进程恢复和显式 Linux OS 隔离检查均实际执行。此前[源码环境 438 项](full-environment-regression-v1.md)保留为历史证据。
+- 最新安装交付：[v17](install-acceptance-v17.md)，123 模块及原生源码与安装文件一致，117 个实际加载项目模块来自安装目录。工具生成接口、多文件 worker、诊断恢复、指令身份和开发反馈轨迹均已纳入。
 - 最新已完成真实 Amazon 优化：[v3](../experiments/amazon-next-autoresearch-v3.md)。开发平均 HR@10 增加 0.012750；独立初始化确认增加 0.013125，主机选中候选。确认使用相同验证用户，不是最终测试；该研究已封存，不使用确认结果继续调优。
 - 最近真实工程验收：[多文件 CPU 执行](../experiments/multifile-diagnostic-jail-v1.md)与[诊断提交中断恢复](../experiments/diagnostic-recovery-jail-v1.md)。没有新增 Codex 调用或训练，也不增加工具效用结论。
 - 最新工具在线验收：[新 worker 三组比较](../experiments/tool-authoring-online-v1.md)，18 次真实角色零重试，候选相对两组对照收益均为 0、在线费用 32，不晋升；18 条指令/主机反馈轨迹和无新增执行恢复审计通过。仅一个合成任务族，真实自主缺口发现和更广效用范围仍未完成。

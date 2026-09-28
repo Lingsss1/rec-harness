@@ -6,9 +6,15 @@ from .store import Store
 
 
 def audit_exposure(campaign):
-    root=Path(campaign);config=read_json(root/'campaign.json')
-    if read_json(root/'research_archive/manifest.json')['config_hash']!=digest(config):
+    root=Path(campaign);amazon=(root/'amazon-auto.json').exists()
+    config=read_json(root/('amazon-auto.json' if amazon else 'campaign.json'))
+    lock=root/('auto-lock.json' if amazon else 'research_archive/manifest.json')
+    if read_json(lock)['config_hash']!=digest(config):
         raise ContractError('exposure campaign configuration changed')
+    study=None
+    if amazon:
+        study=read_json(Path(config['study'])/'study.json')
+        if digest(study)!=config['study_config_hash']:raise ContractError('exposure bound study changed')
     objects=Artifacts(root/'artifacts/objects');store=Store(root/'memory',read_only=True)
     try:
         store.db.execute('BEGIN')
@@ -34,8 +40,16 @@ def audit_exposure(campaign):
                 diagnostic=context.get('diagnostic')
                 if diagnostic is not None:
                     projected=value['role']=='measurement'
-                    baseline=context.get('baseline') or ([] if projected else {})
+                    baseline=context.get('baseline' if projected or not amazon else 'measurement_baseline') or ([] if projected else {})
                     runs=baseline if projected else baseline.get('runs',[])
+                    if amazon:
+                        if context['protocol_hash']!=config['protocol_hash'] or any(
+                                row['seed'] not in study['development_seeds'] or row.get('dataset') not in study['datasets'] for row in runs):
+                            raise ContractError('measurement exposure is outside frozen development conditions')
+                        if not projected:
+                            public_rows=[{k:row[k] for k in ['dataset','seed','metrics']} for row in runs]
+                            if public_rows!=context.get('development_baseline'):
+                                raise ContractError('measurement differs from Amazon development baseline')
                     request={'task_id':context['task_id'],'model_version':context['model_version'],
                         'protocol_hash':context['protocol_hash'],'runs':[{'seed':row['seed'],'valid':row['valid'],
                         'metrics':row.get('metrics',{}),**({'dataset':row['dataset']} if 'dataset' in row else {})}
@@ -57,6 +71,11 @@ def audit_exposure(campaign):
             elif event['kind']=='agent_completed' and value['status']=='success':
                 if value['task_id'] not in submitted:raise ContractError('role completed without submitted input')
                 completed.add(value['task_id'])
+            elif amazon and event['kind']=='role_completed':
+                task=value['task'];submission=submitted.get(task)
+                if not submission or value['role']!=submission['role'] or value.get('context_hash')!=submission['input_hash']:
+                    raise ContractError('Amazon role completion differs from submitted input')
+                completed.add(task)
         for row in exposures:row['transport_completed']=row['task_id'] in completed
         if store.verify()!=integrity:raise ContractError('exposure source changed during audit')
         return {'task_id':config['task_id'],'tool_hash':tool['implementation_hash'] if tool else None,

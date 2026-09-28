@@ -259,7 +259,7 @@ SPEC 沿用 `online_validation` 的 `cases`（development/confirmation）和可�
 报告适配 ToolEvolver 的 utility 阶段。注入测试 agent 的运行始终 `online:false`，不构成真实在线效用证据。
 当前宿主支持一个合成任务族；已完成18次真实 Codex 调用的三组验收，增益为0，候选未通过门槛。完整自主工具演化及多条件收益验收仍待完成，详见验收记录。
 
-`python3 -m rec_harness.tool_exposure CAMPAIGN OUTPUT` 只读审计工具结果的送达链。
+`python3 -m rec_harness.tool_exposure CAMPAIGN OUTPUT` 只读审计工具结果的送达链。 支持通用模型与 Amazon 控制器，含测量审查的精简摘要；Amazon 同时检查 study 冻结身份及开发条件，见[适配器审计](implementation/amazon-tool-exposure.md)。
 审计核对工具源码/worker CAS、收集的测量输出、事件先后、协议及当前 baseline 输入摘要，
 并从提交时保存的角色可见输入证明结果已送达；单独标记该角色传输是否完成。
 它不把工具送达等同于角色采纳、机制证据或决策收益。

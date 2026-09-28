@@ -6,8 +6,8 @@
 
 ## 当前交付与模型结果
 
-- 最新完整回归：[v17 安装环境](install-acceptance-v17.md)中 439 项全部通过、零跳过，覆盖冻结 `b9a4c0d`；Torch、进程恢复和显式 Linux OS 隔离检查均实际执行。此前[源码环境 438 项](full-environment-regression-v1.md)保留为历史证据。
-- 最新安装交付：[v17](install-acceptance-v17.md)，123 模块及原生源码与安装文件一致，117 个实际加载项目模块来自安装目录。工具生成接口、多文件 worker、诊断恢复、指令身份和开发反馈轨迹均已纳入。
+- 最新完整回归：[v18 安装环境](install-acceptance-v18.md)中 447 项全部通过、零跳过，覆盖冻结 `9eee9a1`；Torch、进程恢复和显式 Linux OS 隔离检查均实际执行。[v17](install-acceptance-v17.md)及此前[源码环境 438 项](full-environment-regression-v1.md)保留为历史证据。
+- 最新安装交付：[v18](install-acceptance-v18.md)，125 模块及原生源码与安装文件一致，119 个实际加载项目模块来自安装目录。项目预检、搜索轨迹、生成与草稿归档、Amazon 失败轨迹等后续变更均已纳入。
 - 最新已完成真实 Amazon 优化：[v3](../experiments/amazon-next-autoresearch-v3.md)。开发平均 HR@10 增加 0.012750；独立初始化确认增加 0.013125，主机选中候选。确认使用相同验证用户，不是最终测试；该研究已封存，不使用确认结果继续调优。
 - 最近真实工程验收：[多文件 CPU 执行](../experiments/multifile-diagnostic-jail-v1.md)与[诊断提交中断恢复](../experiments/diagnostic-recovery-jail-v1.md)。没有新增 Codex 调用或训练，也不增加工具效用结论。
 - 最新工具在线验收：[新 worker 三组比较](../experiments/tool-authoring-online-v1.md)，18 次真实角色零重试，候选相对两组对照收益均为 0、在线费用 32，不晋升；18 条指令/主机反馈轨迹和无新增执行恢复审计通过。仅一个合成任务族，真实自主缺口发现和更广效用范围仍未完成。

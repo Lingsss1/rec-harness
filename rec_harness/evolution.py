@@ -10,7 +10,7 @@ from functools import wraps
 from pathlib import Path
 from .process_identity import assert_stopped
 
-from .agents import CodexAgent, run_process
+from .agents import CodexAgent, run_process, schema_for, validate_schema
 from .core import Artifacts, ContractError, digest, identifier, number, file_hash, public_only, read_json, required, validate_card, write_json
 from .store import Store
 
@@ -169,15 +169,43 @@ class Evolution:
             write_json(directory / "candidate.json", frozen);self.store.event("candidate_proposed", frozen)
         role = "tool" if kind == "tool" else "optimizer"
         task_dir = directory / "development"
-        attempts=directory/'development-attempts';attempts.mkdir(exist_ok=True)
-        if task_dir.exists():task_dir.rename(attempts/str(len(list(attempts.iterdir()))+1))
-        if source:
-            self.artifacts.restore(source, task_dir / "model")
-        task_id = candidate_id + "-generation-"+str(len(list(attempts.iterdir()))+1)
-        self.store.reserve(task_id, plan["agent_cost"])
+        request_context={"context":context,"acceptance_plan":plan}
+        submissions=[e['payload'] for e in self.store.events()
+                     if e['kind']=='candidate_generation_submitted' and e['payload']['candidate_id']==candidate_id]
+        recovered=bool(submissions)
+        if recovered:
+            submitted=submissions[-1];task_id=submitted['task_id']
+            if submitted['role']!=role or submitted['input_hash']!=digest(request_context):
+                raise ContractError('generation request changed during recovery')
+            needed=['resources.json','context.json','request.json','response.json','schema.json']
+            if any(not (task_dir/name).is_file() for name in needed):
+                raise ContractError('generation outcome unresolved; retained attempt requires review, not automatic resubmission')
+            receipt=read_json(task_dir/'resources.json');request=read_json(task_dir/'request.json')
+            if (receipt.get('status')!='success' or request.get('role')!=role
+                or request.get('context')!=request_context or read_json(task_dir/'context.json')!=request_context
+                or read_json(task_dir/'schema.json')!=schema_for(role)):
+                raise ContractError('generation receipts do not establish a successful matching request')
+            response=read_json(task_dir/'response.json');validate_schema(response,schema_for(role));public_only(response)
+            files=needed+(['model/'+name for name in response['changed_files']] if kind=='tool' else [])
+            archived=self.artifacts.snapshot(task_dir,files)
+            recovery={'candidate_id':candidate_id,'task_id':task_id,'receipts':archived,
+                      'scope':'Successful matching local terminal receipts; no new generation or charge.'}
+            previous=[e['payload'] for e in self.store.events() if e['kind']=='candidate_generation_recovered'
+                      and e['payload']['task_id']==task_id]
+            if previous:
+                if previous[-1]!=recovery:raise ContractError('recovered generation artifacts changed')
+            else:self.store.event('candidate_generation_recovered',recovery)
+        else:
+            attempts=directory/'development-attempts';attempts.mkdir(exist_ok=True)
+            if task_dir.exists():task_dir.rename(attempts/str(len(list(attempts.iterdir()))+1))
+            if source:self.artifacts.restore(source,task_dir/'model')
+            task_id=candidate_id+'-generation-'+str(len(list(attempts.iterdir()))+1)
+            self.store.reserve(task_id,plan['agent_cost'])
+            self.store.event('candidate_generation_submitted',{'candidate_id':candidate_id,'task_id':task_id,
+                'role':role,'input_hash':digest(request_context)})
         status = "crash"
         try:
-            response = (agent or CodexAgent()).run(role, {"context": context, "acceptance_plan": plan}, task_dir)
+            if not recovered:response=(agent or CodexAgent()).run(role,request_context,task_dir)
             if kind == "harness":
                 validate_card("harness_patch", response)
                 if 'decision_traces' in context:
@@ -198,8 +226,8 @@ class Evolution:
             write_json(directory / "candidate.json", frozen)
             return frozen
         finally:
-            self.store.settle(task_id, plan["agent_cost"], status)
-            self.store.event("candidate_development_finished", {"candidate_id": candidate_id, "status": status})
+            if not recovered:self.store.settle(task_id, plan["agent_cost"], status)
+            self.store.event("candidate_development_finished", {"candidate_id": candidate_id, "status": status, "task_id":task_id, "recovered":recovered})
 
     @serialized
     def run(self,candidate_id,kind,context,plan,*,agent=None,source=None):
@@ -380,6 +408,9 @@ class Evolution:
     def verify(self):
         integrity=self.store.verify()
         count=0
+        for event in self.store.events():
+            if event['kind']=='candidate_generation_recovered':
+                for ref in event['payload']['receipts'].values():self.artifacts.verify(ref);count+=1
         for path in (self.root/'candidates').glob('*/candidate.json'):
             candidate=read_json(path);plan=read_json(path.parent/'plan.json')
             if digest(plan)!=candidate['plan_hash'] or digest(read_json(path.parent/'context.json'))!=candidate['context_hash']:

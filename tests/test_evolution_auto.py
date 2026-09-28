@@ -98,6 +98,78 @@ class EvolutionAutomationTests(unittest.TestCase):
             self.assertEqual(sum(e['kind']=='candidate_implemented' for e in store.events()),1)
         finally:store.close()
 
+    def test_successful_raw_generation_receipts_resume_without_a_second_call(self):
+        from rec_harness.agents import schema_for
+        class Completed(Optimizer):
+            def run(self,role,context,directory):
+                response=super().run(role,context,directory)
+                for name,value in [('context.json',context),('request.json',{'role':role,'context':context}),
+                                   ('schema.json',schema_for(role)),('response.json',response),('resources.json',{'status':'success'})]:
+                    write_json(Path(directory)/name,value)
+                raise KeyboardInterrupt()
+        agent=Completed()
+        with self.assertRaises(KeyboardInterrupt):autoresearch(self.campaign,self.config(),agent=agent)
+        result=autoresearch(self.campaign,agent=agent)
+        self.assertEqual(result['status'],'promoted');self.assertEqual(agent.calls,1)
+        self.assertEqual(result['budget']['charged_or_reserved'],4)
+        self.assertEqual(autoresearch(self.campaign,agent=agent),result)
+        evolution=Evolution(self.campaign)
+        try:
+            events=evolution.store.events()
+            receipts=[e['payload']['receipts'] for e in events if e['kind']=='candidate_generation_recovered']
+            self.assertEqual(len(receipts),1)
+            for ref in receipts[0].values():evolution.artifacts.verify(ref)
+        finally:evolution.store.close()
+
+    def test_tool_receipt_recovery_binds_source_across_another_interruption(self):
+        from rec_harness.agents import schema_for
+        config=read_json(self.config());plan=config['plan']
+        rule=next(iter(plan['stages'].values()))
+        plan['stages']={stage:dict(rule) for stage in STAGES['tool']}
+        class Tool:
+            calls=0
+            def run(self,role,context,directory):
+                self.calls+=1;model=Path(directory)/'model';model.mkdir(parents=True)
+                (model/'diagnostic.py').write_text('def measure(request): return {}\n')
+                response={'changed_files':['diagnostic.py'],'implementation_checks':[],'limitations':['fixture']}
+                for name,value in [('context.json',context),('request.json',{'role':role,'context':context}),
+                    ('schema.json',schema_for(role)),('response.json',response),('resources.json',{'status':'success'})]:
+                    write_json(Path(directory)/name,value)
+                raise KeyboardInterrupt()
+        agent=Tool();evolution=Evolution(self.campaign);self.addCleanup(evolution.store.close)
+        with self.assertRaises(KeyboardInterrupt):evolution.propose('candidate','tool',{},plan,agent=agent)
+        original=evolution.store.event
+        def interrupt(kind,payload):
+            result=original(kind,payload)
+            if kind=='candidate_generation_recovered':raise KeyboardInterrupt()
+            return result
+        with patch.object(evolution.store,'event',side_effect=interrupt):
+            with self.assertRaises(KeyboardInterrupt):evolution.propose('candidate','tool',{},plan,agent=agent)
+        events=evolution.store.events()
+        recovered=next(e['payload'] for e in events if e['kind']=='candidate_generation_recovered')
+        self.assertIn('model/diagnostic.py',recovered['receipts'])
+        source=self.campaign/'candidates/candidate/development/model/diagnostic.py'
+        source.write_text('def measure(request): return {"changed": 1}\n')
+        with self.assertRaisesRegex(ContractError,'recovered generation artifacts changed'):
+            evolution.propose('candidate','tool',{},plan,agent=agent)
+        self.assertEqual(agent.calls,1)
+        self.assertEqual(evolution.store.budget()['charged_or_reserved'],1)
+
+    def test_unknown_generation_outcome_stops_instead_of_resubmitting(self):
+        class Interrupted(Optimizer):
+            def run(self,role,context,directory):
+                super().run(role,context,directory)
+                raise KeyboardInterrupt()
+        agent=Interrupted()
+        with self.assertRaises(KeyboardInterrupt):autoresearch(self.campaign,self.config(),agent=agent)
+        result=autoresearch(self.campaign,agent=agent)
+        self.assertEqual(result['status'],'rejected')
+        self.assertIn('not automatic resubmission',result['reason'])
+        self.assertEqual(result['budget']['charged_or_reserved'],1)
+        self.assertEqual(agent.calls,1)
+        self.assertEqual(autoresearch(self.campaign,agent=agent),result)
+        self.assertEqual(agent.calls,1)
+
     def test_rejected_scientific_validation_cannot_be_retried_into_promotion(self):
         result=autoresearch(self.campaign,self.config(reject='development'),agent=self.agent)
         self.assertEqual(result['status'],'rejected');self.assertEqual(result['budget']['charged_or_reserved'],3)

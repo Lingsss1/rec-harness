@@ -152,6 +152,9 @@ def validate_export_bindings(folder,events):
 
 def export_development_memory(campaign,output):
     campaign=Path(campaign);config=read_json(campaign/'amazon-auto.json')
+    lock=campaign/'auto-lock.json'
+    if not lock.is_file():raise ContractError('development memory export requires frozen controller lock')
+    if read_json(lock).get('config_hash')!=digest(config):raise ContractError('autonomous configuration changed')
     study=read_json(Path(config['study'])/'study.json');entries=[]
     if digest(study)!=config['study_config_hash']:raise ContractError('bound study changed')
     if config.get('review_only'):

@@ -6,14 +6,34 @@ from pathlib import Path
 from rec_harness.adapters.amazon_memory import export_development_memory,validate_memory,execution_failure,validate_export_bindings,compact_development_context,gap_applicability
 from rec_harness.core import ContractError,digest,write_json
 
+
+def freeze_config(campaign,config):
+    write_json(campaign/'amazon-auto.json',config)
+    write_json(campaign/'auto-lock.json',{'config_hash':digest(config)})
+
 class DevelopmentMemoryTests(unittest.TestCase):
+    def test_export_rejects_changed_or_missing_controller_lock_before_reading_study(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);campaign=root/'campaign';output=root/'memory.json'
+            # Missing study is intentional: a changed binding must fail before it is opened.
+            config={'study':str(root/'unavailable-study'),'study_config_hash':'unused',
+                    'task_id':'source','protocol_hash':'p','require_method_sources':True}
+            freeze_config(campaign,config)
+            for key,value in [('task_id','forged-task'),('require_method_sources',False),('study',str(root/'another-study'))]:
+                write_json(campaign/'amazon-auto.json',{**config,key:value})
+                with self.assertRaisesRegex(ContractError,'configuration changed'):export_development_memory(campaign,output)
+                self.assertFalse(output.exists())
+            write_json(campaign/'amazon-auto.json',config);(campaign/'auto-lock.json').unlink()
+            with self.assertRaisesRegex(ContractError,'frozen controller lock'):export_development_memory(campaign,output)
+            self.assertFalse(output.exists())
+
     def test_paper_provenance_survives_export_and_context_without_becoming_verified(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);campaign=root/'campaign';study={'development_seeds':[42]}
             write_json(root/'study/study.json',study)
             config={'study':str(root/'study'),'study_config_hash':digest(study),'protocol_hash':'p',
                     'task_id':'source','require_method_sources':True}
-            write_json(campaign/'amazon-auto.json',config)
+            freeze_config(campaign,config)
             folder=campaign/'rounds/round-1'
             method={'origin':'paper_claim','sources':['https://example.org/fictional-paper.pdf']}
             write_json(folder/'handoff.json',{'cards':{'method':method}})
@@ -37,8 +57,9 @@ class DevelopmentMemoryTests(unittest.TestCase):
                 bad['hash']=digest({k:v for k,v in bad.items() if k!='hash'})
                 with self.assertRaises(ContractError):validate_memory(bad,'p',[42])
             # Historical tasks retain their original export shape and citation strings.
-            config.pop('require_method_sources');write_json(campaign/'amazon-auto.json',config)
-            legacy=export_development_memory(campaign,root/'legacy.json')
+            config.pop('require_method_sources');legacy_campaign=root/'legacy-campaign';freeze_config(legacy_campaign,config)
+            write_json(legacy_campaign/'rounds/round-1/handoff.json',{'cards':{'method':method}})
+            legacy=export_development_memory(legacy_campaign,root/'legacy.json')
             self.assertEqual(legacy['schema'],'amazon-development-memory-v1')
             self.assertNotIn('method_source_provenance',legacy['entries'][0]);validate_memory(legacy,'p',[42])
 
@@ -70,7 +91,7 @@ class DevelopmentMemoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);campaign=root/'campaign';study={'development_seeds':[42]}
             write_json(root/'study/study.json',study)
-            write_json(campaign/'amazon-auto.json',{'study':str(root/'study'),
+            freeze_config(campaign,{'study':str(root/'study'),
                 'study_config_hash':digest(study),'protocol_hash':'p','task_id':'task'})
             folder=campaign/'rounds/round-1'
             report={'schema':'amazon-development-selection-v1','protocol_hash':'p','rows':[{'seed':42}]}
@@ -132,7 +153,7 @@ class DevelopmentMemoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);study={'development_seeds':[42]}
             write_json(root/'study/study.json',study)
-            write_json(root/'campaign/amazon-auto.json',{'study':str(root/'study'),
+            freeze_config(root/'campaign',{'study':str(root/'study'),
                 'study_config_hash':digest(study),'review_only':True})
             with self.assertRaisesRegex(ContractError,'must finish before memory export'):
                 export_development_memory(root/'campaign',root/'memory.json')
@@ -182,7 +203,7 @@ class DevelopmentMemoryTests(unittest.TestCase):
     def test_export_excludes_confirmation_results_and_preserves_failed_designs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);study={'development_seeds':[42]};write_json(root/'study/study.json',study)
-            write_json(root/'campaign/amazon-auto.json',{'study':str(root/'study'),'study_config_hash':digest(study),'protocol_hash':'p','task_id':'task'})
+            freeze_config(root/'campaign',{'study':str(root/'study'),'study_config_hash':digest(study),'protocol_hash':'p','task_id':'task'})
             first=root/'campaign/rounds/round-1';write_json(first/'handoff.json',{'cards':{'method':'model hypothesis'}})
             report={'schema':'amazon-development-selection-v1','protocol_hash':'p','rows':[{'seed':42}]};report['hash']=digest(report)
             write_json(first/'development-readout.json',report)

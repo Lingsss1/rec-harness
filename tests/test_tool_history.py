@@ -55,6 +55,72 @@ class ToolHistoryTests(unittest.TestCase):
             'kind':'tool','campaign':str(self.source),'result_hash':digest(report)}})
         with self.assertRaisesRegex(ContractError,'committed terminal'):project_sources(project)
 
+    def test_failed_correctness_report_is_available_to_future_authors(self):
+        from rec_harness.autonomous import autoresearch
+        from test_evolution_auto import tool_definition
+        config=read_json(self.fixture.fixture.config(reject='prefix_audit'))
+        config.update(kind='tool',context={})
+        rule=config['plan']['stages']['prefix_audit']
+        config['plan']['stages']={stage:copy.deepcopy(rule) for stage in STAGES['tool']}
+        path=self.root/'negative-config.json';write_json(path,config)
+        class Author:
+            calls=0
+            def run(self,role,context,directory):
+                self.calls+=1;model=Path(directory)/'model';model.mkdir(parents=True)
+                (model/'diagnostic.py').write_text('def measure(request): return {}\n')
+                return {'changed_files':['diagnostic.py']+tool_definition(context,directory)}
+        author=Author();target=self.root/'negative'
+        result=autoresearch(target,path,agent=author)
+        self.assertEqual(result['status'],'rejected')
+        # Non-numerical rejection must not become a valid gate failure that
+        # permits Harness continuation or implies accepted measurement quality.
+        self.assertNotIn('rejection_kind',result)
+        history,excluded=collect([{'campaign':str(target)}])
+        row=history['candidates'][0]
+        self.assertEqual(row['validation'],[{'stage':'correctness','status':'rejected','rejection_kind':'validation_contract'}])
+        self.assertIn('prefix_audit',excluded)
+        self.assertEqual(row['status'],'rejected')
+        self.assertEqual(author.calls,1)
+        self.assertEqual(autoresearch(target,agent=author),result)
+        self.assertEqual(author.calls,1)
+        store=Store(target/'memory',read_only=True)
+        try:
+            events=store.events()
+            rejected=next(e['payload'] for e in events if e['kind']=='validation_rejected')
+            self.assertIs(rejected['report']['passed'],False)
+            self.assertEqual(rejected['report_hash'],digest(rejected['report']))
+            self.assertEqual(sum(e['kind']=='validation_stage_launched' for e in events),1)
+        finally:store.close()
+
+    def test_nonpublic_rejected_report_does_not_enter_public_event(self):
+        from rec_harness.evolution import Evolution
+        from unittest.mock import patch
+        plan=read_json(self.fixture.fixture.config())['plan']
+        rule=plan['stages']['prefix_audit'];plan['stages']={stage:copy.deepcopy(rule) for stage in STAGES['tool']}
+        class Author:
+            def run(self,role,context,directory):
+                model=Path(directory)/'model';model.mkdir(parents=True)
+                (model/'diagnostic.py').write_text('def measure(request): return {}\n')
+                return {'changed_files':['diagnostic.py']}
+        evolution=Evolution(self.root/'private-report');self.addCleanup(evolution.store.close)
+        evolution.propose('private','tool',{},plan,agent=Author())
+        with patch('rec_harness.validation_stage.report',return_value={'hidden_score':123}):
+            with self.assertRaisesRegex(ContractError,'forbidden evidence'):evolution.validate('private','correctness')
+        rejection=next(e['payload'] for e in evolution.store.events() if e['kind']=='validation_rejected')
+        self.assertNotIn('report',rejection)
+        self.assertEqual(rejection['rejection_kind'],'validation_contract')
+
+    def test_rejected_report_ids_must_be_nonempty_string_lists(self):
+        for index,ids in enumerate(['not-a-list',[],[{}],[None],['']]):
+            key='malformed-'+str(index)
+            write_json(self.source/'candidates'/key/'plan.json',self.plan)
+            self.store.event('candidate_proposed',{'candidate_id':key,'kind':'tool','plan_hash':digest(self.plan)})
+            report={'evaluation_ids':ids}
+            self.store.event('validation_rejected',{'candidate_id':key,'stage':'shadow',
+                'report':report,'report_hash':digest(report)})
+            with self.assertRaisesRegex(ContractError,'invalid evaluation IDs'):
+                collect([{'campaign':str(self.source),'candidate_ids':[key]}])
+
     def test_freeze_excludes_scores_future_events_and_duplicate_sources(self):
         before=self.store.verify();cutoff=before['events']
         history,excluded=collect([{'campaign':str(self.source),'cutoff_seq':cutoff}])

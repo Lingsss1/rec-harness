@@ -51,10 +51,17 @@ def collect(sources):
                             card=read_json(objects.verify(value['proposal_ref']));validate(card,value.get('source_hash'))
                             row.update(method_card=card,method_card_hash=value['proposal_ref']['sha256'])
                     elif kind in {'validation_passed','validation_rejected'}:
-                        row['validation'].append({'stage':value['stage'],'status':'passed' if kind=='validation_passed' else 'rejected'})
+                        validation={'stage':value['stage'],'status':'passed' if kind=='validation_passed' else 'rejected'}
+                        if kind=='validation_rejected':
+                            reason=value.get('rejection_kind')
+                            validation['rejection_kind']=reason if reason in {'validation_gate','validation_contract'} else 'unknown'
+                        row['validation'].append(validation)
                         if 'report' in value:
                             if digest(value['report'])!=value['report_hash']:raise ContractError('tool history report changed')
-                            excluded.update(value['report']['evaluation_ids'])
+                            report=value['report'];ids=report.get('evaluation_ids') if isinstance(report,dict) else None
+                            if not isinstance(ids,list) or not ids or any(not isinstance(item,str) or not item.strip() for item in ids):
+                                raise ContractError('tool history validation has invalid evaluation IDs')
+                            excluded.update(ids)
                         else:raise ContractError('tool history validation lacks evaluation IDs; cannot exclude prior conditions')
                     elif kind=='candidate_promoted':row['status']='promoted'
                     elif kind=='evolution_stopped':row['status']=value['status']

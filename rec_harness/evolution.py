@@ -371,6 +371,7 @@ class Evolution:
         if any(e['kind']=='validation_rejected' and e['payload']['candidate_id']==candidate_id and e['payload']['stage']==stage for e in self.store.events()):
             raise ContractError('frozen validation previously rejected; create a new candidate and plan')
         target = validations / stage
+        report = None
         try:
             from .validation_stage import report as stage_report
             report=stage_report(self,candidate,plan,stage,run_process)
@@ -386,9 +387,15 @@ class Evolution:
             raise
         except (ContractError, OSError, ValueError) as error:
             rejection={"candidate_id":candidate_id,"stage":stage,"reason":str(error)}
-            if isinstance(error,ValidationGateRejected):
-                rejection.update(rejection_kind='validation_gate',report=report,report_hash=digest(report),
+            if report is not None:
+                try:public_only(report)
+                except (ContractError,ValueError):report=None
+            if report is not None:
+                # A returned report remains evidence of attempted conditions even
+                # when correctness or report-contract checks reject the tool.
+                rejection.update(report=report,report_hash=digest(report),
                     implementation_hash=candidate['implementation_hash'],plan_hash=candidate['plan_hash'])
+            rejection['rejection_kind']='validation_gate' if isinstance(error,ValidationGateRejected) else 'validation_contract'
             self.store.event("validation_rejected",rejection)
             raise
 
@@ -408,6 +415,7 @@ class Evolution:
         return accepted
 
     def _check_report(self, candidate, plan, stage, report):
+        if not isinstance(report,dict):raise ContractError("validation report must be an object")
         public_only(report)
         groups = report.get("comparison_groups", report.get("arms"))
         if "comparison_groups" in report and "arms" in report and report["comparison_groups"] != report["arms"]:

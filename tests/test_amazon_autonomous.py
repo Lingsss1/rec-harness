@@ -269,7 +269,10 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
     def test_transport_failure_archive_survives_cycle_completion_and_detects_tampering(self):
         self.run_pipeline(False,transport_archive=True)
 
-    def run_pipeline(self,confirmation,measurement=False,legacy_measurement=False,history=False,interrupt_control=False,extra_control=False,control_metric=.6,generated_control=False,transport_archive=False):
+    def test_incumbent_measurements_stay_scoped_through_review_and_resume(self):
+        self.run_pipeline(False,scoped_measurement=True)
+
+    def run_pipeline(self,confirmation,measurement=False,legacy_measurement=False,history=False,interrupt_control=False,extra_control=False,control_metric=.6,generated_control=False,transport_archive=False,scoped_measurement=False):
         import json
         from contextlib import ExitStack
         from rec_harness.autonomous import autoresearch
@@ -278,6 +281,10 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
         from test_amazon_plan import sample
         from test_model_source_contract import SOURCE
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            if scoped_measurement:
+                stack.enter_context(patch('rec_harness.adapters.amazon_diagnostics.diagnostic_context',return_value={
+                    'diagnostic':{'model_version':'legacy_incumbent','status':'success','output':{'measurements':{'mean_metric':.5}}},
+                    'measurement_baseline':{'runs':[{'dataset':'tiny','seed':42,'valid':True,'metrics':{'HR@10':.5}}]}}))
             if legacy_measurement:
                 original_patch=Store.patch
                 def legacy_patch(store,patch,**kwargs):
@@ -345,6 +352,13 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                             response['changed_files'].append('control-1.py')
                             (target/'model/control-1.py').write_text(SOURCE.replace('return self.block(x)','return self.block(x) * 0.7'))
                     if role in ('evaluation','lead'):
+                        if scoped_measurement:
+                            self_test.assertNotIn('diagnostic',context)
+                            self_test.assertNotIn('measurement_baseline',context)
+                            incumbent=context['incumbent_measurement_context']
+                            self_test.assertEqual(incumbent['model_version'],'legacy_incumbent')
+                            self_test.assertEqual(incumbent['diagnostic']['model_version'],incumbent['model_version'])
+                            self_test.assertEqual(incumbent['development_baseline'],context['development_baseline'])
                         author=context['implementation_author_report']
                         self_test.assertEqual(author['status'],'identity_verified')
                         self_test.assertFalse(author['checks_verified_by_this_report'])

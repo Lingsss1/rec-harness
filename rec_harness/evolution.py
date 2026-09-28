@@ -214,8 +214,20 @@ class Evolution:
             self.store.event('candidate_generation_submitted',{'candidate_id':candidate_id,'task_id':task_id,
                 'role':role,'input_hash':digest(request_context)})
         status = "crash"
+        def record_generation():
+            names=['context.json','request.json','schema.json','response.json','resources.json',
+                   'stdout.jsonl','stderr.txt','literature-search.json','prompt.txt','launch.json','process.json']
+            receipts=self.artifacts.snapshot(task_dir,[name for name in names if (task_dir/name).is_file()])
+            record={'candidate_id':candidate_id,'task_id':task_id,'role':role,'receipts':receipts,
+                    'scope':'Original available generation files; missing files are not inferred and transport output is not validation evidence.'}
+            prior=[e['payload'] for e in self.store.events() if e['kind']=='candidate_generation_archived'
+                   and e['payload']['task_id']==task_id]
+            if prior:
+                if prior[-1]!=record:raise ContractError('generation archive differs from committed receipts')
+            else:self.store.event('candidate_generation_archived',record)
         try:
             if not recovered:response=(agent or CodexAgent()).run(role,request_context,task_dir)
+            record_generation()
             if role=='optimizer_router':
                 validate_schema(response,schema_for(role));choice=response['kind'];response=json.loads(response['payload_json'])
                 if choice=='measurement_gap':
@@ -264,6 +276,10 @@ class Evolution:
             return frozen
         finally:
             if not recovered:self.store.settle(task_id, plan["agent_cost"], status)
+            # Failed transports also retain available requests, logs and receipts.
+            # Avoid a second event for successful or already archived attempts.
+            if not any(e['kind']=='candidate_generation_archived' and e['payload']['task_id']==task_id
+                       for e in self.store.events()):record_generation()
             self.store.event("candidate_development_finished", {"candidate_id": candidate_id, "status": status, "task_id":task_id, "recovered":recovered})
 
     @serialized
@@ -470,7 +486,7 @@ class Evolution:
         for event in self.store.events():
             if event['kind'] in {'candidate_implemented','measurement_handoff_recorded'} and event['payload'].get('proposal_ref'):
                 self.artifacts.verify(event['payload']['proposal_ref']);count+=1
-            if event['kind']=='candidate_generation_recovered':
+            if event['kind'] in {'candidate_generation_recovered','candidate_generation_archived'}:
                 for ref in event['payload']['receipts'].values():self.artifacts.verify(ref);count+=1
         for path in (self.root/'candidates').glob('*/candidate.json'):
             candidate=read_json(path);plan=read_json(path.parent/'plan.json')

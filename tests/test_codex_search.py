@@ -53,6 +53,9 @@ class SearchTests(unittest.TestCase):
         replay = JailedCodexAgent(self.root/'template', self.root/'runtime', web_search='disabled')
         self.assertIn('Do not retrieve external sources', replay.role_prompt('hypothesis'))
         self.assertNotIn('built-in web search', replay.role_prompt('hypothesis'))
+        tool=JailedCodexAgent(self.root/'template',self.root/'runtime',web_search={'tool':'live'})
+        self.assertIn('diagnostic.py module docstring',tool.role_prompt('tool'))
+        self.assertNotIn('method.sources',tool.role_prompt('tool'))
 
     def test_search_trace_requires_exact_log_response_and_receipt_binding(self):
         event={'type':'item.completed','item':{'type':'web_search','query':'fixture'}}

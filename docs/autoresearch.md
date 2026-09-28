@@ -97,6 +97,8 @@ suite 含 identity、tool_files（必须含 diagnostic.py）、budget、case_cos
 
 同一入口接受 `adapter: research-evolution-v1`。配置提供 `candidate_id`、`kind`（`tool` 或 `harness`）、公开 `context`、冻结 `plan` 和 `agent_backend`。工具可提供 `source` 与 `model_files`，初始化时归档；后续恢复不再读取源工作区。Codex 分别承担 tool 或 optimizer 角色。
 
+新建工具演化任务默认通过 Codex 内置工具进行论文搜索，并在配置中冻结完整策略。可用 `agent_backend.web_search: {"tool":"disabled"}` 明确禁用，或设置 `cached`；旧冻结任务不改变默认行为。来源 URL 和版本/章节写入 `diagnostic.py` 模块说明，来源局限写入 `limitations`。生成请求、日志、搜索收据与进程收据在成功和失败时均进入事件/CAS 档案；归档与搜索发生不代表论文内容已经验证，详见[生成档案合同](implementation/evolution-generation-archive.md)。
+
 `plan` 保留现有 evolve 验证合同：工具依次经过 correctness、synthetic、robustness、shadow、utility、cost_regression；Harness 依次经过 prefix_audit、development、confirmation。每阶段使用冻结的独立 validator 命令及验收阈值。内置 `-m rec_harness...` 验证器还冻结整个包的 Python 源码；外部模块须以阶段的 `validator_files` 列出本地依赖。验证前校验文件哈希，变更会在执行和扣费前被拒绝。这不替代解释器、第三方依赖与系统环境锁。验证程序由操作者提供，候选不能修改；声明 `online: true` 本身不能证明真实在线收益，必须由验证程序实际执行独立实验并保留证据。下述在线配对与三组工具验证器支持隔离 toy 任务；任意任务适配仍待扩展。
 
 Harness 的开发/确认阶段已有隔离 toy 在线配对验证器。先创建规格文件：`cases` 列表中的每项含唯一 `id`、`stage`（development 或 confirmation）和模型研究 `config` 路径，另可指定 `baseline_policy`。任务必须使用 `isolated-toy-v1`、`jailed_codex` 和显式 `codex.model`，各 case 的数据/seed 条件不能重复，包括训练 seed 与另一 case 验证 seed 的重叠；改写 data_version 标签不会创建独立数据。验证器冻结模型及评估器源码，计算 base_llm/tools/start/graph/budget/protocol 配对身份。开发与确认使用同一冻结 suite 的不同条件。

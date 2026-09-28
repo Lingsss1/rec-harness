@@ -34,7 +34,7 @@ class JailedCodexAgent:
                   'This is an OS-isolated public research workspace. Do not read credentials or unrelated paths. '
                   'Do not spawn other agents or execute GPU training. Return exactly the required JSON schema. '
                   'For changes, paths are relative to model/. Preserve the frozen protocol and unrelated code. '
-                  + search_instruction(self.web_search[role]))
+                  + search_instruction(self.web_search[role],role))
 
     def run(self, role, context, directory):
         if role not in ROLES or os.geteuid() != 0:

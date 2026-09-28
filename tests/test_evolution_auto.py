@@ -19,6 +19,59 @@ class Optimizer:
             'regression_risks':['fixture'],'validation_plan':'frozen','rollback_version':'base'}
 
 class EvolutionAutomationTests(unittest.TestCase):
+    def test_new_tool_freezes_literature_mode_and_respects_explicit_disable(self):
+        from rec_harness.evolution_auto import AutonomousEvolution
+        config=read_json(self.config());config['kind']='tool'
+        config['context']={};config['plan']['tool_contract']='public-aggregate-measurement-v1'
+        for index,setting in enumerate([None,'disabled',{'tool':'cached'},{'hypothesis':'disabled'}]):
+            current={**config,'agent_backend':{} if setting is None else {'web_search':setting}}
+            directory=self.root/('tool-search-'+str(index))
+            AutonomousEvolution.init(directory,current)
+            frozen=read_json(directory/'evolution-auto.json')
+            self.assertEqual(frozen['agent_backend']['web_search']['tool'],['live','disabled','cached','live'][index])
+            self.assertEqual(frozen['agent_backend']['web_search']['optimizer'],'disabled')
+            # Freezing does not mutate the caller's backend configuration.
+            self.assertEqual(current['agent_backend'],{} if setting is None else {'web_search':setting})
+
+    def test_normal_and_failed_generation_archive_original_logs_and_search_receipts(self):
+        from rec_harness.agents import schema_for,search_receipt
+        for failure in [False,True]:
+            with self.subTest(failure=failure):
+                campaign=self.root/('failed' if failure else 'normal')
+                class Recorded(Optimizer):
+                    def run(agent,role,context,directory):
+                        response=super().run(role,context,directory)
+                        directory=Path(directory)
+                        for name,value in [('context.json',context),('request.json',{'role':role,'context':context}),
+                                           ('schema.json',schema_for(role)),('response.json',response),
+                                           ('process.json',{'status':'failed' if failure else 'success','fixture':True}),
+                                           ('resources.json',{'status':'failed' if failure else 'success'})]:
+                            write_json(directory/name,value)
+                        (directory/'stdout.jsonl').write_text('{"type":"item.completed","item":{"type":"web_search","query":"fixture"}}\n')
+                        (directory/'stderr.txt').write_text('fixture diagnostic')
+                        search_receipt(directory,'live',None if failure else response)
+                        if failure:raise ContractError('fixture transport failure')
+                        return response
+                agent=Recorded();result=autoresearch(campaign,self.config(),agent=agent)
+                self.assertEqual(result['status'],'rejected' if failure else 'promoted')
+                evolution=Evolution(campaign)
+                try:
+                    records=[e for e in evolution.store.events() if e['kind']=='candidate_generation_archived']
+                    self.assertEqual(len(records),1);record=records[0]['payload']
+                    self.assertEqual(record['role'],'optimizer')
+                    self.assertIn('stdout.jsonl',record['receipts']);self.assertIn('literature-search.json',record['receipts'])
+                    if not failure:
+                        implemented=next(e for e in evolution.store.events() if e['kind']=='candidate_implemented')
+                        self.assertLess(records[0]['seq'],implemented['seq'])
+                    evolution.verify()
+                    # Terminal resumption cannot create another generation or receipt.
+                    before=evolution.store.verify();calls=agent.calls
+                    self.assertEqual(autoresearch(campaign,agent=agent),result)
+                    self.assertEqual(agent.calls,calls);self.assertEqual(evolution.store.verify(),before)
+                    evolution.artifacts.verify(record['receipts']['stdout.jsonl']).write_text('tampered')
+                    with self.assertRaisesRegex(ContractError,'corrupt artifact'):evolution.verify()
+                finally:evolution.store.close()
+
     def test_harness_rationale_is_archived_and_linked_to_frozen_trace(self):
         path=self.config(reject='development');config=read_json(path)
         config['context']['decision_traces']=[{'trace_id':'trace','harness_version':'source-v1','visible_state':{'old':'input'}}]

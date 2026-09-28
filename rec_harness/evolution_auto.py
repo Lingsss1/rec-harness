@@ -34,6 +34,11 @@ class AutonomousEvolution:
             if config['context']['source']['task_id'] not in config['plan']['development_ids']:
                 raise ContractError('tool validation must exclude optimizer source task')
         if config['kind']=='tool':
+            from .agents import search_policy
+            backend=dict(config.get('agent_backend',{}));configured=backend.get('web_search')
+            modes=search_policy(configured)
+            if configured is None or isinstance(configured,dict) and 'tool' not in configured:modes['tool']='live'
+            config['agent_backend']={**backend,'web_search':modes}
             from .diagnostics import CONTRACT,runtime_contract
             if config['plan'].get('tool_contract')==CONTRACT:
                 context=config.get('context',{});contract=runtime_contract()

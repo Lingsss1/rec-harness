@@ -37,7 +37,7 @@ class OnlineValidationTests(unittest.TestCase):
         freeze_suite(self.root/'spec.json',self.root/'suite')
         with patch('rec_harness.toy_isolated.evaluate',side_effect=self.evaluate):
             report=run_validation(self.root/'suite/suite.json',self.root/'candidate',self.root/'result.json','development',agent_factory=lambda *_:PairedAgent())
-            self.assertFalse(report['online']);self.assertEqual(report['gain'],0);self.assertEqual(report['total_cost'],16)
+            self.assertEqual(report['evaluation_mode'],'end_to_end_candidate_generation');self.assertFalse(report['online']);self.assertEqual(report['gain'],0);self.assertEqual(report['total_cost'],16)
             pair=report['rows'][0];self.assertNotEqual(pair['baseline']['graph_directory'],pair['candidate']['graph_directory'])
             self.assertEqual(pair['baseline']['agent_calls'],6)
             again=run_validation(self.root/'suite/suite.json',self.root/'candidate',self.root/'result.json','development',agent_factory=lambda *_:PairedAgent())

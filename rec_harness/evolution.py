@@ -145,6 +145,8 @@ class Evolution:
         required(plan["identity"], ["base_llm", "tools", "start", "graph", "budget", "protocol"])
         for stage, rule in plan["stages"].items():
             required(rule, ["command", "timeout", "cost", "minimum_gain", "maximum_regression", "maximum_total_cost"])
+            if 'evaluation_mode' in rule and (not isinstance(rule['evaluation_mode'],str) or rule['evaluation_mode'] not in {'fixed_candidate_selection','end_to_end_candidate_generation','offline_measurement'}):
+                raise ContractError('unknown validation evaluation mode')
             if not isinstance(rule["command"], list) or not rule["command"]:
                 raise ContractError("validator command must be argv")
             for key in ("timeout", "cost", "minimum_gain", "maximum_regression", "maximum_total_cost"):
@@ -438,6 +440,8 @@ class Evolution:
             raise ContractError("conflicting comparison group fields")
         required({**report, "comparison_groups": groups}, ["passed", "gain", "regression", "total_cost", "evaluation_ids", "identity", "comparison_groups", "online"])
         rule = plan["stages"][stage]
+        if 'evaluation_mode' in rule and report.get('evaluation_mode')!=rule['evaluation_mode']:
+            raise ContractError('validation evaluation mode differs from frozen plan')
         if report["passed"] is not True or report["identity"] != plan["identity"]:
             raise ContractError("validation failed or paired identity differs")
         failures=numerical_gate_failures(report,rule)

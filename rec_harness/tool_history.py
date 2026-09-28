@@ -62,6 +62,8 @@ def collect(sources):
                             if not isinstance(ids,list) or not ids or any(not isinstance(item,str) or not item.strip() for item in ids):
                                 raise ContractError('tool history validation has invalid evaluation IDs')
                             excluded.update(ids)
+                            if isinstance(report.get('evaluation_mode'),str) and report['evaluation_mode'] in {'fixed_candidate_selection','end_to_end_candidate_generation','offline_measurement'}:
+                                validation['evaluation_mode']=report['evaluation_mode']
                             if kind=='validation_rejected' and 'failed_gates' in value:
                                 from .evolution import numerical_gate_failures
                                 expected=numerical_gate_failures(report,plan['stages'][value['stage']])

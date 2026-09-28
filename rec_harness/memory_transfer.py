@@ -130,6 +130,7 @@ def run_validation(study_path,output,stage,*,agent_factory=None):
         if not rows:raise ContractError('no independent target cases')
         target_cost=sum(row[mode]['charged_cost'] for row in rows for mode in ['fresh','experienced'])
         report={'schema':'memory-transfer-report-v1','online':agent_factory is None and study['source_codex_requests'],
+            'evaluation_mode':'end_to_end_candidate_generation',
             'binding':binding,'rows':rows,'gain':statistics.mean(r['delta_experienced_minus_fresh'] for r in rows),
             'negative_transfer_rate':sum(r['delta_experienced_minus_fresh']<0 for r in rows)/len(rows),
             'source_cost':study['source_cost'],'target_cost':target_cost,'total_attributable_cost':study['source_cost']+target_cost,

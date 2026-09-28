@@ -119,6 +119,7 @@ def run_validation(suite_path,output,stage,limit,*,agent_factory=None):
                 'input_audit':audit,**pair})
         if not rows:raise ContractError('no evaluation cases')
         report={'schema':'memory-online-comparison-v1','online':agent_factory is None,
+            'evaluation_mode':'end_to_end_candidate_generation',
             'binding':binding,'rows':rows,
             'total_cost':sum(r['shared_baseline_cost']+sum(r[m]['incremental_cost'] for m in ['graph','flat']) for r in rows),
             'qualification':'Shared audited pre-decision baseline; independent subsequent trajectories. Later input divergence is retained. One task family; individual stochastic runs do not establish general utility.'}

@@ -612,3 +612,5 @@ python3 -m rec_harness amazon-progress /path/to/amazon-campaign
 项目运行期间或结束后，可用 `python3 -m rec_harness project-report /path/to/project --format markdown` 查看各回合及嵌套验证的角色调用、费用和待结算项；[报表范围与真实核验](implementation/project-report.md)。此命令只读，不触发恢复或额外调用。
 
 Harness 演化可使用 `trace_sources` 收集多个 campaign 的独立冻结前缀，避免手工拼接及本地角色 ID 冲突。所有来源任务必须排除在独立验证之外；项目模板和测量转交保留完整来源集合，详见[多来源轨迹入口](implementation/multi-trace-sources.md)。
+
+验证阶段可用 `evaluation_mode` 冻结评价类型，区分固定候选选择、端到端候选生成和离线测量；类型不匹配的报告拒绝准入。现有内置在线比较报告明确标为端到端生成，详见[评价类型边界](implementation/evaluation-modes.md)。

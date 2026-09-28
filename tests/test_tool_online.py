@@ -33,7 +33,7 @@ class ToolOnlineTests(unittest.TestCase):
 
     def test_three_independent_controllers_cost_and_exact_resume(self):
         with patch('rec_harness.toy_isolated.evaluate',side_effect=self.evaluate),patch('rec_harness.diagnostics.run_cpu_job',side_effect=self.execute) as worker:
-            report=self.run_groups();self.assertTrue(report['passed']);self.assertFalse(report['online'])
+            report=self.run_groups();self.assertTrue(report['passed']);self.assertEqual(report['evaluation_mode'],'end_to_end_candidate_generation');self.assertFalse(report['online'])
             self.assertEqual(report['gain'],0);self.assertEqual(report['total_cost'],26)
             groups=report['comparison_groups'];self.assertEqual(len({report['rows'][0][g]['graph_directory'] for g in groups}),3)
             self.assertEqual(worker.call_count,2);self.assertEqual(self.run_groups(),report);self.assertEqual(worker.call_count,2)

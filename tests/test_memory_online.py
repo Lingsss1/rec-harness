@@ -17,7 +17,7 @@ class MemoryOnlineTests(unittest.TestCase):
         args=(self.root/'suite/suite.json',self.root/'report.json','development',131072)
         with patch('rec_harness.toy_isolated.evaluate',side_effect=self.evaluate):
             report=run_validation(*args,agent_factory=lambda *_:PairedAgent())
-            self.assertFalse(report['online']);self.assertEqual(report['total_cost'],15)
+            self.assertEqual(report['evaluation_mode'],'end_to_end_candidate_generation');self.assertFalse(report['online']);self.assertEqual(report['total_cost'],15)
             row=report['rows'][0];self.assertEqual(row['shared_baseline_cost'],1)
             self.assertEqual(row['graph']['incremental_cost'],7)
             first=next(p for p in row['input_audit']['pairs'] if p['role']=='evidence')

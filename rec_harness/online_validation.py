@@ -157,7 +157,7 @@ def run_validation(suite_path,candidate,output,stage,*,agent_factory=None):
             'regression':max(0,max(-row['delta'] for row in rows)),
             'total_cost':sum(row[group]['charged_cost'] for row in rows for group in ['baseline','candidate']),
             'evaluation_ids':[row['evaluation_id'] for row in rows],'identity':suite['identity'],
-            'comparison_groups':['baseline','candidate'],'online':agent_factory is None,'rows':rows,
+            'comparison_groups':['baseline','candidate'],'online':agent_factory is None,'evaluation_mode':'end_to_end_candidate_generation','rows':rows,
             'suite_hash':suite['hash'],'candidate_policy_hash':digest(policy),'qualification':suite['qualification']}
         write_json(output,report);return report
 

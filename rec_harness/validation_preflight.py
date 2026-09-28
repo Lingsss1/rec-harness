@@ -80,6 +80,8 @@ def evaluation_ids(module,path,stage):
 def preflight(plan):
     hashes=freeze_validator_files(plan['stages']);checks=[];seen=set()
     for stage,rule in plan['stages'].items():
+        if 'evaluation_mode' in rule and (not isinstance(rule['evaluation_mode'],str) or rule['evaluation_mode'] not in {'fixed_candidate_selection','end_to_end_candidate_generation','offline_measurement'}):
+            raise ContractError('unknown validation evaluation mode')
         command=rule['command'];module=command[command.index('-m')+1] if '-m' in command else None
         if module not in SUPPORTED:
             checks.append({'stage':stage,'scope':'validator files only; no built-in suite audit'})

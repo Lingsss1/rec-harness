@@ -171,7 +171,7 @@ class ResearchProject:
         if requirements:config['measurement_requirements']=list(requirements.values())
         if state.get('active_tool'):
             from .project_tool_plans import select
-            active_plan=select(self.config,state['tool_updates']-1)
+            active_plan=select(self.config,state['tool_updates']-1 if 'tool_followup_plans' in self.config else 0)
             config['diagnostic_registry']={**self.config['tool_runtime'],'registry':str(self.root/state['active_tool']),
                 'identity':active_plan['identity']}
         if ('tool_followup_plans' in self.config and 'measurement_discovery' in config
@@ -292,7 +292,7 @@ class ResearchProject:
     def route_tool(self,state,gap):
         state['pending_gap']=gap
         from .project_tool_plans import select
-        scope=select(self.config,state['tool_updates']).get('measurement_scope')
+        scope=select(self.config,state['tool_updates'] if 'tool_followup_plans' in self.config else 0).get('measurement_scope')
         if (self.config.get('enforce_tool_measurement_scope') and scope is not None
                 and gap['required_information'] not in scope['supported_outputs']):
             state.update(status='stopped',stop_reason='measurement_contract_unsupported',

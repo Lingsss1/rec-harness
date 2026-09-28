@@ -69,8 +69,15 @@ def report(evolution,candidate,plan,stage,runner):
             module=argv[argv.index('-m')+1] if '-m' in argv and argv.index('-m')+1<len(argv) else None
             safe=(module in {'rec_harness.tool_validation','rec_harness.tool_shadow'} or
                   module=='rec_harness.tool_pipeline' and stage in {'correctness','synthetic','robustness','shadow'})
-            if not safe:raise ValidationRecoveryRequired('unfinished validator has no safe automatic resume contract')
-            try:recoverable_cases(target)
+            online=(module=='rec_harness.online_validation' and stage in {'development','confirmation'} or
+                    module=='rec_harness.tool_online' and stage in {'utility','confirmation'} or
+                    module=='rec_harness.tool_pipeline' and stage=='utility')
+            if not (safe or online):raise ValidationRecoveryRequired('unfinished validator has no safe automatic resume contract')
+            try:
+                if online:
+                    from .online_recovery import completed_groups
+                    completed_groups(target,module,stage)
+                else:recoverable_cases(target)
             except (ContractError,OSError,KeyError,TypeError,ValueError) as error:
                 raise ValidationRecoveryRequired('unfinished validation case requires recovery: '+str(error)) from error
     elif target.exists():

@@ -61,3 +61,40 @@ class PriorExplanationTests(unittest.TestCase):
             private_snapshot=copy.deepcopy(store.snapshot())
             next(n for n in private_snapshot['nodes'] if n['id']=='old-gap')['attrs']['partition']='confirmation'
             self.assertEqual(prior_explanations(graph,private_snapshot,entries)['historical_explanation_ids'],[])
+
+    def test_later_review_receives_committed_revision_and_its_development_basis(self):
+        entries=[];nodes=[]
+        for index in [1,2]:
+            proposal='proposal-'+str(index);readout=digest(proposal)
+            task='amazon-research-'+digest(proposal)[:16]
+            fact=task+'-'+readout[:16]+'-development'
+            entries.append({'round':'round-'+str(index),'development_hash':readout,'design':{'proposal':{'proposal_id':proposal}}})
+            nodes.extend([node(fact,'Experiment',{'partition':'development','valid':True,
+                'kind':'derived_development_comparison'},task,'p'),
+                node('explanation-'+str(index),'Claim',{'status':'provisional','scope':task,
+                    'evidence_refs':[fact]},task,'p','agent_hypothesis')])
+        relation=edge('revision','explanation-2','explanation-1','SUPERSEDES',[nodes[2]['id']],nodes[2]['attrs']['task_id'],1)
+        relation['attrs'].update(origin='agent_hypothesis',status='provisional')
+        observation=node('slice','Observation',{'partition':'development','evidence_dependency_ids':[nodes[2]['id']]},nodes[2]['attrs']['task_id'],'p')
+        nodes.append(observation);relation['attrs']['evidence_refs'].append('slice')
+        snapshot={'nodes':nodes,'edges':[relation]}
+        original=copy.deepcopy(snapshot)
+        graph={'task_id':'third','protocol_hash':'p','nodes':[],'edges':[]}
+        view=prior_explanations(graph,snapshot,entries)
+        self.assertEqual(view['historical_revision_edge_ids'],['revision'])
+        self.assertEqual(view['historical_evidence_ids'],sorted([nodes[2]['id'],'slice']))
+        self.assertEqual(view['edges'],[relation])
+        self.assertEqual(snapshot,original)
+        self.assertEqual(view,prior_explanations(graph,snapshot,entries))
+        ids={item['id'] for item in view['nodes']}
+        self.assertTrue(set(relation['attrs']['evidence_refs'])<=ids)
+        self.assertEqual(next(item for item in view['nodes'] if item['id']=='explanation-1')['attrs']['status'],'provisional')
+        # The revision does not promote its historical basis to a current fact.
+        self.assertNotEqual(next(item for item in view['nodes'] if item['id']==nodes[2]['id'])['attrs']['task_id'],'third')
+        for field,value in [('partition','confirmation'),('protocol_hash','other'),('valid',False)]:
+            changed=copy.deepcopy(snapshot);changed['nodes'][2]['attrs'][field]=value
+            self.assertEqual(prior_explanations(graph,changed,entries)['historical_revision_edge_ids'],[])
+        changed=copy.deepcopy(snapshot);changed['edges'][0]['attrs']['evidence_refs']=['private-evidence']
+        self.assertEqual(prior_explanations(graph,changed,entries)['edges'],[])
+        # Memory selection remains bounded; do not follow links into omitted rounds.
+        self.assertEqual(prior_explanations(graph,snapshot,entries[:1])['edges'],[])

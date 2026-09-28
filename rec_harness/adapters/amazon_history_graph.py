@@ -37,11 +37,12 @@ def attach_history(controller,folder,graph,projection):
             elif not any(e['id']==prefix+'-measured' and e['source']==observation_id and e['target']==tool_id
                          and e['relation']=='MEASURED_BY' for e in snapshot['edges']):
                 raise ContractError('history graph measurement edge missing')
-            snapshot=store.snapshot();historical=set(graph.get('historical_explanation_ids',[]))
+            snapshot=store.snapshot();historical=set(graph.get('historical_explanation_ids',[]))|set(graph.get('historical_evidence_ids',[]))
             selected=[n for n in snapshot['nodes'] if n['attrs']['task_id']==task or n['id'] in historical]
             ids={n['id'] for n in selected}
             result={**graph,'graph_version':store.version,'nodes':selected,
-                    'edges':[e for e in snapshot['edges'] if e['source'] in ids and e['target'] in ids],
+                    'edges':[e for e in snapshot['edges'] if e['source'] in ids and e['target'] in ids
+                             and (not {e['source'],e['target']}&historical or e['id'] in graph.get('historical_revision_edge_ids',[]))],
                     'integrity':store.verify()}
             return result
         finally:store.close()

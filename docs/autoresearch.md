@@ -129,6 +129,8 @@ Amazon 工具验证已有[三组在线入口](implementation/amazon-tool-online.
 
 若实验只比较固定候选之间的选择，使用[固定候选选择入口](implementation/fixed-selection.md)；其预先提供的观测和分数与上述端到端模型生成分别报告。运行入口是否完整、候选是否有效，分别由执行收据和独立效用结果判断。
 
+Harness 的 Amazon 独立开发/确认可使用 [Amazon 配对入口](implementation/amazon-harness-online.md)。Amazon 的前缀及累计费用 pipeline 尚待接入。
+
 Harness 的开发/确认阶段已有隔离 toy 在线配对验证器。先创建规格文件：`cases` 列表中的每项含唯一 `id`、`stage`（development 或 confirmation）和模型研究 `config` 路径，另可指定 `baseline_policy`。任务必须使用 `isolated-toy-v1`、`jailed_codex` 和显式 `codex.model`，各 case 的数据/seed 条件不能重复，包括训练 seed 与另一 case 验证 seed 的重叠；改写 data_version 标签不会创建独立数据。验证器冻结模型及评估器源码，计算 base_llm/tools/start/graph/budget/protocol 配对身份。开发与确认使用同一冻结 suite 的不同条件。
 
 ```bash
@@ -137,7 +139,7 @@ python3 -m rec_harness.online_validation run --suite /path/to/suite/suite.json \
   --candidate /path/to/candidate --output /path/to/development/result.json --stage development
 ```
 
-候选目录须含已生成的 `policy.json`。将 run 命令填入对应验证阶段的 `command`，分别使用 `{candidate}`、`{output}` 占位符；`plan.identity` 使用冻结 suite 的 identity。每组执行完整研究角色与实际隔离训练，分别建立事件/记忆目录。报告的 gain 是配对终态 incumbent 分数差的平均值，regression 是最大退化，total_cost 汇总两组实际账本费用，阈值仍由外层冻结计划判定。`passed` 仅表示验证执行有效，不能单独作为晋升条件。测试注入 Agent 时强制 `online: false`。该实现覆盖单个合成任务族的独立数据/seed 条件，尚不支持 Amazon 在线 Harness 验证、多任务族或统计置信门槛。
+候选目录须含已生成的 `policy.json`。将 run 命令填入对应验证阶段的 `command`，分别使用 `{candidate}`、`{output}` 占位符；`plan.identity` 使用冻结 suite 的 identity。每组执行完整研究角色与实际隔离训练，分别建立事件/记忆目录。报告的 gain 是配对终态 incumbent 分数差的平均值，regression 是最大退化，total_cost 汇总两组实际账本费用，阈值仍由外层冻结计划判定。`passed` 仅表示验证执行有效，不能单独作为晋升条件。测试注入 Agent 时强制 `online: false`。该实现覆盖单个合成任务族的独立数据/seed 条件，Amazon 独立入口见上文；此小型任务入口尚无统计置信门槛。
 
 Harness 外循环可配置 `trace_source`（campaign、可选 roles 和 cutoff_seq）代替手写 context。输入来自已提交角色调用：当时可见的上下文、调用前源码快照、检索节点、输出、费用和事件身份。新运行保留精确源码快照；旧档案缺少快照时明确标注，不从调用后的代码倒推。优化器输出的 trace_refs 必须引用所提供的轨迹。源 task_id 必须列入 plan.development_ids，从独立验证中排除。当前轨迹接口不会把后续实验结果补入原始决策输入。
 

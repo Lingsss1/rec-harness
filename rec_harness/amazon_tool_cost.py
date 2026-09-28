@@ -9,13 +9,13 @@ from .tool_exposure import audit_exposure
 from .adapters.amazon_execution import resolve_execution
 
 
-def check_binding(root,case,suite,group,report):
+def check_binding(root,case,suite,group,report,*,study_group=None,scripted_agent=False):
     config=read_json(root/'campaign/amazon-auto.json');study=read_json(root/'study/study.json')
     options=None if group=='no_tool' else {**suite['tool_runtime'],'files':suite['tool_files'],
         'source':str(root.parents[1]/('candidate' if group=='candidate_tool' else 'existing'))}
-    if read_json(root/'started.json')!={'case_hash':digest(case),'tool_hash':digest(options),'scripted_agent':False}:
+    if read_json(root/'started.json')!={'case_hash':digest(case),'tool_hash':digest(options),'scripted_agent':scripted_agent}:
         raise ContractError('Amazon utility launch binding differs')
-    expected={**case['study'],'study_id':group+'-'+case['id'],
+    expected={**case['study'],'study_id':(study_group or group)+'-'+case['id'],
         'model_versions':{name:{'path':str((root/'study/frozen'/(name+'.py')).resolve()),'sha256':ref['sha256']}
                           for name,ref in case['models'].items()},'worker':str((root/'study/frozen/worker.py').resolve())}
     if study!=expected:raise ContractError('Amazon utility study differs from frozen inputs')

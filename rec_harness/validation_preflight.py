@@ -7,7 +7,7 @@ from .evolution import freeze_validator_files
 
 
 SUPPORTED={'rec_harness.'+name for name in ['tool_pipeline','harness_pipeline','tool_online',
-    'online_validation','tool_shadow','tool_validation','harness_prefix','amazon_tool_online']}
+    'online_validation','tool_shadow','tool_validation','harness_prefix','amazon_tool_online','amazon_harness_online']}
 
 
 def check_suite(module,path,stage=None):
@@ -33,6 +33,9 @@ def check_suite(module,path,stage=None):
         suite,_=load_suite(path)
     elif module=='rec_harness.amazon_tool_online':
         from .amazon_tool_online import load_suite
+        suite,_=load_suite(path)
+    elif module=='rec_harness.amazon_harness_online':
+        from .amazon_harness_online import load_suite
         suite,_=load_suite(path)
     elif module=='rec_harness.harness_prefix':
         from .harness_pipeline import prefix_suite
@@ -78,6 +81,9 @@ def evaluation_ids(module,path,stage):
     if module=='rec_harness.amazon_tool_online':
         if stage not in {'utility','confirmation'}:raise ContractError('invalid Amazon online validation stage')
         return {case['id'] for case in suite['cases'] if case['stage']==('development' if stage=='utility' else 'confirmation')}
+    if module=='rec_harness.amazon_harness_online':
+        if stage not in {'development','confirmation'}:raise ContractError('invalid Amazon Harness validation stage')
+        return {case['id'] for case in suite['cases'] if case['stage']==stage}
     cases=suite['cases']
     if module in {'rec_harness.tool_validation','rec_harness.online_validation'}:
         cases=[case for case in cases if case['stage']==stage]

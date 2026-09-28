@@ -39,14 +39,32 @@ def freeze_suite(specification,directory):
         runtime['execution'][key]=str((path.parent/runtime['execution'][key]).resolve())
     existing=freeze_validation_tool({**runtime,'source':str((path.parent/spec['existing_tool']).resolve()),
         'files':spec['tool_files']},Artifacts(root/'objects'))
-    cases=[];seen=set();conditions=set();objects=Artifacts(root/'objects')
-    for entry in spec['cases']:
+    cases=freeze_cases(spec['cases'],path.parent,Artifacts(root/'objects'),weights)
+    body={'schema':'amazon-online-tool-suite-v1','cases':cases,'tool_runtime':runtime,'tool_files':spec['tool_files'],
+          'existing_tool':existing,'cost_weights':weights,'code_hashes':code_identity(),
+          'qualification':'Independent study and seed conditions on declared Amazon data; shared validation users can remain. Measures terminal development HR@10 after each study internal confirmation rule; not final-test evidence. CPU admission/rescoring wall time is not a charged ledger axis.'}
+    body['identity']={'base_llm':digest([c['controller']['agent_backend'] for c in cases]),
+        'tools':digest([existing,runtime]),'start':digest([c['models'] for c in cases]),
+        'graph':digest('fresh independent study and controller stores per group'),
+        'budget':digest([weights,[(c['study']['budget_gpu_seconds'],c['controller']['role_call_limit'],c['controller']['diagnostic_budget']) for c in cases]]),
+        'protocol':digest([c['study'] for c in cases])}
+    if any(c['controller'].get('activation_diagnostic') for c in cases):
+        activation=[c['controller'].get('activation_diagnostic') for c in cases]
+        body['identity']['tools']=digest([body['identity']['tools'],activation])
+        body['identity']['budget']=digest([body['identity']['budget'],[o['budget'] if o else 0 for o in activation]])
+    body['hash']=digest(body);write_json(root/'suite.json',body);return body
+
+
+def freeze_cases(entries,base,objects,weights,*,require_diagnostics=True):
+    """Freeze independent Amazon inputs shared by tool and policy comparisons."""
+    cases=[];seen=set();conditions=set()
+    for entry in entries:
         if set(entry)-{'id','stage','config','execution_recipe','development_seeds','confirmation_seeds'}:
             raise ContractError('unsupported Amazon comparison condition option')
         identifier(entry['id'])
         if entry['id'] in seen or entry['stage'] not in {'development','confirmation'}:raise ContractError('unique case IDs and both stages required')
         seen.add(entry['id'])
-        config=configuration(path.parent/entry['config'])
+        config=configuration(base/entry['config'])
         if set(config)-CONTROLLER_KEYS-{'study','task_id'}:raise ContractError('Amazon validation requires fresh reference controller settings')
         if config.get('adapter')!='amazon-nextitnet-v1':raise ContractError('Amazon adapter required')
         backend=config['agent_backend']
@@ -66,7 +84,7 @@ def freeze_suite(specification,directory):
             if type(config.get(key)) is not int or config[key]<1:raise ContractError('positive controller limits required')
         if config['role_call_limit']<6 or not config.get('rescore_recipe') or not config.get('uid_registry'):
             raise ContractError('six-role capacity and independent CPU rescoring configuration required')
-        number(config.get('diagnostic_budget'),'diagnostic_budget',0)
+        number(config.get('diagnostic_budget',None if require_diagnostics else 0),'diagnostic_budget',0)
         seeds=study['development_seeds']+study['confirmation_seeds']
         if any(type(seed) is not int or seed<0 for seed in seeds):raise ContractError('nonnegative integer seeds required')
         if not study['development_seeds'] or not study['confirmation_seeds'] or len(set(seeds))!=len(seeds):raise ContractError('disjoint nonempty study seed partitions required')
@@ -105,19 +123,7 @@ def freeze_suite(specification,directory):
         cases.append({'id':entry['id'],'stage':entry['stage'],'controller':config,'study':study,
                       'models':snapshots,'worker':worker,'execution_recipe':recipe})
     if {case['stage'] for case in cases}!={'development','confirmation'}:raise ContractError('development and confirmation cases required')
-    body={'schema':'amazon-online-tool-suite-v1','cases':cases,'tool_runtime':runtime,'tool_files':spec['tool_files'],
-          'existing_tool':existing,'cost_weights':weights,'code_hashes':code_identity(),
-          'qualification':'Independent study and seed conditions on declared Amazon data; shared validation users can remain. Measures terminal development HR@10 after each study internal confirmation rule; not final-test evidence. CPU admission/rescoring wall time is not a charged ledger axis.'}
-    body['identity']={'base_llm':digest([c['controller']['agent_backend'] for c in cases]),
-        'tools':digest([existing,runtime]),'start':digest([c['models'] for c in cases]),
-        'graph':digest('fresh independent study and controller stores per group'),
-        'budget':digest([weights,[(c['study']['budget_gpu_seconds'],c['controller']['role_call_limit'],c['controller']['diagnostic_budget']) for c in cases]]),
-        'protocol':digest([c['study'] for c in cases])}
-    if any(c['controller'].get('activation_diagnostic') for c in cases):
-        activation=[c['controller'].get('activation_diagnostic') for c in cases]
-        body['identity']['tools']=digest([body['identity']['tools'],activation])
-        body['identity']['budget']=digest([body['identity']['budget'],[o['budget'] if o else 0 for o in activation]])
-    body['hash']=digest(body);write_json(root/'suite.json',body);return body
+    return cases
 
 
 def load_suite(path):

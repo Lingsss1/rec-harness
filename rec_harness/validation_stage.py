@@ -80,7 +80,7 @@ def report(evolution,candidate,plan,stage,runner):
             module=argv[argv.index('-m')+1] if '-m' in argv and argv.index('-m')+1<len(argv) else None
             safe=(module in {'rec_harness.tool_validation','rec_harness.tool_shadow'} or
                   module=='rec_harness.tool_pipeline' and stage in {'correctness','synthetic','robustness','shadow'})
-            online=(module=='rec_harness.online_validation' and stage in {'development','confirmation'} or
+            online=(module in {'rec_harness.online_validation','rec_harness.amazon_harness_online'} and stage in {'development','confirmation'} or
                     module=='rec_harness.harness_pipeline' and stage in {'development','confirmation'} or
                     module in {'rec_harness.tool_online','rec_harness.amazon_tool_online'} and stage in {'utility','confirmation'} or
                     module=='rec_harness.tool_pipeline' and stage=='utility')

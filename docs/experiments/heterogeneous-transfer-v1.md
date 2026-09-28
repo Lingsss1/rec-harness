@@ -1,6 +1,6 @@
 # 不同合成任务合同的真实经验迁移 v1
 
-运行目录 `rec-harness-runs/heterogeneous-transfer-v1`，源码冻结于 `e7538d125f37954c21c2e6ffa8289af36032249e`。源阶段和目标开发比较已完成；开发增益为0，独立确认仍在运行，尚无最终结论。
+运行目录 `rec-harness-runs/heterogeneous-transfer-v1`，源码冻结于 `e7538d125f37954c21c2e6ffa8289af36032249e`。源、开发与独立确认全部完成，30次真实Codex角色、50 BCU；两阶段增益均为0，终态审计通过。没有迁移收益证据。
 
 在首次角色调用前冻结：源 A 为 piecewise-v1，seeds3201/3202；目标 B 为 periodic-v1，开发seeds3301/3302，确认seeds3401/3402。各条件96条训练、120条验证、噪声标准差0.1。每个研究回合最多一轮、12 BCU、0次格式重试；源6次角色、目标开发/确认各两组每组6次，正常路径预计30次串行Codex调用。实际失败与费用保留，不重试以取得正收益。
 
@@ -18,7 +18,7 @@
 
 同期当前源码完整回归487项通过、零跳过，90.912秒，包括Torch与Linux OS测试；证据为 `full-regression-e7538d1/acceptance.json`。这不是安装包完整回归，也不替代本次真实目标比较。
 
-目标开发Fresh组已完成6次角色，10 BCU；`development-fresh-acceptance.json` 核对6条轨迹、来源节点暴露为0以及终态恢复零调用/零训练。Experienced组已自动启动，配对差值仍待两组最终结果产生后计算。
+目标开发Fresh组已完成6次角色，10 BCU；`development-fresh-acceptance.json` 核对6条轨迹、来源节点暴露为0以及终态恢复零调用/零训练。Experienced组随后自动启动并完成，完整配对结果见下文。
 
 ## 开发配对结果
 
@@ -29,4 +29,21 @@
 
 开发配对增益为0，单个条件的负迁移指示为0；不能推断总体无负迁移风险。源成本10 BCU另计，开发阶段连同源成本为30 BCU。两组均未达到模型保留门槛，零效应是对本次完整研究策略的观察，不把未晋升候选的最好指标当作最终收益。
 
-`development-assignment-acceptance.json` 从提交前CAS输入核对源记忆实际送达与配对条件一致；两个group验收各核对6条角色轨迹。`development-stage-acceptance.json` 在禁止Codex与训练执行的情况下重跑完整阶段，报告精确一致、无新增执行。确认阶段按预声明计划继续，顺序为Experienced→Fresh，没有根据开发符号修改条件或候选。
+`development-assignment-acceptance.json` 从提交前CAS输入核对源记忆实际送达与配对条件一致；两个group验收各核对6条角色轨迹。`development-stage-acceptance.json` 在禁止Codex与训练执行的情况下重跑完整阶段，报告精确一致、无新增执行。确认阶段按预声明计划执行，顺序为Experienced→Fresh，没有根据开发符号修改条件或候选。
+
+## 确认及最终审计
+
+| 阶段 | Fresh最终quality | Experienced最终quality | 增益 | 目标成本 |
+|---|---:|---:|---:|---:|
+| 开发 | 0.7856231324551504 | 0.7856231324551504 | 0 | 20 BCU |
+| 确认 | 0.7836887694009409 | 0.7836887694009409 | 0 | 20 BCU |
+
+所有组最终incumbent均为root。源成本10 BCU只计算一次，总计50 BCU。两个阶段各有一个配对条件、每个条件两个seed，负迁移指示均为0；样本范围不足以排除其他任务上的负迁移。源A本轮本身未形成有效模型改进，不能由本次结果推断更充分来源经验的价值。
+
+`confirmation-assignment-acceptance.json` 同样核对Fresh实际源节点0、Experienced为7及其配对条件。两个确认组各6条轨迹和终态恢复审计通过。`confirmation-stage-acceptance.json` 在禁止角色与训练情况下重跑确认阶段，报告精确一致。
+
+`terminal-acceptance.json` 核对五个控制器、30条轨迹、30份成功传输收据和全部账本，待结算为0；禁止执行后逐个恢复报告和事件完全相同。`receipt-manifest.json` 绑定准备、运行、分组/阶段/终态审计材料。主运行已退出0，不再有本实验等待中的角色。
+
+调用开始时间跨度2176.881秒，最短间隔43.992秒，中位间隔64.296秒，任意闭区间60秒最多2次提交。这是框架角色调用时间，不推断CLI内部API请求或服务计费。
+
+本次完成不同合成任务合同下的真实A→B、开发与确认双阶段验收。真实原始输入的经验分组成立，结果为零增益；不将工程完成写成记忆有效，也不扩大为真实推荐/跨业务证据。未改动封存Amazon研究或最终测试。

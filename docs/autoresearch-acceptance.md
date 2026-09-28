@@ -680,3 +680,11 @@ Amazon autonomous 配置新增可选 `execution_id`，初始化时解析已注�
 Amazon `ingest` 新导入的 Experiment、ModelVersion、Observation 和 Failure 都记录由 study 冻结 seed 列表确定的 partition。显式收据标签与冻结划分冲突、seed 不在划分中、划分交叠/重复/不完整都会拒绝。完全缺少旧 seed 配置时标记 unknown，不推断确认资格；已入库旧节点保持不可变，不追补分区。重试继续沿用原 job 的 independent_run_id。开发聚合新增明确 `source_experiment_ids`，区分来源训练与回放依赖。
 
 `partition-provenance-acceptance-v1/acceptance.json` 对已完成 v3 合成研究三份开发收据及真实 Amazon v3 的八份开发、十六份确认收据完成只读分区投影，配置、收据及源事件导出均未改变。它不修改历史图，也不证明历史角色读取过新增字段。全量 375 项回归，355 通过、20 项环境相关跳过；实际导入测试覆盖两分区、失败重试身份及幂等图恢复。新增 Codex、训练、推理均为零。
+
+### 后继模型的旧缺口适用性复查
+
+Amazon 每轮新建上下文时，对本轮检索到的历史设计 GapCard 生成 `gap_applicability`：逐项保留来源 round、card hash、原模型/协议及原状态，并区分同一声明范围、模型变化、协议变化和范围未知。当前缺口状态始终从 unknown 开始；同范围要求复查当前证据，变化/未知要求重新测量后才复用结论。证据角色收到明确说明，仍必须为当前 incumbent 生成模型/协议一致的新 GapCard。旧卡片不会被改写或因 keep/discard 自动升级、反驳。
+
+这是每轮上下文中的复查要求，未增加角色调用，也不在状态表生成时擅自执行诊断。只覆盖检索工作集中的原始设计卡，不声称检查了库内全部 GapHypothesis、证明了模型语义对应或完成了实际重测。已经冻结的旧 input.json 和角色请求保持原样。
+
+`gap-applicability-acceptance-v1/acceptance.json` 读取真实 Amazon v3 的十条已归档公开开发记忆：对 legacy_incumbent 全部属于同一声明范围；对第二 GELU 候选全部标记 model_changed，并要求重新测量。源记忆 hash 不变，没有读取确认结果或新增调用/训练/推理。全套 376 项测试，356 通过、20 项环境相关跳过；控制器上下文测试覆盖旧卡复查和私有确认字段不进入上下文，辅助测试覆盖协议变化、缺少范围、状态不自动迁移及来源保留。尚未用新真实 Codex 轮次验证其决策效用。

@@ -3,6 +3,34 @@ from pathlib import Path
 from rec_harness.core import ContractError,digest,read_json,write_json
 
 
+def gap_applicability(entries, model_version, protocol_hash):
+    """Review prior GapCard scope without transferring its scientific status."""
+    checks = []
+    for entry in entries:
+        gap = entry.get('design', {}).get('gap')
+        if not isinstance(gap, dict):
+            continue
+        previous_model = gap.get('model_version')
+        previous_protocol = gap.get('protocol_hash')
+        if not previous_model or not previous_protocol:
+            status = 'scope_unknown'
+        elif previous_protocol != protocol_hash:
+            status = 'protocol_changed'
+        elif previous_model != model_version:
+            status = 'model_changed'
+        else:
+            status = 'same_declared_scope'
+        checks.append({'source_round': entry['round'], 'gap_id': gap.get('gap_id'),
+            'source_card_hash': digest(gap), 'source_model_version': previous_model,
+            'source_protocol_hash': previous_protocol, 'source_status': gap.get('status', 'unknown'),
+            'current_model_version': model_version, 'current_protocol_hash': protocol_hash,
+            'applicability': status, 'current_gap_status': 'unknown',
+            'required_action': 'review_current_evidence' if status == 'same_declared_scope'
+                               else 'remeasure_before_reusing_conclusion'})
+    return {'schema': 'amazon-gap-applicability-v1', 'checks': checks,
+        'scope': 'Declared model/protocol identity only. Same scope does not establish continued support; changed scope does not refute a mechanism. Resolve source cards by round and card hash in research_memory.'}
+
+
 def execution_failure(folder,events):
     folder=Path(folder)
     if not (folder/'failure.json').exists() or (folder/'private-confirmation-started.json').exists():return None

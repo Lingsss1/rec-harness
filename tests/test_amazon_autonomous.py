@@ -445,7 +445,8 @@ class ContextPrivacyTests(unittest.TestCase):
             report={'schema':'amazon-development-selection-v1','protocol_hash':'p','rows':[{'seed':42}]}
             report['hash']=digest(report)
             write_json(root/'rounds/round-2/development-readout.json',report)
-            write_json(root/'rounds/round-2/handoff.json',{'cards':{'mechanism':'previous gated model'}})
+            write_json(root/'rounds/round-2/handoff.json',{'cards':{'mechanism':'previous gated model',
+                'gap':{'gap_id':'old-gap','model_version':'previous','protocol_hash':'p','status':'supported'}}})
             write_json(root/'rounds/round-2/knowledge/response.json',{'patch_json':'development-only explanation'})
             write_json(root/'rounds/round-2/private-confirmation.json',{'result':'PRIVATE_METRICS'})
             cfg={'datasets':['tiny'],'development_seeds':[42],'confirmation_seeds':[17,83],
@@ -460,3 +461,6 @@ class ContextPrivacyTests(unittest.TestCase):
             self.assertEqual(context['history'],[report])
             self.assertEqual(context['research_memory'][0]['development_hash'],report['hash'])
             self.assertNotIn('development',context['research_memory'][0])
+            self.assertEqual(context['gap_applicability']['checks'][0]['applicability'],'model_changed')
+            self.assertEqual(context['gap_applicability']['checks'][0]['current_gap_status'],'unknown')
+            self.assertEqual(context['gap_applicability']['checks'][0]['source_round'],'round-2')

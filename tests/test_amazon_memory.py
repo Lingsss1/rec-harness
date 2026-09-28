@@ -3,10 +3,33 @@ import unittest
 import copy
 from unittest.mock import patch
 from pathlib import Path
-from rec_harness.adapters.amazon_memory import export_development_memory,validate_memory,execution_failure,validate_export_bindings,compact_development_context
+from rec_harness.adapters.amazon_memory import export_development_memory,validate_memory,execution_failure,validate_export_bindings,compact_development_context,gap_applicability
 from rec_harness.core import ContractError,digest,write_json
 
 class DevelopmentMemoryTests(unittest.TestCase):
+    def test_gap_applicability_rechecks_promoted_models_without_transferring_status(self):
+        entries=[{'round':'r1','design':{'gap':{'gap_id':'gap','model_version':'old',
+            'protocol_hash':'p','status':'supported','alternative_explanations':['training']}}},
+            {'round':'r2','design':{'gap':{'gap_id':'gap','model_version':'new',
+            'protocol_hash':'p','status':'mitigated'}}},
+            {'round':'r3','design':{'gap':{'gap_id':'gap','model_version':'new',
+            'protocol_hash':'other','status':'contradicted'}}},
+            {'round':'legacy','design':{'gap':{'gap_id':'unknown'}}},
+            {'round':'failure','execution_failure':{'status':'unresolved'}}]
+        before=copy.deepcopy(entries)
+        report=gap_applicability(entries,'new','p')
+        self.assertEqual(entries,before)
+        self.assertEqual(report,gap_applicability(entries,'new','p'))
+        checks=report['checks']
+        self.assertEqual([row['applicability'] for row in checks],
+            ['model_changed','same_declared_scope','protocol_changed','scope_unknown'])
+        self.assertEqual([row['current_gap_status'] for row in checks],['unknown']*4)
+        self.assertEqual(checks[0]['source_card_hash'],digest(entries[0]['design']['gap']))
+        self.assertEqual(checks[0]['source_status'],'supported')
+        self.assertEqual(checks[0]['required_action'],'remeasure_before_reusing_conclusion')
+        self.assertEqual(checks[1]['required_action'],'review_current_evidence')
+        self.assertEqual(gap_applicability(entries,'old','p')['checks'][0]['applicability'],'same_declared_scope')
+
     def test_export_does_not_recover_source_projection_or_include_confirmation(self):
         from rec_harness.store import Store
         with tempfile.TemporaryDirectory() as tmp:

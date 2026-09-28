@@ -286,7 +286,7 @@ class AmazonAutoresearch:
         limit=self.config.get('research_policy',{}).get('retrieval_limit')
         if limit is not None:
             history=history[-limit:];research_memory=research_memory[-limit:];failures=failures[-limit:]
-        from .amazon_memory import compact_development_context
+        from .amazon_memory import compact_development_context,gap_applicability
         history,research_memory=compact_development_context(history,research_memory,cfg['protocol_hash'],cfg['development_seeds'],available_history)
         from .amazon_diagnostics import diagnostic_context
         diagnostics=diagnostic_context(self,base,rows)
@@ -310,6 +310,7 @@ class AmazonAutoresearch:
             'development_controls':control_rows,'control_execution_evidence':control_execution,
             'generated_controls':generated_controls,
             'history':history,'research_memory':research_memory,'prior_execution_failures':failures,'budget':budget,
+            'gap_applicability':gap_applicability(research_memory,base,cfg['protocol_hash']),
             'bindings':{'proposal_id':pid,'candidate_model_version':pid+'-model','base_model_id':base,
                         'controls':controls+[v['model_version'] for v in generated_controls],'train_protocol_hash':cfg['protocol_hash'],
                         'seeds':cfg['development_seeds']+cfg['confirmation_seeds']},
@@ -318,6 +319,7 @@ class AmazonAutoresearch:
             'instructions':['Use exact supplied bindings. Edit model.py for the candidate; when generated_controls is nonempty, create each named file as a complete model module with a distinct falsifiable control of the proposed mechanism. All files must preserve incumbent imports, training helpers and module settings.',
                 'Prior development readouts appear once in history, keyed by hash. Resolve research_memory.development_hash against history; all referenced readouts are included.',
                 'Evidence GapCard.model_version MUST equal bindings.base_model_id (the incumbent being diagnosed), never candidate_model_version. GapCard.protocol_hash MUST equal bindings.train_protocol_hash.',
+                'Review gap_applicability before reusing a historical gap: a changed model/protocol requires current measurements; same declared scope still requires evidence review. Prior supported/contradicted/mitigated status never transfers automatically. Use current observations to produce the new incumbent-scoped GapCard, retaining competing explanations and marking unmeasured applicability unknown. A model keep/discard decision is not a mechanism conclusion.',
                 'Proposal.controls is a list of model IDs, not prose descriptions. Copy bindings.controls verbatim. Put explanations and CPU checks in mechanism/insertion_contract/falsification_condition.',
                 'Numerical contract must hold after learning, not only at initialization: encode_sequence returns causal [batch,length,hidden] final representations; score_candidates equals item_emb(candidates) @ encode_sequence(seq)[0,-1]. Forward uses the same encoded representations. Insert learnable readout transforms inside encode_sequence, never only in forward/score_candidates.',
                 'Propose one distinct falsifiable architectural change against the incumbent and all explicitly bound controls, including each newly generated mechanism control. Existing control outcomes are previously exposed evidence; their presence alone does not establish a mechanism. Do not reopen rejected mechanisms.',

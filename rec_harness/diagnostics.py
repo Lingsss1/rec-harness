@@ -4,12 +4,13 @@ from .core import ContractError,digest,file_hash,number,public_only,read_json,re
 from .cpu_job import run_cpu_job,recover_completed_cpu_job
 from .evolution import Evolution
 
-CONTRACT='public-aggregate-measurement-v1'
+from .diagnostic_inputs import CONTRACT,OBSERVATION_CONTRACT,CONTRACTS,measurement_request,verify_observations
 
 
-def runtime_contract():
+def runtime_contract(contract=CONTRACT):
     """Public authoring contract for newly initialized diagnostic candidates."""
-    return {'contract':CONTRACT,'entrypoint':'diagnostic.py:measure(request)',
+    if contract not in CONTRACTS:raise ContractError('unsupported diagnostic input contract')
+    result={'contract':contract,'entrypoint':'diagnostic.py:measure(request)',
         'request':{'task_id':'string','model_version':'string','protocol_hash':'string',
             'runs':'list of objects: seed, valid, metrics mapping; dataset present when available'},
         'response':{'measurements':'nonempty mapping of quantity names (1–128 characters) to finite numbers',
@@ -17,6 +18,11 @@ def runtime_contract():
         'execution':'The controller imports diagnostic.py in a CPU jail and calls measure once with the request object; return the response object, do not write result files.',
         'available_inputs':'Only supplied public development aggregate rows. No raw interactions, user IDs, rankings, checkpoints, or model internals are supplied by this contract.',
         'constraints':'Do not modify training, weights or scoring. Define behavior for empty, malformed or insufficient inputs; reject unsupported cases instead of inventing measurements. Validation and promotion are performed independently by the host.'}
+    if contract==OBSERVATION_CONTRACT:
+        result['request']['observations']={field:'list of committed current-model development observations: observation_id, model_version, dataset, seed, measurements (finite named quantities), limitations, scope'
+            for field in ['activation_diagnostics','block_score_diagnostics']}
+        result['available_inputs']='Public development metric rows and supplied committed activation/block-score aggregate observations only. Lists may be empty. Preserve each observation scope and limitations; repeated quantities or probes are not independent training. No raw interactions, user IDs, rankings, tensors, checkpoints or model access.'
+    return result
 
 
 def validate_runtime(options):
@@ -41,7 +47,8 @@ def freeze_tool(options,artifacts):
         candidate=registry.verified_candidate(active['candidate_id'])
         plan=read_json(registry.root/'candidates'/candidate['candidate_id']/'plan.json')
         if plan['identity']!=options['identity']:raise ContractError('tool validation conditions differ')
-        if plan.get('tool_contract')!=CONTRACT:raise ContractError('tool must validate public aggregate measurement contract')
+        contract=plan.get('tool_contract')
+        if contract not in CONTRACTS:raise ContractError('tool must validate public aggregate measurement contract')
         if 'diagnostic.py' not in candidate['implementation']:raise ContractError('diagnostic.py entry required')
         if candidate['implementation']!=active['implementation']:raise ContractError('active tool implementation differs')
         snapshot={name:artifacts.put(registry.artifacts.verify(ref)) for name,ref in candidate['implementation'].items()}
@@ -51,7 +58,7 @@ def freeze_tool(options,artifacts):
         context=read_json(registry.root/'candidates'/candidate['candidate_id']/'context.json')
         if digest(context)!=candidate['context_hash']:raise ContractError('tool registration context changed')
         registration={'schema':'validated-diagnostic-registration-v1','entrypoint':'diagnostic.py:measure',
-            'contract':CONTRACT,'validated_conditions':plan['identity'],'validation_stages':stages,
+            'contract':contract,'validated_conditions':plan['identity'],'validation_stages':stages,
             'usage':{'execution':'The controller automatically measures the current incumbent before research roles; use the committed diagnostic output and its limitations.',
                 'input':'task_id, model_version, protocol_hash, runs of seed/valid/metrics and optional dataset; public development aggregates only',
                 'output':'measurements: nonempty mapping of quantity names to finite numbers; limitations: list of strings',
@@ -60,10 +67,12 @@ def freeze_tool(options,artifacts):
             'rollback_candidate_id':(active.get('previous') or {}).get('candidate_id'),
             'source_tool_predecessor':context.get('tool_predecessor'),
             'scope':'Diagnostic validation under frozen conditions; not independent model-effect or mechanism evidence. Source ancestry does not establish a local rollback target.'}
+        if contract==OBSERVATION_CONTRACT:
+            registration['usage']['input']=runtime_contract(contract)['available_inputs']
         if registry.store.verify()['head']!=head:raise ContractError('tool registry changed during activation')
         worker=Path(__file__).with_name('diagnostic_worker.py')
         return {'candidate_id':candidate['candidate_id'],'implementation':snapshot,'implementation_hash':digest(snapshot),
-            'contract':CONTRACT,'plan_hash':candidate['plan_hash'],'registry_event_head':head,'registration':registration,
+            'contract':contract,'plan_hash':candidate['plan_hash'],'registry_event_head':head,'registration':registration,
             'worker':artifacts.put(worker),'execution':options['execution'],'cost':options['cost'],'timeout':options['timeout']}
     finally:registry.store.close()
 
@@ -94,20 +103,22 @@ def record_graph(research,record):
         edge(observation+'-about',observation,record['model_version'],'ABOUT',[observation],research.task,research.store.version+1)]})
 
 
-def measure(research,state):
+def measure(research,state,*,observations=None):
     """Caller holds the campaign lock; only public aggregate metrics enter the jail."""
     tool=research.config.get('diagnostic_tool')
     if tool is None:return None
     baseline=state.get('baseline') or {}
-    request={'task_id':research.task,'model_version':state['incumbent'],'protocol_hash':research.protocol_hash,
-        'runs':[{'seed':row['seed'],'valid':row['valid'],'metrics':row.get('metrics',{}),
-                 **({'dataset':row['dataset']} if 'dataset' in row else {})} for row in baseline.get('runs',[])]}
-    public_only(request)
+    request=measurement_request(research.task,state['incumbent'],research.protocol_hash,
+        baseline.get('runs',[]),tool.get('contract',CONTRACT),observations)
+    verify_observations(request,research.store)
     identity=digest({'request':request,'tool':tool['implementation_hash'],'worker':tool['worker']})
     records=[e['payload'] for e in research.store.events() if e['kind']=='diagnostic_completed' and e['payload']['identity']==identity]
     if records:
         record=records[-1]
         for ref in record.get('artifacts',{}).values():research.artifacts.verify(ref)
+        if tool.get('contract')==OBSERVATION_CONTRACT:
+            if read_json(research.artifacts.verify(record['request_ref']))!=request:
+                raise ContractError('cached diagnostic observations changed')
         record_graph(research,record)
         return record
     directory=research.root/'research_archive/diagnostics'/identity
@@ -138,6 +149,8 @@ def measure(research,state):
         'input_hash':digest(request),'model_version':state['incumbent'],
         **({'tool_registration':tool['registration']} if 'registration' in tool else {}),
         'qualification':'tool measurement, not independent model evaluation or mechanism proof'}
+    if tool.get('contract')==OBSERVATION_CONTRACT:
+        record['request_ref']=research.artifacts.put(directory/'request.json')
     try:
         if receipt is None:
             receipt=run_cpu_job(job,execution['recipe'],files,'worker.py',[],python=execution['python'],
@@ -161,9 +174,11 @@ def freeze_validation_tool(options,artifacts):
     required(options['execution'],['recipe','python','uid_registry'])
     number(options['cost'],'diagnostic cost',0);number(options['timeout'],'diagnostic timeout',0)
     if options['timeout']<=0:raise ContractError('positive diagnostic timeout required')
+    contract=options.get('contract',CONTRACT)
+    if contract not in CONTRACTS:raise ContractError('unsupported diagnostic input contract')
     snapshot=artifacts.snapshot(options['source'],options['files'])
     if 'diagnostic.py' not in snapshot:raise ContractError('diagnostic.py entry required')
     return {'candidate_id':'validation-'+digest(snapshot)[:24],'implementation':snapshot,
-        'implementation_hash':digest(snapshot),'contract':CONTRACT,'validation_only':True,
+        'implementation_hash':digest(snapshot),'contract':contract,'validation_only':True,
         'worker':artifacts.put(Path(__file__).with_name('diagnostic_worker.py')),
         'execution':options['execution'],'cost':options['cost'],'timeout':options['timeout']}

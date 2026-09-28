@@ -16,7 +16,7 @@
 
 - 最新真实传输验收：[v18 工具检索与草稿归档](../experiments/tool-literature-transport-v1.md)：1 次 Codex 调用、零重试，实际搜索/打开来源，指令、日志、返回源码和 CAS 绑定通过，无新增调用恢复通过。没有运行验证阶梯或晋升；不是自主发现缺口或正效用证据。
 
-- 最新完整回归：`379b7c6` 加项目轨迹预检和Harness淘汰续接的501项源码测试全部通过、零跳过，140.924秒，含Torch、Linux OS隔离和公开边界检查。`autoresearch-rejection-continuation-v1/acceptance.json`及源码清单绑定此次测试版本；未新增Codex调用或Amazon训练。该版本晚于下列v22安装包。
+- 最新完整回归：`ae71462` 加公开观测工具合同的508项源码测试全部通过、零跳过，140.296秒，含Torch、Linux OS隔离和公开边界检查。`observation-tool-contract-v1/acceptance.json`及源码清单绑定此次测试版本；未新增Codex调用或Amazon训练。该版本晚于下列v22安装包。
 - 最新安装交付：[v22](install-acceptance-v22.md)，128个模块与原生源码逐字节一致，14个入口及22项安装环境测试通过，72个实际加载模块来自安装目录；四项历史输出与源码一致。包含通用/Amazon工具送达与多任务合同。完整487项回归在源码环境执行。
 - 最新已完成真实 Amazon 优化：[v3](../experiments/amazon-next-autoresearch-v3.md)。开发平均 HR@10 增加 0.012750；独立初始化确认增加 0.013125，主机选中候选。确认使用相同验证用户，不是最终测试；该研究已封存，不使用确认结果继续调优。
 - 最近真实工程验收：[多文件 CPU 执行](../experiments/multifile-diagnostic-jail-v1.md)与[诊断提交中断恢复](../experiments/diagnostic-recovery-jail-v1.md)。没有新增 Codex 调用或训练，也不增加工具效用结论。
@@ -46,6 +46,8 @@
 §6 的 TokenMixer 场景在方案中明确标为假设示例，不将其记成真实完成实验。跨主机分布式调度也不因历史清单提到它而自动扩张为本次必交付条件。
 
 ## 接续工作
+
+新增[公开观测工具v2合同](observation-tool-contract.md)：工具作者收到明确接口，注册后的工具可读取当前模型已提交的激活/block-score开发聚合观测；身份、范围、CAS、缓存恢复与角色送达均校验。7项新增测试覆盖Amazon项目生成→注册→复测→送达工程链，纳入上述508项回归。内置shadow/在线套件尚未自动提供这些新观测，仍须补齐对应独立验证输入；本项不是工具效用或真实自主发现缺口验收。
 
 补齐[Harness正常淘汰后的模型续接](harness-rejection-continuation.md)：新项目对合法报告的数值门槛失败，保留原策略和incumbent并在原额度内继续研究；异常报告/执行失败仍停止。6项新增工程测试覆盖原策略、此前晋升策略、转换中断恢复和旧项目兼容，已纳入上述501项全量回归。工具测量缺口未解决仍停止，不以此功能绕过工具晋升。
 

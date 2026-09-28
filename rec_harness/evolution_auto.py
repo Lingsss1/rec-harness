@@ -43,9 +43,9 @@ class AutonomousEvolution:
             modes=search_policy(configured)
             if configured is None or isinstance(configured,dict) and 'tool' not in configured:modes['tool']='live'
             config['agent_backend']={**backend,'web_search':modes}
-            from .diagnostics import CONTRACT,runtime_contract
-            if config['plan'].get('tool_contract')==CONTRACT:
-                context=config.get('context',{});contract=runtime_contract()
+            from .diagnostics import CONTRACTS,runtime_contract
+            if config['plan'].get('tool_contract') in CONTRACTS:
+                context=config.get('context',{});contract=runtime_contract(config['plan']['tool_contract'])
                 if 'diagnostic_contract' in context and context['diagnostic_contract']!=contract:
                     raise ContractError('diagnostic authoring contract differs from runtime')
                 config['context']={**context,'diagnostic_contract':contract}

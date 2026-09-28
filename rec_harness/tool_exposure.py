@@ -3,6 +3,7 @@ import argparse
 from pathlib import Path
 from .core import Artifacts,ContractError,digest,read_json,write_json
 from .store import Store
+from .diagnostic_inputs import CONTRACT,OBSERVATION_CONTRACT,measurement_request,verify_observations
 
 
 def audit_exposure(campaign):
@@ -50,11 +51,10 @@ def audit_exposure(campaign):
                             public_rows=[{k:row[k] for k in ['dataset','seed','metrics']} for row in runs]
                             if public_rows!=context.get('development_baseline'):
                                 raise ContractError('measurement differs from Amazon development baseline')
-                    request={'task_id':context['task_id'],'model_version':context['model_version'],
-                        'protocol_hash':context['protocol_hash'],'runs':[{'seed':row['seed'],'valid':row['valid'],
-                        'metrics':row.get('metrics',{}),**({'dataset':row['dataset']} if 'dataset' in row else {})}
-                        for row in runs]}
                     if tool is None:raise ContractError('role saw measurement without a bound tool')
+                    request=measurement_request(context['task_id'],context['model_version'],context['protocol_hash'],
+                        runs,tool.get('contract',CONTRACT),context)
+                    verify_observations(request,store)
                     identity=digest({'request':request,'tool':tool['implementation_hash'],'worker':tool['worker']})
                     record=records.get(identity if projected else diagnostic.get('identity'))
                     expected=({k:record[k] for k in ['status','tool_version','implementation_hash','output','tool_registration'] if k in record}
@@ -63,6 +63,9 @@ def audit_exposure(campaign):
                     diagnostic=record
                     if diagnostic['model_version']!=context['model_version']:raise ContractError('role saw stale model measurement')
                     if diagnostic['input_hash']!=digest(request):raise ContractError('measurement does not describe the visible baseline')
+                    if tool.get('contract')==OBSERVATION_CONTRACT:
+                        if read_json(objects.verify(diagnostic['request_ref']))!=request:
+                            raise ContractError('measurement differs from committed observation input')
                     if diagnostic['identity']!=digest({'request':request,'tool':tool['implementation_hash'],'worker':tool['worker']}):
                         raise ContractError('measurement execution identity changed')
                     exposures.append({'task_id':value['task_id'],'role':value['role'],'model_version':context['model_version'],

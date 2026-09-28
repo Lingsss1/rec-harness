@@ -80,6 +80,8 @@ python3 -m rec_harness amazon-call-report CAMPAIGN
 
 Amazon 也支持下述 `diagnostic_registry` 与 `measurement_requirements`。诊断只接收已审计开发 seed 的品类聚合指标，包含 dataset 标签；不传入原始交互、checkpoint 或确认结果。启用工具时须指定独立 `diagnostic_budget`，费用记录在 diagnostic-budget，不能混算为 Codex 调用次数。必需测量缺失会生成 MeasurementGap，以 measurement_required 停止，保留 incumbent；此时不会生成模型提案或启动训练。工具外循环的 measurement_source 可直接引用该 Amazon campaign。新研究回合可冻结晋升后的工具并复测；项目总调度可自动创建 Amazon 后继回合，继续使用同一冻结 study 和共享 GPU 账本。
 
+工具计划显式选用 `public-observation-measurement-v2` 后，还可读取当前开发模型已提交的激活/block-score聚合观测；来源、范围、输入归档与恢复均受主机校验。旧合同输入不变，独立验证仍须覆盖新输入。见[公开观测工具合同](implementation/observation-tool-contract.md)。
+
 `verify` 和 `recover` 已识别 Amazon campaign，无需初始化 Codex 服务。verify 核对控制器/绑定 study 事件链、角色内容与绑定、已提交开发周期及 CAS，并单列旧角色记录缺少完整事件绑定的情况；它不替代逐 GPU 作业或私有确认结果审计。恢复在控制器锁下检查角色和诊断工作进程，保留未知实际成本的预留费用。
 
 可选 `history_diagnostic: true` 在假设生成前提供基线开发历史长度分布，并在候选开发完成后提供配对分桶结果。仅使用已审计开发 seed，事件/CAS 绑定输入并支持精确恢复；不会新增模型推理。具体字段边界和真实分布见 [开发历史诊断](experiments/amazon-baseline-history.md)。

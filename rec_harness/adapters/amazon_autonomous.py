@@ -320,14 +320,26 @@ class AmazonAutoresearch:
         from .amazon_memory import compact_development_context,gap_applicability
         history,research_memory=compact_development_context(history,research_memory,cfg['protocol_hash'],cfg['development_seeds'],available_history)
         from .amazon_diagnostics import diagnostic_context
-        diagnostics=diagnostic_context(self,base,rows)
+        from rec_harness.diagnostic_inputs import OBSERVATION_CONTRACT
+        observations_first=self.config.get('diagnostic_tool',{}).get('contract')==OBSERVATION_CONTRACT
+        if observations_first:
+            observations={}
+            if self.config.get('block_score_diagnostics') or self.config.get('block_interaction_diagnostics'):
+                from .amazon_block_context import block_context
+                observations.update(block_context(self,base,cfg))
+            from .amazon_activation import activation_context
+            observations.update(activation_context(self,base,cfg))
+            diagnostics=dict(observations)
+            if not observations.get('measurement_failure'):
+                diagnostics.update(diagnostic_context(self,base,rows,observations=observations))
+        else:diagnostics=diagnostic_context(self,base,rows)
         if self.config.get('history_diagnostic'):
             from .amazon_baseline_history import baseline_history
             diagnostics['baseline_history']=baseline_history(self,folder,base)
-        if self.config.get('block_score_diagnostics') or self.config.get('block_interaction_diagnostics'):
+        if not observations_first and (self.config.get('block_score_diagnostics') or self.config.get('block_interaction_diagnostics')):
             from .amazon_block_context import block_context
             diagnostics.update(block_context(self,base,cfg))
-        if not diagnostics.get('measurement_failure'):
+        if not observations_first and not diagnostics.get('measurement_failure'):
             from .amazon_activation import activation_context
             diagnostics.update(activation_context(self,base,cfg))
         if self.config.get('structured_insertion_contract'):

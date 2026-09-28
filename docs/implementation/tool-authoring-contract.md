@@ -1,5 +1,7 @@
 # 工具生成输入中的运行接口
 
+补充：[公开观测v2合同](observation-tool-contract.md)允许新生成工具复用已核验的激活/block-score聚合观测，仍使用相同入口和输出。以下v1接口保持兼容；v2须显式选择，不自动扩大旧任务输入。
+
 新建 `AutonomousEvolution` 工具任务时，如果冻结计划指定 `public-aggregate-measurement-v1`，主机将 `diagnostic_contract` 写入候选上下文：`diagnostic.py:measure(request)` 入口、公开聚合请求字段、返回值字段、CPU jail 调用方式、数据可见范围和失败处理要求。这个上下文与验收计划一起实际传给 tool 角色，并被原有配置/候选 hash 和生成输入 hash 绑定。
 
 原接口只有计划中的合同名称，测量转交上下文没有入口和输入输出说明；脚本角色预先知道接口，不能证明真实 Agent 能据此实现。现在普通工具任务和优化器转交任务使用相同的主机接口说明。调用者提供冲突说明时在初始化冻结之前拒绝，不将它交给生成角色。

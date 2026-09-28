@@ -14,7 +14,7 @@ class DiagnosticLedger:
     def settle(self,*args):return self.costs.settle(*args)
 
 
-def diagnostic_context(controller,base,rows):
+def diagnostic_context(controller,base,rows,*,observations=None):
     config=controller.config
     if not config.get('diagnostic_tool') and not config.get('measurement_requirements') and not config.get('measurement_discovery'):return {}
     task=config['task_id'];protocol=config['protocol_hash'];known={n['id']:n for n in controller.store.snapshot()['nodes']}
@@ -34,7 +34,7 @@ def diagnostic_context(controller,base,rows):
         view=SimpleNamespace(root=controller.root,config=config,task=task,protocol_hash=protocol,
             store=DiagnosticLedger(controller.store,costs),artifacts=controller.artifacts)
         state={'incumbent':base,'baseline':{'runs':runs}}
-        diagnostic=measure(view,state)
+        diagnostic=measure(view,state,observations=observations) if observations is not None else measure(view,state)
         try:gaps=triage(view,state,diagnostic);failure=None
         except MeasurementDeferred as error:gaps=[];failure=str(error)
         return {'diagnostic':diagnostic,'measurement_gaps':gaps,'measurement_failure':failure,'measurement_baseline':{'runs':runs}}

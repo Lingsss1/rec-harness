@@ -71,6 +71,17 @@ def verify_reopen_history(controller):
     return count
 
 
+def verify_rejected_role(value,source,artifacts):
+    if source is None or source['role']!=value['role']:raise ContractError('rejected role lacks matching submission')
+    refs=value['archive']
+    if not {'context.json','rejection.json'}.issubset(refs):raise ContractError('rejected role archive incomplete')
+    for ref in refs.values():artifacts.verify(ref)
+    if digest(read_json(artifacts.verify(refs['context.json'])))!=source['input_hash']:
+        raise ContractError('rejected role context differs from submission')
+    if read_json(artifacts.verify(refs['rejection.json']))!={'status':'rejected','reason':value['reason'],'retryable':value['retryable']}:
+        raise ContractError('rejected role receipt differs from event')
+
+
 def verify_rejected_roles(store,artifacts):
     """Failure evidence is bound at rejection, before any optional repair."""
     submitted={};count=0
@@ -78,15 +89,7 @@ def verify_rejected_roles(store,artifacts):
         value=event['payload']
         if event['kind']=='agent_submitted':submitted[value['task_id']]=value
         if event['kind']!='role_rejected' or 'archive' not in value:continue
-        source=submitted.get(value['task'])
-        if source is None or source['role']!=value['role']:raise ContractError('rejected role lacks matching submission')
-        refs=value['archive']
-        if not {'context.json','rejection.json'}.issubset(refs):raise ContractError('rejected role archive incomplete')
-        for ref in refs.values():artifacts.verify(ref)
-        if digest(read_json(artifacts.verify(refs['context.json'])))!=source['input_hash']:
-            raise ContractError('rejected role context differs from submission')
-        if read_json(artifacts.verify(refs['rejection.json']))!={'status':'rejected','reason':value['reason'],'retryable':value['retryable']}:
-            raise ContractError('rejected role receipt differs from event')
+        verify_rejected_role(value,submitted.get(value['task']),artifacts)
         count+=1
     return count
 

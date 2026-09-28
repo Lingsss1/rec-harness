@@ -28,7 +28,7 @@ def request(context,budget):
     number(budget,'optimizer measurement development budget',0)
     original=expand_traces(context);evidence=[]
     for trace in original.get('decision_traces',[]):
-        if trace.get('transport_status')!='success':continue
+        if trace.get('transport_status')!='success' or trace.get('role_admission')=='rejected':continue
         visible=trace.get('visible_state',{});diagnostic=visible.get('diagnostic')
         if diagnostic and diagnostic.get('status')!='success':continue
         baseline=visible.get('baseline')

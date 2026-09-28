@@ -20,12 +20,17 @@ def collect_traces(campaign,*,roles=None,cutoff_seq=None):
             if event['seq']>cutoff:break
             value=event['payload']
             if event['kind']=='agent_submitted':submitted[value['task_id']]=event
-            if event['kind']!=('role_completed' if amazon else 'agent_completed'):continue
+            rejected=amazon and event['kind']=='role_rejected' and 'archive' in value
+            if not rejected and event['kind']!=('role_completed' if amazon else 'agent_completed'):continue
+            if rejected:value={**value,'task_id':value['task']}
             if amazon and 'task_id' not in value:continue
             start=submitted.get(value['task_id'])
             # A staging/preflight failure can settle a reservation before any
             # role input was submitted. It is an execution failure, not a decision.
             if start is None:continue
+            if rejected:
+                from .adapters.amazon_auto_audit import verify_rejected_role
+                verify_rejected_role(value,start['payload'],artifacts)
             request=start['payload'];role=request['role']
             if roles is not None and role not in roles:continue
             archive=value['archive'];context_ref=request.get('visible_state_ref') or archive.get('context.json')
@@ -36,8 +41,12 @@ def collect_traces(campaign,*,roles=None,cutoff_seq=None):
                 context_ref=archive['request.json']
             else:raise ContractError('trace lacks the actual role input')
             if digest(context)!=request['input_hash']:raise ContractError('trace input differs from submitted identity')
-            response=read_json(artifacts.verify(archive['response.json'])) if 'response.json' in archive else None
+            response=read_json(artifacts.verify(archive['response.json'])) if not rejected and 'response.json' in archive else None
             resources=read_json(artifacts.verify(archive['resources.json'])) if 'resources.json' in archive else {}
+            if rejected:
+                process=read_json(artifacts.verify(archive['process.json'])) if 'process.json' in archive else {}
+                value={**value,'status':resources.get('status',process.get('status','unknown')),
+                       'wall_seconds':resources.get('wall_seconds',process.get('wall_seconds'))}
             bundle=context.get('evidence');original=restore(bundle) if bundle and 'presentation' in bundle else bundle
             snapshot=request.get('source_snapshot')
             if snapshot is not None:
@@ -58,6 +67,14 @@ def collect_traces(campaign,*,roles=None,cutoff_seq=None):
                                  'token_usage':resources.get('token_usage')},
                 'submitted_event':start['hash'],'completed_event':event['hash'],
                 'qualification':'visible input and role output; transport success is not scientific or protocol validation'}
+            if rejected:
+                trace['role_call_id']=value['task_id']
+                trace['trace_id']=value['task_id']+'-rejected-'+event['hash'][:16]
+                trace['role_admission']='rejected'
+                trace['rejection']={'reason':value['reason'],'retryable':value['retryable'],
+                    'receipt_ref':archive['rejection.json'],'raw_response_ref':archive.get('response.json'),
+                    'returned_workspace_ref':archive.get('returned-workspace/manifest.json'),
+                    'qualification':'Unadmitted role output; not a selected scientific action or evidence that the model or method failed.'}
             from .instruction_identity import from_archive
             instructions=from_archive(archive,artifacts)
             if instructions is not None:trace['instruction_identity']=instructions

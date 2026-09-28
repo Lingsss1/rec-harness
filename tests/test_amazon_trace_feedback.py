@@ -9,6 +9,43 @@ from rec_harness.adapters.amazon_trace_feedback import commit
 
 
 class AmazonTraceFeedbackTests(unittest.TestCase):
+    def test_rejections_are_visible_but_never_admitted_measurement_evidence(self):
+        from rec_harness.adapters.amazon_autonomous import AmazonAutoresearch
+        from rec_harness.optimizer_handoff import request
+        for status in ['crash','success']:
+            with self.subTest(status=status),tempfile.TemporaryDirectory() as temp:
+                root=Path(temp);store=Store(root/'memory');store.configure_budget(5)
+                try:
+                    config={'task_id':'fixture','protocol_hash':'p'}
+                    write_json(root/'amazon-auto.json',config);write_json(root/'auto-lock.json',{'config_hash':digest(config)})
+                    runner=object.__new__(AmazonAutoresearch);runner.store=store
+                    class BadAgent:
+                        def run(self,role,context,target):
+                            write_json(target/'request.json',{'role':role})
+                            write_json(target/'resources.json',{'status':status,'wall_seconds':2})
+                            (target/'response.json').write_text('invalid JSON')
+                            raise ContractError('fixture failure')
+                    runner.agent=BadAgent();context={'baseline':{'runs':[{'seed':42,'valid':True,'metrics':{'quality':.5}}]}}
+                    with self.assertRaises(ContractError):runner._role(root/'rounds/round-1','lead',context)
+                    package=collect_traces(root);traces=package['decision_traces']
+                    self.assertEqual(len(traces),1 if status=='crash' else 2)
+                    self.assertEqual(request(package,10)['allowed_evidence_refs'],[])
+                    for trace in traces:
+                        self.assertEqual(trace['role_admission'],'rejected');self.assertIsNone(trace['role_output'])
+                        self.assertEqual(trace['transport_status'],status)
+                        self.assertEqual(trace['resource_cost']['wall_seconds'],2)
+                        self.assertIn('baseline',trace['visible_state']);self.assertNotIn('rejection',trace['visible_state'])
+                        self.assertIsNotNone(trace['rejection']['raw_response_ref'])
+                    events=store.events();first=next(e for e in events if e['kind']=='role_rejected')
+                    prefix=collect_traces(root,cutoff_seq=first['seq'])
+                    self.assertEqual(len(prefix['decision_traces']),1)
+                    with self.assertRaisesRegex(ContractError,'no committed decision traces'):
+                        collect_traces(root,cutoff_seq=first['seq']-1)
+                    store.event('future_private_result',{'private_value':'FUTURE_NOT_VISIBLE'})
+                    self.assertEqual(collect_traces(root,cutoff_seq=first['seq']),prefix)
+                    self.assertNotIn('FUTURE_NOT_VISIBLE',str(collect_traces(root)))
+                finally:store.close()
+
     def test_development_feedback_respects_cutoff_and_excludes_confirmation(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);store=Store(root/'memory');self.addCleanup(store.close)

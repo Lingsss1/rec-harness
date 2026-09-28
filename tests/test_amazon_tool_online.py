@@ -62,6 +62,17 @@ class AmazonToolOnlineTests(unittest.TestCase):
         self.assertEqual(len({read_json(root/'study.json')['model_versions']['base']['path'] for root in roots}),3)
         with self.assertRaises(FileExistsError):create_study(case,roots[0],objects)
 
+    def test_freeze_preserves_virtualenv_interpreter_symlink(self):
+        executable=self.root/'base-python';executable.write_text('fixture interpreter')
+        python=self.root/'venv/bin/python';python.parent.mkdir(parents=True)
+        python.symlink_to(executable)
+        self.spec['tool_runtime']['execution']['python']='venv/bin/python'
+        suite,_=load_suite(self.freeze())
+        frozen=suite['tool_runtime']['execution']['python']
+        self.assertEqual(frozen,str(python))
+        self.assertNotEqual(frozen,str(python.resolve()))
+        self.assertEqual(suite['existing_tool']['execution']['python'],frozen)
+
     def test_reused_condition_and_inherited_memory_rejected(self):
         source=self.root/'confirmation/study.json';cfg=read_json(source);cfg['development_seeds']=[100]
         write_json(source,cfg);write_json(source.parent/'study-lock.json',{'config_hash':digest(cfg)})

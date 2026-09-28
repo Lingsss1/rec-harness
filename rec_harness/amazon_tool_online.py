@@ -35,8 +35,10 @@ def freeze_suite(specification,directory):
     for value in weights.values():
         if number(value,'ledger cost weight',0)<=0:raise ContractError('positive ledger cost weights required')
     runtime=copy.deepcopy(spec['tool_runtime'])
-    for key in ['python','uid_registry']:
-        runtime['execution'][key]=str((path.parent/runtime['execution'][key]).resolve())
+    # A venv interpreter may be a symlink to the base executable. Resolving
+    # that symlink changes sys.prefix and discards the venv's dependencies.
+    runtime['execution']['python']=str((path.parent/runtime['execution']['python']).absolute())
+    runtime['execution']['uid_registry']=str((path.parent/runtime['execution']['uid_registry']).resolve())
     existing=freeze_validation_tool({**runtime,'source':str((path.parent/spec['existing_tool']).resolve()),
         'files':spec['tool_files']},Artifacts(root/'objects'))
     cases=freeze_cases(spec['cases'],path.parent,Artifacts(root/'objects'),weights)

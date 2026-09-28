@@ -1,8 +1,8 @@
 """Deterministic lifecycle graph from committed evolution events, without scores."""
-from .core import ContractError,digest,read_json
+from .core import Artifacts,ContractError,digest,read_json
 
 
-def lifecycle_graph(events,contexts=None):
+def lifecycle_graph(events,contexts=None,proposals=None):
     nodes={};edges={};candidates={};versions={}
     def node(identity,kind,attrs,task,protocol,event):
         nodes[identity]={'id':identity,'type':kind,'attrs':{**attrs,'task_id':task,'protocol_hash':protocol,
@@ -13,6 +13,7 @@ def lifecycle_graph(events,contexts=None):
         edges[identity]={'id':identity,'source':source,'target':target,'relation':relation,'attrs':{
             'scope':task,'evidence_refs':[source],'origin':'local_evidence','status':'provisional',
             'created_at':event['created_at'],'revision_id':event['hash']}}
+        return edges[identity]
     for event in events:
         value=event['payload'];kind=event['kind']
         if kind=='candidate_proposed':
@@ -52,6 +53,36 @@ def lifecycle_graph(events,contexts=None):
             if kind=='candidate_implemented':
                 node(identity,'Observation',{'kind':'evolution_implementation','implementation_hash':value['implementation_hash']},candidate,protocol,event)
                 link(identity,parent,'ABOUT',event,candidate)
+                proposal=(proposals or {}).get(candidate)
+                if category=='harness' and proposal is not None:
+                    hypothesis='evolution-failure-'+event['hash'][:32]
+                    node(hypothesis,'DecisionFailureHypothesis',{
+                        'failure_pattern':proposal['failure_pattern'],
+                        'causal_hypothesis':proposal['causal_hypothesis'],
+                        'expected_decision_change':proposal['expected_decision_change'],
+                        'regression_risks':proposal['regression_risks'],
+                        'proposal_ref':value['proposal_ref'],'status':'provisional'},candidate,protocol,event)
+                    nodes[hypothesis]['attrs']['origin']='agent_hypothesis'
+                    link(parent,hypothesis,'ADDRESSES',event,candidate)
+                    traces={t['trace_id']:t for t in (contexts or {}).get(candidate,{}).get('decision_traces',[])}
+                    for reference in proposal['trace_refs']:
+                        if reference not in traces:continue  # Legacy references remain in the immutable proposal.
+                        trace=traces[reference]
+                        trace_id='evolution-trace-'+digest([candidate,reference])[:32]
+                        node(trace_id,'DecisionTrace',{'external_trace_id':reference,
+                            'trace_hash':digest(trace),'context_hash':nodes[parent]['attrs']['context_hash'],
+                            'qualification':'Frozen optimizer input; does not establish the causal hypothesis.'},candidate,protocol,event)
+                        if trace.get('harness_version'):
+                            harness_id='evolution-source-harness-'+digest([candidate,trace['harness_version']])[:32]
+                            node(harness_id,'HarnessVersion',{'external_version':trace['harness_version'],
+                                'lifecycle_event':'observed_in_trace',
+                                'qualification':'Version attribution in frozen source trace; not a local promotion.'},candidate,protocol,event)
+                            link(trace_id,harness_id,'GENERATED_BY',event,candidate)
+                        support=link(hypothesis,trace_id,'SUPPORTED_BY',event,candidate)
+                        # This is the optimizer's supporting attribution, not an
+                        # independently confirmed causal relationship.
+                        support['attrs']['origin']='agent_hypothesis'
+                        support['attrs']['evidence_refs']=[trace_id]
             elif kind in {'validation_passed','validation_rejected'}:
                 attrs={'stage':value['stage'],'status':'accepted' if kind=='validation_passed' else 'rejected'}
                 if kind=='validation_passed':attrs.update(report_hash=value['report_hash'],implementation_hash=value['implementation_hash'])
@@ -89,7 +120,10 @@ def sync_lifecycle(store,*,check_only=False):
     store.verify();events=store.events()
     contexts={event['payload']['candidate_id']:read_json(store.root.parent/'candidates'/event['payload']['candidate_id']/'context.json')
               for event in events if event['kind']=='candidate_proposed'}
-    projection=lifecycle_graph(events,contexts);snapshot=store.snapshot()
+    artifacts=Artifacts(store.root.parent/'objects')
+    proposals={event['payload']['candidate_id']:read_json(artifacts.verify(event['payload']['proposal_ref']))
+               for event in events if event['kind']=='candidate_implemented' and event['payload'].get('proposal_ref')}
+    projection=lifecycle_graph(events,contexts,proposals);snapshot=store.snapshot()
     patch={'base_version':snapshot['version']}
     for key in ['nodes','edges']:
         existing={item['id']:item for item in snapshot[key]}

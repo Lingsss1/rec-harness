@@ -19,6 +19,36 @@ class Optimizer:
             'regression_risks':['fixture'],'validation_plan':'frozen','rollback_version':'base'}
 
 class EvolutionAutomationTests(unittest.TestCase):
+    def test_harness_rationale_is_archived_and_linked_to_frozen_trace(self):
+        path=self.config(reject='development');config=read_json(path)
+        config['context']['decision_traces']=[{'trace_id':'trace','harness_version':'source-v1','visible_state':{'old':'input'}}]
+        write_json(path,config)
+        result=autoresearch(self.campaign,path,agent=self.agent)
+        self.assertEqual(result['status'],'rejected')
+        evolution=Evolution(self.campaign)
+        try:
+            snapshot=evolution.store.snapshot()
+            hypothesis=next(n for n in snapshot['nodes'] if n['type']=='DecisionFailureHypothesis')
+            self.assertEqual(hypothesis['attrs']['origin'],'agent_hypothesis')
+            self.assertEqual(hypothesis['attrs']['status'],'provisional')
+            trace=next(n for n in snapshot['nodes'] if n['attrs'].get('external_trace_id')=='trace')
+            self.assertNotIn('visible_state',trace['attrs'])
+            generated=next(e for e in snapshot['edges'] if e['relation']=='GENERATED_BY')
+            self.assertEqual(generated['source'],trace['id'])
+            harness=next(n for n in snapshot['nodes'] if n['id']==generated['target'])
+            self.assertEqual(harness['attrs']['external_version'],'source-v1')
+            self.assertEqual(harness['attrs']['lifecycle_event'],'observed_in_trace')
+            support=next(e for e in snapshot['edges'] if e['relation']=='SUPPORTED_BY')
+            self.assertEqual(support['target'],trace['id'])
+            self.assertEqual(support['attrs']['evidence_refs'],[trace['id']])
+            self.assertTrue(any(e['relation']=='ADDRESSES' and e['target']==hypothesis['id'] for e in snapshot['edges']))
+            proposal=evolution.artifacts.verify(hypothesis['attrs']['proposal_ref'])
+            self.assertEqual(read_json(proposal)['trace_refs'],['trace'])
+            evolution.verify()
+            proposal.write_text('{}')
+            with self.assertRaisesRegex(ContractError,'corrupt artifact'):evolution.verify()
+        finally:evolution.store.close()
+
     def test_invalid_plan_stops_without_inventing_candidate_graph(self):
         evolution=Evolution(self.campaign)
         try:

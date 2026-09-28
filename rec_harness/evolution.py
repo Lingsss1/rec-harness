@@ -141,6 +141,7 @@ class Evolution:
             if digest(saved['implementation'])!=saved['implementation_hash']:
                 raise ContractError('committed implementation identity changed')
             for ref in saved['implementation'].values():self.artifacts.verify(ref)
+            if saved.get('proposal_ref'):self.artifacts.verify(saved['proposal_ref'])
             marker=directory/'candidate.json'
             if marker.exists():
                 current=read_json(marker)
@@ -213,6 +214,11 @@ class Evolution:
                     if not response['trace_refs'] or not set(response['trace_refs']).issubset(known):raise ContractError('optimizer cites traces outside its frozen prefix')
                 policy = json.loads(response["patch_diff"])
                 validate_patch_scope(response["editable_scope"],policy)
+                # Preserve the rationale independently of the executable policy.
+                # Scripted transports need not write their own response receipt.
+                public_only(response)
+                write_json(task_dir / 'accepted-proposal.json',response)
+                frozen['proposal_ref']=self.artifacts.put(task_dir / 'accepted-proposal.json')
                 write_json(task_dir / "policy.json", policy)
                 files = ["policy.json"]
                 snapshot = self.artifacts.snapshot(task_dir, files)
@@ -376,12 +382,21 @@ class Evolution:
             raise ContractError("plan changed")
         if digest(candidate["implementation"]) != candidate["implementation_hash"]:
             raise ContractError("candidate implementation identity changed")
+        self._verify_proposal(candidate)
         for stage in STAGES[candidate["kind"]]:
             if self._accepted_stage(candidate,plan,stage) is None:
                 raise ContractError(f"missing independent validation: {stage}")
         for ref in candidate["implementation"].values():
             self.artifacts.verify(ref)
         return candidate
+
+    def _verify_proposal(self,candidate):
+        committed=[e['payload'] for e in self.store.events() if e['kind']=='candidate_implemented'
+                   and e['payload']['candidate_id']==candidate['candidate_id']]
+        if not committed:return
+        reference=committed[-1].get('proposal_ref')
+        if candidate.get('proposal_ref')!=reference:raise ContractError('candidate proposal projection changed')
+        if reference:self.artifacts.verify(reference)
 
     @serialized
     def promote(self, candidate_id):
@@ -417,10 +432,13 @@ class Evolution:
         integrity=self.store.verify()
         count=0
         for event in self.store.events():
+            if event['kind']=='candidate_implemented' and event['payload'].get('proposal_ref'):
+                self.artifacts.verify(event['payload']['proposal_ref']);count+=1
             if event['kind']=='candidate_generation_recovered':
                 for ref in event['payload']['receipts'].values():self.artifacts.verify(ref);count+=1
         for path in (self.root/'candidates').glob('*/candidate.json'):
             candidate=read_json(path);plan=read_json(path.parent/'plan.json')
+            self._verify_proposal(candidate)
             if digest(plan)!=candidate['plan_hash'] or digest(read_json(path.parent/'context.json'))!=candidate['context_hash']:
                 raise ContractError('frozen candidate inputs changed')
             if 'implementation' in candidate:

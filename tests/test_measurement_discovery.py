@@ -145,3 +145,51 @@ class DiscoveryTests(unittest.TestCase):
         changed=copy.deepcopy(context);changed['block_score_diagnostics'][0]['measurements']['A.block-0.delta.HR@10']=1.
         with self.assertRaisesRegex(ContractError,'committed observation'):
             review_context(self.research,self.state,changed,self.gap)
+
+    def prepare_handoff(self):
+        from rec_harness.core import Artifacts,digest
+        r=self.research
+        r.artifacts=Artifacts(r.root/'artifacts/objects')
+        config={**r.config,'task_id':r.task,'protocol_hash':r.protocol_hash}
+        write_json(r.root/'campaign.json',config)
+        write_json(r.root/'research_archive/manifest.json',{'config_hash':digest(config)})
+
+    def test_tool_handoff_retains_exact_discovery_input_without_future_observations(self):
+        from rec_harness.measurement_gaps import evolution_context
+        self.prepare_handoff()
+        context=self.activation_context();response=copy.deepcopy(self.response)
+        response['evidence_refs']=['activation-one']
+        calls=[]
+        def invoke(request):calls.append(copy.deepcopy(request));return response
+        gaps=discover(self.research,self.state,context,self.gap,'attempt',invoke)
+        result=evolution_context(self.research.root,gaps[0]['measurement_gap_id'])
+        self.assertEqual(result['measurement_review_input'],calls[0])
+        self.assertEqual(result['measurement_review_input']['activation_diagnostics'],context['activation_diagnostics'])
+        self.assertEqual(result['measurement_review'],response)
+        self.assertNotIn('private_path',str(result))
+        self.assertIn('does not expand',result['measurement_review_provenance']['qualification'])
+        r=self.research
+        r.store.patch({'base_version':r.store.version,'nodes':[
+            node('future-observation','Observation',{'valid':True,'measurements':{'future':999}},r.task,r.protocol_hash)],'edges':[]})
+        before=r.store.verify()
+        self.assertEqual(evolution_context(r.root,gaps[0]['measurement_gap_id']),result)
+        self.assertEqual(r.store.verify(),before)
+        ref=result['measurement_review_provenance']['input_ref']
+        r.artifacts.verify(ref).write_text('{}')
+        with self.assertRaises(ContractError):evolution_context(r.root,gaps[0]['measurement_gap_id'])
+
+    def test_handoff_rejects_review_bound_to_another_model(self):
+        from rec_harness.core import digest
+        from rec_harness.measurement_gaps import evolution_context
+        self.prepare_handoff();r=self.research;original=r.store.event
+        def corrupt_record(kind,value):
+            if kind=='measurement_reviewed':
+                request=read_json(r.artifacts.verify(value['input_ref']))
+                request['model_version']='unrelated'
+                path=r.root/'altered-review-input.json';write_json(path,request)
+                value={**value,'input_ref':r.artifacts.put(path),'input_hash':digest(request)}
+            return original(kind,value)
+        with patch.object(r.store,'event',side_effect=corrupt_record):
+            gaps=discover(r,self.state,self.context,self.gap,'attempt',lambda _:copy.deepcopy(self.response))
+        with self.assertRaisesRegex(ContractError,'source identity'):
+            evolution_context(r.root,gaps[0]['measurement_gap_id'])

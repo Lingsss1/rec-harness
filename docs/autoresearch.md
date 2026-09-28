@@ -148,6 +148,8 @@ python3 -m rec_harness evolve /path/to/evolution rollback --kind harness
 
 工具外循环可用 `measurement_source: {"campaign": "/path/to/model-campaign", "gap_id": "measurement-gap-..."}` 替代手写 `context`。初始化从已提交触发事件冻结 GapCard 及当时图版本中的公开实验聚合值；不携带整份归档、原始样本或未来结果。`plan.development_ids` 必须包含这些开发实验 ID，后续 shadow/utility 不能复用它们。候选通过验证后，新模型 campaign 通过 `diagnostic_registry` 冻结新工具并复测。项目总调度器已支持从模型停止状态创建后继 campaign；工具验证任务仍由冻结计划指定，尚未自动设计。
 
+自主测量缺口的工具转交还保留已归档的审查输入（`measurement_review_input`），包括当时确实可见的激活/block-score 聚合及其限制；核对审查事件、内容身份和触发前图快照。开发证据不扩大工具运行时的数据合同，详见[转交证据](implementation/measurement-review-handoff.md)。
+
 ## 开发经验续接
 
 ```bash

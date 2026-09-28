@@ -1,5 +1,5 @@
 """Host-owned coverage triage; a failed tool is not evidence of a model deficit."""
-from .core import ContractError,digest,number,required,validate_card,read_json
+from .core import ContractError,digest,number,required,validate_card,read_json,public_only
 
 
 class MeasurementDeferred(ContractError):
@@ -137,7 +137,45 @@ def evolution_context(campaign,gap_id):
         review={}
         if payload.get('review_ref'):
             from .core import Artifacts
-            review={'measurement_review':read_json(Artifacts(root/'artifacts/objects').verify(payload['review_ref']))}
+            from .measurement_discovery import validate_review
+            artifacts=Artifacts(root/'artifacts/objects')
+            response=read_json(artifacts.verify(payload['review_ref']))
+            review={'measurement_review':response}
+            records=[e for e in store.events() if e['seq']<event['seq'] and e['kind']=='measurement_reviewed'
+                     and e['payload'].get('review_ref')==payload['review_ref']]
+            if len(records)>1:raise ContractError('ambiguous measurement review provenance')
+            # Older archives without a bound review input remain explicitly limited
+            # to the response; never synthesize their historical visible state.
+            if records and records[0]['payload'].get('input_ref'):
+                record=records[0]['payload']
+                request=read_json(artifacts.verify(record['input_ref']))
+                if digest(request)!=record['input_hash']:raise ContractError('measurement review input changed')
+                if (request.get('task_id')!=config['task_id'] or request.get('protocol_hash')!=config['protocol_hash']
+                    or request.get('model_version')!=payload['model_version']
+                    or record.get('model_version')!=payload['model_version']):
+                    raise ContractError('measurement review source identity differs')
+                validate_review(request,response);public_only(request)
+                if response['assessment']!='measurement_gap':raise ContractError('source review did not propose a measurement gap')
+                rule=response['requirements'][0]
+                if rule['measurement']!=gap['required_information'] or any(rule[key]!=gap[key] for key in
+                    ['blocked_decision','competing_explanations','cheapest_test','development_budget','acceptance_contract']):
+                    raise ContractError('measurement gap differs from its source review')
+                for ref in response['evidence_refs']:
+                    if ref not in known or known[ref]['type'] not in {'Experiment','Observation'}:
+                        raise ContractError('measurement review evidence missing from trigger prefix')
+                for field in ['activation_diagnostics','block_score_diagnostics']:
+                    for row in request.get(field,[]):
+                        source=known.get(row.get('observation_id'),{})
+                        attrs=source.get('attrs',{})
+                        if (source.get('type')!='Observation' or attrs.get('valid') is not True
+                            or attrs.get('task_id')!=config['task_id'] or attrs.get('protocol_hash')!=config['protocol_hash']
+                            or attrs.get('origin')!='local_evidence' or row.get('model_version')!=payload['model_version']
+                            or set(row)!={'observation_id','model_version','dataset','seed','measurements','limitations','scope'}
+                            or any(attrs.get(key)!=value for key,value in row.items())):
+                            raise ContractError('measurement review observation differs from trigger prefix')
+                review.update(measurement_review_input=request,measurement_review_provenance={
+                    'review_event':records[0]['hash'],'input_ref':record['input_ref'],'input_hash':record['input_hash'],
+                    'qualification':'Exact public review input at discovery. Authoring evidence does not expand the diagnostic runtime input contract; no private artifacts or future observations are supplied.'})
         return {'measurement_gap':gap,'observations':observations,**review,
             'source':{'task_id':config['task_id'],'protocol_hash':config['protocol_hash'],
                       'event_head':event['hash'],'trigger_sequence':event['seq'],'graph_version':version,'graph_hash':graph['hash']},

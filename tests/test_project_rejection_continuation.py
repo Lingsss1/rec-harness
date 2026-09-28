@@ -12,6 +12,44 @@ import test_project
 class RejectionContinuationTests(unittest.TestCase):
     setUp=test_project.ProjectTests.setUp
 
+    def test_pending_validator_does_not_commit_project_terminal_or_repeat_optimizer(self):
+        from rec_harness.validation_stage import ValidationRecoveryRequired
+        with patch('rec_harness.evolution.run_process',side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):autoresearch(self.campaign,self.config(),agent=self.agent)
+        project_store=Store(self.campaign/'memory',read_only=True)
+        try:before=project_store.verify()
+        finally:project_store.close()
+        with patch.object(test_project.ProjectAgent,'run',side_effect=AssertionError('replayed role')):
+            for _ in range(2):
+                with self.assertRaises(ValidationRecoveryRequired):autoresearch(self.campaign,agent=self.agent)
+        project=ResearchProject(self.campaign,agent=self.agent)
+        try:
+            self.assertEqual(project.store.verify(),before)
+            state=[e['payload']['state'] for e in project.store.events() if e['kind']=='project_transition'][-1]
+            self.assertEqual(state['phase'],'harness');self.assertNotEqual(state['status'],'stopped')
+            self.assertEqual(len(project.verify()['verified_episodes']),1)
+        finally:project.store.close()
+
+    def test_report_commit_interruption_resumes_from_project_entry(self):
+        original=Store.event
+        def interrupt(store,kind,value):
+            if kind=='validation_passed':raise KeyboardInterrupt()
+            return original(store,kind,value)
+        with patch.object(Store,'event',interrupt):
+            with self.assertRaises(KeyboardInterrupt):autoresearch(self.campaign,self.config(),agent=self.agent)
+        class NoOptimizer(test_project.ProjectAgent):
+            def run(agent,role,context,directory):
+                if role.startswith('optimizer'):raise AssertionError('replayed optimizer')
+                return super().run(role,context,directory)
+        from rec_harness.agents import run_process
+        with patch('rec_harness.evolution.run_process',wraps=run_process) as runner:
+            report=autoresearch(self.campaign,agent=NoOptimizer())
+        self.assertEqual(runner.call_count,1)  # Only the zero-gain development stage remains.
+        self.assertEqual([e['kind'] for e in report['episodes']],['model','harness','model'])
+        child=read_json(self.campaign/'episodes/harness-1/campaign/run-report.json')
+        self.assertEqual(child['rejection_kind'],'validation_gate')
+        self.assertEqual(child['budget']['charged_or_reserved'],3)
+
     def config(self,*,second_only=False,invalid=False):
         path=test_project.ProjectTests.config(self,'harness');config=read_json(path)
         config['model']['research_policy']={'prompts':{'evidence':'Retain original guidance'}}

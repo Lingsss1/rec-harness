@@ -121,3 +121,14 @@ def admission_evidence(study,proposal_id,protocol_hash,candidate_id,candidate_pa
         result['insertion_scope']=source_review['insertion_scope']
     result['hash']=digest(result)
     return result
+def scope_incumbent_measurements(context):
+    """Retain incumbent evidence without labeling it as candidate measurements."""
+    from rec_harness.diagnostic_inputs import OBSERVATION_FIELDS
+    fields=('diagnostic','measurement_baseline',*OBSERVATION_FIELDS)
+    result=dict(context)
+    if any(key in context for key in fields):
+        result['incumbent_measurement_context']={
+            key:context[key] for key in ('task_id','model_version','protocol_hash','development_baseline',*fields)
+            if key in context}
+        for key in fields:result.pop(key,None)
+    return result

@@ -518,13 +518,15 @@ class AmazonAutoresearch:
                         'training_contract':training_contract_evidence(self.study,cfg,version,dataset,seed,result)})
             generated_evidence.append({'model_version':version,'implementation_evidence':admitted,
                                        'execution_evidence':control_execution})
-        review={**context,'model_version':binding['candidate_model_version'],
+        from .amazon_review_evidence import scope_incumbent_measurements
+        review={**scope_incumbent_measurements(context),'model_version':binding['candidate_model_version'],
                 'visible_model_source':None,
                 'implementation_author_report':experiment_report(folder,self.store.events()),
                 'implementation_evidence':implementation,
                 'candidate_execution_evidence':execution_evidence,
                 'handoff':{'cards':cards,'versions':versions},'development':report,
                 'instructions':['Evaluate the actual complete development readout. Include its exact hash in evidence_refs: '+report['hash'],
+                                'incumbent_measurement_context, when present, contains measurements of bindings.base_model_id only. They motivated the proposal; they are not measurements of the candidate or evidence that its mechanism succeeded.',
                                 'implementation_author_report preserves the experiment role reported checks and limitations. Its verified identity does not verify any claimed check. Compare it with the proposal correctness_checks/falsification_condition and host evidence; explicitly retain unexecuted or unsupported validations in unresolved_explanations. Do not equate completion of training and primary-metric selection with completion of every proposed diagnostic or scientific test.',
                                 'implementation_evidence reports host-verified admission checks; its report hashes are references, not files available in your workspace. When structural_changes is supplied, compare its actual changed methods and assigned fields with the proposal insertion contract; AST evidence does not prove that semantic contract. tensor_graph summarizes verified executed tensor paths; unavailable means no recorded coverage. Never infer unexecuted branch coverage or causal isolation from operator counts. sequence_semantics reports finite input-immutability and per-user batch-independence probes, not proof of the proposal-specific mechanism. Distinguish these checks from missing scientific evidence. Evaluation has no source file; lead receives candidate source separately.',
                                 'candidate_execution_evidence summarizes audited completed development training under the frozen worker and protocol. Use verified fields to assess actual execution settings, rather than local model helper defaults. training_contract distinguishes fresh pre-training probes from probes bound to the selected trained development checkpoint; unavailable means no archived gates. These are synthetic checks, not held-out recommendation quality. It does not prove a causal mechanism or expose confirmation results.',

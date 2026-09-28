@@ -38,6 +38,19 @@ def audit_exposure(campaign):
                 context=read_json(objects.verify(value['visible_state_ref']))
                 if digest(context)!=value['input_hash']:raise ContractError('submitted role input changed')
                 submitted[value['task_id']]=value
+                if 'incumbent_measurement_context' in context:
+                    scoped=context['incumbent_measurement_context']
+                    binding=context.get('bindings',{})
+                    if (not amazon or value['role'] not in ('evaluation','lead') or
+                            not isinstance(scoped,dict) or
+                            any(key in context for key in ('diagnostic','measurement_baseline','activation_diagnostics','block_score_diagnostics')) or
+                            scoped.get('model_version')!=binding.get('base_model_id') or
+                            context.get('model_version')!=binding.get('candidate_model_version') or
+                            scoped.get('task_id')!=context.get('task_id') or
+                            scoped.get('protocol_hash')!=context.get('protocol_hash') or
+                            scoped.get('development_baseline')!=context.get('development_baseline')):
+                        raise ContractError('incumbent measurement scope differs from review bindings')
+                    context=scoped
                 diagnostic=context.get('diagnostic')
                 if diagnostic is not None:
                     projected=value['role']=='measurement'

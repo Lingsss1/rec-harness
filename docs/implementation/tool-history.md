@@ -47,3 +47,11 @@
 50项相关测试通过（19.337秒），覆盖实际脚本验证器返回正确性失败→事件保留→历史提取→终态恢复零重复，以及非法ID、非公开字段和Harness拒绝续接边界。证据在rec-harness-runs/rejected-tool-history-v1。无新增Codex调用或Amazon训练；本项晚于v25包及564项完整源码回归。
 
 后续[真实CPU拒绝验收](../experiments/rejected-tool-history-cpu-v1.md)已完成：已知错误工具在两个实际隔离案例中一错一对，真实验证器返回正确性失败；历史保留条件并阻止再次使用，恢复和独立复算零新增执行。合计4 BCU，无Codex调用或Amazon训练，不增加工具科学效用结论。
+
+## 数值淘汰原因反馈
+
+新的validation_gate拒绝事件记录failed_gates：minimum_gain、maximum_regression、maximum_total_cost，可同时包含多个失败门槛。判定仍使用原冻结门槛；等于门槛时沿用原通过行为。验证合同失败不获得这些数值原因。
+
+历史把门槛名称传给后续作者，ToolValidation/HarnessValidation图节点也保留名称，不复制分数、自由错误文本或验证样本，不生成模型效果Claim。读取新历史时从已绑定报告与冻结计划复算名称；记录不一致则拒绝。旧拒绝事件未记录此字段时不追写或猜测。
+
+45项相关回归通过（18.506秒）；消除重复计算后，两项聚焦测试再次通过。覆盖边界相等、三个单独失败原因、多个同时失败、事件/图/历史一致性、终态无重复和不一致原因拒绝。证据在rec-harness-runs/tool-gate-feedback-v1。无Codex调用或Amazon训练；变更晚于v27安装包。

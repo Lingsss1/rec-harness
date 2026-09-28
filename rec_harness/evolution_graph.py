@@ -126,6 +126,8 @@ def lifecycle_graph(events,contexts=None,proposals=None):
             elif kind in {'validation_passed','validation_rejected'}:
                 attrs={'stage':value['stage'],'status':'accepted' if kind=='validation_passed' else 'rejected'}
                 if kind=='validation_passed':attrs.update(report_hash=value['report_hash'],implementation_hash=value['implementation_hash'])
+                elif value.get('rejection_kind')=='validation_gate' and 'failed_gates' in value:
+                    attrs['failed_gates']=value['failed_gates']
                 # Detailed validator scores, task IDs and free-text failure
                 # messages stay in the source event; only gate outcomes enter here.
                 node(identity,'ToolValidation' if category=='tool' else 'HarnessValidation',attrs,candidate,protocol,event)

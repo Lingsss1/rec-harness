@@ -62,6 +62,12 @@ def collect(sources):
                             if not isinstance(ids,list) or not ids or any(not isinstance(item,str) or not item.strip() for item in ids):
                                 raise ContractError('tool history validation has invalid evaluation IDs')
                             excluded.update(ids)
+                            if kind=='validation_rejected' and 'failed_gates' in value:
+                                from .evolution import numerical_gate_failures
+                                expected=numerical_gate_failures(report,plan['stages'][value['stage']])
+                                if value.get('rejection_kind')!='validation_gate' or not expected or value['failed_gates']!=expected:
+                                    raise ContractError('tool history failed gates differ from frozen report and plan')
+                                validation['failed_gates']=expected
                         else:raise ContractError('tool history validation lacks evaluation IDs; cannot exclude prior conditions')
                     elif kind=='candidate_promoted':row['status']='promoted'
                     elif kind=='evolution_stopped':row['status']=value['status']

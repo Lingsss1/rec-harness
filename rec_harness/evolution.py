@@ -24,6 +24,19 @@ EDITABLE = {"prompts", "retrieval_limit", "routing"}
 
 class ValidationGateRejected(ContractError):
     """A well-formed independent report failed its frozen numerical gates."""
+    def __init__(self,message,failed_gates=()):
+        super().__init__(message)
+        self.failed_gates=list(failed_gates)
+
+
+def numerical_gate_failures(report,rule):
+    gain=number(report['gain'],'gain')
+    regression=number(report['regression'],'regression',0)
+    cost=number(report['total_cost'],'total_cost',0)
+    return [name for name,failed in [
+        ('minimum_gain',gain<rule['minimum_gain']),
+        ('maximum_regression',regression>rule['maximum_regression']),
+        ('maximum_total_cost',cost>rule['maximum_total_cost'])] if failed]
 
 
 def serialized(method):
@@ -398,6 +411,7 @@ class Evolution:
                 rejection.update(report=report,report_hash=digest(report),
                     implementation_hash=candidate['implementation_hash'],plan_hash=candidate['plan_hash'])
             rejection['rejection_kind']='validation_gate' if isinstance(error,ValidationGateRejected) else 'validation_contract'
+            if isinstance(error,ValidationGateRejected):rejection['failed_gates']=error.failed_gates
             self.store.event("validation_rejected",rejection)
             raise
 
@@ -426,8 +440,7 @@ class Evolution:
         rule = plan["stages"][stage]
         if report["passed"] is not True or report["identity"] != plan["identity"]:
             raise ContractError("validation failed or paired identity differs")
-        gain=number(report['gain'],'gain');regression=number(report['regression'],'regression',0)
-        total_cost=number(report['total_cost'],'total_cost',0)
+        failures=numerical_gate_failures(report,rule)
         ids = set(report["evaluation_ids"])
         if not ids:
             raise ContractError("missing validation identities")
@@ -445,8 +458,7 @@ class Evolution:
             previous = read_json(self.root / "candidates" / candidate["candidate_id"] / "validation" / "development" / "accepted.json")
             if ids & set(previous["report"]["evaluation_ids"]):
                 raise ContractError("confirmation reused development tasks")
-        if gain<rule['minimum_gain'] or regression>rule['maximum_regression'] or total_cost>rule['maximum_total_cost']:
-            raise ValidationGateRejected('utility/cost/regression gate failed')
+        if failures:raise ValidationGateRejected('utility/cost/regression gate failed',failures)
 
     def verified_candidate(self, candidate_id):
         identifier(candidate_id)

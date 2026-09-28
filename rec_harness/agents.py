@@ -12,6 +12,7 @@ from .core import ContractError, canonical, identifier, read_json, write_json
 from .process_identity import identity
 
 ROLES = {
+    "optimizer_router": "Audit the supplied decision traces. In one call choose harness_patch or measurement_gap. Return payload_json as a JSON string matching context.optimizer_payload_schemas[kind]: a HarnessPatch, or a measurement review using measurement_handoff_request. Prefer a minimal Harness patch unless a concrete missing measurement blocks a decision. Unresolved invocation, implementation, data or applicability prohibits handoff. Never invent evidence, change the stable kernel, or claim utility. Respect base_policy and patch_semantics when supplied.",
     "measurement": "Review measurement sufficiency for the supplied model gap. Distinguish insufficient resolution from invocation/implementation failure, inadequate data and inapplicability. Different explanations alone, or one failed model improvement, do not establish a measurement gap. Sufficient means existing measurements can evaluate the next authorized model experiment, not that its outcome is already known. Pending candidate training/results and host training-cost estimation are not missing measurement prerequisites. Propose a new measurement only when it can change a concrete decision, has usable supplied artifacts, and has falsifiable independent acceptance criteria. Never invent observations. Otherwise report sufficient or prerequisite_unresolved.",
     "evidence": "Separate observations from explanations. Produce a GapCard with competing explanations and the cheapest discriminating test.",
     "hypothesis": "Produce one MethodCard and Proposal addressing the supplied gap. Use frozen seeds/protocol, independent initialization, explicit controls and falsification. Cite exact primary sources for paper claims; otherwise mark agent_hypothesis.",
@@ -85,6 +86,8 @@ def strings():
 
 
 def schema_for(role):
+    if role=='optimizer_router':
+        return object_schema({'kind':{'type':'string','enum':['harness_patch','measurement_gap']},'payload_json':{'type':'string'}})
     # Fields deliberately use explicit types: Codex strict structured output is not arbitrary JSON.
     s, a = text_schema(), strings()
     gap = object_schema({**{k: s for k in "gap_id model_version task_context protocol_hash suspected_capability cheapest_discriminating_test status".split()}, **{k: a for k in "observation_refs affected_components alternative_explanations predicted_observations".split()}})

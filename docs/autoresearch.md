@@ -162,6 +162,8 @@ python3 -m rec_harness verify /path/to/project
 
 同时配置工具和 Harness 时，两者依次在模型回合边界生效。例如模型→工具→模型→Harness→模型，最后一个模型回合同时保留新工具、测量要求和新策略，并继承上一模型的 incumbent。该五阶段组合已通过集成测试，包括 Harness 晋升提交后中断、恢复不重复工具/优化器调用、末轮实际复测及五个子回合完整性检查。它使用脚本角色和固定验证报告，证明联合调度与恢复；真实三循环收益仍须独立实验。
 
+新项目默认启用 `optimizer_measurement_handoff: true`，在原优化器调用位置使用一次 `optimizer_router` 调用，选择增量 Harness 补丁或测量缺口审查；不会无条件追加调用。主机接受测量转交后，跳过 Harness 验证/晋升，进入独立工具候选验证及模型复测。无可用工具槽或额度则保留缺口并停止；数据、调用等前置条件不足则拒绝转交。独立演化配置可用 `optimizer_handoff_budget` 开启此选择合同，工具配置通过 `optimizer_measurement_source` 引用已提交转交的 Harness campaign。详见[转交合同与恢复](implementation/optimizer-measurement-handoff.md)。
+
 当前总调度支持通用模型及 Amazon 适配器。Amazon 后继回合继承 incumbent ID 和经过验证的开发记忆包；study 配置与初始记忆包在项目创建时冻结，后续 GPU 成本继续进入同一 study 账本。Amazon 新角色调用也保留调用前上下文/源码快照及完成事件，可直接作为 Harness trace_source；旧档案没有这些绑定时不会倒推补造。工具验证任务的自动设计、任意未预声明测量缺口发现、多任务族在线验证，以及三循环联动的真实收益验收尚未完成。控制器测试中的固定阶段报告仅验证交接与恢复，不是在线收益证据。
 
 ## 结果与边界

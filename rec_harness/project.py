@@ -15,6 +15,7 @@ class ResearchProject:
         config.setdefault('measurement_lineage',True)
         config.setdefault('inherit_tool_source',True)
         config.setdefault('inherit_harness_policy',True)
+        config.setdefault('optimizer_measurement_handoff',True)
         identifier(config['task_id'])
         if config['model'].get('adapter') not in {None,'amazon-nextitnet-v1'}:raise ContractError('unsupported project model adapter')
         if config['model'].get('adapter')=='amazon-nextitnet-v1':
@@ -123,6 +124,10 @@ class ResearchProject:
         if kind=='tool':
             config['measurement_source']={'campaign':str(source),'gap_id':state['pending_gap']['measurement_gap_id']}
             ids=state['pending_gap']['experiment_refs']
+            if state.get('pending_optimizer_handoff'):
+                config.pop('measurement_source')
+                config['optimizer_measurement_source']=str(self.root/state['pending_optimizer_handoff'])
+                ids=ids+[read_json(source/('amazon-auto.json' if (source/'amazon-auto.json').exists() else 'campaign.json'))['task_id']]
             if state.get('active_tool') and self.config.get('inherit_tool_source'):
                 from .evolution import Evolution
                 previous=Evolution(self.root/state['active_tool'])
@@ -142,6 +147,8 @@ class ResearchProject:
             ids=[source_config['task_id']]
             if self.config.get('inherit_harness_policy'):
                 config['harness_base_policy']=source_config.get('research_policy',{})
+            if self.config.get('optimizer_measurement_handoff'):
+                config['optimizer_handoff_budget']=self.config.get('tool',config)['plan']['budget']
         config['plan']['development_ids']=sorted(set(config['plan']['development_ids'])|set(ids))
         return config
 
@@ -211,6 +218,13 @@ class ResearchProject:
                     elif 'harness' in self.config and state['harness_updates']<self.config.get('max_harness_updates',1):
                         state.update(phase='harness')
                     else:state.update(status='stopped',stop_reason='model_research_finished')
+                elif kind=='harness' and result['status']=='measurement_required':
+                    state={**state,'harness_updates':state['harness_updates']+1,
+                        'pending_gap':result['measurement_gap'],'pending_optimizer_handoff':relative}
+                    if ('tool' in self.config and 'tool_runtime' in self.config
+                        and state['tool_updates']<self.config.get('max_tool_updates',1)
+                        and state['model_index']<self.config['max_model_episodes']):state.update(phase='tool')
+                    else:state.update(status='stopped',stop_reason='measurement_unresolved')
                 elif result['status']=='promoted':
                     if kind=='tool':
                         obligations=list(state.get('measurement_obligations',[]))
@@ -220,6 +234,7 @@ class ResearchProject:
                     state={**state,kind+'_updates':state[kind+'_updates']+1,'active_'+kind:relative,
                         'phase':'model','model_index':state['model_index']+1}
                     state.pop('pending_gap',None)
+                    state.pop('pending_optimizer_handoff',None)
                 else:state={**state,'status':'stopped','stop_reason':kind+'_rejected'}
                 self.transition(state,episode)
             write_json(self.root/'state.json',state)

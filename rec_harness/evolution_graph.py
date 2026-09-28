@@ -51,6 +51,12 @@ def lifecycle_graph(events,contexts=None,proposals=None):
                         'context_hash':value['context_hash']},candidate,value['plan_hash'],event)
                     nodes[gap_id]['attrs']['origin']='agent_hypothesis'
                     link(identity,gap_id,'ADDRESSES',event,candidate)
+        elif kind=='measurement_handoff_recorded':
+            candidate=value['candidate_id'];parent,category,protocol=candidates[candidate]
+            gap=value['measurement_gap'];identity=gap['measurement_gap_id']
+            node(identity,'MeasurementGap',{**gap,'proposal_ref':value['proposal_ref'],'status':'proposed'},candidate,protocol,event)
+            nodes[identity]['attrs']['origin']='agent_hypothesis'
+            link(parent,identity,'EXPOSES',event,candidate)
         elif kind in {'candidate_implemented','validation_passed','validation_rejected','candidate_promoted','evolution_stopped'}:
             candidate=value['candidate_id']
             # Invalid inputs can stop before a proposal is committed. The raw

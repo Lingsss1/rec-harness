@@ -133,11 +133,19 @@ class Evolution:
         frozen = {"candidate_id": candidate_id, "kind": kind, "plan_hash": digest(plan), "context_hash": digest(context), "source_hash": digest(source), "status": "proposed", "validator_hashes": validator_hashes}
         self.store.configure_budget(plan["budget"])
         committed=[e['payload'] for e in self.store.events()
-                   if e['kind']=='candidate_implemented' and e['payload']['candidate_id']==candidate_id]
+                   if e['kind'] in {'candidate_implemented','measurement_handoff_recorded'} and e['payload']['candidate_id']==candidate_id]
         if committed:
             saved=committed[-1]
             if any(saved[key]!=frozen[key] for key in ['candidate_id','kind','plan_hash','context_hash','source_hash','validator_hashes']):
                 raise ContractError('committed evolution inputs differ')
+            if saved.get('status')=='measurement_required':
+                self.artifacts.verify(saved['proposal_ref'])
+                marker=directory/'candidate.json'
+                if marker.exists():
+                    current=read_json(marker)
+                    if current.get('status')!='proposed' and current!=saved:raise ContractError('measurement handoff projection changed')
+                write_json(directory/'candidate.json',saved)
+                return saved
             if digest(saved['implementation'])!=saved['implementation_hash']:
                 raise ContractError('committed implementation identity changed')
             for ref in saved['implementation'].values():self.artifacts.verify(ref)
@@ -169,6 +177,7 @@ class Evolution:
             write_json(directory / "plan.json", plan);write_json(directory / "context.json", context)
             write_json(directory / "candidate.json", frozen);self.store.event("candidate_proposed", frozen)
         role = "tool" if kind == "tool" else "optimizer"
+        if kind=='harness' and 'measurement_handoff_request' in context:role='optimizer_router'
         task_dir = directory / "development"
         request_context={"context":context,"acceptance_plan":plan}
         submissions=[e['payload'] for e in self.store.events()
@@ -207,6 +216,18 @@ class Evolution:
         status = "crash"
         try:
             if not recovered:response=(agent or CodexAgent()).run(role,request_context,task_dir)
+            if role=='optimizer_router':
+                validate_schema(response,schema_for(role));choice=response['kind'];response=json.loads(response['payload_json'])
+                if choice=='measurement_gap':
+                    from .optimizer_handoff import validate
+                    gap=validate(context,response,candidate_id)
+                    write_json(task_dir/'accepted-measurement-review.json',response)
+                    frozen.update(status='measurement_required',measurement_gap=gap,
+                        proposal_ref=self.artifacts.put(task_dir/'accepted-measurement-review.json'))
+                    status='success';self.store.event('measurement_handoff_recorded',frozen)
+                    write_json(directory/'candidate.json',frozen)
+                    return frozen
+                validate_schema(response,schema_for('optimizer'))
             if kind == "harness":
                 validate_card("harness_patch", response)
                 if 'decision_traces' in context:
@@ -263,12 +284,15 @@ class Evolution:
         if not graph_requested:self.store.event('evolution_graph_requested',{'candidate_id':candidate_id})
         try:
             candidate=self.propose(candidate_id,kind,context,plan,agent=agent,source=source)
-            for stage in STAGES[kind]:
-                rejected=[e for e in self.store.events() if e['kind']=='validation_rejected' and e['payload']['candidate_id']==candidate_id and e['payload']['stage']==stage]
-                if rejected:raise ContractError('frozen validation previously rejected: '+stage)
-                self.validate(candidate_id,stage)
-            version=self.promote(candidate_id)
-            result={'candidate_id':candidate_id,'kind':kind,'status':'promoted','version':version}
+            if candidate['status']=='measurement_required':
+                result={'candidate_id':candidate_id,'kind':kind,'status':'measurement_required','measurement_gap':candidate['measurement_gap']}
+            else:
+                for stage in STAGES[kind]:
+                    rejected=[e for e in self.store.events() if e['kind']=='validation_rejected' and e['payload']['candidate_id']==candidate_id and e['payload']['stage']==stage]
+                    if rejected:raise ContractError('frozen validation previously rejected: '+stage)
+                    self.validate(candidate_id,stage)
+                version=self.promote(candidate_id)
+                result={'candidate_id':candidate_id,'kind':kind,'status':'promoted','version':version}
         except (ContractError,OSError,ValueError,KeyError) as error:
             result={'candidate_id':candidate_id,'kind':kind,'status':'rejected','reason':str(error)}
         result['budget']=self.store.budget()
@@ -387,6 +411,7 @@ class Evolution:
     def verified_candidate(self, candidate_id):
         identifier(candidate_id)
         candidate = read_json(self.root / "candidates" / candidate_id / "candidate.json")
+        if candidate.get('status')=='measurement_required':raise ContractError('measurement handoff is not a promotable implementation')
         plan = read_json(self.root / "candidates" / candidate_id / "plan.json")
         if digest(plan) != candidate["plan_hash"]:
             raise ContractError("plan changed")
@@ -401,10 +426,11 @@ class Evolution:
         return candidate
 
     def _verify_proposal(self,candidate):
-        committed=[e['payload'] for e in self.store.events() if e['kind']=='candidate_implemented'
+        committed=[e['payload'] for e in self.store.events() if e['kind'] in {'candidate_implemented','measurement_handoff_recorded'}
                    and e['payload']['candidate_id']==candidate['candidate_id']]
         if not committed:return
         reference=committed[-1].get('proposal_ref')
+        if committed[-1].get('status')=='measurement_required' and candidate!=committed[-1]:raise ContractError('measurement handoff projection changed')
         if candidate.get('proposal_ref')!=reference:raise ContractError('candidate proposal projection changed')
         if reference:self.artifacts.verify(reference)
 
@@ -442,7 +468,7 @@ class Evolution:
         integrity=self.store.verify()
         count=0
         for event in self.store.events():
-            if event['kind']=='candidate_implemented' and event['payload'].get('proposal_ref'):
+            if event['kind'] in {'candidate_implemented','measurement_handoff_recorded'} and event['payload'].get('proposal_ref'):
                 self.artifacts.verify(event['payload']['proposal_ref']);count+=1
             if event['kind']=='candidate_generation_recovered':
                 for ref in event['payload']['receipts'].values():self.artifacts.verify(ref);count+=1

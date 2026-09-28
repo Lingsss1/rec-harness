@@ -27,6 +27,12 @@ class AutonomousEvolution:
             ids=set(config['plan']['development_ids'])
             if not set(config['context']['measurement_gap']['experiment_refs']).issubset(ids):
                 raise ContractError('tool validation must exclude the measurement trigger development experiments')
+        if 'optimizer_measurement_source' in config:
+            from .optimizer_handoff import load_context
+            if config['kind']!='tool' or config.get('context'):raise ContractError('optimizer handoff requires a tool without overriding context')
+            config['context']=load_context(config.pop('optimizer_measurement_source'))
+            if config['context']['source']['task_id'] not in config['plan']['development_ids']:
+                raise ContractError('tool validation must exclude optimizer source task')
         root.mkdir(parents=True,exist_ok=True);evolution=Evolution(root)
         try:
             if 'source' in config:
@@ -41,6 +47,12 @@ class AutonomousEvolution:
                 validate_policy(config['harness_base_policy'])
                 config['context']={**config['context'],'base_policy':config['harness_base_policy'],
                     'patch_semantics':'Apply patch_diff to base_policy: replace supplied top-level fields, merge supplied prompt roles, preserve omitted fields. Validators evaluate the complete resulting policy.'}
+            if 'optimizer_handoff_budget' in config:
+                from .optimizer_handoff import request
+                from .agents import schema_for
+                if config['kind']!='harness':raise ContractError('optimizer routing requires Harness evolution')
+                config['context']['measurement_handoff_request']=request(config['context'],config['optimizer_handoff_budget'])
+                config['context']['optimizer_payload_schemas']={'harness_patch':schema_for('optimizer'),'measurement_gap':schema_for('measurement')}
             if config['kind']=='harness' and config.setdefault('compact_optimizer_traces',True):
                 from .trace_context import compact_traces,expand_traces
                 original=config['context'];config['context']=compact_traces(original)

@@ -18,11 +18,12 @@ class ProjectAgent(ScriptedAgent):
             model=Path(directory)/'model';model.mkdir(parents=True,exist_ok=True)
             (model/'diagnostic.py').write_text('def measure(request): return {}\n')
             return {'changed_files':['diagnostic.py'],'implementation_checks':[],'limitations':['fixture']}
-        if role=='optimizer':
+        if role in {'optimizer','optimizer_router'}:
             trace=context['context']['decision_traces'][0]['trace_id']
-            return {'patch_id':'patch','failure_pattern':'fixture','trace_refs':[trace],
+            response={'patch_id':'patch','failure_pattern':'fixture','trace_refs':[trace],
                 'causal_hypothesis':'fixture','editable_scope':['retrieval_limit'],'patch_diff':'{"retrieval_limit":25}',
                 'expected_decision_change':'fixture','regression_risks':['fixture'],'validation_plan':'frozen','rollback_version':'base'}
+            return {'kind':'harness_patch','payload_json':json.dumps(response)} if role=='optimizer_router' else response
         return super().run(role,context,directory)
 
 class DiscoverAgent(ProjectAgent):
@@ -112,12 +113,12 @@ class ProjectTests(unittest.TestCase):
         write_json(path,config);bases=[]
         class IncrementalOptimizer(ProjectAgent):
             def run(agent,role,context,directory):
-                response=super().run(role,context,directory)
-                if role=='optimizer':
+                response=super().run('optimizer' if role=='optimizer_router' else role,context,directory)
+                if role in {'optimizer','optimizer_router'}:
                     bases.append(context['context']['base_policy'])
                     if len(bases)==2:
                         response.update(editable_scope=['prompts.lead'],patch_diff=json.dumps({'prompts':{'lead':'Check contrary evidence'}}))
-                return response
+                return {'kind':'harness_patch','payload_json':json.dumps(response)} if role=='optimizer_router' else response
         agent=IncrementalOptimizer()
         report=autoresearch(self.campaign,path,agent=agent)
         self.assertEqual([e['kind'] for e in report['episodes']],['model','harness','model','harness','model'])

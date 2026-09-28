@@ -39,6 +39,8 @@ def configuration(path):
         config['diagnostic_registry']['registry']=str((path.parent/config['diagnostic_registry']['registry']).resolve())
     if 'measurement_source' in config:
         config['measurement_source']['campaign']=str((path.parent/config['measurement_source']['campaign']).resolve())
+    if 'optimizer_measurement_source' in config:
+        config['optimizer_measurement_source']=str((path.parent/config['optimizer_measurement_source']).resolve())
     if 'trace_source' in config:
         config['trace_source']['campaign']=str((path.parent/config['trace_source']['campaign']).resolve())
     for key in ('development_memory_files','development_history','initial_memory_files'):

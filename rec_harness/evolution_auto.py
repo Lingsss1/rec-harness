@@ -12,13 +12,16 @@ class AutonomousEvolution:
         if root.exists() and any(root.iterdir()):raise ContractError('evolution campaign directory must be empty')
         config=dict(configuration);identifier(config['candidate_id'])
         if config['kind'] not in STAGES:raise ContractError('tool or harness evolution required')
-        if 'trace_source' in config:
-            from .decision_traces import collect_traces
+        if 'trace_source' in config and 'trace_sources' in config:raise ContractError('supply trace_source or trace_sources, not both')
+        if 'trace_source' in config or 'trace_sources' in config:
+            from .decision_traces import collect_traces,collect_trace_set,source_task_ids
             if config['kind']!='harness' or config.get('context') or 'measurement_source' in config:raise ContractError('trace trigger requires a Harness candidate without overriding context')
-            source=config.pop('trace_source')
-            config['context']=collect_traces(source['campaign'],roles=source.get('roles'),cutoff_seq=source.get('cutoff_seq'))
-            if config['context']['source']['task_id'] not in config['plan']['development_ids']:
-                raise ContractError('Harness validation must exclude the trace source development task')
+            if 'trace_sources' in config:config['context']=collect_trace_set(config.pop('trace_sources'))
+            else:
+                source=config.pop('trace_source')
+                config['context']=collect_traces(source['campaign'],roles=source.get('roles'),cutoff_seq=source.get('cutoff_seq'))
+            if not source_task_ids(config['context']).issubset(config['plan']['development_ids']):
+                raise ContractError('Harness validation must exclude every trace source development task')
         if 'measurement_source' in config:
             from .measurement_gaps import evolution_context
             if config['kind']!='tool' or config.get('context'):raise ContractError('measurement trigger requires a tool candidate without an overriding context')
@@ -31,8 +34,9 @@ class AutonomousEvolution:
             from .optimizer_handoff import load_context
             if config['kind']!='tool' or config.get('context'):raise ContractError('optimizer handoff requires a tool without overriding context')
             config['context']=load_context(config.pop('optimizer_measurement_source'))
-            if config['context']['source']['task_id'] not in config['plan']['development_ids']:
-                raise ContractError('tool validation must exclude optimizer source task')
+            from .decision_traces import source_task_ids
+            if not source_task_ids(config['context']).issubset(config['plan']['development_ids']):
+                raise ContractError('tool validation must exclude every optimizer source task')
         if config['kind']=='tool':
             from .agents import search_policy
             backend=dict(config.get('agent_backend',{}));configured=backend.get('web_search')

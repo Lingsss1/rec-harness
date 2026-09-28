@@ -61,11 +61,15 @@ def request(context,budget):
         try:observations=visible_measurements(visible,trace.get('model_version'),rows)
         except (ContractError,TypeError):continue
         evidence.append({'trace_id':trace['trace_id'],'model_version':trace.get('model_version'),
+            **({k:trace[k] for k in ['task_id','protocol_hash','source_prefix_hash']} if 'source_prefix_hash' in trace else {}),
             'trace_hash':digest(trace),'rows':rows,'diagnostic':diagnostic,**observations})
     value={'allowed_evidence_refs':[e['trace_id'] for e in evidence],'trace_evidence':evidence,
         'diagnostic':next((e['diagnostic'] for e in reversed(evidence) if e['diagnostic']),None),
         'measurement_contract':{'development_budget':budget,'available_artifacts':['supplied public development aggregates'],
             'instructions':'Cite only allowed trace IDs. Missing candidate outcomes or inaccessible private artifacts are not measurement gaps. Require satisfied data/applicability and one independently testable requirement.'}}
+    if original.get('source',{}).get('kind')=='multiple_frozen_prefixes':
+        value['diagnostic']=None
+        value['measurement_contract']['source_scope']='Multiple task/protocol prefixes; cite scoped trace IDs and compare their diagnostics separately. No aggregate diagnostic or pooled independent sample is implied.'
     if any(row.get('activation_diagnostics') or row.get('block_score_diagnostics') for row in evidence):
         value['measurement_contract']['authoring_evidence_scope']='Includes public observations already visible in source traces, with their original scope and limitations. This does not expand the tool runtime input contract or authorize private artifacts.'
     public_only(value);return value

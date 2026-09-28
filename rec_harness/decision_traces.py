@@ -5,6 +5,39 @@ from .memory_view import restore
 from .store import Store
 
 
+def collect_trace_set(sources):
+    """Union explicit immutable prefixes without conflating local role IDs."""
+    if not isinstance(sources,list) or not sources:raise ContractError('nonempty trace_sources required')
+    prefixes={};traces=[];calls=set();paths=set()
+    for source in sources:
+        if not isinstance(source,dict) or 'campaign' not in source or set(source)-{'campaign','roles','cutoff_seq'}:
+            raise ContractError('trace source requires campaign and optional roles/cutoff_seq')
+        path=Path(source['campaign']).resolve()
+        if path in paths:raise ContractError('duplicate trace source campaign')
+        paths.add(path)
+        packet=collect_traces(path,roles=source.get('roles'),cutoff_seq=source.get('cutoff_seq'))
+        prefix=packet['hash'];prefixes[prefix]=packet['source']
+        for trace in packet['decision_traces']:
+            call=(trace['submitted_event'],trace['completed_event'])
+            if call in calls:raise ContractError('duplicate role evidence across trace sources')
+            calls.add(call)
+            traces.append({**trace,'trace_id':'trace-'+digest([prefix,trace['trace_id']]),
+                'source_trace_id':trace['trace_id'],'source_trace_hash':digest(trace),'source_prefix_hash':prefix})
+    # Stable sort groups prefixes while preserving their committed event order.
+    prefixes=dict(sorted(prefixes.items()));traces.sort(key=lambda row:row['source_prefix_hash'])
+    identity=digest(prefixes)
+    result={'schema':'research-decision-prefix-set-v1','decision_traces':traces,
+        'source':{'kind':'multiple_frozen_prefixes','task_id':'trace-set-'+identity,
+            'task_ids':sorted({source['task_id'] for source in prefixes.values()}),'prefixes':prefixes},
+        'instructions':'Each trace has a unique trace_id for optimizer citations. source_trace_id preserves its local role ID; source_trace_hash binds the unmodified trace. source_prefix_hash selects its independent frozen source prefix. Do not merge task/protocol/model scope or count repeated roles as independent experiments. Never assign outcomes to unexecuted alternatives.'}
+    public_only(result);result['hash']=digest(result);return result
+
+
+def source_task_ids(context):
+    source=context['source']
+    return set(source['task_ids']) if source.get('kind')=='multiple_frozen_prefixes' else {source['task_id']}
+
+
 def collect_traces(campaign,*,roles=None,cutoff_seq=None):
     root=Path(campaign);amazon=(root/'amazon-auto.json').exists()
     config=read_json(root/('amazon-auto.json' if amazon else 'campaign.json'))

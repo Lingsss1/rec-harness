@@ -596,3 +596,5 @@ python3 -m rec_harness amazon-progress /path/to/amazon-campaign
 新项目的后继记忆默认启用来源一致性检查：恢复时从已提交前驱重建导出并核对缓存，拒绝替换包与提交后改变的前驱事件链，详见[后继记忆绑定](implementation/successor-memory-binding.md)。
 
 项目运行期间或结束后，可用 `python3 -m rec_harness project-report /path/to/project --format markdown` 查看各回合及嵌套验证的角色调用、费用和待结算项；[报表范围与真实核验](implementation/project-report.md)。此命令只读，不触发恢复或额外调用。
+
+Harness 演化可使用 `trace_sources` 收集多个 campaign 的独立冻结前缀，避免手工拼接及本地角色 ID 冲突。所有来源任务必须排除在独立验证之外；项目模板和测量转交保留完整来源集合，详见[多来源轨迹入口](implementation/multi-trace-sources.md)。

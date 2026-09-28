@@ -164,7 +164,9 @@ class ResearchProject:
             if state.get('pending_optimizer_handoff'):
                 config.pop('measurement_source')
                 config['optimizer_measurement_source']=str(self.root/state['pending_optimizer_handoff'])
-                ids=ids+[read_json(source/('amazon-auto.json' if (source/'amazon-auto.json').exists() else 'campaign.json'))['task_id']]
+                from .optimizer_handoff import load_context
+                from .decision_traces import source_task_ids
+                ids=ids+sorted(source_task_ids(load_context(config['optimizer_measurement_source'])))
             if state.get('active_tool') and self.config.get('inherit_tool_source'):
                 from .evolution import Evolution
                 previous=Evolution(self.root/state['active_tool'])
@@ -179,9 +181,18 @@ class ResearchProject:
                         'implementation_hash':candidate['implementation_hash'],'plan_hash':candidate['plan_hash']}
                 finally:previous.store.close()
         else:
-            config['trace_source']={'campaign':str(source)}
             source_config=read_json(source/('amazon-auto.json' if (source/'amazon-auto.json').exists() else 'campaign.json'))
             ids=[source_config['task_id']]
+            if 'trace_sources' in config:
+                config.pop('trace_source',None)
+                sources=config['trace_sources']
+                if not isinstance(sources,list) or not sources:raise ContractError('nonempty project trace_sources required')
+                if not any(Path(item['campaign']).resolve()==source.resolve() for item in sources):
+                    sources.append({'campaign':str(source)})
+                for item in sources:
+                    folder=Path(item['campaign'])
+                    ids.append(read_json(folder/('amazon-auto.json' if (folder/'amazon-auto.json').exists() else 'campaign.json'))['task_id'])
+            else:config['trace_source']={'campaign':str(source)}
             if self.config.get('inherit_harness_policy'):
                 config['harness_base_policy']=source_config.get('research_policy',{})
             if self.config.get('optimizer_measurement_handoff'):

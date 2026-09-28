@@ -6,7 +6,11 @@
 
 ## 当前交付与模型结果
 
-- 最新交付为 [v29](install-acceptance-v29.md)：144 个模块逐字节一致，20 个入口、637 项安装回归全过，零跳过，已包含 Amazon Harness 三阶段实现。下文“晚于 v28”保留历史验收时点。
+- 最新交付为 [v30](install-acceptance-v30.md)：144 个模块逐字节一致，20 个入口、639 项安装回归全过，零跳过，包含 Amazon Harness 三阶段及紧凑清单。下文“晚于 v28/v29”保留历史验收时点。
+
+- 已将封存选中的 [NextItNet v3 源码](../../examples/amazon/selected-nextitnet-v3/README.md)、对应基线、补丁和协议摘要交付到源码 checkout。两个源码哈希与旧收据一致，补丁应用后逐字节等于候选；没有依据确认结果重新调优或新增训练。
+
+- 历史交付 [v29](install-acceptance-v29.md)：144 个模块逐字节一致，20 个入口、637 项安装回归全过，零跳过，包含 Amazon Harness 三阶段实现。
 
 - [Amazon evidence 前缀真实验收](../experiments/amazon-harness-prefix-live-v1.md)：两次 Codex 传输及合同检查成功，2 BCU；恢复零新增调用。操作者提示、一个历史前缀，不是优化器或在线模型效用验收。
 

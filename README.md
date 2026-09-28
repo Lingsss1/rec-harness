@@ -20,6 +20,8 @@
 
 ## 快速运行
 
+已封存选中的 Amazon NextItNet 候选、对应基线及单行改动补丁见[模型源码交付](examples/amazon/selected-nextitnet-v3/README.md)。源码保持验收时的精确哈希；开发/确认结果及限制见同页，不包含最终测试结论。
+
 连续多轮、隔离评估及 NextItNet 自动研究使用 [`autoresearch` 单入口](docs/autoresearch.md)，已有[真实两轮验收](docs/autoresearch-acceptance.md)。模型、工具和 Harness 三个循环联动使用其中的[项目总调度](docs/autoresearch.md#项目总调度)，不是单次 `run --rounds 1`。
 
 需要 Python 3.11+ 和已登录的 Codex CLI。Python 运行时无第三方依赖。

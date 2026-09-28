@@ -2,6 +2,8 @@
 
 目标保持为完整方案实现及 Amazon NextItNet 对比优化。小型示例不构成完成证据。
 
+优化器新增[轨迹上下文无损共享](optimizer-trace-sharing.md)：完全相同的 visible_state 字段按 hash 共用，保留每条轨迹的完整可见状态及角色输出。真实历史输入从 210,942 降至 168,201 字节且完整还原一致；没有新增 Codex 调用，不换算 token/费用改善。
+
 [真实 Codex 增量 Harness 验收](../experiments/harness-incremental-codex-v1.md)已通过：新增一次 optimizer 调用，最小 evaluation 补丁合并后保留已有检索量及 knowledge 提示词，提案 CAS/6 节点 6 关系/无新增调用恢复通过。仅合同集成验收，未运行效用验证器、训练或晋升。
 
 连续工具更新已修复多文件发布遗漏：增量 changed_files 与已核验的继承文件合并成完整实现，未声明修改/删除拒绝。完整源码回归 410 项通过（21 项环境相关跳过），详见[连续工具更新](successive-tools.md)。无新增真实角色或训练任务。

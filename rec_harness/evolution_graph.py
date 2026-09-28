@@ -27,6 +27,9 @@ def lifecycle_graph(events,contexts=None,proposals=None):
             context=(contexts or {}).get(candidate)
             if context is not None:
                 if digest(context)!=value['context_hash']:raise ContractError('evolution graph context changed')
+                if context.get('trace_context_encoding',{}).get('schema')=='shared-trace-fields-v1':
+                    from .trace_context import expand_traces
+                    context=expand_traces(context)
                 predecessor=context.get('tool_predecessor')
                 if predecessor and value['kind']=='tool':
                     source_id='evolution-source-tool-'+digest([candidate,predecessor])[:32]
@@ -70,7 +73,11 @@ def lifecycle_graph(events,contexts=None,proposals=None):
                         'proposal_ref':value['proposal_ref'],'status':'provisional'},candidate,protocol,event)
                     nodes[hypothesis]['attrs']['origin']='agent_hypothesis'
                     link(parent,hypothesis,'ADDRESSES',event,candidate)
-                    traces={t['trace_id']:t for t in (contexts or {}).get(candidate,{}).get('decision_traces',[])}
+                    trace_context=(contexts or {}).get(candidate,{})
+                    if trace_context.get('trace_context_encoding',{}).get('schema')=='shared-trace-fields-v1':
+                        from .trace_context import expand_traces
+                        trace_context=expand_traces(trace_context)
+                    traces={t['trace_id']:t for t in trace_context.get('decision_traces',[])}
                     for reference in proposal['trace_refs']:
                         if reference not in traces:continue  # Legacy references remain in the immutable proposal.
                         trace=traces[reference]

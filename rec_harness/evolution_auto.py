@@ -41,6 +41,10 @@ class AutonomousEvolution:
                 validate_policy(config['harness_base_policy'])
                 config['context']={**config['context'],'base_policy':config['harness_base_policy'],
                     'patch_semantics':'Apply patch_diff to base_policy: replace supplied top-level fields, merge supplied prompt roles, preserve omitted fields. Validators evaluate the complete resulting policy.'}
+            if config['kind']=='harness' and config.setdefault('compact_optimizer_traces',True):
+                from .trace_context import compact_traces,expand_traces
+                original=config['context'];config['context']=compact_traces(original)
+                if expand_traces(config['context'])!=original:raise ContractError('trace sharing changed optimizer evidence')
             write_json(root/'evolution-auto.json',config)
             write_json(root/'auto-lock.json',{'config_hash':digest(config)})
             write_json(root/'state.json',{'candidate_id':config['candidate_id'],'kind':config['kind'],'status':'ready'})

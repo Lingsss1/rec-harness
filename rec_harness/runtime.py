@@ -206,7 +206,7 @@ class Research:
             public_only(context)
             frozen = digest(context)
             write_json(directory/'visible-state.json',context)
-            self.store.event("agent_submitted", {"task_id": task_id, "role": role, "input_hash": frozen, "model_version": context.get("model_version"), "graph_version": self.store.version,
+            self.store.event("agent_submitted", {"task_id": task_id, "episode_id":attempt, "role": role, "input_hash": frozen, "model_version": context.get("model_version"), "graph_version": self.store.version,
                 'visible_state_ref':self.artifacts.put(directory/'visible-state.json'),'source_snapshot':snapshot or {}})
             try:
                 response = self.agent.run(role, context, directory)

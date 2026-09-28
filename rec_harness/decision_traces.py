@@ -61,6 +61,16 @@ def collect_traces(campaign,*,roles=None,cutoff_seq=None):
             from .instruction_identity import from_archive
             instructions=from_archive(archive,artifacts)
             if instructions is not None:trace['instruction_identity']=instructions
+            if not amazon and 'episode_id' in request:
+                episode=request['episode_id'];trace['episode_id']=episode
+                feedback=[e for e in events if e['seq']<=cutoff and e['kind']=='round_completed'
+                          and e['payload'].get('attempt')==episode]
+                trace['host_feedback']={'availability':'not_committed_in_prefix'}
+                if feedback:
+                    final=feedback[-1]
+                    trace['host_feedback']={'availability':'committed','event_hash':final['hash'],
+                        'event_seq':final['seq'],'decision':final['payload']['decision'],
+                        'qualification':'Host decision for the shared episode, observed after the role call; not part of its visible input and not independent evidence per role.'}
             public_only(trace);traces.append(trace)
         if not traces:raise ContractError('no committed decision traces in requested prefix')
         if store.verify()!=integrity:raise ContractError('trace source changed while freezing')

@@ -51,6 +51,17 @@ class DecisionTraceTests(unittest.TestCase):
                 self.assertIn('model.py',trace['visible_source_snapshot'])
                 self.assertNotIn('evaluation',trace['visible_state'])
                 self.assertEqual(trace['role_output']['proposal']['base_model_id'],trace['model_version'])
+                completed=next(e for e in research.store.events() if e['kind']=='round_completed' and e['payload']['attempt']==trace['episode_id'])
+                self.assertEqual(trace['host_feedback']['decision'],completed['payload']['decision'])
+                self.assertEqual(trace['host_feedback']['event_hash'],completed['hash'])
+                earlier=collect_traces(root,roles=['hypothesis'],cutoff_seq=completed['seq']-1)['decision_traces'][0]
+                self.assertEqual(earlier['host_feedback'],{'availability':'not_committed_in_prefix'})
+                self.assertEqual(earlier['visible_state'],trace['visible_state'])
+                self.assertEqual(earlier['input_hash'],trace['input_hash'])
+                # A different episode's outcome must not overwrite this one.
+                research.store.event('round_completed',{'attempt':'unrelated','decision':{'selection':'invalid'}})
+                latest=collect_traces(root,roles=['hypothesis'])['decision_traces'][0]
+                self.assertEqual(latest['host_feedback'],trace['host_feedback'])
                 research.store.event('future_outcome',{'result':'FUTURE'})
                 self.assertEqual(collect_traces(root,roles=['hypothesis'],cutoff_seq=cutoff),package)
                 projection=root/'memory/events.jsonl'

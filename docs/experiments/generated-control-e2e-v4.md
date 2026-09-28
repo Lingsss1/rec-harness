@@ -7,3 +7,5 @@
 终态验收脚本检查两轮角色与周期归档、实际角色收到的训练前后合同、长期图中的非独立合同观测、第二轮的上一轮记忆/缺口复查、由第一轮决定的 incumbent、独立排名一致性，以及禁止新增调用/训练/评分后的精确恢复。
 
 当前状态：已启动。控制器 PID 40976、start_ticks 5892124878；观察器 PID 41036、start_ticks 5892128180。两者 boot_id 为 `17e9114f-f060-4b1d-b1dc-db95f3d07e7d`，启动时身份已核验。当前进度文件为 freeze_execution，尚无完整训练、角色周期或终态通过证据。终态以 `controller-result.json`、`watch-result.json` 和 `terminal-acceptance.json` 为准，不能以启动记录认定完成。
+
+后续进度：基线已完成，合成开发 HR@10 为 0.09375；32 用户独立复评分的排名差异为零。第一轮 evidence 角色已完成，hypothesis 已提交。`first-context-acceptance.json` 将实际 evidence 上下文和响应绑定到完成事件，核验角色输入含 verified 的训练前后合同及 gap_applicability。第一轮没有前序本 campaign GapCard，检查列表为空是预期情况；第二轮记忆交接仍待执行。该阶段记录不代表两轮终态通过。

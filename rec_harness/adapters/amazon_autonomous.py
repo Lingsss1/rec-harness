@@ -456,7 +456,8 @@ class AmazonAutoresearch:
     def _review_roles(self,folder,context,binding,cards,versions,candidate,report,history=None):
         cfg=load_config(self.study);pid=binding['proposal_id']
         graph_path=self.study/'research-readouts'/(pid+'-graph.json')
-        graph=read_json(graph_path) if graph_path.exists() else ingest_development(self.study,pid)
+        graph=read_json(graph_path) if graph_path.exists() else ingest_development(self.study,pid,
+            include_method_sources=self.config.get('require_method_sources',False))
         if 'baseline_history' in context:
             from .amazon_history_graph import attach_history
             graph=attach_history(self,folder,graph,context['baseline_history'])

@@ -9,7 +9,7 @@ from .amazon_evidence import ingest
 from .amazon_selection import development_readout
 
 
-def ingest_development(root, proposal_id):
+def ingest_development(root, proposal_id, *, include_method_sources=False):
     root=Path(root)
     with (root/'controller.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -44,6 +44,12 @@ def ingest_development(root, proposal_id):
                 edges=[edge(prefix+'-targets',ids['proposal'],ids['gap'],'TARGETS',[],task,store.version+1),
                        edge(prefix+'-uses',ids['proposal'],ids['method'],'USES',[],task,store.version+1),
                        edge(prefix+'-tests',fact_id,ids['proposal'],'TESTS',[fact_id],task,store.version+1)]
+                if include_method_sources:
+                    from rec_harness.method_sources import graph_records
+                    method=plan['cards']['method']
+                    next(n for n in nodes if n['id']==ids['method'])['attrs']['origin']=method['origin']
+                    source_nodes,source_edges=graph_records(method,ids['method'],task,protocol,store.version+1)
+                    nodes.extend(source_nodes);edges.extend(source_edges)
                 for source in sources:
                     edges.append(edge(prefix+'-source-'+digest(source)[:12],fact_id,source,'DERIVED_FROM',[source],task,store.version+1))
                 for row in summary['slices']:

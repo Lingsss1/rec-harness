@@ -527,12 +527,16 @@ class Research:
                     if self.config.get('single_incumbent_control') and proposal['controls']!=[state['incumbent']]:
                         raise ContractError('this adapter requires the existing incumbent as its sole control')
                     write_json(decision_dir / "action.json", proposal)
+                    source_nodes,source_edges=[],[]
+                    if self.config.get('require_method_sources'):
+                        from .method_sources import graph_records
+                        source_nodes,source_edges=graph_records(method,attempt+'-method',self.task,self.protocol_hash,self.store.version+1)
                     self.store.patch({"base_version": self.store.version, "nodes": [
                         node(attempt + "-gap", "GapHypothesis", gap, self.task, self.protocol_hash, "agent_hypothesis"),
                         node(attempt + "-method", "Method", method, self.task, self.protocol_hash, method["origin"]),
-                        node(attempt + "-proposal", "Proposal", proposal, self.task, self.protocol_hash, "agent_hypothesis")], "edges": [
+                        node(attempt + "-proposal", "Proposal", proposal, self.task, self.protocol_hash, "agent_hypothesis")]+source_nodes, "edges": [
                         edge(attempt + "-targets", attempt + "-proposal", attempt + "-gap", "TARGETS", [], self.task, self.store.version + 1),
-                        edge(attempt + "-uses", attempt + "-proposal", attempt + "-method", "USES", [], self.task, self.store.version + 1)]})
+                        edge(attempt + "-uses", attempt + "-proposal", attempt + "-method", "USES", [], self.task, self.store.version + 1)]+source_edges})
                     implementation, directory = self._agent("experiment", {**self.context('experiment', state), "gap": gap, "method": method, "proposal": proposal}, attempt, before)
                     # All files, including newly added source, are retained; only allowlisted source
                     # or explicitly reported changes enter the next model snapshot.

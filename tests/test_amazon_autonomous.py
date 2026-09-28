@@ -403,7 +403,8 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                 if not marker.exists():
                     control_fits.append(model_versions);write_json(marker,{'completed':True})
                     if interrupt_control:raise KeyboardInterrupt()
-            def graph(root,pid):
+            def graph(root,pid,*,include_method_sources=False):
+                self_test.assertTrue(include_method_sources)
                 s=Store(Path(root)/'memory');g={'task_id':'graph-task','protocol_hash':'protocol','graph_version':s.version,'nodes':[],'edges':[]};s.close()
                 write_json(Path(root)/'research-readouts'/(pid+'-graph.json'),g);return g
             report={'schema':'amazon-development-selection-v1','proposal_id':'fixture','plan_handoff_hash':'fixture',

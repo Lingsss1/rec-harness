@@ -53,3 +53,27 @@ def select(nodes, edges, counter, role, query, limit, canonical):
             reasons[key] = 'ranked_fill'
     return selected, {'method': 'role-lexical-two-hop-v2',
                       'role_type_priority': list(priorities), 'selection_reasons': reasons}
+
+
+def revision_visibility(nodes, edges, selected):
+    """Describe revision truncation without changing a claim's scientific status.
+
+    Store supplies only task/protocol/reveal-visible nodes and edges. Omitted
+    source bodies stay omitted; at most one compact entry is added per returned
+    node. A proposed SUPERSEDES link is not itself a host-confirmed retraction.
+    """
+    visible=set(selected);incoming={}
+    for relation in edges:
+        if relation['relation']=='SUPERSEDES':
+            incoming.setdefault(relation['target'],set()).add(relation['source'])
+    rows=[]
+    for identity in selected:
+        status=nodes[identity]['attrs'].get('status')
+        sources=incoming.get(identity,set())
+        if not sources and status not in {'superseded','retracted'}:continue
+        rows.append({'node_id':identity,'declared_status':status,
+            'visible_superseders':sorted(sources&visible),
+            'omitted_superseder_count':len(sources-visible),
+            'requires_revision_review':True})
+    return {'entries':rows,
+        'scope':'Declared retirement and incoming SUPERSEDES links in the allowed evidence snapshot. A revision link does not automatically retire its target or establish the replacement scientifically. Omitted superseders are not supplied as evidence.'}

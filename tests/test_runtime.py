@@ -190,6 +190,41 @@ class GraphTests(Temporary):
         bundle = self.store.bundle("t", "p", "hypothesis", query="matching", limit=3)
         self.assertIn("counter", [n["id"] for n in bundle["nodes"]])
 
+    def test_revision_warning_survives_truncation_without_revealing_future_sources(self):
+        from rec_harness.memory_view import paired_views,restore
+        old=node('old','Claim',{'status':'provisional','scope':'t','evidence_refs':[],
+                              'description':'matching'},'t','p','agent_hypothesis')
+        new=node('new','Claim',{'status':'provisional','scope':'t','evidence_refs':[]},'t','p','agent_hypothesis')
+        retired=node('retired','Claim',{'status':'retracted','scope':'t','evidence_refs':[]},'t','p','agent_hypothesis')
+        relation=edge('revision','new','old','SUPERSEDES',[],'t',1)
+        relation['attrs'].update(origin='agent_hypothesis',status='provisional')
+        basis=node('future-basis','Observation',{},'t','p')
+        relation['attrs']['evidence_refs']=['future-basis']
+        self.patch([old,new,retired,basis],[relation])
+        original=self.store.snapshot()
+        compact=self.store.bundle('t','p','knowledge',query='matching',limit=1)
+        self.assertEqual([n['id'] for n in compact['nodes']],['old'])
+        self.assertEqual(compact['edges'],[])
+        warning=compact['revision_visibility']['entries'][0]
+        self.assertEqual(warning['declared_status'],'provisional')
+        self.assertEqual(warning['visible_superseders'],[])
+        self.assertEqual(warning['omitted_superseder_count'],1)
+        self.assertNotIn('new',str(warning))
+        complete=self.store.bundle('t','p','knowledge',query='matching',limit=3)
+        warnings={row['node_id']:row for row in complete['revision_visibility']['entries']}
+        self.assertEqual(warnings['old']['visible_superseders'],['new'])
+        self.assertEqual(warnings['old']['omitted_superseder_count'],0)
+        self.assertEqual(warnings['retired']['declared_status'],'retracted')
+        hidden=self.store.bundle('t','p','knowledge',query='matching',limit=1,revealed=['old'])
+        self.assertNotIn('revision_visibility',hidden)
+        hidden_basis=self.store.bundle('t','p','knowledge',limit=3,revealed=['old','new','retired'])
+        self.assertEqual(hidden_basis['edges'],[])
+        self.assertFalse(any(row['node_id']=='old' for row in hidden_basis['revision_visibility']['entries']))
+        self.assertNotIn('future-basis',str(hidden_basis))
+        pair=paired_views(compact)
+        self.assertEqual(restore(pair['flat']),restore(pair['graph']))
+        self.assertEqual(self.store.snapshot(),original)
+
     def test_role_priorities_keep_counterevidence_and_visibility_boundary(self):
         self.patch([node('obs', 'Observation', {}, 't', 'p'),
                     node('method', 'Method', {}, 't', 'p'),

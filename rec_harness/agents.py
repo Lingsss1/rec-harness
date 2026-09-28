@@ -52,25 +52,8 @@ def search_instruction(mode):
 def search_receipt(directory, mode, response=None):
     """Archive observed CLI search events; enabling search alone is not retrieval."""
     directory = Path(directory)
-    from .core import file_hash
-    log = directory / "stdout.jsonl"
-    events = []
-    if log.exists():
-        for line in log.read_text().splitlines():
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(event, dict) and isinstance(event.get("item"), dict):
-                if event["item"].get("type") in {"web_search", "web_search_call"}:
-                    events.append(event)
-    sources = (response or {}).get("method", {}).get("sources", [])
-    write_json(directory / "literature-search.json", {
-        "schema": "codex-literature-search-v1", "mode": mode,
-        "observed_search_events": events, "search_observed": bool(events),
-        "reported_sources": sources, "sources_status": "agent_reported_unverified",
-        "stdout_sha256": file_hash(log) if log.exists() else None,
-        "qualification": "CLI events and agent-reported citations; not source-content or mechanism verification"})
+    from .literature import receipt
+    write_json(directory / "literature-search.json",receipt(directory / "stdout.jsonl",mode,response))
 
 
 def object_schema(properties):

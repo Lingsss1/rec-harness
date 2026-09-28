@@ -14,6 +14,7 @@ class DecisionTraceTests(unittest.TestCase):
         from rec_harness.agents import schema_for
         from rec_harness.core import write_json
         from rec_harness.instruction_identity import manifest
+        from rec_harness.agents import search_receipt
         class RecordedAgent(ScriptedAgent):
             def run(self,role,context,directory):
                 result=super().run(role,context,directory)
@@ -21,6 +22,8 @@ class DecisionTraceTests(unittest.TestCase):
                 request=read_json(Path(directory)/'request.json')
                 write_json(Path(directory)/'request.json',{**request,'prompt':prompt,'instruction_identity':manifest(prompt,schema)})
                 write_json(Path(directory)/'schema.json',schema)
+                (Path(directory)/'stdout.jsonl').write_text('{"type":"item.completed","item":{"type":"web_search","query":"fixture"}}\n' if role=='hypothesis' else '')
+                search_receipt(directory,'live' if role=='hypothesis' else 'disabled',result)
                 return result
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)/'campaign';config=read_json(ROOT/'examples/toy/campaign.json')
@@ -33,6 +36,10 @@ class DecisionTraceTests(unittest.TestCase):
                     value=trace['instruction_identity']
                     self.assertEqual(value['prompt_hash'],manifest('fixture '+trace['role'],schema_for(trace['role']))['prompt_hash'])
                     research.artifacts.verify(value['request_ref']);research.artifacts.verify(value['schema_ref'])
+                    search=trace['literature_search']
+                    self.assertEqual(search['search_observed'],trace['role']=='hypothesis')
+                    research.artifacts.verify(search['receipt_ref']);research.artifacts.verify(search['stdout_ref'])
+                    self.assertNotIn('literature_search',trace['visible_state'])
             finally:research.store.close()
 
     def test_prefix_references_actual_inputs_and_excludes_later_events(self):

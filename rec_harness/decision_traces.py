@@ -61,6 +61,9 @@ def collect_traces(campaign,*,roles=None,cutoff_seq=None):
             from .instruction_identity import from_archive
             instructions=from_archive(archive,artifacts)
             if instructions is not None:trace['instruction_identity']=instructions
+            from .literature import from_archive as literature_from_archive
+            literature=literature_from_archive(archive,artifacts)
+            if literature is not None:trace['literature_search']=literature
             if amazon and config.get('trace_development_feedback') and 'episode_id' in request:
                 from .adapters.amazon_trace_feedback import project
                 trace['episode_id']=request['episode_id']

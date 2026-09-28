@@ -24,13 +24,33 @@ def amazon_development_rows(visible):
     return rows
 
 
+
+def visible_measurements(visible,model_version,rows):
+    """Preserve public observations from the bound trace, not its private archives."""
+    from .diagnostics import validate_measurement
+    fields={'observation_id','model_version','dataset','seed','measurements','limitations','scope'}
+    result={};conditions={(row.get('dataset'),row.get('seed')) for row in rows}
+    for field in ['activation_diagnostics','block_score_diagnostics']:
+        values=visible.get(field,[])
+        if not isinstance(values,list):raise ContractError('invalid trace observation list')
+        for row in values:
+            if (not isinstance(row,dict) or set(row)!=fields or row['model_version']!=model_version
+                or (row['dataset'],row['seed']) not in conditions
+                or not isinstance(row['observation_id'],str) or not row['observation_id']
+                or not isinstance(row['scope'],str) or not row['scope']):
+                raise ContractError('trace observation differs from current model or development conditions')
+            validate_measurement({k:row[k] for k in ['measurements','limitations']})
+        if values:result[field]=values
+    return result
+
+
 def request(context,budget):
     number(budget,'optimizer measurement development budget',0)
     original=expand_traces(context);evidence=[]
     for trace in original.get('decision_traces',[]):
         if trace.get('transport_status')!='success' or trace.get('role_admission')=='rejected':continue
         visible=trace.get('visible_state',{});diagnostic=visible.get('diagnostic')
-        if diagnostic and diagnostic.get('status')!='success':continue
+        if visible.get('measurement_failure') or (diagnostic and diagnostic.get('status')!='success'):continue
         baseline=visible.get('baseline')
         rows=baseline.get('runs',[]) if isinstance(baseline,dict) else []
         if rows and all(r.get('valid') is True for r in rows):
@@ -38,12 +58,16 @@ def request(context,budget):
         else:
             rows=amazon_development_rows(visible)
             if rows is None:continue
+        try:observations=visible_measurements(visible,trace.get('model_version'),rows)
+        except (ContractError,TypeError):continue
         evidence.append({'trace_id':trace['trace_id'],'model_version':trace.get('model_version'),
-            'trace_hash':digest(trace),'rows':rows,'diagnostic':diagnostic})
+            'trace_hash':digest(trace),'rows':rows,'diagnostic':diagnostic,**observations})
     value={'allowed_evidence_refs':[e['trace_id'] for e in evidence],'trace_evidence':evidence,
         'diagnostic':next((e['diagnostic'] for e in reversed(evidence) if e['diagnostic']),None),
         'measurement_contract':{'development_budget':budget,'available_artifacts':['supplied public development aggregates'],
             'instructions':'Cite only allowed trace IDs. Missing candidate outcomes or inaccessible private artifacts are not measurement gaps. Require satisfied data/applicability and one independently testable requirement.'}}
+    if any(row.get('activation_diagnostics') or row.get('block_score_diagnostics') for row in evidence):
+        value['measurement_contract']['authoring_evidence_scope']='Includes public observations already visible in source traces, with their original scope and limitations. This does not expand the tool runtime input contract or authorize private artifacts.'
     public_only(value);return value
 
 
@@ -57,6 +81,9 @@ def validate(context,response,candidate_id):
         raise ContractError('proposed measurement already exists in cited baseline metrics')
     if any(rule['measurement'] in (r['diagnostic'] or {}).get('output',{}).get('measurements',{}) for r in selected):
         raise ContractError('proposed measurement already exists in cited trace')
+    if any(rule['measurement'] in observation['measurements'] for row in selected
+           for field in ['activation_diagnostics','block_score_diagnostics'] for observation in row.get(field,[])):
+        raise ContractError('proposed measurement already exists in cited trace observations')
     gap={'measurement_gap_id':'optimizer-measurement-gap-'+digest([candidate_id,response,packet]),
         'related_gap_ids':[],'experiment_refs':[], 'blocked_decision':rule['blocked_decision'],
         'competing_explanations':rule['competing_explanations'],

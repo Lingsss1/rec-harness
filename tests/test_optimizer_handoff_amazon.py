@@ -47,3 +47,66 @@ class AmazonHandoffEvidenceTests(unittest.TestCase):
         self.assertEqual(request(context,10)['allowed_evidence_refs'],['trace'])
         visible.pop('baseline_execution_evidence')
         self.assertEqual(request(context,10)['allowed_evidence_refs'],[])
+
+    def with_observations(self):
+        context=self.fixture();visible=context['decision_traces'][0]['visible_state']
+        for field,name in [('activation_diagnostics','rms'),('block_score_diagnostics','block.delta.HR@10')]:
+            visible[field]=[{'observation_id':field+'-one','model_version':'model','dataset':'A','seed':42,
+                'measurements':{name:0.1},'limitations':['fixed development weights only'],
+                'scope':'public development aggregate; no retrained intervention'}]
+        return context
+
+    def test_observations_reach_packet_and_cannot_be_proposed_as_new_measurements(self):
+        context=self.with_observations();packet=request(context,10)
+        for field in ['activation_diagnostics','block_score_diagnostics']:
+            self.assertEqual(packet['trace_evidence'][0][field],context['decision_traces'][0]['visible_state'][field])
+        review={'assessment':'measurement_gap','rationale':'fixture','evidence_refs':['trace'],
+            'prerequisites':{k:{'status':'satisfied','rationale':'fixture'} for k in ['invocation','implementation','data','applicability']},
+            'requirements':[{'measurement':'new','blocked_decision':'fixture','competing_explanations':['a','b'],
+                'cheapest_test':'fixture','development_budget':5,'acceptance_contract':'fixture'}]}
+        validate({'measurement_handoff_request':packet},review,'candidate')
+        for name in ['rms','block.delta.HR@10']:
+            review['requirements'][0]['measurement']=name
+            with self.assertRaisesRegex(ContractError,'already exists'):
+                validate({'measurement_handoff_request':packet},review,'candidate')
+        self.assertIn('does not expand',packet['measurement_contract']['authoring_evidence_scope'])
+
+    def test_failed_or_mismatched_observation_trace_is_not_usable_evidence(self):
+        for change in [{'model_version':'other'},{'seed':83},{'dataset':'other'},
+                       {'measurements':{'rms':float('nan')}},{'private_path':'excluded'},
+                       {'limitations':'missing'},{'scope':''}]:
+            with self.subTest(change=change):
+                context=self.with_observations()
+                context['decision_traces'][0]['visible_state']['activation_diagnostics'][0].update(change)
+                self.assertEqual(request(context,10)['allowed_evidence_refs'],[])
+        context=self.with_observations()
+        context['decision_traces'][0]['visible_state']['measurement_failure']='activation budget unavailable'
+        self.assertEqual(request(context,10)['allowed_evidence_refs'],[])
+
+    def test_committed_handoff_export_preserves_observations_without_source_requery(self):
+        import tempfile
+        from pathlib import Path
+        from rec_harness.core import Artifacts,digest,write_json
+        from rec_harness.optimizer_handoff import load_context
+        from rec_harness.store import Store
+        packet=request(self.with_observations(),10)
+        context={'measurement_handoff_request':packet,'source':{'task_id':'source-task'}}
+        review={'assessment':'measurement_gap','rationale':'fixture','evidence_refs':['trace'],
+            'prerequisites':{k:{'status':'satisfied','rationale':'fixture'} for k in ['invocation','implementation','data','applicability']},
+            'requirements':[{'measurement':'new','blocked_decision':'fixture','competing_explanations':['a','b'],
+                'cheapest_test':'fixture','development_budget':5,'acceptance_contract':'fixture'}]}
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);config={'context':context}
+            write_json(root/'evolution-auto.json',config)
+            write_json(root/'auto-lock.json',{'config_hash':digest(config)})
+            write_json(root/'review.json',review);objects=Artifacts(root/'objects')
+            store=Store(root/'memory')
+            try:
+                store.event('measurement_handoff_recorded',{'candidate_id':'candidate','proposal_ref':objects.put(root/'review.json'),
+                    'context_hash':digest(context),'measurement_gap':validate(context,review,'candidate')})
+                before=store.verify()
+                first=load_context(root)
+                self.assertEqual(first['observations'],packet['trace_evidence'])
+                self.assertEqual(load_context(root),first)
+                self.assertEqual(store.verify(),before)
+            finally:store.close()

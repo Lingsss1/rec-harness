@@ -704,3 +704,11 @@ Amazon 每轮新建上下文时，对本轮检索到的历史设计 GapCard 生�
 `status` 改为独立只读入口，BEGIN 快照中核验事件并读取预算/图版本，不构造可写控制器或恢复账本。Amazon 轮次完成/重开、ResearchProject 阶段采用最后已提交事件；状态文件缺失或不一致不掩盖已提交轮次。既有终态文件的 stopped/stop_reason 作为显式 terminal_overlay 保留，其他未适配控制器报告 state.json 来源。状态查询不核验进程存活。
 
 `read-only-status-acceptance-v1/acceptance.json` 对真实 v4 两轮终态重复查询，与 run-report 的状态完全一致，源状态及事件导出 hash 不变。测试覆盖 CLI 查询时禁止事件导出、陈旧/缺失状态文件、终态覆盖、失败重开与项目阶段。380 项回归，360 通过、20 项环境相关跳过。未新增研究调用或执行。
+
+### 同一 study 的跨轮解释修订
+
+新的开发评审图可从本轮检索记忆中定位既有本地开发事实，并附上相同协议、对应旧任务的 agent_hypothesis GapHypothesis 和 provisional Claim。只读取真实已有节点；外部记忆没有对应本地事实时标记 unavailable。历史节点自身的支持事实未因此变成当前任务的可比实验，不能据关联宣称因果反驳。
+
+知识角色可追加本轮解释，以 SUPERSEDES、BASED_ON、ALTERNATIVE_TO 指向历史解释。边必须来自新增节点，声明当前 task、agent_hypothesis/provisional，并引用至少一个本轮 local_evidence 开发 Experiment/Observation。禁止借此改写旧节点、让旧解释相互重连或建立跨任务 SUPPORTS/CONTRADICTS。基线历史诊断附加图时保留这些节点，已接受评审的旧上下文不追补字段。
+
+`historical-explanation-acceptance-v1/acceptance.json` 在 v4 真实第二轮视图中只读定位到第一轮的两条旧解释，来源图、角色输入和事件导出不变；没有回写新关系，也未重新调用旧角色。回归以实际 Store.patch 验证新 provisional 修订关系可提交、旧解释保持原样、缺少当前事实及跨任务直接反证拒绝。全套 381 项测试，361 通过、20 跳过；随后收紧事实类型约束的修订测试和 20 项控制器回归通过。真实角色主动修订及其研究效用仍待验收。

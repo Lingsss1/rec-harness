@@ -426,6 +426,16 @@ class AmazonAutoresearch:
             from .amazon_history_graph import attach_history
             graph=attach_history(self,folder,graph,context['baseline_history'])
             write_json(graph_path,graph)
+        if ('historical_explanation_ids' not in graph and
+            not any((folder/role/'accepted.json').exists() for role in ['evaluation','lead','knowledge'])):
+            from .amazon_memory_graph import prior_explanations
+            memory=Store(self.study/'memory',read_only=True)
+            try:
+                memory.db.execute('BEGIN')
+                memory.verify()
+                graph=prior_explanations({**graph,'protocol_hash':cfg['protocol_hash']},memory.snapshot(),context.get('research_memory',[]))
+            finally:memory.close()
+            write_json(graph_path,graph)
         from .amazon_review_evidence import admission_evidence,protocol_summary,experiment_report
         from .amazon_training_evidence import training_contract_evidence
         implementation=admission_evidence(self.study,pid,cfg['protocol_hash'],binding['candidate_model_version'],candidate)
@@ -482,6 +492,8 @@ class AmazonAutoresearch:
             'instructions':['Append new provisional explanations only. Every node attrs must include task_id/protocol_hash/origin; Claims additionally need scope/status/evidence_refs.',
                             'Evidence refs must be supplied graph node IDs, never file paths. Retain all negative slices; empty patch is valid.',
                             'Implementation author checks and limitations are reported claims, not host-verified test outcomes. Preserve relevant unresolved validation requirements; do not infer that every proposed diagnostic ran because the development cycle completed.']}
+        if graph.get('historical_explanation_ids'):
+            knowledge_context['instructions'].append('historical_explanation_ids are immutable prior local development explanations. You may append a current-scoped provisional interpretation and link FROM that new node TO an old explanation with SUPERSEDES, BASED_ON or ALTERNATIVE_TO. Edge attrs require current task scope, origin agent_hypothesis, status provisional and at least one current local_evidence development Experiment/Observation reference. Do not rewrite old nodes or assert cross-task SUPPORTS/CONTRADICTS. Missing external history remains prose context, not fabricated graph evidence.')
         self._role(folder,'knowledge',knowledge_context,validator=lambda v,d:validate_knowledge_patch(json.loads(v['patch_json']),graph))
         cycle=finalize_cycle(self.study,pid,folder)
         return lead,cycle

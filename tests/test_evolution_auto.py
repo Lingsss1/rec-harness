@@ -52,6 +52,52 @@ class EvolutionAutomationTests(unittest.TestCase):
         self.assertEqual(autoresearch(self.campaign,agent=self.agent),result)
         store=Store(self.campaign/'memory');self.assertEqual(store.verify(),before);store.close()
 
+    def test_committed_generation_recovers_before_candidate_projection_without_new_call(self):
+        from rec_harness import evolution as module
+        original=module.write_json
+        def interrupt(path,value):
+            if Path(path).name=='candidate.json' and value.get('status')=='implemented':raise KeyboardInterrupt()
+            return original(path,value)
+        with patch.object(module,'write_json',side_effect=interrupt):
+            with self.assertRaises(KeyboardInterrupt):autoresearch(self.campaign,self.config(),agent=self.agent)
+        self.assertEqual(self.agent.calls,1)
+        marker=self.campaign/'candidates/candidate/candidate.json'
+        self.assertEqual(read_json(marker)['status'],'proposed')
+        store=Store(self.campaign/'memory')
+        try:
+            self.assertEqual(sum(e['kind']=='candidate_implemented' for e in store.events()),1)
+            self.assertEqual(store.budget()['charged_or_reserved'],1)
+        finally:store.close()
+        # The event also supports reconstructing a missing projection.
+        marker.unlink()
+        result=autoresearch(self.campaign,agent=self.agent)
+        self.assertEqual(result['status'],'promoted')
+        self.assertEqual(result['budget']['charged_or_reserved'],4)
+        self.assertEqual(self.agent.calls,1)
+        self.assertEqual(autoresearch(self.campaign,agent=self.agent),result)
+        self.assertEqual(self.agent.calls,1)
+
+    def test_committed_generation_survives_unsettled_cost_without_new_generation(self):
+        original=Store.settle
+        interrupted=[]
+        def interrupt(store,task,actual,status):
+            if '-generation-' in task and not interrupted:
+                interrupted.append(True);raise KeyboardInterrupt()
+            return original(store,task,actual,status)
+        with patch.object(Store,'settle',interrupt):
+            with self.assertRaises(KeyboardInterrupt):autoresearch(self.campaign,self.config(),agent=self.agent)
+        self.assertEqual(self.agent.calls,1)
+        result=autoresearch(self.campaign,agent=self.agent)
+        self.assertEqual(result['status'],'promoted')
+        self.assertEqual(result['budget']['charged_or_reserved'],4)
+        self.assertEqual(self.agent.calls,1)
+        store=Store(self.campaign/'memory')
+        try:
+            row=store.db.execute("SELECT status,actual FROM budget WHERE id='candidate-generation-1'").fetchone()
+            self.assertEqual(row['status'],'interrupted');self.assertIsNone(row['actual'])
+            self.assertEqual(sum(e['kind']=='candidate_implemented' for e in store.events()),1)
+        finally:store.close()
+
     def test_rejected_scientific_validation_cannot_be_retried_into_promotion(self):
         result=autoresearch(self.campaign,self.config(reject='development'),agent=self.agent)
         self.assertEqual(result['status'],'rejected');self.assertEqual(result['budget']['charged_or_reserved'],3)

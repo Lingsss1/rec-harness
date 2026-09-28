@@ -132,6 +132,26 @@ class Evolution:
         directory = self.root / "candidates" / candidate_id
         frozen = {"candidate_id": candidate_id, "kind": kind, "plan_hash": digest(plan), "context_hash": digest(context), "source_hash": digest(source), "status": "proposed", "validator_hashes": validator_hashes}
         self.store.configure_budget(plan["budget"])
+        committed=[e['payload'] for e in self.store.events()
+                   if e['kind']=='candidate_implemented' and e['payload']['candidate_id']==candidate_id]
+        if committed:
+            saved=committed[-1]
+            if any(saved[key]!=frozen[key] for key in ['candidate_id','kind','plan_hash','context_hash','source_hash','validator_hashes']):
+                raise ContractError('committed evolution inputs differ')
+            if digest(saved['implementation'])!=saved['implementation_hash']:
+                raise ContractError('committed implementation identity changed')
+            for ref in saved['implementation'].values():self.artifacts.verify(ref)
+            marker=directory/'candidate.json'
+            if marker.exists():
+                current=read_json(marker)
+                if any(current[key]!=saved[key] for key in ['candidate_id','kind','plan_hash','context_hash','source_hash','validator_hashes']):
+                    raise ContractError('candidate projection inputs differ')
+                if 'implementation' in current:
+                    if (current['implementation']!=saved['implementation'] or current['implementation_hash']!=saved['implementation_hash']):
+                        raise ContractError('candidate projection implementation differs')
+                    return current
+            write_json(marker,saved)
+            return saved
         if (directory/'candidate.json').exists():
             old=read_json(directory/'candidate.json')
             if any(old[key]!=frozen[key] for key in ['candidate_id','kind','plan_hash','context_hash','source_hash','validator_hashes']):
@@ -139,9 +159,8 @@ class Evolution:
             if 'implementation' in old:
                 if digest(old['implementation'])!=old['implementation_hash']:raise ContractError('candidate implementation identity changed')
                 for ref in old['implementation'].values():self.artifacts.verify(ref)
-                committed=[e['payload'] for e in self.store.events() if e['kind']=='candidate_implemented' and e['payload']['candidate_id']==candidate_id]
-                if not committed:self.store.event('candidate_implemented',old)
-                elif committed[-1]['implementation_hash']!=old['implementation_hash']:raise ContractError('committed implementation differs')
+                # Compatibility with earlier projection-before-event commits.
+                self.store.event('candidate_implemented',old)
                 return old
             frozen=old
         else:
@@ -174,9 +193,9 @@ class Evolution:
                 if not snapshot:
                     raise ContractError("empty tool implementation")
             frozen.update(status="implemented", implementation=snapshot, implementation_hash=digest(snapshot))
-            write_json(directory / "candidate.json", frozen)
-            self.store.event("candidate_implemented", frozen)
             status = "success"
+            self.store.event("candidate_implemented", frozen)
+            write_json(directory / "candidate.json", frozen)
             return frozen
         finally:
             self.store.settle(task_id, plan["agent_cost"], status)

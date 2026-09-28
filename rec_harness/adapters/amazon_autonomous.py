@@ -35,10 +35,14 @@ from rec_harness.core import RoleTransportFailure
 
 class AmazonAutoresearch:
     @staticmethod
-    def init(root,configuration,*,review_only=False):
+    def init(root,configuration,*,review_only=False,_validation_tool=None):
         root=Path(root).resolve()
         if root.exists() and any(root.iterdir()):raise ContractError('autonomous directory must be empty')
-        config=dict(configuration);config['study']=str(Path(config['study']).resolve())
+        config=dict(configuration)
+        if 'validation_only' in config:raise ContractError('validation_only is controller-owned')
+        if _validation_tool is not None and (review_only or config.get('review_only') or 'diagnostic_registry' in config):
+            raise ContractError('validation tool cannot override a registry or enter a review-only controller')
+        config['study']=str(Path(config['study']).resolve())
         if config.get('review_only') and not review_only:raise ContractError('review-only configuration requires review entry point')
         if review_only:config['review_only']=True
         if config.get('review_predecessor'):
@@ -84,6 +88,12 @@ class AmazonAutoresearch:
             from rec_harness.core import number
             number(config.get('diagnostic_budget'),'diagnostic_budget',0)
             config['diagnostic_tool']=freeze_tool(config.pop('diagnostic_registry'),Artifacts(root/'artifacts/objects'))
+        if _validation_tool is not None:
+            from rec_harness.diagnostics import freeze_validation_tool
+            from rec_harness.core import number
+            number(config.get('diagnostic_budget'),'diagnostic_budget',0)
+            config['diagnostic_tool']=freeze_validation_tool(_validation_tool,Artifacts(root/'artifacts/objects'))
+            config['validation_only']=True
         if 'harness_registry' in config:
             from rec_harness.harness_activation import load_active_policy
             if config.get('research_policy'):raise ContractError('cannot override a promoted harness policy')

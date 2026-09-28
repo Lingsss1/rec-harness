@@ -13,6 +13,13 @@ from .amazon_selection import development_readout
 from rec_harness.knowledge import validate_knowledge_patch
 
 
+def failed_role_archives(directory):
+    """Include explicit host-repair archives as well as contract retries."""
+    directory=Path(directory)
+    return sorted({folder.name for pattern in ('*-rejected-*','*-transport-archive-*')
+                   for folder in directory.glob(pattern) if folder.is_dir()})
+
+
 def finalize_cycle(root, proposal_id, directory):
     root,directory=Path(root),Path(directory)
     decision=read_json(directory/'lead/response.json');validate_schema(decision,schema_for('lead'))
@@ -51,7 +58,7 @@ def finalize_cycle(root, proposal_id, directory):
             role_names=['evidence','hypothesis','experiment','evaluation','lead','knowledge']
             if (directory/'measurement').exists():role_names.insert(1,'measurement')
             if (directory/'evidence-corrected').exists(): role_names.insert(1,'evidence-corrected')
-            rejected=[folder.name for folder in sorted(directory.glob('*-rejected-*')) if folder.is_dir()]
+            rejected=failed_role_archives(directory)
             role_names.extend(rejected)
             for role in role_names:
                 folder=directory/role

@@ -111,6 +111,8 @@ class RoleRecoveryTests(unittest.TestCase):
             archives=list((r.root/'rounds/round-1').glob('lead-transport-archive-*'))
             self.assertEqual(len(archives),1)
             self.assertFalse(read_json(archives[0]/'rejection.json')['retryable'])
+            from rec_harness.adapters.amazon_cycle import failed_role_archives
+            self.assertIn(archives[0].name,failed_role_archives(r.root/'rounds/round-1'))
             from rec_harness.adapters.amazon_auto_audit import verify_reopen_history
             self.assertEqual(verify_reopen_history(r),1)
 
@@ -246,7 +248,10 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
     def test_generated_control_is_admitted_archived_and_recovers_without_extra_roles(self):
         self.run_pipeline(True,generated_control=True,control_metric=.55,interrupt_control=True)
 
-    def run_pipeline(self,confirmation,measurement=False,legacy_measurement=False,history=False,interrupt_control=False,extra_control=False,control_metric=.6,generated_control=False):
+    def test_transport_failure_archive_survives_cycle_completion_and_detects_tampering(self):
+        self.run_pipeline(False,transport_archive=True)
+
+    def run_pipeline(self,confirmation,measurement=False,legacy_measurement=False,history=False,interrupt_control=False,extra_control=False,control_metric=.6,generated_control=False,transport_archive=False):
         import json
         from contextlib import ExitStack
         from rec_harness.autonomous import autoresearch
@@ -292,7 +297,18 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             class Agent:
                 def run(self,role,context,target):
                     calls.append(role);response=sample(schema_for(role))
-                    if role=='evidence':response.update(gap_id='gap',model_version='legacy_incumbent',protocol_hash='protocol')
+                    if role=='evidence':
+                        response.update(gap_id='gap',model_version='legacy_incumbent',protocol_hash='protocol')
+                        if transport_archive:
+                            # Archive fixture only; failed-call accounting is exercised
+                            # separately through actual transport failure and reopening.
+                            failed=target.parent/'evidence-transport-archive-fixture';failed.mkdir()
+                            write_json(failed/'context.json',{'task_id':'failed-fixture'})
+                            write_json(failed/'request.json',{'role':'evidence'})
+                            write_json(failed/'resources.json',{'status':'crash'})
+                            write_json(failed/'process.json',{'returncode':1})
+                            write_json(failed/'rejection.json',{'retryable':False})
+                            (failed/'stdout.jsonl').write_text('transport interrupted\n')
                     if role=='measurement':
                         response.update(assessment='sufficient',requirements=[],evidence_refs=context['allowed_evidence_refs'],rationale='Existing development aggregates suffice.')
                         response['prerequisites']={key:{'status':'satisfied','rationale':'Audited baseline supplied.'} for key in ['invocation','implementation','data','applicability']}
@@ -426,6 +442,18 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                     with self.assertRaisesRegex(ContractError,'readout differs from committed cycle'):audit.verify()
                     write_json(folder/'development-readout.json',original_readout)
                     cycle=read_json(folder/'cycle.json')
+                    if transport_archive:
+                        failed_role='evidence-transport-archive-fixture'
+                        receipt=cycle['roles'][failed_role]
+                        self.assertEqual(receipt['response_validation']['status'],'rejected')
+                        self.assertEqual(set(receipt['artifacts']),{'context.json','request.json','resources.json','rejection.json','stdout.jsonl','process.json'})
+                        path=folder/failed_role/'stdout.jsonl';original=path.read_bytes()
+                        path.write_bytes(original+b'changed')
+                        with self.assertRaisesRegex(ContractError,'role archive differs from committed cycle'):audit.verify()
+                        with self.assertRaisesRegex(ContractError,failed_role+' archive changed'):
+                            finalize_cycle(study,'auto-round-1',folder)
+                        path.write_bytes(original)
+                        self.assertEqual(audit.verify(),verified)
                     if generated_control:
                         self.assertIn('model/control-1.py',cycle['roles']['experiment']['artifacts'])
                         marker=folder/'experiment/accepted.json';accepted=read_json(marker)

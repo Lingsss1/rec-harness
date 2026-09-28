@@ -20,6 +20,27 @@ class NextItNetModel(nn.Module):
 '''
 
 class SourceContractTests(unittest.TestCase):
+    def test_position_specific_registered_block_calls(self):
+        source=SOURCE.replace('self.block = nn.Linear(hidden, hidden)',
+            'self.block = nn.Linear(hidden, hidden)\n        self.blocks = nn.ModuleList([NextItNetBlock(hidden)])')
+        for body in ('for i, block in enumerate(self.blocks):\n            x = block(x) * (0.95 if i == 0 else 1.0)\n        return x',
+                     'for i in range(len(self.blocks)):\n            x = self.blocks[i](x)\n        return x',
+                     'return self.blocks[0](x)', 'return self.blocks[-1](x)'):
+            with self.subTest(body=body):
+                review_source(source,source.replace('return self.block(x)',body))
+
+    def test_unrelated_enumerated_and_indirect_calls_still_rejected(self):
+        source=SOURCE.replace('self.block = nn.Linear(hidden, hidden)',
+            'self.block = nn.Linear(hidden, hidden)\n        self.blocks = nn.ModuleList([NextItNetBlock(hidden)])')
+        for body in ('for i, block in enumerate(x):\n            x = block(x)\n        return x',
+                     'return x[0](x)', 'return self.block[0](x)',
+                     'return self.blocks[:](x)', 'return self.blocks[0.5](x)',
+                     'return self.blocks[0].register_forward_hook(x)'):
+            with self.subTest(body=body),self.assertRaises(ContractError):
+                review_source(source,source.replace('return self.block(x)',body))
+        with self.assertRaises(ContractError):
+            review_source(SOURCE,SOURCE.replace('return self.block(x)','return self.blocks[0](x)'))
+
     def test_inline_block_uses_declared_modules_only(self):
         source=SOURCE.replace('self.block = nn.Linear(hidden, hidden)',
             'self.block = nn.Linear(hidden, hidden)\n        self.blocks = nn.ModuleList([NextItNetBlock(hidden)])')

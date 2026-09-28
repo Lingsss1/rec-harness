@@ -87,6 +87,10 @@ def review_source(baseline,candidate):
                        and isinstance(n.value,ast.Call) and dotted(n.value.func).startswith('nn.')
                        and dotted(n.value.func) in MODULE_CALLS for target in n.targets
                        if isinstance(target,ast.Attribute) and dotted(target).startswith('self.')}
+        block_list=any(isinstance(n,ast.Assign) and isinstance(n.value,ast.Call)
+                       and dotted(n.value.func)=='nn.ModuleList'
+                       and any(dotted(target)=='self.blocks' for target in n.targets)
+                       for n in ast.walk(cls))
         for fn in cls.body:
             if fn.name not in METHODS or fn.decorator_list:raise ContractError('unsupported model method or decorator')
             original_fn=next((n for n in original[cls.name].body if isinstance(n,ast.FunctionDef) and n.name==fn.name),None)
@@ -98,6 +102,14 @@ def review_source(baseline,candidate):
                 raise ContractError('cannot shadow model execution globals')
             blocks={n.target.id for n in ast.walk(fn) if isinstance(n,ast.For) and isinstance(n.target,ast.Name)
                     and dotted(n.iter)=='self.blocks'}
+            # Position-specific changes naturally enumerate the same registered
+            # blocks. Preserve that binding instead of rejecting its local name.
+            blocks.update(n.target.elts[1].id for n in ast.walk(fn)
+                if block_list and isinstance(n,ast.For) and isinstance(n.target,ast.Tuple)
+                and len(n.target.elts)==2 and all(isinstance(t,ast.Name) for t in n.target.elts)
+                and isinstance(n.iter,ast.Call) and dotted(n.iter.func)=='enumerate'
+                and len(n.iter.args)==1 and not n.iter.keywords
+                and dotted(n.iter.args[0])=='self.blocks')
             block_calls={name+'.'+field for name in blocks for field in block_fields}
             block_helpers={name+'._causal_conv' for name in blocks
                            if any(isinstance(m,ast.FunctionDef) and m.name=='_causal_conv' for m in block_class.body)}
@@ -132,6 +144,13 @@ def review_source(baseline,candidate):
                         elif path in block_calls|block_helpers:pass
                         elif n.func.attr=='__init__' and isinstance(n.func.value,ast.Call) and dotted(n.func.value.func)=='super':pass
                         elif n.func.attr not in TENSOR_METHODS:raise ContractError('unapproved tensor call: '+n.func.attr)
+                    elif block_list and isinstance(n.func,ast.Subscript) and dotted(n.func.value)=='self.blocks':
+                        index=n.func.slice
+                        if not (isinstance(index,ast.Name)
+                                or isinstance(index,ast.Constant) and type(index.value) is int
+                                or isinstance(index,ast.UnaryOp) and isinstance(index.op,ast.USub)
+                                and isinstance(index.operand,ast.Constant) and type(index.operand.value) is int):
+                            raise ContractError('block call requires a scalar index')
                     else:raise ContractError('indirect calls prohibited')
     return {'contract':'nextitnet-model-classes-v1','source_ast_hash':digest(ast.dump(after,include_attributes=False)),
             'structural_changes':structural_changes(before,after),

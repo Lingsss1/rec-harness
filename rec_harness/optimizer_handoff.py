@@ -2,7 +2,7 @@
 from pathlib import Path
 from .core import Artifacts,ContractError,digest,number,public_only,read_json,validate_card
 from .trace_context import expand_traces
-from .measurement_discovery import validate_review
+from .measurement_discovery import common_baseline_metrics,validate_review
 from .store import Store
 
 
@@ -53,6 +53,8 @@ def validate(context,response,candidate_id):
     selected=[row for row in packet['trace_evidence'] if row['trace_id'] in response['evidence_refs']]
     if not selected:raise ContractError('optimizer handoff lacks usable development evidence')
     rule=response['requirements'][0]
+    if rule['measurement'] in common_baseline_metrics([row for trace in selected for row in trace['rows']]):
+        raise ContractError('proposed measurement already exists in cited baseline metrics')
     if any(rule['measurement'] in (r['diagnostic'] or {}).get('output',{}).get('measurements',{}) for r in selected):
         raise ContractError('proposed measurement already exists in cited trace')
     gap={'measurement_gap_id':'optimizer-measurement-gap-'+digest([candidate_id,response,packet]),

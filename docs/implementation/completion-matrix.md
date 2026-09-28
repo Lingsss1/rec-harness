@@ -2,6 +2,8 @@
 
 目标保持为完整方案实现及 Amazon NextItNet 对比优化。小型示例不构成完成证据。
 
+测量发现和优化器转交已补充[已有基线指标覆盖检查](existing-measurement-coverage.md)：完整条件下已有的同名指标不能再次声明为缺失测量，派生量及缺失条件不被误判为已有。未改变预算或晋升规则，无新增服务或训练调用。
+
 优化器测量转交的恢复身份已加强：拒绝伪装为 proposed 的改写投影，明确禁止转交记录晋升，损坏审查归档阻止工具导出；6 项定向测试通过，无新增角色或训练调用。见[转交完整性](optimizer-measurement-handoff.md)。
 
 修复[Amazon 优化器转交证据准入](optimizer-amazon-evidence.md)：按实际 verified 摘要匹配品类/seed、协议和身份字段，并兼容旧 baseline 列表。真实 Amazon 研究 7 条轨迹中的 5 条可引用，真实小型适配器运行 12 条中的 10 条可引用；源研究不变，无新增角色或训练调用。

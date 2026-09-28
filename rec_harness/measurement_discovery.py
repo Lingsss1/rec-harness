@@ -55,6 +55,11 @@ def review_context(research,state,context,gap):
     public_only(request);return request
 
 
+def common_baseline_metrics(rows):
+    """Exact quantity names supplied for every baseline condition, not semantic equivalence."""
+    return set.intersection(*(set(row.get('metrics',{})) for row in rows)) if rows else set()
+
+
 def validate_review(request,response):
     validate_schema(response,schema_for('measurement'))
     public_only(response)
@@ -75,6 +80,7 @@ def validate_review(request,response):
         if requirements[0]['development_budget']>request['measurement_contract']['development_budget']:
             raise ContractError('measurement proposal exceeds host development envelope')
         available=set((request.get('diagnostic') or {}).get('output',{}).get('measurements',{}))
+        available.update(common_baseline_metrics(request.get('baseline',[])))
         for row in request.get('activation_diagnostics',[])+request.get('block_score_diagnostics',[]):
             available.update(row['measurements'])
         if requirements[0]['measurement'] in available:

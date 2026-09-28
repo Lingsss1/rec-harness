@@ -10,6 +10,18 @@ from rec_harness.measurement_gaps import MeasurementDeferred
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_existing_baseline_metric_is_not_a_missing_measurement(self):
+        request=review_context(self.research,self.state,self.context,self.gap)
+        request['baseline']=[{'metrics':{'HR@10':0.2}},{'metrics':{'HR@10':0.3}}]
+        response=copy.deepcopy(self.response);response['requirements'][0]['measurement']='HR@10'
+        with self.assertRaisesRegex(ContractError,'already exists'):validate_review(request,response)
+        # A differently defined quantity, or missing condition, is not silently
+        # declared covered just because another row has a similarly named metric.
+        response['requirements'][0]['measurement']='HR@10.seed_spread'
+        validate_review(request,response)
+        response['requirements'][0]['measurement']='HR@10';request['baseline'][1]['metrics']={}
+        validate_review(request,response)
+
     def setUp(self):
         test_diagnostics.DiagnosticTests.setUp(self)
         r=self.research

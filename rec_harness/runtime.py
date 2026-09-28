@@ -472,7 +472,6 @@ class Research:
                 if event["kind"] == "round_started" and event["payload"]["attempt"] not in completed:
                     old = event["payload"]["state"]
                     attempt = event["payload"]["attempt"]
-                    archived = self.root / "research_archive" / "attempts" / attempt
                     if attempt in checkpoints:
                         saved=read_json(self.artifacts.verify(checkpoints[attempt]))
                         if saved['attempt']!=attempt or saved['state']!=old:
@@ -481,15 +480,18 @@ class Research:
                         if self._transport_failed(attempt):recovered_decision['failure_kind']='role_transport'
                         self._record_attempt(attempt,old,saved['before'],saved['after'],saved['evaluation'],recovered_decision,saved['dependencies'])
                         self.store.event('knowledge_deferred',{'attempt':attempt,'reason':'controller interrupted after committed decision; use consolidate to retry knowledge'})
-                    if all((archived / name).exists() for name in ("node.json", "decision.json", "observations.json")):
-                        decision = read_json(archived / "decision.json")
+                    from .round_recovery import archived as archived_round
+                    committed=archived_round(self,attempt,old)
+                    if committed is not None:
+                        archived_node,archived_evaluation,decision=committed
                         if decision["selection"] == "keep":
-                            state.update(incumbent=attempt, workspace=read_json(archived / "node.json")["workspace_after"], baseline=read_json(archived / "observations.json"))
+                            state.update(incumbent=attempt, workspace=archived_node["workspace_after"], baseline=archived_evaluation)
                     else:
                         decision = {"selection": "crash", "conclusion_status": "unknown", "rationale": "controller interrupted; raw tasks and consumed costs retained"}
                         if self._transport_failed(attempt):decision['failure_kind']='role_transport'
                         self._record_attempt(attempt, old, old["workspace"], old["workspace"], {"attempt": attempt, "valid": False, "score": None, "runs": []}, decision, [])
                     state["round"] = max(state["round"], old["round"] + 1)
+                    if decision.get('measurement_required'):state.update(status='stopped',stop_reason='measurement_required')
                     if self._transport_failed(attempt):state.update(status='stopped',stop_reason='role_transport_failure')
                     self.store.event("round_completed", {"attempt": attempt, "decision": decision, "state": state, "state_hash": digest(state)})
                     write_json(self.state_path, state)

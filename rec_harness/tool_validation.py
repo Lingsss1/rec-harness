@@ -7,6 +7,7 @@ from .cpu_job import run_cpu_job
 from .diagnostics import validate_measurement
 from .process_identity import assert_stopped
 from .store import Store
+from .validation_case import prepare as prepare_case,settle_once
 
 
 def validate_suite(suite,stage):
@@ -53,21 +54,22 @@ def run_validation(suite_path,candidate,output,stage):
                 files={'request.json':{'path':str(folder/'input.json'),'sha256':file_hash(folder/'input.json')},
                     'worker.py':{'path':str(worker),'sha256':binding['worker_hash']}}
                 for name,ref in source.items():files['tool/'+name]={'path':str(artifacts.verify(ref)),'sha256':ref['sha256']}
-                attempt=len(list(folder.glob('job-*')))+1;task=case['id']+'-'+str(attempt)
-                store.reserve(task,suite['case_cost']);row={'case_id':case['id'],'passed':False,'input_hash':digest(case['input'])}
+                task,job,receipt=prepare_case(store,folder,case['id'],files,suite,artifacts)
+                row={'case_id':case['id'],'passed':False,'input_hash':digest(case['input'])}
                 try:
-                    job=folder/('job-'+str(attempt));execution=suite['execution']
-                    receipt=run_cpu_job(job,execution['recipe'],files,'worker.py',[],python=execution['python'],
-                        uid_registry=execution['uid_registry'],artifacts=artifacts,timeout=suite['timeout'])
+                    execution=suite['execution']
+                    if receipt is None:
+                        receipt=run_cpu_job(job,execution['recipe'],files,'worker.py',[],python=execution['python'],
+                            uid_registry=execution['uid_registry'],artifacts=artifacts,timeout=suite['timeout'])
                     row['artifacts']=receipt['collection']['artifacts'];row['wall_seconds']=receipt['wall_seconds']
                     if receipt['process']['status']!='success':raise ContractError('candidate measurement process failed')
-                    value=validate_measurement(read_json(job/'results/measurement.json'))['measurements']
+                    value=validate_measurement(read_json(artifacts.verify(receipt['collection']['artifacts']['measurement.json'])))['measurements']
                     if set(value)!=set(case['expected']):raise ContractError('measurement names differ from reference contract')
                     errors={name:abs(value[name]-expected) for name,expected in case['expected'].items()}
                     for error in errors.values():number(error,'reference error',0)
                     row.update(errors=errors,passed=all(error<=case['absolute_tolerance'] for error in errors.values()))
                 except (ContractError,OSError,ValueError,KeyError,TypeError) as error:row['error']=str(error)
-                finally:store.settle(task,suite['case_cost'],'accepted' if row['passed'] else 'rejected')
+                finally:settle_once(store,task,suite['case_cost'],'accepted' if row['passed'] else 'rejected')
                 store.event('reference_case_completed',row);rows.append(row)
             accuracy=sum(row['passed'] for row in rows)/len(rows)
             report={'passed':all(row['passed'] for row in rows),'gain':accuracy,'regression':1-accuracy,

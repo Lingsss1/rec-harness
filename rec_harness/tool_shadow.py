@@ -8,6 +8,7 @@ from .diagnostics import validate_measurement
 from .diagnostic_inputs import CONTRACT,OBSERVATION_CONTRACT,CONTRACTS
 from .process_identity import assert_stopped
 from .store import Store
+from .validation_case import prepare as prepare_case,settle_once
 from .adapters.amazon_controls import load_config
 from .adapters.amazon_report import audit_job
 
@@ -118,19 +119,20 @@ def run_validation(suite_path,candidate,output):
                     files={'worker.py':{'path':str(worker),'sha256':binding['worker_hash']},
                         'request.json':{'path':str(folder/'input.json'),'sha256':file_hash(folder/'input.json')}}
                     for name,ref in source.items():files['tool/'+name]={'path':str(artifacts.verify(ref)),'sha256':ref['sha256']}
-                    attempt=len(list(folder.glob('job-*')))+1;task=key+'-'+str(attempt);store.reserve(task,suite['case_cost'])
+                    task,job,receipt=prepare_case(store,folder,key,files,suite,artifacts)
                     row={'key':key,'passed':False}
                     try:
-                        execution=suite['execution'];job=folder/('job-'+str(attempt))
-                        receipt=run_cpu_job(job,execution['recipe'],files,'worker.py',[],python=execution['python'],uid_registry=execution['uid_registry'],artifacts=artifacts,timeout=suite['timeout'])
+                        execution=suite['execution']
+                        if receipt is None:
+                            receipt=run_cpu_job(job,execution['recipe'],files,'worker.py',[],python=execution['python'],uid_registry=execution['uid_registry'],artifacts=artifacts,timeout=suite['timeout'])
                         row['artifacts']=receipt['collection']['artifacts'];row['wall_seconds']=receipt['wall_seconds']
                         if receipt['process']['status']!='success':raise ContractError('shadow process failed')
-                        values=validate_measurement(read_json(job/'results/measurement.json'))['measurements']
+                        values=validate_measurement(read_json(artifacts.verify(receipt['collection']['artifacts']['measurement.json'])))['measurements']
                         if set(values)!=set(suite['measurement_bounds']):raise ContractError('shadow measurement names changed')
                         if not all(bounds[0]<=values[name]<=bounds[1] for name,bounds in suite['measurement_bounds'].items()):raise ContractError('measurement outside preregistered bounds')
                         row.update(passed=True,measurements=values)
                     except (ContractError,OSError,ValueError,KeyError,TypeError) as error:row['error']=str(error)
-                    finally:store.settle(task,suite['case_cost'],'accepted' if row['passed'] else 'rejected')
+                    finally:settle_once(store,task,suite['case_cost'],'accepted' if row['passed'] else 'rejected')
                     store.event('shadow_measurement_completed',row);repetitions.append(row)
                 passed=all(row['passed'] for row in repetitions)
                 if passed:passed=all(abs(repetitions[0]['measurements'][name]-repetitions[1]['measurements'][name])<=suite['repeat_tolerance'] for name in suite['measurement_bounds'])

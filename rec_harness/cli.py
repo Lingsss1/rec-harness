@@ -170,12 +170,13 @@ def main(argv=None):
                 result = research.run(args.rounds) if args.command == "run" else research.consolidate(args.attempt)
             finally:
                 research.store.close()
-        elif args.command in {"status", "verify", "recover", "graph", "migrate", "memory"}:
+        elif args.command == 'status':
+            from .status import inspect_status
+            result=inspect_status(args.directory)
+        elif args.command in {"verify", "recover", "graph", "migrate", "memory"}:
             store = Store(Path(args.directory) / "memory")
             try:
-                if args.command == "status":
-                    result = {"state": read_json(Path(args.directory) / "state.json"), "budget": store.budget(), "graph_version": store.version}
-                elif args.command == "verify":
+                if args.command == "verify":
                     research = inspection_controller(args.directory)
                     try:
                         result = research.verify()

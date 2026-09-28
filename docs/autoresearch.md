@@ -164,6 +164,8 @@ python3 -m rec_harness verify /path/to/project
 
 `run-report.json` 包含终态、停止原因、预算和事件链校验；`state.json` 记录轮次和 incumbent。每轮保留源代码、角色请求/响应、失败及独立评估证据。恢复已达到停止条件的 campaign 不额外调用角色或训练。要改变冻结配置、追加轮次或预算，创建新 campaign；Amazon GPU 预算仍以底层 study 的授权接续为准。
 
+查询当前工作流状态使用 `python3 -m rec_harness status /path/to/campaign`。命令以只读事务读取账本，不恢复任务、不重写事件导出。Amazon 轮次及项目阶段优先采用已提交状态事件；状态文件缺失或与事件快照不同会显式报告。既有 Amazon 控制器在最后一个轮次事件后发布的 stopped/stop_reason 保留为明确标注的文件层终态，不当作事件事实。`process_status: not_inspected` 表示该命令没有核验进程存活；不能仅据 ready/stopped 文件判断是否应重启。通用旧控制器没有适配的状态事件时仍返回 state.json，并标记 not_event_bound。
+
 本入口实现顺序模型研究闭环、预声明测量覆盖要求触发、工具/Harness 候选生命周期与通用/Amazon 项目总调度。自主发现缺口的真实正例和在线收益、自主工具候选的多条件在线收益验收、三循环真实联动收益验收、经验迁移收益实验、论文引用的内容级验证、任意任务适配和多 worker 分布式调度仍未完成。
 
 ### 工具影子验证与三组在线效用

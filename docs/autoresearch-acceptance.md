@@ -698,3 +698,9 @@ Amazon 每轮新建上下文时，对本轮检索到的历史设计 GapCard 生�
 `implementation-author-handoff-acceptance-v1/acceptance.json` 对 v4 两轮真实 experiment 记录完成只读投影，候选和对照四份源码身份、原限制说明及完成事件绑定均通过，源账本未变。未让已结束角色重新消费字段。全量 377 项回归，357 通过、20 跳过；补充的控制器回归验证 evaluation/lead/knowledge 交接和恢复，篡改响应、重写接受上下文、改变源码及删除已提交报告均有拒绝测试。该改动晚于 v12 安装交付。
 
 复用恢复路径补充：旧单候选收据的 `source_hash` 同样用于核验 model.py，不能因缺少新的多文件哈希表而丢失源码绑定。恢复测试经真实来源事件/CAS 复制后调用同一交接入口，验证原限制说明保留以及复制后篡改源码拒绝。`implementation-author-reuse-acceptance-v1/acceptance.json` 对实际已完成的 amazon-input-offset-review-v4 复用 experiment 记录只读核验通过，原/目标事件导出与角色文件均不变，没有新增调用/训练/推理。全套 377 项回归再次通过，20 项环境相关跳过；不代表旧角色已读取新增字段。
+
+### 无副作用的工作流状态查询
+
+`status` 改为独立只读入口，BEGIN 快照中核验事件并读取预算/图版本，不构造可写控制器或恢复账本。Amazon 轮次完成/重开、ResearchProject 阶段采用最后已提交事件；状态文件缺失或不一致不掩盖已提交轮次。既有终态文件的 stopped/stop_reason 作为显式 terminal_overlay 保留，其他未适配控制器报告 state.json 来源。状态查询不核验进程存活。
+
+`read-only-status-acceptance-v1/acceptance.json` 对真实 v4 两轮终态重复查询，与 run-report 的状态完全一致，源状态及事件导出 hash 不变。测试覆盖 CLI 查询时禁止事件导出、陈旧/缺失状态文件、终态覆盖、失败重开与项目阶段。380 项回归，360 通过、20 项环境相关跳过。未新增研究调用或执行。

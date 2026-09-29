@@ -15,3 +15,5 @@
 已有工具组已自动接续：四项基线训练及四次独立复评分完成，排名差异均为 0，开发激活摘要已提交。`existing_tool-exposure-acceptance.json` 通过只读送达审计：工具输出 mean_metric=0.556 与四个公开开发聚合的独立均值一致，并进入已完成 evidence 角色的实际输入。后续角色与训练仍在进行；此记录不证明语义使用、工具效用或该组终态通过。
 
 随后已有工具组完整结束，`existing-group-acceptance.json` 通过：六个真实角色各完成一次、12 次训练成功、候选与对照八次独立复评分排名差异为 0。完整 `audit_exposure` 包含已完成的 evaluation/lead，基线测量单独限定身份，未重现 v4 的混用故障。候选/基线/对照均值分别为 0.553/0.556/0.548，未获确认准入，保留 legacy_incumbent；当前该组结果与无工具组相同，不能宣称工具增益。全部三组及终态恢复仍待完成。
+
+新工具组的四项基线训练及四次独立复评分完成，排名差异为 0。`candidate_tool-exposure-acceptance.json` 通过：mean_metric=0.556、minimum_metric=0.446、metric_spread=0.189 均与四个公开开发聚合的独立计算一致，并已送达完成的 evidence 角色。该证据连接本次真实工具生成、CPU 验证和在线测量输入；不代表自主缺口发现、后续决策收益或整组完成。

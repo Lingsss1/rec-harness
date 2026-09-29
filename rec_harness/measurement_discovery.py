@@ -23,6 +23,14 @@ def review_context(research,state,context,gap):
     graph=research.store.snapshot();known={n['id']:n for n in graph['nodes']}
     refs=[r['run_id'] for r in runs if r.get('run_id') in known and known[r['run_id']]['type']=='Experiment']
     if not refs or len(refs)!=len(runs):raise MeasurementDeferred('auditable baseline experiment references required')
+    for ref in refs:
+        attrs=known[ref]['attrs']
+        if (attrs.get('task_id')!=research.task
+                or attrs.get('protocol_hash')!=research.protocol_hash
+                or attrs.get('origin')!='local_evidence'
+                or attrs.get('valid') is not True
+                or attrs.get('partition','development')!='development'):
+            raise MeasurementDeferred('measurement review requires valid local development baseline evidence')
     # Strict projection: no checkpoint, interaction, user-level result or arbitrary runtime path.
     rows=[{k:r[k] for k in ['run_id','seed','dataset','metrics','valid'] if k in r} for r in runs]
     request={'task_id':research.task,'model_version':state['incumbent'],'protocol_hash':research.protocol_hash,

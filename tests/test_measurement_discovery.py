@@ -72,6 +72,17 @@ class DiscoveryTests(unittest.TestCase):
             with self.assertRaises(MeasurementDeferred):
                 discover(self.research,state,context,self.gap,'a',lambda _:self.fail('must not call Codex'))
 
+    def test_baseline_graph_scope_is_checked_before_role_invocation(self):
+        graph=self.research.store.snapshot()
+        for key,value in [('task_id','other-task'),('protocol_hash','other-protocol'),
+                ('origin','agent_hypothesis'),('valid',False),('partition','confirmation')]:
+            altered=copy.deepcopy(graph)
+            next(n for n in altered['nodes'] if n['id']=='run-one')['attrs'][key]=value
+            with self.subTest(field=key),patch.object(self.research.store,'snapshot',return_value=altered):
+                with self.assertRaisesRegex(MeasurementDeferred,'local development baseline'):
+                    discover(self.research,self.state,self.context,self.gap,'a',
+                        lambda _:self.fail('must not invoke a role with out-of-scope evidence'))
+
     def test_unresolved_prerequisites_and_sufficient_evidence_do_not_create_gap(self):
         for assessment in ['sufficient','prerequisite_unresolved']:
             response={**self.response,'assessment':assessment,'requirements':[]}

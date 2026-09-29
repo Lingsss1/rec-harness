@@ -30,6 +30,8 @@ def freeze_suite(specification,directory):
         from .toy_isolated import validate_task
         from .toy_observations import freeze_options
         freeze_options(config)
+        from .semantic_encoder import pin_options
+        pin_options(config)
         if 'synthetic_task' in config['protocol']:
             if config['protocol']['synthetic_task'] is None:raise ContractError('explicit synthetic task cannot be null')
             validate_task(config['protocol']['synthetic_task'])
@@ -61,13 +63,16 @@ def freeze_suite(specification,directory):
 
 def suite_identity(suite):
     cases=suite['cases']
-    return {
+    result = {
         'base_llm':digest({c['id']:{'codex':c['config'].get('codex',{}),'backend':c['config']['agent_backend']} for c in cases}),
         'tools':digest({c['id']:c['config']['execution'] for c in cases}),
         'start':digest({c['id']:c['inputs'] for c in cases}),
         'graph':digest('independent empty graph overlays with identical root model per pair'),
         'budget':digest({c['id']:{k:c['config'].get(k) for k in ['budget','max_rounds','max_role_retries']} for c in cases}),
         'protocol':digest({c['id']:c['config']['protocol'] for c in cases})}
+    if any('semantic_encoder' in c['config'] for c in cases):
+        result['tools']=digest([result['tools'],[c['config'].get('semantic_encoder') for c in cases]])
+    return result
 
 
 def load_suite(path):
@@ -94,6 +99,8 @@ def episode(case,policy,root,inputs,*,agent=None,validation_tool=None,memory_pac
     research=Research(root,agent=agent)
     try:
         frozen=research.config
+        from .semantic_encoder import verify_options
+        verify_options(config,frozen)
         expected_memory=[research.artifacts.put(memory_package)] if memory_package is not None else []
         if frozen.get('initial_memory',[])!=expected_memory:
             raise ContractError('paired source memory changed')
@@ -111,7 +118,7 @@ def episode(case,policy,root,inputs,*,agent=None,validation_tool=None,memory_pac
             raise ContractError('paired execution backend changed')
         # Reconstruct initialization changes through the persisted config/manifest.
         for key,value in config.items():
-            if key in {'source','protocol','execution','evaluator_files','initial_memory_files'}:continue
+            if key in {'source','protocol','execution','evaluator_files','initial_memory_files','semantic_encoder'}:continue
             if frozen.get(key)!=value:raise ContractError('paired episode configuration changed: '+key)
         if frozen['protocol']['evaluator_snapshot']!={name:case['inputs'][name] for name in config.get('evaluator_files',[])}:
             raise ContractError('paired evaluator changed')

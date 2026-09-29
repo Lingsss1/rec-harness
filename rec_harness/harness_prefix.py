@@ -53,17 +53,23 @@ def historical_bundle(graph,original,limit):
     if digest(body)!=graph['hash'] or graph['version']!=original['graph_snapshot_id'] or graph['hash']!=original['graph_hash']:
         raise ContractError('historical graph binding changed')
     nodes={n['id']:n for n in graph['nodes'] if n['attrs']['task_id']==original['task_id'] and n['attrs']['protocol_hash']==original['protocol_hash']}
-    edges=[e for e in graph['edges'] if e['source'] in nodes and e['target'] in nodes]
+    revealed=original.get('retrieval',{}).get('revealed')
+    if revealed is not None:
+        nodes={key:n for key,n in nodes.items() if set(n['attrs'].get('evidence_dependency_ids',[key])).issubset(revealed)}
+    edges=[e for e in graph['edges'] if e['source'] in nodes and e['target'] in nodes
+           and (revealed is None or set(e['attrs'].get('evidence_refs',[])).issubset(nodes))]
     counter={e['source'] for e in edges if e['relation'] in {'CONTRADICTS','ALTERNATIVE_TO'}}
     counter|={n['id'] for n in nodes.values() if n['attrs'].get('status') in {'disputed','demoted'} or n['type']=='Failure' or n['attrs'].get('counterevidence') is True}
     query=original.get('retrieval',{}).get('query','')
-    selected,audit=select(nodes,edges,counter,original['role'],query,limit,canonical)
+    selected,audit=select(nodes,edges,counter,original['role'],query,limit,canonical,
+        semantic=original.get('retrieval',{}).get('semantic'))
     revisions=revision_visibility(nodes,edges,selected)
     return {**{k:original[k] for k in ['graph_snapshot_id','graph_hash','role','task_id','protocol_hash']},
         **({'revision_visibility':revisions} if revisions['entries'] else {}),
         'nodes':[nodes[key] for key in selected],'edges':[e for e in edges if e['source'] in selected and e['target'] in selected],
         'retrieval':{'query':query,'limit':limit,'retrieved_node_ids':selected,'counterevidence_available':len(counter),
-            'counterevidence_omitted':len(counter-set(selected)),**audit}}
+            'counterevidence_omitted':len(counter-set(selected)),
+            **({'revealed':revealed} if revealed is not None else {}),**audit}}
 
 
 def replay_context(case,policy,baseline):

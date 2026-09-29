@@ -85,6 +85,8 @@ class ResearchProject:
         for kind in ['model','tool','harness']:
             if kind not in config:continue
             template=config[kind]
+            from .semantic_encoder import pin_options
+            pin_options(template)
             if 'source' in template:
                 files=list(dict.fromkeys(template['model_files']+template.get('evaluator_files',[])))
                 template['source_snapshot']=artifacts.snapshot(template.pop('source'),files)

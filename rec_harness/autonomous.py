@@ -45,6 +45,8 @@ def configuration(path):
             if key in config:config[kind]=configuration(path.parent/config.pop(key))
     for key in ('source','study'):
         if key in config:config[key]=str((path.parent/config[key]).resolve())
+    if 'semantic_encoder' in config and isinstance(config['semantic_encoder'],dict) and 'model_path' in config['semantic_encoder']:
+        config['semantic_encoder']['model_path']=str((path.parent/config['semantic_encoder']['model_path']).resolve())
     backend=config.get('agent_backend',{})
     for key in ('template','runtime_root'):
         if key in backend:backend[key]=str((path.parent/backend[key]).resolve())

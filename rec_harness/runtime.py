@@ -64,6 +64,8 @@ class Research:
         required(config, ["task_id", "source", "model_files", "protocol", "budget"])
         identifier(config["task_id"])
         public_only(config)
+        from .semantic_encoder import freeze_options as freeze_semantic
+        freeze_semantic(config)
         from .measurement_gaps import validate_requirements
         validate_requirements(config.get('measurement_requirements',[]))
         from .measurement_discovery import validate_config
@@ -238,6 +240,8 @@ class Research:
                                                    "archive": self._archive_directory(directory) if directory.exists() else {}})
 
     def context(self, role, state):
+        from .semantic_encoder import configured
+        query,encoder=configured(self,role)
         from .diagnostics import measure
         from .measurement_gaps import triage
         from .toy_observations import context as observation_context
@@ -250,7 +254,7 @@ class Research:
         return {**observations,"task_id": self.task, "model_version": state["incumbent"], "protocol_hash": self.protocol_hash,
                 **({'method_source_contract':METHOD_SOURCE_CONTRACT} if self.config.get('require_method_sources') else {}),
                 "protocol": self.protocol, "budget": self.store.budget(), "harness_version": self.config["harness_version"],
-                "evidence": self.store.bundle(self.task, self.protocol_hash, role, limit=self.config.get("research_policy", {}).get("retrieval_limit", 24)), "baseline": state["baseline"],
+                "evidence": self.store.bundle(self.task, self.protocol_hash, role, query=query, semantic=encoder, limit=self.config.get("research_policy", {}).get("retrieval_limit", 24)), "baseline": state["baseline"],
                 'execution_contract':self.config.get('task_contract',{}),
                 'diagnostic':diagnostic,
                 'measurement_gaps':measurement_gaps,

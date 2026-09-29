@@ -45,6 +45,8 @@ def check_binding(root,case,suite,group,report,*,study_group=None,scripted_agent
         if tool['implementation_hash']!=(report['binding']['candidate_hash'] if group=='candidate_tool' else suite['existing_tool']['implementation_hash']):
             raise ContractError('Amazon utility tool implementation changed')
         wanted.update(diagnostic_tool=tool,validation_only=True)
+    from .semantic_encoder import freeze_options
+    freeze_options(wanted)
     if config!=wanted:raise ContractError('Amazon utility controller differs from frozen inputs')
     return config
 

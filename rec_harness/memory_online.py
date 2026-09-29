@@ -48,7 +48,7 @@ def fork_baseline(source,destination,mode):
             if staging.exists():raise ContractError('incomplete fork staging requires inspection')
             staging.mkdir(parents=True)
             # CAS contains the collected worker receipts; omit disposable jail trees.
-            for name in ['artifacts','research_archive','evaluator']:
+            for name in ['artifacts','research_archive','evaluator','semantic-retrieval']:
                 if (source/name).exists():
                     shutil.copytree(source/name,staging/name,ignore=shutil.ignore_patterns('jail'))
             (staging/'memory').mkdir()
@@ -95,10 +95,16 @@ def run_validation(suite_path,output,stage,limit,*,agent_factory=None):
             if not (baseline/'campaign.json').exists():Research.init(baseline,start)
             reference=Research(baseline,agent=object())
             try:
+                from .semantic_encoder import verify_options
+                verify_options(start,reference.config)
                 for key,value in start.items():
-                    if key not in {'source','protocol','execution','evaluator_files'} and reference.config.get(key)!=value:
+                    if key not in {'source','protocol','execution','evaluator_files','semantic_encoder'} and reference.config.get(key)!=value:
                         raise ContractError('baseline conditions changed: '+key)
                 reference.run(rounds=0);reference.verify()
+                if reference.config.get('semantic_retrieval'):
+                    # Freeze the common first ranking (including its cost receipt)
+                    # before copying graph/flat branches; later trajectories diverge.
+                    reference.context('evidence',read_json(reference.state_path))
             finally:reference.store.close()
             pair={};shared=None
             # Alternate execution order across independent cases; record it explicitly.

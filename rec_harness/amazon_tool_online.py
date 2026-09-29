@@ -23,7 +23,7 @@ STUDY_KEYS={'datasets','development_seeds','confirmation_seeds','model_versions'
             'gpu_ids','trusted_baselines_only','hidden_evaluation'}
 CONTROLLER_KEYS={'adapter','base_model_id','control_model_ids','max_rounds','role_call_limit','rescore_recipe',
                  'uid_registry','agent_backend','role_timeout','diagnostic_budget','generated_control_count',
-                 'structured_insertion_contract','require_method_sources','minimum_round_gpu_seconds','activation_diagnostic'}
+                 'structured_insertion_contract','require_method_sources','minimum_round_gpu_seconds','activation_diagnostic','semantic_encoder'}
 
 
 def freeze_suite(specification,directory):
@@ -54,6 +54,8 @@ def freeze_suite(specification,directory):
         activation=[c['controller'].get('activation_diagnostic') for c in cases]
         body['identity']['tools']=digest([body['identity']['tools'],activation])
         body['identity']['budget']=digest([body['identity']['budget'],[o['budget'] if o else 0 for o in activation]])
+    if any('semantic_encoder' in c['controller'] for c in cases):
+        body['identity']['tools']=digest([body['identity']['tools'],[c['controller'].get('semantic_encoder') for c in cases]])
     body['hash']=digest(body);write_json(root/'suite.json',body);return body
 
 
@@ -117,6 +119,8 @@ def freeze_cases(entries,base,objects,weights,*,require_diagnostics=True):
         if file_hash(study['worker'])!=study['worker_sha256']:raise ContractError('study worker changed')
         worker=objects.put(study['worker']);study.pop('worker');study.pop('model_versions')
         config.pop('study');config.pop('task_id',None)
+        from .semantic_encoder import pin_options
+        pin_options(config)
         if config.get('base_model_id','legacy_incumbent') not in snapshots:raise ContractError('initial model absent from frozen sources')
         recipe=entry['execution_recipe']
         if set(recipe)!={'runtime_dirs','runtime_files'}:raise ContractError('explicit GPU execution recipe required')

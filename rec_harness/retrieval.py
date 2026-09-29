@@ -12,7 +12,7 @@ ROLE_TYPES = {
 }
 
 
-def select(nodes, edges, counter, role, query, limit, canonical):
+def select(nodes, edges, counter, role, query, limit, canonical, *, semantic=None):
     priorities = ROLE_TYPES.get(role, ())
     terms = query.lower().split()
 
@@ -22,13 +22,18 @@ def select(nodes, edges, counter, role, query, limit, canonical):
                 priorities.index(kind) if kind in priorities else len(priorities), key)
 
     ranked = sorted(nodes, key=rank)
+    seeds=ranked
+    if semantic is not None:
+        from .semantic import validate
+        scores=validate(semantic,nodes,query)
+        seeds=sorted(nodes,key=lambda key:(-scores[key],rank(key)))
     quota = max(1, limit // 3)
     selected = sorted(counter, key=rank)[:quota]
     reasons = {key: 'counterevidence' for key in selected}
-    for key in ranked[:quota]:
+    for key in seeds[:quota]:
         if key not in reasons and len(selected) < limit:
             selected.append(key)
-            reasons[key] = 'role_query_seed'
+            reasons[key] = 'semantic_seed' if semantic is not None else 'role_query_seed'
     frontier = set(selected)
     for hop in (1, 2):
         neighbors = set()
@@ -51,7 +56,8 @@ def select(nodes, edges, counter, role, query, limit, canonical):
         if key not in reasons:
             selected.append(key)
             reasons[key] = 'ranked_fill'
-    return selected, {'method': 'role-lexical-two-hop-v2',
+    return selected, {'method': 'role-neural-two-hop-v1' if semantic is not None else 'role-lexical-two-hop-v2',
+                      **({'semantic':semantic} if semantic is not None else {}),
                       'role_type_priority': list(priorities), 'selection_reasons': reasons}
 
 

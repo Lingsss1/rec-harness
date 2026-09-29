@@ -39,6 +39,8 @@ class AmazonAutoresearch:
         root=Path(root).resolve()
         if root.exists() and any(root.iterdir()):raise ContractError('autonomous directory must be empty')
         config=dict(configuration)
+        from rec_harness.semantic_encoder import freeze_options
+        freeze_options(config)
         if 'validation_only' in config:raise ContractError('validation_only is controller-owned')
         if _validation_tool is not None and (review_only or config.get('review_only') or 'diagnostic_registry' in config):
             raise ContractError('validation tool cannot override a registry or enter a review-only controller')
@@ -325,7 +327,14 @@ class AmazonAutoresearch:
             history.append(report)
         available_history=history
         limit=self.config.get('research_policy',{}).get('retrieval_limit')
-        if limit is not None:
+        from rec_harness.semantic_encoder import configured
+        query,encoder=configured(self,'evidence')
+        memory_retrieval=None
+        if encoder is not None:
+            from .amazon_semantic import retrieve
+            history,research_memory,failures,memory_retrieval=retrieve(history,research_memory,failures,
+                cfg['protocol_hash'],cfg['development_seeds'],query,encoder,limit or 24)
+        elif limit is not None:
             history=history[-limit:];research_memory=research_memory[-limit:];failures=failures[-limit:]
         from .amazon_memory import compact_development_context,gap_applicability
         history,research_memory=compact_development_context(history,research_memory,cfg['protocol_hash'],cfg['development_seeds'],available_history)
@@ -364,6 +373,7 @@ class AmazonAutoresearch:
             'development_controls':control_rows,'control_execution_evidence':control_execution,
             'generated_controls':generated_controls,
             'history':history,'research_memory':research_memory,'prior_execution_failures':failures,'budget':budget,
+            **({'research_memory_retrieval':memory_retrieval} if memory_retrieval is not None else {}),
             'gap_applicability':gap_applicability(research_memory,base,cfg['protocol_hash']),
             'bindings':{'proposal_id':pid,'candidate_model_version':pid+'-model','base_model_id':base,
                         'controls':controls+[v['model_version'] for v in generated_controls],'train_protocol_hash':cfg['protocol_hash'],

@@ -284,7 +284,7 @@ class Store:
             self._project(versions[max(versions)])
         return self.verify()
 
-    def bundle(self, task_id, protocol_hash, role, *, version=None, query="", limit=24, revealed=None):
+    def bundle(self, task_id, protocol_hash, role, *, version=None, query="", limit=24, revealed=None, semantic=None):
         if limit < 1:
             raise ContractError("context limit must be positive")
         snapshot = self.snapshot(version)
@@ -296,14 +296,18 @@ class Store:
                  and (revealed is None or set(e["attrs"].get("evidence_refs",[])).issubset(nodes))]
         counter = {e["source"] for e in edges if e["relation"] in {"CONTRADICTS", "ALTERNATIVE_TO"}}
         counter |= {n["id"] for n in nodes.values() if n["attrs"].get("status") in {"disputed", "demoted"} or n["type"] == "Failure" or n["attrs"].get("counterevidence") is True}
-        selected, audit = select(nodes, edges, counter, role, query, limit, canonical)
+        if callable(semantic):
+            # Encoders never receive nodes outside this exact visible snapshot.
+            semantic=semantic(json.loads(canonical(nodes)),query)
+        selected, audit = select(nodes, edges, counter, role, query, limit, canonical,semantic=semantic)
         from .retrieval import revision_visibility
         revisions=revision_visibility(nodes,edges,selected)
         return {"graph_snapshot_id": snapshot["version"], "graph_hash": snapshot["hash"], "role": role,
                 **({"revision_visibility":revisions} if revisions["entries"] else {}),
                 "task_id": task_id, "protocol_hash": protocol_hash, "nodes": [nodes[k] for k in selected],
                 "edges": [e for e in edges if e["source"] in selected and e["target"] in selected],
-                "retrieval": {"query": query, "limit": limit, "retrieved_node_ids": selected, "counterevidence_available": len(counter), "counterevidence_omitted": len(counter - set(selected)), **audit}}
+                "retrieval": {"query": query, "limit": limit, "retrieved_node_ids": selected, "counterevidence_available": len(counter), "counterevidence_omitted": len(counter - set(selected)),
+                    **({'revealed':sorted(visible)} if revealed is not None else {}), **audit}}
 
     def configure_budget(self, limit):
         number(limit, "budget", 0)

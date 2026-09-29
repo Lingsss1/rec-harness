@@ -16,7 +16,7 @@ GROUPS=('baseline','candidate')
 
 def identity(suite):
     cases=suite['cases']
-    return {'base_llm':digest([c['controller']['agent_backend'] for c in cases]),
+    result = {'base_llm':digest([c['controller']['agent_backend'] for c in cases]),
         'tools':digest([c['controller'].get('activation_diagnostic') for c in cases]),
         'start':digest([c['models'] for c in cases]),
         'graph':digest('fresh independent Amazon graph overlays per policy'),
@@ -24,6 +24,9 @@ def identity(suite):
             ['max_rounds','role_call_limit','diagnostic_budget','activation_diagnostic']} for c in cases],
             [c['study']['budget_gpu_seconds'] for c in cases]]),
         'protocol':digest([c['study'] for c in cases])}
+    if any('semantic_encoder' in c['controller'] for c in cases):
+        result['tools']=digest([result['tools'],[c['controller'].get('semantic_encoder') for c in cases]])
+    return result
 
 
 def freeze_suite(specification,directory):

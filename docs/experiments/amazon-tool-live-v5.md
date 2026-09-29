@@ -6,4 +6,6 @@
 
 64份历史账本只读备份核验通过，累计503.711171 BCU：development 66、activation 24、diagnostic 3、role 35、GPU22542.670273秒。历史未知GPU预留仍计费，不等于实际利用量。首次嵌套备份触及SQLite路径限制，部分备份移至研究目录外层的retention-path-failure保留；改用身份摘要短路径后又发现diagnostic-budget目录名丢失导致费用分类错误，错误报告保留，恢复原账本目录名并逐项断言费用类型后通过。失败备份不位于campaign内，不重复计费；源记录未修改。
 
-运行目录 `rec-harness-runs/amazon-tool-live-v5` 保存prepare、成本继承、预检、冻结内核和审计脚本。主进程及工具作者调用已确认存活，尚无结果。测量缺口仍由操作者定义，不计为自主发现；最终测试继续按用户要求暂缓。
+运行目录 `rec-harness-runs/amazon-tool-live-v5` 保存prepare、成本继承、预检、冻结内核和审计脚本。工具作者一次调用完成，correctness、synthetic、robustness 各两个案例及 shadow 四次执行，共 10 次 CPU 收据独立复算通过，证据见运行目录 completed-stages-acceptance.json。主进程与在线验证进程仍在运行，尚无终态结果。测量缺口仍由操作者定义，不计为自主发现；最终测试继续按用户要求暂缓。
+
+终态恢复审计脚本 audit-resume.py 已准备：先要求完整终态证据审计通过，再使用冻结内核运行外层恢复，拦截 Codex 与子进程启动，并核对全部账本、预算与结果不变。当前仅检查了语法和缺少终态时的提前退出，尚未执行终态恢复，不能记为通过。

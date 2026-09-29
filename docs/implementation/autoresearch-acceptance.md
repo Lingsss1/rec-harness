@@ -9,7 +9,7 @@
 | Harness 历史诊断、前缀验证、独立开发与确认、晋升和回退 | `evolution_auto.py`、`harness_pipeline.py`、`amazon_harness_online.py` | 三阶段接线与恢复已有覆盖；真实运行的零收益拒绝不要求改成晋升 |
 | 图记忆、来源、反证、条件检索、跨任务继承 | `store.py`、`knowledge.py`、`memory_transfer.py` | 合成任务迁移及图/平面对照已有证据；真实推荐迁移收益仍未证明 |
 | 中断恢复、失败保留、重复调用防护、成本与产物审计 | `round_recovery.py`、`online_recovery.py`、`project_report.py` | 成功结果复用及未知结果保守停止均为明确合同；当前真实 v5 还需终态审计和零新增调用恢复验收 |
-| 安装后可运行、入口与源码一致 | [v33 安装验收](install-acceptance-v33.md) | 144 个模块及原生源码一致、20 个入口、645 项安装回归通过且零跳过 |
+| 安装后可运行、入口与源码一致 | [v34 安装验收](install-acceptance-v34.md) | 144 个模块及原生源码一致、20 个入口、646 项安装回归通过且零跳过 |
 
 上表是审计入口，不是逐项完成声明。详细限制及原始证据索引见[实现清单](completion-matrix.md)，需求依据见[方案第九节](../auto-research-plan.md#9-实施阶段与验收)。
 

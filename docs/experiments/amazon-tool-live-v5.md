@@ -9,3 +9,5 @@
 运行目录 `rec-harness-runs/amazon-tool-live-v5` 保存prepare、成本继承、预检、冻结内核和审计脚本。工具作者一次调用完成，correctness、synthetic、robustness 各两个案例及 shadow 四次执行，共 10 次 CPU 收据独立复算通过，证据见运行目录 completed-stages-acceptance.json。主进程与在线验证进程仍在运行，尚无终态结果。测量缺口仍由操作者定义，不计为自主发现；最终测试继续按用户要求暂缓。
 
 终态恢复审计脚本 audit-resume.py 已准备：先要求完整终态证据审计通过，再使用冻结内核运行外层恢复，拦截 Codex 与子进程启动，并核对全部账本、预算与结果不变。当前仅检查了语法和缺少终态时的提前退出，尚未执行终态恢复，不能记为通过。
+
+无工具组已完成一轮，`first-group-acceptance.json` 审计通过：六个真实 Codex 角色各完成一次，角色档案与传输核对一致；12 次基线/候选/机制对照训练成功，8 次候选及对照独立复评分的排名差异均为 0。候选开发 HR@10 为 0.553，基线 0.556，对照 0.548；候选较基线 -0.003，未获确认准入，保留 legacy_incumbent。evaluation/lead/knowledge 顺序接续完成，未因候选失败重复训练或放宽门槛。该组审计不替代三组效用、完整费用及终态恢复审计。

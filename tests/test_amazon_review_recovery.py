@@ -88,8 +88,9 @@ class ReviewReuseTests(unittest.TestCase):
                     accepted['source_hash']=file_hash(model)
                     accepted['model_source_hashes']={'model.py':file_hash(model),'control-1.py':file_hash(control)}
                 write_json(folder/'accepted.json',accepted)
+                write_json(folder/'returned-workspace/manifest.json',{'files':['model.py','control-1.py']})
                 store.event('role_completed',{'task':'round-1-'+role+'-1','role':role,**accepted,
-                    'archive':objects.snapshot(folder,['context.json','response.json','resources.json'])})
+                    'archive':objects.snapshot(folder,['context.json','response.json','resources.json','returned-workspace/manifest.json'])})
             before=store.verify();store.close()
             first=reuse_design(None,source,target,plan)
             self.assertEqual((target/'experiment/model/control-1.py').read_text(),'distinct control')

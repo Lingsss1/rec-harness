@@ -94,7 +94,8 @@ def reuse_design(controller,source,folder,plan):
             files=['context.json','request.json','response.json','resources.json','schema.json','accepted.json']
             files.extend(name for name in ['literature-search.json','stdout.jsonl','process.json','launch.json','model/model.py'] if (src/name).is_file())
             files.extend('model/'+name for name in accepted.get('model_source_hashes',{}) if name!='model.py')
-            for name in files:
+            files.extend(matches[0]['payload'].get('archive',{}))
+            for name in dict.fromkeys(files):
                 destination=target/name;destination.parent.mkdir(parents=True,exist_ok=True)
                 if destination.exists() and file_hash(destination)!=file_hash(src/name):raise ContractError('reused role archive changed')
                 if not destination.exists():shutil.copyfile(src/name,destination)

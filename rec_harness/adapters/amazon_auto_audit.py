@@ -27,6 +27,21 @@ def verify_reused_role(folder,accepted):
     return reuse
 
 
+def verify_role_history(controller,role_folder,accepted,projection):
+    from .amazon_baseline_history import verify_visible_history
+    if not (role_folder/'reuse.json').exists():
+        return verify_visible_history(controller,role_folder.parent,projection)
+    from types import SimpleNamespace
+    reuse=verify_reused_role(role_folder,accepted)
+    original=Path(reuse['source_role_directory']).parent
+    store=Store(original.parent.parent/'memory',read_only=True)
+    try:
+        source=SimpleNamespace(store=store,config=controller.config,
+            artifacts=Artifacts(store.root.parent/'artifacts/objects'))
+        verify_visible_history(source,original,projection)
+    finally:store.close()
+
+
 def verify_reopen_history(controller):
     events=controller.store.events();known={};count=0;latest_transition=None
     for event in events:
@@ -116,8 +131,7 @@ def verify_campaign(controller):
             accepted=read_json(marker);response=read_json(marker.parent/'response.json');validate_schema(response,schema_for(role))
             context=read_json(marker.parent/'context.json')
             if 'baseline_history' in context:
-                from .amazon_baseline_history import verify_visible_history
-                verify_visible_history(controller,marker.parent.parent,context['baseline_history'])
+                verify_role_history(controller,marker.parent,accepted,context['baseline_history'])
             if role=='measurement':
                 from rec_harness.measurement_discovery import validate_review
                 validate_review(read_json(marker.parent/'context.json'),response)

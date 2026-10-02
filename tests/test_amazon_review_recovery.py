@@ -67,25 +67,32 @@ class ReviewReuseTests(unittest.TestCase):
             root=Path(temp);source=root/'original/rounds/round-1';target=root/'new/rounds/round-1'
             cards={'gap':{'gap_id':'g'},'method':{'method_id':'m'},'proposal':{'proposal_id':'p'}}
             model=source/'experiment/model/model.py';model.parent.mkdir(parents=True);model.write_text('candidate')
+            control=model.with_name('control-1.py');control.write_text('distinct control')
             versions={'candidate':{'model_version':'candidate','source':{'sha256':file_hash(model)}},
-                      'controls':[{'model_version':'base','source':{'sha256':'base'}}]}
+                      'controls':[{'model_version':'base','source':{'sha256':'base'}},
+                                  {'model_version':'control-1','source':{'sha256':file_hash(control)}}]}
             plan={'cards':cards,'versions':versions};write_json(source/'handoff.json',plan)
             store=Store(root/'original/memory');store.configure_budget(10)
             store.reserve('calls',3);store.settle('calls',3,'success')
             objects=Artifacts(root/'original/artifacts/objects')
-            experiment_response={'changed_files':['model.py'],'implementation_checks':['shape check reported'],
+            experiment_response={'changed_files':['model.py','control-1.py'],'implementation_checks':['shape check reported'],
                                  'limitations':['No checkpoint intervention performed.']}
             for role,response in [('evidence',cards['gap']),('hypothesis',{k:cards[k] for k in ['method','proposal']}),('experiment',experiment_response)]:
                 folder=source/role
-                for name,value in [('context.json',{'role':role}),('response.json',response),('request.json',{}),('schema.json',{}),('resources.json',{'status':'success'})]:
+                context={'role':role}
+                if role=='experiment':context['generated_controls']=[{'file':'control-1.py'}]
+                for name,value in [('context.json',context),('response.json',response),('request.json',{}),('schema.json',{}),('resources.json',{'status':'success'})]:
                     write_json(folder/name,value)
-                accepted={'response_hash':digest(response),'context_hash':digest({'role':role})}
-                if role=='experiment':accepted['source_hash']=file_hash(model)
+                accepted={'response_hash':digest(response),'context_hash':digest(context)}
+                if role=='experiment':
+                    accepted['source_hash']=file_hash(model)
+                    accepted['model_source_hashes']={'model.py':file_hash(model),'control-1.py':file_hash(control)}
                 write_json(folder/'accepted.json',accepted)
                 store.event('role_completed',{'task':'round-1-'+role+'-1','role':role,**accepted,
                     'archive':objects.snapshot(folder,['context.json','response.json','resources.json'])})
             before=store.verify();store.close()
             first=reuse_design(None,source,target,plan)
+            self.assertEqual((target/'experiment/model/control-1.py').read_text(),'distinct control')
             self.assertEqual(reuse_design(None,source,target,plan),first)
             write_json(target/'handoff.json',plan)
             validate_export_bindings(target,[])
@@ -101,7 +108,7 @@ class ReviewReuseTests(unittest.TestCase):
             from rec_harness.adapters.amazon_review_evidence import experiment_report
             report=experiment_report(target,[])
             self.assertEqual(report['reported_limitations'],experiment_response['limitations'])
-            self.assertEqual(report['source_hashes'],{'model.py':file_hash(model)})
+            self.assertEqual(report['source_hashes'],{'model.py':file_hash(model),'control-1.py':file_hash(control)})
             self.assertFalse(report['checks_verified_by_this_report'])
             copied=target/'experiment/model/model.py';copied.write_text('changed after reuse')
             with self.assertRaisesRegex(ContractError,'source changed'):experiment_report(target,[])

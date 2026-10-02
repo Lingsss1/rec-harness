@@ -52,9 +52,13 @@ class AmazonAutoresearch:
             config['review_predecessor']=str(Path(config['review_predecessor']).resolve())
         config.setdefault('structured_insertion_contract',True)
         config.setdefault('require_method_sources',True)
+        config.setdefault('source_novelty_guard',True)
+        if type(config['source_novelty_guard']) is not bool:raise ContractError('source_novelty_guard must be boolean')
         if type(config['require_method_sources']) is not bool:raise ContractError('require_method_sources must be boolean')
         if type(config['structured_insertion_contract']) is not bool:raise ContractError('structured_insertion_contract must be boolean')
         study=load_config(config['study']);identifier(config['task_id'])
+        from .amazon_role_sources import freeze_source_history
+        freeze_source_history(config,study)
         if type(config.get('max_rounds')) is not int or config['max_rounds']<1:raise ContractError('positive max_rounds required')
         if type(config.get('role_call_limit')) is not int or config['role_call_limit']<6:raise ContractError('role_call_limit must cover six roles')
         if type(config.get('history_diagnostic',False)) is not bool:raise ContractError('history_diagnostic must be boolean')
@@ -288,6 +292,13 @@ class AmazonAutoresearch:
         pid=self.config['task_id']+'-'+folder.name
         generated_controls=[{'model_version':pid+'-control-'+str(i+1),'file':'control-'+str(i+1)+'.py'}
                             for i in range(self.config.get('generated_control_count',0))]
+        previous_sources=None
+        if self.config.get('source_novelty_guard',False):
+            from .amazon_role_sources import development_sources
+            previous_sources=development_sources(self.study,cfg,
+                exclude=[pid+'-model',*[item['model_version'] for item in generated_controls]])
+            previous_sources.extend(row for record in self.config.get('prior_development_sources',[])
+                                    for row in record['sources'])
         control_rows=[];control_execution=[]
         for version in controls:
             if version==base:continue
@@ -372,6 +383,7 @@ class AmazonAutoresearch:
             'development_baseline':rows,'baseline_execution_evidence':execution_evidence,
             'development_controls':control_rows,'control_execution_evidence':control_execution,
             'generated_controls':generated_controls,
+            **({'previous_development_sources':previous_sources} if previous_sources is not None else {}),
             'history':history,'research_memory':research_memory,'prior_execution_failures':failures,'budget':budget,
             **({'research_memory_retrieval':memory_retrieval} if memory_retrieval is not None else {}),
             'gap_applicability':gap_applicability(research_memory,base,cfg['protocol_hash']),
@@ -426,6 +438,9 @@ class AmazonAutoresearch:
             for name in names:
                 review=review_source(source.read_text(),safe_file(directory/'model',name).read_text())
                 verify_scope(contract,review)
+            if self.config.get('source_novelty_guard',False):
+                from .amazon_role_sources import verify_new_sources
+                verify_new_sources(directory/'model',names,context['previous_development_sources'])
         self._role(folder,'experiment',{**context,'gap':gap,**generated},source,source_check)
         candidate=folder/'experiment/model/model.py';cards={'gap':gap,**generated}
         generated_sources={item['model_version']:folder/'experiment/model'/item['file'] for item in context.get('generated_controls',[])}

@@ -75,6 +75,8 @@ def reuse_design(controller,source,folder,plan):
         if cost['pending']:raise ContractError('source controller still has pending calls')
         for role in names:
             src=source/role;accepted=read_json(src/'accepted.json')
+            from .amazon_role_sources import verify_generated_sources
+            verify_generated_sources(src,role,read_json(src/'context.json'),accepted)
             if digest(read_json(src/'response.json'))!=accepted['response_hash'] or digest(read_json(src/'context.json'))!=accepted['context_hash']:
                 raise ContractError('reused role accepted bytes changed')
             if 'source_hash' in accepted and file_hash(src/'model/model.py')!=accepted['source_hash']:
@@ -91,6 +93,7 @@ def reuse_design(controller,source,folder,plan):
             target=folder/role;target.mkdir(parents=True,exist_ok=True)
             files=['context.json','request.json','response.json','resources.json','schema.json','accepted.json']
             files.extend(name for name in ['literature-search.json','stdout.jsonl','process.json','launch.json','model/model.py'] if (src/name).is_file())
+            files.extend('model/'+name for name in accepted.get('model_source_hashes',{}) if name!='model.py')
             for name in files:
                 destination=target/name;destination.parent.mkdir(parents=True,exist_ok=True)
                 if destination.exists() and file_hash(destination)!=file_hash(src/name):raise ContractError('reused role archive changed')

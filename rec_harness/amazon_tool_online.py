@@ -23,7 +23,7 @@ STUDY_KEYS={'datasets','development_seeds','confirmation_seeds','model_versions'
             'gpu_ids','trusted_baselines_only','hidden_evaluation'}
 CONTROLLER_KEYS={'adapter','base_model_id','control_model_ids','max_rounds','role_call_limit','rescore_recipe',
                  'uid_registry','agent_backend','role_timeout','diagnostic_budget','generated_control_count',
-                 'structured_insertion_contract','require_method_sources','minimum_round_gpu_seconds','activation_diagnostic','semantic_encoder'}
+                 'structured_insertion_contract','require_method_sources','minimum_round_gpu_seconds','activation_diagnostic','semantic_encoder','source_novelty_guard'}
 
 
 def freeze_suite(specification,directory):
@@ -119,6 +119,7 @@ def freeze_cases(entries,base,objects,weights,*,require_diagnostics=True):
         if file_hash(study['worker'])!=study['worker_sha256']:raise ContractError('study worker changed')
         worker=objects.put(study['worker']);study.pop('worker');study.pop('model_versions')
         config.pop('study');config.pop('task_id',None)
+        config.setdefault('source_novelty_guard',True)
         from .semantic_encoder import pin_options
         pin_options(config)
         if config.get('base_model_id','legacy_incumbent') not in snapshots:raise ContractError('initial model absent from frozen sources')

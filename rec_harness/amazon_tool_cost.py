@@ -47,6 +47,7 @@ def check_binding(root,case,suite,group,report,*,study_group=None,scripted_agent
         wanted.update(diagnostic_tool=tool,validation_only=True)
     from .semantic_encoder import freeze_options
     freeze_options(wanted)
+    if 'source_novelty_guard' in config:wanted.setdefault('source_novelty_guard',True)
     if config!=wanted:raise ContractError('Amazon utility controller differs from frozen inputs')
     return config
 

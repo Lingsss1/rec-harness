@@ -16,7 +16,7 @@ from .memory_view import restore,present
 from .process_identity import assert_stopped
 from .store import Store
 
-ROLES={'evidence','hypothesis','evaluation','lead'}
+ROLES={'evidence','hypothesis','evaluation','lead','researcher','reviewer','analyst'}
 
 
 def check_response(role,context,response):

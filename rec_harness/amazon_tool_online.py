@@ -23,7 +23,7 @@ STUDY_KEYS={'datasets','development_seeds','confirmation_seeds','model_versions'
             'gpu_ids','trusted_baselines_only','hidden_evaluation'}
 CONTROLLER_KEYS={'adapter','base_model_id','control_model_ids','max_rounds','role_call_limit','rescore_recipe',
                  'uid_registry','agent_backend','role_timeout','diagnostic_budget','generated_control_count',
-                 'structured_insertion_contract','require_method_sources','minimum_round_gpu_seconds','activation_diagnostic','semantic_encoder','source_novelty_guard'}
+                 'structured_insertion_contract','require_method_sources','minimum_round_gpu_seconds','activation_diagnostic','semantic_encoder','source_novelty_guard','selection_policy','hypothesis_graph','hypothesis_graph_limit','role_layout'}
 
 
 def freeze_suite(specification,directory):
@@ -86,8 +86,8 @@ def freeze_cases(entries,base,objects,weights,*,require_diagnostics=True):
             if number(study[key],key,0)<=0:raise ContractError('positive study limits required')
         for key in ['max_rounds','role_call_limit']:
             if type(config.get(key)) is not int or config[key]<1:raise ContractError('positive controller limits required')
-        if config['role_call_limit']<6 or not config.get('rescore_recipe') or not config.get('uid_registry'):
-            raise ContractError('six-role capacity and independent CPU rescoring configuration required')
+        if config['role_call_limit']<(4 if config.get('role_layout')=='compact-four-v1' else 6) or not config.get('rescore_recipe') or not config.get('uid_registry'):
+            raise ContractError('frozen role capacity and independent CPU rescoring configuration required')
         number(config.get('diagnostic_budget',None if require_diagnostics else 0),'diagnostic_budget',0)
         seeds=study['development_seeds']+study['confirmation_seeds']
         if any(type(seed) is not int or seed<0 for seed in seeds):raise ContractError('nonnegative integer seeds required')
@@ -120,6 +120,8 @@ def freeze_cases(entries,base,objects,weights,*,require_diagnostics=True):
         worker=objects.put(study['worker']);study.pop('worker');study.pop('model_versions')
         config.pop('study');config.pop('task_id',None)
         config.setdefault('source_novelty_guard',True)
+        config.setdefault('selection_policy','baseline-positive-v1')
+        config.setdefault('hypothesis_graph',True)
         from .semantic_encoder import pin_options
         pin_options(config)
         if config.get('base_model_id','legacy_incumbent') not in snapshots:raise ContractError('initial model absent from frozen sources')
@@ -224,6 +226,8 @@ def episode(case,root,objects,tool,*,agent=None):
     execution=create_study(case,root/'study',objects)
     config={**copy.deepcopy(case['controller']),'study':str((root/'study').resolve()),
             'task_id':'online-'+digest([case['id'],str(root)])[:24],'execution_id':execution}
+    config.setdefault('selection_policy','legacy-candidate-controls-v1')
+    config.setdefault('hypothesis_graph',False)
     AmazonAutoresearch.init(root/'campaign',config,_validation_tool=tool)
     controller=AmazonAutoresearch(root/'campaign',agent=agent)
     try:

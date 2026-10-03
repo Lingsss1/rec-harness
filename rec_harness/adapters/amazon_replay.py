@@ -105,14 +105,15 @@ def archive_cycle(campaign,output,*,gpu_weight,role_weight):
                     source=config['model_versions'][version]
                     if file_hash(source['path'])!=source['sha256']:raise ContractError('replay model source changed')
                     target['model.py']=artifacts.put(source['path'])
-                visible=read_json(folder/'evidence/context.json')
+                design_role='researcher' if 'researcher' in roles else 'evidence'
+                visible=read_json(folder/design_role/'context.json')
                 if 'charged_or_reserved' not in visible.get('budget',{}):
                     raise ContractError('design-time GPU cost snapshot required for observed replay')
                 world=build_cycle_world(artifacts=artifacts,protocol=config['protocol_hash'],proposal=plan['proposal_id'],
                     baseline=baseline,candidate=candidate,visible=visible,report=report,selection=cycle['selection'],
                     gpu_total=gpu['charged_or_reserved'],candidate_gpu=candidate_gpu,
                     role_calls=audit['role_costs']['charged_or_reserved'],gpu_weight=gpu_weight,role_weight=role_weight,
-                    request_ref=roles['evidence']['context.json'],workspace_before=before,workspace_after=after)
+                    request_ref=roles[design_role]['context.json'],workspace_before=before,workspace_after=after)
                 world.update(role_archives=roles,training_receipts=receipts,
                     readout_ref=artifacts.put(folder/'development-readout.json'),cycle_ref=artifacts.put(cycles[0]),
                     source={'campaign':str(controller.root),'controller_head':audit['head'],'study_head':study_before['head']})

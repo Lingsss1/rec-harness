@@ -28,6 +28,9 @@ def summarize_development(config, plan, rows):
             slices.append({'seed':seed,'dataset':dataset,'candidate':value,
                            'effects':{v:value-index[(v,dataset,seed)]['metrics'][metric] for v in effects}})
     threshold=config['protocol']['minimum_effect']
+    if plan.get('selection_policy')=='baseline-positive-v1':
+        from .amazon_promotion import development_summary
+        return development_summary(config,plan,means,effects,slices,rows)
     eligible=effects[plan['baseline']]>threshold and all(effects[v]>0 for v in controls)
     return {'metric':metric,'means':means,'candidate_minus_comparator':effects,'slices':slices,
             'minimum_effect':threshold,'eligible_for_confirmation':eligible,
@@ -65,6 +68,8 @@ def development_readout(root, proposal_id, store=None):
               'source_hashes':{v:config['model_versions'][v]['sha256'] for v in versions},
               'summary':summary,'source_receipts':identities,'rows':rows,
               'selection_policy_provenance':'host minimum-effect rule plus positive-control contrast; adapter release gate implemented during development, not an additional preregistered confirmation criterion'}
+        if plan.get('selection_policy')=='baseline-positive-v1':
+            body['selection_policy_provenance']='Preregistered baseline-only promotion; mechanism contrasts are descriptive development evidence.'
         return {**body,'hash':digest(body)}
     finally:
         if own:store.close()
@@ -105,6 +110,9 @@ def release_confirmation(root, proposal_id, decision, readout_hash):
                     'readout_ref':artifacts.put(directory/'readout.json'),'decision_ref':artifacts.put(directory/'decision.json'),
                     'source_hashes':report['source_hashes'],'confirmation_seeds':config['confirmation_seeds'],
                     'scope':'frozen development selection; no confirmation result yet'}
+            if 'promotion_order' in report['summary']:
+                record['promotion_order']=report['summary']['promotion_order']
+                record['selection_policy']=report['summary']['selection_policy']
             store.event('amazon_confirmation_released',record)
             return record
         finally:store.close()

@@ -50,13 +50,22 @@ class MethodSourceGraphTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp,ExitStack() as stack:
             root=Path(temp);store=Store(root/'memory')
             cards={'gap':{},'proposal':{},'method':{'origin':'paper_claim','sources':[CITATION,CITATION]}}
-            store.event('amazon_research_plan_registered',{'proposal_id':'fixture','baseline':'base','cards':cards});store.close()
+            store.event('amazon_research_plan_registered',{'proposal_id':'fixture','baseline':'base','cards':cards,'versions':{'candidate':{'model_version':'recent'}}});store.close()
             report={'protocol_hash':'p','hash':'a'*64,'source_receipts':{},'summary':{'metric':'HR@10',
-                'candidate_minus_comparator':{'base':0},'eligible_for_confirmation':False,'minimum_effect':0.01,'slices':[]}}
+                'selection_policy':'baseline-positive-v1','model_minus_baseline':{'recent':-.01,'early':.01},
+                'candidate_minus_comparator':{'base':-.01},'eligible_for_confirmation':True,'minimum_effect':0.01,'slices':[],
+                'mechanism_comparisons':[{'candidate':'recent','control':'early','candidate_minus_control':-.01,'mechanism_status':'unknown'}]}}
             stack.enter_context(patch('rec_harness.adapters.amazon_research_graph.development_readout',return_value=report))
             stack.enter_context(patch('rec_harness.adapters.amazon_research_graph.ingest'))
             stack.enter_context(patch('rec_harness.adapters.amazon_contract_graph.attach_contracts'))
             stack.enter_context(patch('rec_harness.adapters.amazon_controls.load_config',return_value={}))
             graph=ingest_development(root,'fixture',include_method_sources=True)
             self.assert_sources(graph)
+            comparisons=[n for n in graph['nodes'] if n['attrs'].get('kind')=='mechanism_comparison']
+            fact=next(n for n in graph['nodes'] if n['attrs'].get('kind')=='derived_development_comparison')
+            self.assertFalse(fact['attrs']['effect_gate_passed'])
+            self.assertTrue(fact['attrs']['counterevidence'])
+            self.assertEqual(len(comparisons),1)
+            self.assertEqual(comparisons[0]['attrs']['mechanism_status'],'unknown')
+            self.assertFalse(comparisons[0]['attrs']['independent_unit'])
             self.assertEqual(ingest_development(root,'fixture',include_method_sources=True),graph)

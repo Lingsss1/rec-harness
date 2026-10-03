@@ -120,7 +120,7 @@ def compact_development_context(history,entries,protocol,development_seeds,avail
 def validate_export_bindings(folder,events):
     """Use available committed identities; do not silently trust edited projections."""
     responses={}
-    for role in ['evidence','hypothesis','lead','knowledge']:
+    for role in ['evidence','hypothesis','lead','knowledge','researcher','analyst']:
         path=folder/role/'response.json'
         completed=[e['payload'] for e in events if e['kind']=='role_completed'
                    and e['payload'].get('role')==role
@@ -142,6 +142,9 @@ def validate_export_bindings(folder,events):
         expected={'gap':responses['evidence'],**responses['hypothesis']}
         if read_json(folder/'handoff.json')['cards']!=expected:
             raise ContractError('development memory handoff differs from committed roles')
+    if (folder/'handoff.json').exists() and 'researcher' in responses:
+        if read_json(folder/'handoff.json')['cards']!={k:responses['researcher'][k] for k in ['gap','method','proposal']}:
+            raise ContractError('development memory handoff differs from researcher')
     completed=[e['payload']['result'] for e in events if e['kind']=='auto_round_completed'
                and 'round-'+str(e['payload']['state']['round'])==folder.name]
     if completed and completed[-1].get('cycle_identity'):
@@ -181,6 +184,9 @@ def export_development_memory(campaign,output):
         for name,key in [('handoff.json','design'),('lead/response.json','development_decision'),('knowledge/response.json','provisional_knowledge')]:
             if (folder/name).exists():
                 value=read_json(folder/name);entry[key]=value['cards'] if key=='design' else value
+        if (folder/'analyst/response.json').exists():
+            combined=read_json(folder/'analyst/response.json')
+            entry.update(development_decision=combined['decision'],provisional_knowledge=combined['knowledge'])
         path=folder/'development-readout.json'
         if path.exists():
             value=read_json(path)

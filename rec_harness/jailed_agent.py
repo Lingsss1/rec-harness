@@ -90,7 +90,8 @@ class JailedCodexAgent:
                     original_files.append(name)
             for path in [workspace / 'model', *(workspace / 'model').rglob('*')]:
                 os.chown(path, uid, uid)
-        schema = schema_for(role)
+        from .bound_output import bound_schema
+        schema = bound_schema(role, context)
         write_json(directory / 'schema.json', schema)
         write_json(directory / 'context.json', context)
         for name in ('schema.json', 'context.json'):

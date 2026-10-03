@@ -272,7 +272,16 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
     def test_incumbent_measurements_stay_scoped_through_review_and_resume(self):
         self.run_pipeline(False,scoped_measurement=True)
 
-    def run_pipeline(self,confirmation,measurement=False,legacy_measurement=False,history=False,interrupt_control=False,extra_control=False,control_metric=.6,generated_control=False,transport_archive=False,scoped_measurement=False):
+    def test_generated_control_promotes_and_resume_preserves_incumbent(self):
+        self.run_pipeline(True,generated_control=True,control_metric=.65,promotion=True)
+
+    def test_compact_four_calls_review_before_training_and_control_promotion(self):
+        self.run_pipeline(True,generated_control=True,control_metric=.65,promotion=True,compact=True)
+
+    def test_compact_reviewer_rejection_prevents_training_and_is_not_retried(self):
+        self.run_pipeline(False,compact=True,review_reject=True)
+
+    def run_pipeline(self,confirmation,measurement=False,legacy_measurement=False,history=False,interrupt_control=False,extra_control=False,control_metric=.6,generated_control=False,transport_archive=False,scoped_measurement=False,promotion=False,compact=False,review_reject=False):
         import json
         from contextlib import ExitStack
         from rec_harness.autonomous import autoresearch
@@ -305,6 +314,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                     'execution_id':'execution-test',
                     'role_call_limit':12,'rescore_recipe':{'fixture':True},'uid_registry':'fixture',
                     'agent_backend':{'template':'unused','runtime_root':'unused'}}
+            if compact:config['role_layout']='compact-four-v1'
             if extra_control:config['control_model_ids']=['mechanism_control']
             if generated_control:config['generated_control_count']=1
             expected_reused=['legacy_incumbent']+(['mechanism_control'] if extra_control else [])
@@ -337,7 +347,11 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                     if role=='measurement':
                         response.update(assessment='sufficient',requirements=[],evidence_refs=context['allowed_evidence_refs'],rationale='Existing development aggregates suffice.')
                         response['prerequisites']={key:{'status':'satisfied','rationale':'Audited baseline supplied.'} for key in ['invocation','implementation','data','applicability']}
-                    if role=='hypothesis':
+                    if role=='researcher':
+                        refs=[context['evidence_graph']['nodes'][0]['id']]
+                        response['gap'].update(gap_id='gap',model_version='legacy_incumbent',protocol_hash='protocol',observation_refs=refs)
+                        response['evidence_refs']=refs
+                    if role in ('hypothesis','researcher'):
                         self_test.assertEqual(context['bindings']['controls'],expected_controls)
                         if extra_control:self_test.assertEqual(context['development_controls'][0]['model_version'],'mechanism_control')
                         response['method'].update(method_id='method',origin='agent_hypothesis',sources=[])
@@ -346,6 +360,9 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                         if context.get('insertion_contract_format'):
                             response['proposal']['insertion_contract']=json.dumps({'schema':'nextitnet-method-scope-v1','allowed_methods':['NextItNetModel.forward'],'rationale':'fixture scale at model forward'})
                     if role=='experiment':
+                        if compact:
+                            self_test.assertNotIn('evidence_graph',context)
+                            self_test.assertNotIn('history',context)
                         response['changed_files']=['model.py']
                         (target/'model/model.py').write_text(SOURCE.replace('return self.block(x)','return self.block(x) * 0.9'))
                         if generated_control:
@@ -391,14 +408,27 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                             self_test.assertEqual(context['visible_model_source']['sha256'],file_hash(target/'model/model.py'))
                             self_test.assertEqual(context['visible_model_source']['model_version'],context['model_version'])
                         response.update(selection='keep' if confirmation else 'discard',conclusion_status='unknown',evidence_refs=[report['hash']])
+                    if role=='reviewer':
+                        self_test.assertEqual(fits,[])
+                        self_test.assertIn('return self.block(x) * 0.9',context['implementation_sources']['model.py']['source'])
+                        self_test.assertEqual(context['implementation_sources']['baseline.py']['source'],SOURCE)
+                        if generated_control:self_test.assertIn('control-1.py',context['implementation_sources'])
+                        response.update(verdict='request_changes' if review_reject else 'approve',
+                            findings=['implementation differs'] if review_reject else [], evidence_refs=[context['implementation_hash']])
+                    if role=='analyst':
+                        self_test.assertEqual(context['code_review']['verdict'],'approve')
+                        self_test.assertIn('patch_contract',context)
+                        response['decision'].update(selection='keep' if confirmation else 'discard',conclusion_status='unknown',evidence_refs=[report['hash']])
+                        response['knowledge']['patch_json']=json.dumps({'base_version':context['graph']['graph_version'],'nodes':[],'edges':[]})
                     if role=='knowledge':
                         self_test.assertEqual(context['implementation_author_report']['reported_limitations'],sample(schema_for('experiment'))['limitations'])
                         self_test.assertFalse(context['implementation_author_report']['checks_verified_by_this_report'])
                         response['patch_json']=json.dumps({'base_version':context['graph']['graph_version'],'nodes':[],'edges':[]})
                     for name,value in [('request.json',{'role':role}),('schema.json',schema_for(role)),('context.json',context),('response.json',response),('resources.json',{'status':'success'})]:write_json(target/name,value)
-                    if role=='hypothesis':
-                        write_json(target/'literature-search.json',{'search_observed':False,'qualification':'fixture; no source verification'})
+                    if role in ('hypothesis','researcher'):
                         (target/'stdout.jsonl').write_text('{"type":"fixture"}\n')
+                        from rec_harness.agents import search_receipt
+                        search_receipt(target,'disabled',response)
                         write_json(target/'process.json',{'status':'success','qualification':'fixture'})
                     return response
             def gate(python,source,model_id,directory,env,timeout):
@@ -411,7 +441,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             def controls(root,model_versions,seeds,execution_id=None):
                 self.assertEqual(execution_id,'execution-test')
                 self.assertEqual(model_versions,expected_reused);self.assertEqual(seeds,[17,83])
-                self.assertEqual(calls[-1],'knowledge')
+                self.assertEqual(calls[-1],'analyst' if compact else 'knowledge')
                 self.assertTrue((campaign/'rounds/round-1/private-confirmation-started.json').exists())
                 marker=Path(root)/'confirmation-controls.json'
                 if not marker.exists():
@@ -426,6 +456,9 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                 'protocol_hash':'protocol','summary':{'eligible_for_confirmation':confirmation},
                 'rows':[{'model_version':version,'dataset':'tiny','seed':42,'metrics':{'HR@10':.6 if version=='auto-round-1-model' else .5}}
                         for version in dict.fromkeys(['auto-round-1-model',*expected_controls])]}
+            if promotion:
+                report['summary'].update(selection_policy='baseline-positive-v1',
+                    promotion_order=[control_id,'auto-round-1-model'], eligible_models=[control_id,'auto-round-1-model'])
             report['hash']=digest(report)
             def audited_job(root,config,version,dataset,seed):
                 value=.6 if (extra_control or generated_control) and seed in [17,83] and version!='legacy_incumbent' else .5
@@ -443,9 +476,17 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             stack.enter_context(patch('rec_harness.adapters.amazon_autonomous.ingest_development',side_effect=graph))
             for module in ['amazon_autonomous','amazon_cycle']:
                 stack.enter_context(patch('rec_harness.adapters.'+module+'.development_readout',return_value=report))
+            if review_reject:
+                result=autoresearch(campaign,root/'config.json',agent=Agent())
+                again=autoresearch(campaign,agent=Agent())
+                self.assertEqual(result,again);self.assertEqual(fits,[])
+                self.assertEqual(calls,['researcher','experiment','reviewer'])
+                self.assertEqual(result['failed_rounds'],1)
+                self.assertEqual(result['role_calls']['charged_or_reserved'],3)
+                return
             with patch.object(AmazonAutoresearch,'_rescore',side_effect=KeyboardInterrupt()):
                 with self.assertRaises(KeyboardInterrupt):autoresearch(campaign,root/'config.json',agent=Agent())
-            self.assertEqual(fits,['development']);self.assertEqual(calls,['evidence']+(['measurement'] if measurement else [])+['hypothesis','experiment'])
+            self.assertEqual(fits,['development']);self.assertEqual(calls,(['researcher']+(['measurement'] if measurement else [])+['experiment','reviewer']) if compact else ['evidence']+(['measurement'] if measurement else [])+['hypothesis','experiment'])
             self.assertEqual(resolver.call_args.args[1],'execution-test')
             with patch.object(AmazonAutoresearch,'_rescore',return_value=[]):
                 if interrupt_control:
@@ -453,7 +494,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                     self.assertEqual(fits,['development'])
                 result=autoresearch(campaign,agent=Agent())
                 again=autoresearch(campaign,agent=Agent())
-            expected_roles=7 if measurement else 6
+            expected_roles=(4 if compact else 6)+int(measurement)
             self.assertEqual(fits,['development','confirmation'] if confirmation else ['development']);self.assertEqual(len(calls),expected_roles)
             self.assertEqual(result,again);self.assertEqual(result['state']['round'],1)
             self.assertEqual(control_fits,[expected_reused] if confirmation else [])
@@ -466,7 +507,11 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             self.assertEqual(progress['costs']['role_calls_charged_or_reserved'],expected_roles)
             self.assertEqual(progress['costs']['study_cost_status'],'recorded')
             self.assertEqual((campaign/'rounds/round-1/private-confirmation.json').exists(),confirmation)
-            if extra_control or generated_control:
+            if promotion:
+                private=read_json(campaign/'rounds/round-1/private-confirmation.json')
+                self.assertEqual(private['promoted_model'],control_id)
+                self.assertEqual(result['state']['incumbent'],control_id)
+            elif extra_control or generated_control:
                 private=read_json(campaign/'rounds/round-1/private-confirmation.json')
                 self.assertTrue(all(v>.005 for v in private['effects'].values()))
                 self.assertEqual(private['control_effects'],{'17':{control_id:.6-control_metric},'83':{control_id:.6-control_metric}})
@@ -485,6 +530,19 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                     with self.assertRaisesRegex(ContractError,'readout differs from committed cycle'):audit.verify()
                     write_json(folder/'development-readout.json',original_readout)
                     cycle=read_json(folder/'cycle.json')
+                    if compact:
+                        self.assertEqual(set(cycle['roles']),{'researcher','experiment','reviewer','analyst'})
+                        from rec_harness.adapters.amazon_memory import export_development_memory
+                        pack=export_development_memory(campaign,root/'export.json')
+                        self.assertEqual(pack['entries'][0]['development_decision']['evidence_refs'],[report['hash']])
+                        self.assertIn('provisional_knowledge',pack['entries'][0])
+                        self.assertNotIn('private-confirmation',str(pack))
+                        from rec_harness.adapters.amazon_call_report import call_report
+                        self.assertEqual(call_report(campaign)['local_submissions'],4)
+                        from rec_harness.decision_traces import collect_traces
+                        trace=collect_traces(campaign,roles=['researcher'])['decision_traces'][0]
+                        self.assertEqual(trace['retrieved_node_ids'],trace['role_output']['evidence_refs'])
+
                     if transport_archive:
                         failed_role='evidence-transport-archive-fixture'
                         receipt=cycle['roles'][failed_role]
@@ -515,11 +573,12 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                         with self.assertRaisesRegex(ContractError,'experiment archive changed'):
                             finalize_cycle(study,'auto-round-1',folder)
                         path.write_bytes(original)
+                    design_role='researcher' if compact else 'hypothesis'
                     for name in ['literature-search.json','stdout.jsonl']:
-                        self.assertIn(name,cycle['roles']['hypothesis']['artifacts'])
-                        path=folder/'hypothesis'/name;original_bytes=path.read_bytes()
+                        self.assertIn(name,cycle['roles'][design_role]['artifacts'])
+                        path=folder/design_role/name;original_bytes=path.read_bytes()
                         path.write_bytes(original_bytes+b' ')
-                        with self.assertRaisesRegex(ContractError,'hypothesis archive changed'):
+                        with self.assertRaisesRegex(ContractError,design_role+' archive changed'):
                             finalize_cycle(study,'auto-round-1',folder)
                         path.write_bytes(original_bytes)
                     self.assertEqual(finalize_cycle(study,'auto-round-1',folder),cycle)
@@ -536,10 +595,11 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                         try:
                             with self.assertRaisesRegex(ContractError,'already active'):other.verify()
                         finally:other.close()
-                    context=read_json(campaign/'rounds/round-1/lead/context.json')
-                    context['injected']='changed after completion';write_json(campaign/'rounds/round-1/lead/context.json',context)
-                    marker=read_json(campaign/'rounds/round-1/lead/accepted.json');marker['context_hash']=digest(context)
-                    write_json(campaign/'rounds/round-1/lead/accepted.json',marker)
+                    last_role='analyst' if compact else 'lead'
+                    context=read_json(campaign/'rounds/round-1'/last_role/'context.json')
+                    context['injected']='changed after completion';write_json(campaign/'rounds/round-1'/last_role/'context.json',context)
+                    marker=read_json(campaign/'rounds/round-1'/last_role/'accepted.json');marker['context_hash']=digest(context)
+                    write_json(campaign/'rounds/round-1'/last_role/'accepted.json',marker)
                     with self.assertRaisesRegex(ContractError,'binding differs'):audit.verify()
                 finally:audit.close()
 

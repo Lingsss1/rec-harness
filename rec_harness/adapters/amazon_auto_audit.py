@@ -127,7 +127,7 @@ def verify_campaign(controller):
         records={e['payload']['identity']:e['payload'] for e in ledger.events() if e['kind']=='amazon_research_cycle_completed'}
         for marker in (root/'rounds').glob('round-*/*/accepted.json'):
             role=marker.parent.name
-            if role not in {'evidence','measurement','hypothesis','experiment','evaluation','lead','knowledge'}:continue
+            if role not in {'evidence','measurement','hypothesis','experiment','evaluation','lead','knowledge','researcher','reviewer','analyst'}:continue
             accepted=read_json(marker);response=read_json(marker.parent/'response.json');validate_schema(response,schema_for(role))
             context=read_json(marker.parent/'context.json')
             if 'baseline_history' in context:

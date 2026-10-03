@@ -12,6 +12,8 @@
 
 最新实验：[Amazon NextItNet 20 轮续跑记录](docs/experiments/amazon-autoresearch-v5-v6.md)（含 GPT-6 Sol low 的 12 轮结果、失败分析与调用统计）。
 
+新 Amazon 示例采用[证据图驱动的四阶段研究](docs/implementation/compact-research-and-evidence-graph.md)：研究设计、实现、独立代码审稿、结果分析与知识更新；晋升规则见[性能与机制分离](docs/implementation/model-promotion-and-mechanisms.md)。旧冻结任务保持原流程。
+
 </div>
 
 ---

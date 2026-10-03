@@ -22,8 +22,15 @@ def failed_role_archives(directory):
 
 def finalize_cycle(root, proposal_id, directory):
     root,directory=Path(root),Path(directory)
-    decision=read_json(directory/'lead/response.json');validate_schema(decision,schema_for('lead'))
-    knowledge=read_json(directory/'knowledge/response.json');validate_schema(knowledge,schema_for('knowledge'))
+    compact=(directory/'researcher/accepted.json').exists()
+    decision_path=directory/('analyst/response.json' if compact else 'lead/response.json')
+    decision=read_json(decision_path)
+    knowledge=decision['knowledge'] if compact else read_json(directory/'knowledge/response.json')
+    decision=decision['decision'] if compact else decision
+    validate_schema(decision,schema_for('lead'));validate_schema(knowledge,schema_for('knowledge'))
+    if compact:
+        reviewer=read_json(directory/'reviewer/response.json');validate_schema(reviewer,schema_for('reviewer'))
+        if reviewer['verdict']!='approve' or reviewer['findings']:raise ContractError('compact cycle requires independent code approval')
     graph=read_json(root/'research-readouts'/(proposal_id+'-graph.json'))
     patch=json.loads(knowledge['patch_json']);validate_knowledge_patch(patch,graph)
     if (directory/'measurement').exists():
@@ -40,6 +47,8 @@ def finalize_cycle(root, proposal_id, directory):
                 raise ContractError('development cannot finalize a scientific confirmation')
             selection=decision['selection']
             if not report['summary']['eligible_for_confirmation']: selection='discard'
+            if report['summary'].get('selection_policy')=='baseline-positive-v1':
+                selection='keep' if report['summary']['eligible_for_confirmation'] else 'discard'
             identity=digest([proposal_id,report['hash'],decision,knowledge])
             prior=[e['payload'] for e in store.events() if e['kind']=='amazon_research_cycle_completed' and e['payload']['proposal_id']==proposal_id]
             if prior:
@@ -55,7 +64,7 @@ def finalize_cycle(root, proposal_id, directory):
                 raise ContractError('knowledge may not overwrite existing global graph identities')
             if store.version!=patch['base_version']:raise ContractError('knowledge graph became stale')
             artifacts=Artifacts(root/'artifacts/objects');roles={}
-            role_names=['evidence','hypothesis','experiment','evaluation','lead','knowledge']
+            role_names=['researcher','experiment','reviewer','analyst'] if compact else ['evidence','hypothesis','experiment','evaluation','lead','knowledge']
             if (directory/'measurement').exists():role_names.insert(1,'measurement')
             if (directory/'evidence-corrected').exists(): role_names.insert(1,'evidence-corrected')
             rejected=failed_role_archives(directory)
@@ -91,7 +100,8 @@ def finalize_cycle(root, proposal_id, directory):
             patch['nodes'].append(node(fact_id,'DecisionTrace',{'selection':selection,
                 'scientific_conclusion':decision['conclusion_status'],'readout_hash':report['hash'],
                 'eligible_for_confirmation':report['summary']['eligible_for_confirmation'],
-                'decision_ref':artifacts.put(directory/'lead/response.json'),
+                'decision_ref':artifacts.put(decision_path),
+                **({'decision_field':'decision'} if compact else {}),
                 'scope':'development selection; incumbent unchanged unless separately confirmed'},graph['task_id'],report['protocol_hash']))
             record={'identity':identity,'proposal_id':proposal_id,'selection':selection,
                     'conclusion_status':decision['conclusion_status'],'readout_hash':report['hash'],

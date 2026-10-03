@@ -41,7 +41,7 @@ def audit_exposure(campaign):
                 if 'incumbent_measurement_context' in context:
                     scoped=context['incumbent_measurement_context']
                     binding=context.get('bindings',{})
-                    if (not amazon or value['role'] not in ('evaluation','lead') or
+                    if (not amazon or value['role'] not in ('evaluation','lead','analyst') or
                             not isinstance(scoped,dict) or
                             any(key in context for key in ('diagnostic','measurement_baseline','activation_diagnostics','block_score_diagnostics')) or
                             scoped.get('model_version')!=binding.get('base_model_id') or

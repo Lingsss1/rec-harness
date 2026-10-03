@@ -1,4 +1,4 @@
-"""Resumable six-role Amazon research; no handwritten per-round launch scripts."""
+"""Resumable Amazon research with frozen role layouts; no handwritten per-round launch scripts."""
 import fcntl
 import json
 import shutil
@@ -52,6 +52,16 @@ class AmazonAutoresearch:
             config['review_predecessor']=str(Path(config['review_predecessor']).resolve())
         config.setdefault('structured_insertion_contract',True)
         config.setdefault('require_method_sources',True)
+        config.setdefault('role_layout','six-role-v1')
+        if config['role_layout'] not in {'six-role-v1','compact-four-v1'}:raise ContractError('unknown role_layout')
+        if review_only and config['role_layout']!='six-role-v1':raise ContractError('historical review-only recovery requires six-role-v1')
+        config.setdefault('hypothesis_graph',not review_only)
+        if config['role_layout']=='compact-four-v1' and not config['hypothesis_graph']:raise ContractError('compact research requires hypothesis_graph')
+        if type(config['hypothesis_graph']) is not bool:raise ContractError('hypothesis_graph must be boolean')
+        if type(config.get('hypothesis_graph_limit',64)) is not int or config.get('hypothesis_graph_limit',64)<2:raise ContractError('hypothesis_graph_limit must be at least two')
+        config.setdefault('selection_policy','legacy-candidate-controls-v1' if review_only else 'baseline-positive-v1')
+        from .amazon_promotion import validate_policy
+        validate_policy(config['selection_policy'])
         config.setdefault('source_novelty_guard',True)
         if type(config['source_novelty_guard']) is not bool:raise ContractError('source_novelty_guard must be boolean')
         if type(config['require_method_sources']) is not bool:raise ContractError('require_method_sources must be boolean')
@@ -60,7 +70,8 @@ class AmazonAutoresearch:
         from .amazon_role_sources import freeze_source_history
         freeze_source_history(config,study)
         if type(config.get('max_rounds')) is not int or config['max_rounds']<1:raise ContractError('positive max_rounds required')
-        if type(config.get('role_call_limit')) is not int or config['role_call_limit']<6:raise ContractError('role_call_limit must cover six roles')
+        minimum_calls=4 if config['role_layout']=='compact-four-v1' else 6
+        if type(config.get('role_call_limit')) is not int or config['role_call_limit']<minimum_calls:raise ContractError('role_call_limit must cover the frozen role layout')
         if type(config.get('history_diagnostic',False)) is not bool:raise ContractError('history_diagnostic must be boolean')
         if type(config.get('generated_control_count',0)) is not int or config.get('generated_control_count',0)<0:
             raise ContractError('generated_control_count must be a nonnegative integer')
@@ -147,6 +158,8 @@ class AmazonAutoresearch:
         with self.lock():return verify_campaign(self)
 
     def _role(self,folder,role,context,source=None,validator=None):
+        if getattr(self,'config',{}).get('selection_policy')=='baseline-positive-v1':
+            context={**context,'host_bound_output':True}
         target=folder/role
         artifacts=Artifacts(self.store.root.parent/'artifacts/objects')
         transitions=[e for e in self.store.events() if e['kind'] in {'auto_round_completed','auto_round_reopened'}]
@@ -331,6 +344,9 @@ class AmazonAutoresearch:
                 for name,key in [('handoff.json','design'),('lead/response.json','development_decision'),('knowledge/response.json','provisional_knowledge')]:
                     previous=path.parent/name
                     if previous.exists():entry[key]=read_json(previous)['cards'] if key=='design' else read_json(previous)
+                if (path.parent/'analyst/response.json').exists():
+                    combined=read_json(path.parent/'analyst/response.json')
+                    entry.update(development_decision=combined['decision'],provisional_knowledge=combined['knowledge'])
                 research_memory.append(entry)
         for path in self.config.get('development_history',[]):
             report=read_json(path)
@@ -377,6 +393,9 @@ class AmazonAutoresearch:
             diagnostics['insertion_contract_format']={'schema':SCHEMA,
                 'allowed_methods':method_catalog(Path(cfg['model_versions'][base]['path']).read_text()),
                 'instructions':'Proposal.insertion_contract MUST be a JSON-encoded object with exactly schema, allowed_methods (nonempty subset of this catalog), rationale. Declare all methods the candidate AND generated controls may change, including initialization. Experiment edits outside these methods or comment-only changes are rejected before CPU admission. Other proposal fields explain the mechanism and falsification; method scope is not causal proof.'}
+        if self.config.get('hypothesis_graph'):
+            from .amazon_hypothesis_graph import context_graph
+            diagnostics['evidence_graph']=context_graph(self,history,base,cfg['protocol_hash'],rows)
         return {**diagnostics,'task_id':self.config['task_id'],'model_version':base,'protocol_hash':cfg['protocol_hash'],
             **({'method_source_contract':METHOD_SOURCE_CONTRACT} if self.config.get('require_method_sources') else {}),
             'protocol':cfg['protocol'],'seeds':cfg['development_seeds']+cfg['confirmation_seeds'],
@@ -393,6 +412,7 @@ class AmazonAutoresearch:
             'source_contract':{'editable_classes':['NextItNetModel','NextItNetBlock'],'library_calls':sorted(MODULE_CALLS),
                                'tensor_methods':sorted(TENSOR_METHODS),'preserve':'all module configuration, imports, training/data helpers and method signatures'},
             'instructions':['Use exact supplied bindings. Edit model.py for the candidate; when generated_controls is nonempty, create each named file as a complete model module with a distinct falsifiable control of the proposed mechanism. All files must preserve incumbent imports, training helpers and module settings.',
+                'When evidence_graph is supplied, inspect its actual nodes and edges before proposing a mechanism. Trace supporting and counter evidence, SUPERSEDES/ALTERNATIVE_TO relations and omitted revision warnings. Cite graph node IDs in observation_refs and proposal rationale fields; distinguish local measurements from provisional claims. Empty history means no prior mechanism evidence. Do not treat a model discard as a mechanism refutation.',
                 'Prior development readouts appear once in history, keyed by hash. Resolve research_memory.development_hash against history; all referenced readouts are included.',
                 'Evidence GapCard.model_version MUST equal bindings.base_model_id (the incumbent being diagnosed), never candidate_model_version. GapCard.protocol_hash MUST equal bindings.train_protocol_hash.',
                 'Review gap_applicability before reusing a historical gap: a changed model/protocol requires current measurements; same declared scope still requires evidence review. Prior supported/contradicted/mitigated status never transfers automatically. Use current observations to produce the new incumbent-scoped GapCard, retaining competing explanations and marking unmeasured applicability unknown. A model keep/discard decision is not a mechanism conclusion.',
@@ -414,22 +434,31 @@ class AmazonAutoresearch:
             validate_card('gap',value)
             if value['model_version']!=binding['base_model_id'] or value['protocol_hash']!=binding['train_protocol_hash']:
                 raise ContractError('GapCard diagnoses the incumbent: model_version must be '+binding['base_model_id']+'; protocol_hash must be '+binding['train_protocol_hash'])
-        gap=self._role(folder,'evidence',context,source,gap_check)
-        if not context.get('measurement_gaps'):
-            from rec_harness.measurement_discovery import discover,validate_review
-            context['measurement_gaps']=discover(self,{'incumbent':state['incumbent'],'baseline':context.get('measurement_baseline')},
-                context,gap,folder.name,lambda request:self._role(folder,'measurement',request,source,lambda response,_:validate_review(request,response)))
-        block_model_proposal(self,folder.name,gap,context.get('measurement_gaps',[]))
-        def proposal_check(value,_):
+        def proposal_check(value,_,gap_value):
             validate_card('method',value['method'],require_method_sources=self.config.get('require_method_sources',False));validate_card('proposal',value['proposal']);p=value['proposal']
             for key in ['proposal_id','base_model_id','controls','train_protocol_hash','seeds']:
                 if p[key]!=binding[key]:raise ContractError('proposal binding mismatch: '+key+' must equal the literal JSON value '+json.dumps(binding[key]))
-            if p['gap_ids']!=[gap['gap_id']] or p['method_ids']!=[value['method']['method_id']]:raise ContractError('unresolved proposal references')
+            if p['gap_ids']!=[gap_value['gap_id']] or p['method_ids']!=[value['method']['method_id']]:raise ContractError('unresolved proposal references')
             if not 0<p['budget']<=context['budget']['remaining']:raise ContractError('proposal budget outside frozen envelope')
             if context.get('insertion_contract_format'):
                 from .insertion_contract import parse_contract
                 parse_contract(p['insertion_contract'],required=True,available_methods=context['insertion_contract_format']['allowed_methods'])
-        generated=self._role(folder,'hypothesis',{**context,'gap':gap},source,proposal_check)
+        if self.config.get('role_layout')=='compact-four-v1':
+            from .amazon_compact import design
+            gap,generated=design(self,folder,context,source,gap_check,proposal_check)
+            if not context.get('measurement_gaps'):
+                from rec_harness.measurement_discovery import discover,validate_review
+                context['measurement_gaps']=discover(self,{'incumbent':state['incumbent'],'baseline':context.get('measurement_baseline')},
+                    context,gap,folder.name,lambda request:self._role(folder,'measurement',request,source,lambda response,_:validate_review(request,response)))
+            block_model_proposal(self,folder.name,gap,context.get('measurement_gaps',[]))
+        else:
+            gap=self._role(folder,'evidence',context,source,gap_check)
+            if not context.get('measurement_gaps'):
+                from rec_harness.measurement_discovery import discover,validate_review
+                context['measurement_gaps']=discover(self,{'incumbent':state['incumbent'],'baseline':context.get('measurement_baseline')},
+                    context,gap,folder.name,lambda request:self._role(folder,'measurement',request,source,lambda response,_:validate_review(request,response)))
+            block_model_proposal(self,folder.name,gap,context.get('measurement_gaps',[]))
+            generated=self._role(folder,'hypothesis',{**context,'gap':gap},source,lambda v,d:proposal_check(v,d,gap))
         def source_check(value,directory):
             names=['model.py',*[item['file'] for item in context.get('generated_controls',[])]]
             if value['changed_files']!=names:raise ContractError('changed_files must match frozen candidate/control files')
@@ -441,14 +470,22 @@ class AmazonAutoresearch:
             if self.config.get('source_novelty_guard',False):
                 from .amazon_role_sources import verify_new_sources
                 verify_new_sources(directory/'model',names,context['previous_development_sources'])
-        self._role(folder,'experiment',{**context,'gap':gap,**generated},source,source_check)
+        implementation_context={**context,'gap':gap,**generated}
+        if self.config.get('role_layout')=='compact-four-v1':
+            from .amazon_compact import implementation_context as compact_implementation
+            implementation_context=compact_implementation(context,gap,generated)
+        self._role(folder,'experiment',implementation_context,source,source_check)
         candidate=folder/'experiment/model/model.py';cards={'gap':gap,**generated}
         generated_sources={item['model_version']:folder/'experiment/model'/item['file'] for item in context.get('generated_controls',[])}
         versions={'candidate':{'model_version':binding['candidate_model_version'],'source':{'path':str(candidate),'sha256':file_hash(candidate)}},
                   'controls':[{'model_version':v,'source':({'path':str(generated_sources[v]),'sha256':file_hash(generated_sources[v])}
                      if v in generated_sources else cfg['model_versions'][v])} for v in binding['controls']]}
         write_json(folder/'handoff.json',{'cards':cards,'versions':versions})
-        plan=register_plan(self.study,cards,versions);write_json(folder/'preregistration.json',plan)
+        policy_args={'selection_policy':self.config['selection_policy']} if self.config.get('selection_policy')=='baseline-positive-v1' else {}
+        if self.config.get('role_layout')=='compact-four-v1':
+            from .amazon_compact import review_code
+            review_code(self,folder,context,cards,source,candidate,generated_sources)
+        plan=register_plan(self.study,cards,versions,**policy_args);write_json(folder/'preregistration.json',plan)
         write_json(folder/'admission.json',admit_plan(self.study,pid,recipe=self.config['rescore_recipe'],uid_registry=self.config['uid_registry']))
         run_phase(self.study,pid,'development',execution_id=self.config.get('execution_id'))
         for version in binding['controls']:
@@ -463,7 +500,11 @@ class AmazonAutoresearch:
             from .amazon_history_context import development_history
             history=development_history(self,folder,binding)
         lead,cycle=self._review_roles(folder,context,binding,cards,versions,candidate,report,history)
-        selected=False;confirmation=None
+        selected=False;confirmation=None;promoted_model=None
+        promotion=report['summary'].get('selection_policy')=='baseline-positive-v1'
+        if promotion and report['summary']['eligible_for_confirmation']:
+            # Selection is a host metric decision; scientific prose cannot veto it.
+            lead={**lead,'selection':'keep','rationale':'Host baseline-positive selection for independently eligible arms. Agent mechanism assessment retained in the development cycle.'}
         if report['summary']['eligible_for_confirmation'] and lead['selection']=='keep':
             write_json(folder/'private-confirmation-started.json',{'scope':'host-only phase boundary; excludes later failures from agent context'})
             release_confirmation(self.study,pid,lead,report['hash'])
@@ -476,29 +517,37 @@ class AmazonAutoresearch:
             run_phase(self.study,pid,'confirmation',execution_id=self.config.get('execution_id'))
             for version in generated_sources:self._rescore(folder,version,cfg['confirmation_seeds'])
             self._rescore(folder,binding['candidate_model_version'],cfg['confirmation_seeds'])
-            cfg=load_config(self.study);effects={};control_effects={}
-            for seed in cfg['confirmation_seeds']:
-                deltas=[];contrasts={v:[] for v in binding['controls'] if v!=binding['base_model_id']}
-                for dataset in cfg['datasets']:
-                    candidate_result,cm=audit_job(self.study,cfg,binding['candidate_model_version'],dataset,seed)
-                    baseline_result,bm=audit_job(self.study,cfg,binding['base_model_id'],dataset,seed)
-                    if (cm['candidates_hash'],cm['data_hashes'],candidate_result.get('execution_id','direct-reviewed-v1'))!=(bm['candidates_hash'],bm['data_hashes'],baseline_result.get('execution_id','direct-reviewed-v1')):
-                        raise ContractError('confirmation pairing differs')
-                    deltas.append(candidate_result['metrics'][cfg['protocol']['metric']]-baseline_result['metrics'][cfg['protocol']['metric']])
-                    for version in contrasts:
-                        control_result,manifest=audit_job(self.study,cfg,version,dataset,seed)
-                        if (manifest['candidates_hash'],manifest['data_hashes'],control_result.get('execution_id','direct-reviewed-v1'))!=(cm['candidates_hash'],cm['data_hashes'],candidate_result.get('execution_id','direct-reviewed-v1')):
-                            raise ContractError('confirmation control pairing differs')
-                        contrasts[version].append(candidate_result['metrics'][cfg['protocol']['metric']]-control_result['metrics'][cfg['protocol']['metric']])
-                effects[str(seed)]=sum(deltas)/len(deltas)
-                control_effects[str(seed)]={v:sum(values)/len(values) for v,values in contrasts.items()}
-            selected=all(effect>cfg['protocol']['minimum_effect'] for effect in effects.values()) and all(
-                effect>0 for contrasts in control_effects.values() for effect in contrasts.values())
-            confirmation={'effects':effects,'selected':selected,'scope':'host-only confirmation; not sent to Codex roles or final test'}
-            if any(control_effects.values()):confirmation['control_effects']=control_effects
+            cfg=load_config(self.study)
+            if promotion:
+                from .amazon_promotion import confirm_promotion
+                confirmation=confirm_promotion(self.study,cfg,binding['base_model_id'],report['summary'],audit_job)
+                promoted_model=confirmation['promoted_model']
+                selected=promoted_model is not None
+            else:
+                effects={};control_effects={}
+                for seed in cfg['confirmation_seeds']:
+                    deltas=[];contrasts={v:[] for v in binding['controls'] if v!=binding['base_model_id']}
+                    for dataset in cfg['datasets']:
+                        candidate_result,cm=audit_job(self.study,cfg,binding['candidate_model_version'],dataset,seed)
+                        baseline_result,bm=audit_job(self.study,cfg,binding['base_model_id'],dataset,seed)
+                        if (cm['candidates_hash'],cm['data_hashes'],candidate_result.get('execution_id','direct-reviewed-v1'))!=(bm['candidates_hash'],bm['data_hashes'],baseline_result.get('execution_id','direct-reviewed-v1')):
+                            raise ContractError('confirmation pairing differs')
+                        deltas.append(candidate_result['metrics'][cfg['protocol']['metric']]-baseline_result['metrics'][cfg['protocol']['metric']])
+                        for version in contrasts:
+                            control_result,manifest=audit_job(self.study,cfg,version,dataset,seed)
+                            if (manifest['candidates_hash'],manifest['data_hashes'],control_result.get('execution_id','direct-reviewed-v1'))!=(cm['candidates_hash'],cm['data_hashes'],candidate_result.get('execution_id','direct-reviewed-v1')):
+                                raise ContractError('confirmation control pairing differs')
+                            contrasts[version].append(candidate_result['metrics'][cfg['protocol']['metric']]-control_result['metrics'][cfg['protocol']['metric']])
+                    effects[str(seed)]=sum(deltas)/len(deltas)
+                    control_effects[str(seed)]={v:sum(values)/len(values) for v,values in contrasts.items()}
+                selected=all(effect>cfg['protocol']['minimum_effect'] for effect in effects.values()) and all(
+                    effect>0 for contrasts in control_effects.values() for effect in contrasts.values())
+                confirmation={'effects':effects,'selected':selected,'scope':'host-only confirmation; not sent to Codex roles or final test'}
+                if any(control_effects.values()):confirmation['control_effects']=control_effects
             write_json(folder/'private-confirmation.json',confirmation)
         return {'cycle_identity':cycle['identity'],'candidate':binding['candidate_model_version'],
-                'development_hash':report['hash'],'selected':selected,'confirmation_executed':confirmation is not None}
+                'development_hash':report['hash'],'selected':selected,'confirmation_executed':confirmation is not None,
+                **({'promoted_model':promoted_model} if promotion else {})}
 
     def _review_roles(self,folder,context,binding,cards,versions,candidate,report,history=None):
         cfg=load_config(self.study);pid=binding['proposal_id']
@@ -556,6 +605,8 @@ class AmazonAutoresearch:
                                 'implementation_evidence reports host-verified admission checks; its report hashes are references, not files available in your workspace. When structural_changes is supplied, compare its actual changed methods and assigned fields with the proposal insertion contract; AST evidence does not prove that semantic contract. tensor_graph summarizes verified executed tensor paths; unavailable means no recorded coverage. Never infer unexecuted branch coverage or causal isolation from operator counts. sequence_semantics reports finite input-immutability and per-user batch-independence probes, not proof of the proposal-specific mechanism. Distinguish these checks from missing scientific evidence. Evaluation has no source file; lead receives candidate source separately.',
                                 'candidate_execution_evidence summarizes audited completed development training under the frozen worker and protocol. Use verified fields to assess actual execution settings, rather than local model helper defaults. training_contract distinguishes fresh pre-training probes from probes bound to the selected trained development checkpoint; unavailable means no archived gates. These are synthetic checks, not held-out recommendation quality. It does not prove a causal mechanism or expose confirmation results.',
                                 'Keep only if eligible_for_confirmation is true. No confirmation results are supplied; conclusion unknown/provisional.']}
+        if report['summary'].get('selection_policy')=='baseline-positive-v1':
+            review['instructions'].append('Promotion is decided by host baseline-only metrics for candidate AND generated controls. A control winning does not veto a useful candidate; scientific mechanism conclusions remain separate. Record alternative explanations and the next discriminating experiment, including negative and null contrasts.')
         if generated_evidence:
             review['generated_control_evidence']=generated_evidence
             review['instructions'].append('generated_control_evidence binds each new control to its own source admission and completed development execution. These checks do not establish that the control isolates the proposed mechanism; assess that separately from the paired outcomes.')
@@ -564,12 +615,16 @@ class AmazonAutoresearch:
             validate_card('decision',value)
             if report['hash'] not in value['evidence_refs']:raise ContractError('exact development readout hash required')
             if value['conclusion_status'] not in ['unknown','provisional']:raise ContractError('development cannot establish scientific confirmation')
+        if self.config.get('role_layout')=='compact-four-v1':
+            from .amazon_compact import analyze
+            return analyze(self,folder,review,graph,report,decision_check)
         evaluation=self._role(folder,'evaluation',review,validator=decision_check)
         lead=self._role(folder,'lead',{**review,'evaluation':evaluation,
             'visible_model_source':{'path':'model/model.py','model_version':binding['candidate_model_version'],
                                     'sha256':file_hash(candidate)}},candidate,decision_check)
         knowledge_context={'graph':graph,'development':report,'decision':lead,
             'implementation_author_report':review['implementation_author_report'],
+            **({'mechanism_comparisons':report['summary']['mechanism_comparisons']} if 'mechanism_comparisons' in report['summary'] else {}),
             'patch_contract':{'base_version':graph['graph_version'],'fields':['base_version','nodes','edges'],
                 'allowed_node_types':['Claim','GapHypothesis','MeasurementGap'],'origin':'agent_hypothesis',
                 'task_id':graph['task_id'],'protocol_hash':cfg['protocol_hash'],'status':'provisional',
@@ -628,7 +683,7 @@ class AmazonAutoresearch:
                     remaining=ledger.budget()['remaining']
                 finally:ledger.close()
                 folder=self.root/'rounds'/('round-'+str(state['round']+1))
-                roles=['evidence','hypothesis','experiment','evaluation','lead','knowledge']
+                roles=['researcher','experiment','reviewer','analyst'] if self.config.get('role_layout')=='compact-four-v1' else ['evidence','hypothesis','experiment','evaluation','lead','knowledge']
                 if 'measurement_discovery' in self.config:roles.append('measurement')
                 required=sum(not (folder/role/'accepted.json').exists() for role in roles)
                 if self.store.budget()['remaining']<required:reason='role_budget';break
@@ -636,7 +691,7 @@ class AmazonAutoresearch:
                 folder=self.root/'rounds'/('round-'+str(state['round']+1))
                 try:
                     result=self._round(state,folder)
-                    if result['selected']:state['incumbent']=result['candidate']
+                    if result['selected']:state['incumbent']=result.get('promoted_model') or result['candidate']
                 except MeasurementDeferred as error:
                     result={'status':'deferred','reason':str(error),'selected':False};reason='measurement_required'
                     self.store.event('auto_round_deferred',{'round':state['round']+1,**result})

@@ -12,6 +12,9 @@ from .core import ContractError, canonical, identifier, read_json, write_json
 from .process_identity import identity
 
 ROLES = {
+    "researcher": "Read the actual evidence_graph nodes and relations, including counterevidence and revisions. In one call diagnose the gap and design one falsifiable candidate and its controls. Return gap, method, proposal and evidence_refs naming supplied graph nodes actually used. Separate observed facts from provisional explanations. Do not implement or train. Use literature only for attributed external claims.",
+    "reviewer": "Independently inspect the supplied baseline, candidate and generated-control source texts and hashes. Compare actual changes against the frozen proposal, insertion contract and author claims. Check implementation errors, scoring/encode consistency, unintended changes and whether each control implements its stated intervention. Approve only if no blocking issue remains; otherwise request_changes or unresolved. Do not edit code, run training or reinterpret the research hypothesis to excuse a mismatch. Reference the exact implementation_hash. An approval is code review, not proof of correctness or causal isolation.",
+    "analyst": "Analyze the audited public development outcomes and mechanism contrasts, retaining negative and null results. In one call return a decision explanation and a knowledge GraphPatch against the supplied graph and patch_contract. Performance selection belongs to the host. Scientific claims stay provisional/unknown; never invent evidence or inspect confirmation. Record competing explanations and the next discriminating experiment.",
     "selection": "Choose exactly one supplied candidate_id using only the supplied public candidate information and observations. Do not generate or modify candidates, run experiments, or infer withheld evaluation scores. Return the chosen candidate_id and a bounded rationale.",
     "optimizer_router": "Audit the supplied decision traces. In one call choose harness_patch or measurement_gap. Return payload_json as a JSON string matching context.optimizer_payload_schemas[kind]: a HarnessPatch, or a measurement review using measurement_handoff_request. Prefer a minimal Harness patch unless a concrete missing measurement blocks a decision. Unresolved invocation, implementation, data or applicability prohibits handoff. Never invent evidence, change the stable kernel, or claim utility. Respect base_policy and patch_semantics when supplied.",
     "measurement": "Review measurement sufficiency for the supplied model gap. Distinguish insufficient resolution from invocation/implementation failure, inadequate data and inapplicability. Different explanations alone, or one failed model improvement, do not establish a measurement gap. Sufficient means existing measurements can evaluate the next authorized model experiment, not that its outcome is already known. Pending candidate training/results and host training-cost estimation are not missing measurement prerequisites. Propose a new measurement only when it can change a concrete decision, has usable supplied artifacts, and has falsifiable independent acceptance criteria. Never invent observations. Otherwise report sufficient or prerequisite_unresolved.",
@@ -28,7 +31,7 @@ ROLES = {
 
 def search_policy(value=None):
     """Explicit per-role modes; live literature retrieval belongs to hypothesis."""
-    modes = {role: "live" if role == "hypothesis" else "disabled" for role in ROLES}
+    modes = {role: "live" if role in {"hypothesis","researcher"} else "disabled" for role in ROLES}
     if isinstance(value, str):
         value = {role: value for role in ROLES}
     if value is not None:
@@ -73,6 +76,11 @@ def strings():
 
 
 def schema_for(role):
+    if role=='researcher':
+        hypothesis=schema_for('hypothesis')['properties']
+        return object_schema({'gap':schema_for('evidence'),**hypothesis,'evidence_refs':strings()})
+    if role=='analyst':return object_schema({'decision':schema_for('lead'),'knowledge':schema_for('knowledge')})
+    if role=='reviewer':return object_schema({'verdict':{'type':'string','enum':['approve','request_changes','unresolved']},'findings':strings(),'evidence_refs':strings(),'limitations':strings()})
     if role=='selection':return object_schema({'candidate_id':text_schema(),'rationale':text_schema()})
     if role=='optimizer_router':
         return object_schema({'kind':{'type':'string','enum':['harness_patch','measurement_gap']},'payload_json':{'type':'string'}})
@@ -128,6 +136,10 @@ def validate_schema(value, schema):
     elif kind == "number":
         from .core import number
         number(value)
+        if 'maximum' in schema and value > schema['maximum']:
+            raise ContractError('number exceeds output maximum')
+        if 'exclusiveMinimum' in schema and value <= schema['exclusiveMinimum']:
+            raise ContractError('number below output exclusive minimum')
 
 
 def run_process(argv, cwd, directory, *, stdin=None, timeout=300, env=None):
@@ -184,7 +196,8 @@ class CodexAgent:
             raise ContractError("unknown agent role")
         directory = Path(directory).resolve()
         directory.mkdir(parents=True, exist_ok=True)
-        schema = schema_for(role)
+        from .bound_output import bound_schema
+        schema = bound_schema(role, context)
         write_json(directory / "schema.json", schema)
         if role == "knowledge":
             context = {**context, "graph_patch_contract": {

@@ -75,7 +75,7 @@ def compile_plan(config, cards, versions, remaining):
             'confirmation_scope': 'new initializations on shared validation users; not final test'}
 
 
-def register_plan(root, cards, versions):
+def register_plan(root, cards, versions, *, selection_policy=None):
     root = Path(root)
     with (root / 'controller.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -93,7 +93,12 @@ def register_plan(root, cards, versions):
                 if ref['sha256'] != source['sha256']:
                     raise ContractError('planned source changed during archival')
                 version['source'] = ref
-            identity = digest({'cards': cards, 'versions': frozen})
+            identity_body = {'cards': cards, 'versions': frozen}
+            if selection_policy is not None:
+                from .amazon_promotion import validate_policy
+                validate_policy(selection_policy)
+                identity_body['selection_policy'] = selection_policy
+            identity = digest(identity_body)
             for event in store.events():
                 if event['kind'] != 'amazon_research_plan_registered': continue
                 prior = event['payload']
@@ -109,6 +114,7 @@ def register_plan(root, cards, versions):
                 if (previous_names & current_names) - reused:
                     raise ContractError('model version already belongs to another registered plan')
             plan = compile_plan(config, cards, frozen, store.budget()['remaining'])
+            if selection_policy is not None:plan['selection_policy']=selection_policy
             # Changing a candidate name cannot erase prior outcome exposure.
             hashes = {v['source']['sha256'] for v in [frozen['candidate'], *frozen['controls']]
                       if v['model_version'] not in plan['reused_control_versions']}

@@ -80,7 +80,7 @@ def collect_traces(campaign,*,roles=None,cutoff_seq=None):
                 process=read_json(artifacts.verify(archive['process.json'])) if 'process.json' in archive else {}
                 value={**value,'status':resources.get('status',process.get('status','unknown')),
                        'wall_seconds':resources.get('wall_seconds',process.get('wall_seconds'))}
-            bundle=context.get('evidence');original=restore(bundle) if bundle and 'presentation' in bundle else bundle
+            bundle=context.get('evidence') or (context.get('evidence_graph') if amazon else None);original=restore(bundle) if bundle and 'presentation' in bundle else bundle
             snapshot=request.get('source_snapshot')
             if snapshot is not None:
                 for ref in snapshot.values():artifacts.verify(ref)

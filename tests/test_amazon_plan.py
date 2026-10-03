@@ -59,6 +59,13 @@ class AmazonPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, 'rewritten'):
             register_plan(self.root, self.cards, self.versions)
 
+    def test_selection_policy_is_frozen_before_outcomes(self):
+        report=register_plan(self.root,self.cards,self.versions,selection_policy='baseline-positive-v1')
+        self.assertEqual(report['selection_policy'],'baseline-positive-v1')
+        self.assertEqual(register_plan(self.root,self.cards,self.versions,selection_policy='baseline-positive-v1'),report)
+        with self.assertRaisesRegex(ContractError,'rewritten'):
+            register_plan(self.root,self.cards,self.versions)
+
     def test_protocol_controls_and_budget_cannot_be_changed(self):
         for field, value, message in [('seeds',[1],'protocol'), ('controls',['imaginary'],'controls'), ('budget',101,'budget')]:
             cards = copy.deepcopy(self.cards); cards['proposal'][field] = value

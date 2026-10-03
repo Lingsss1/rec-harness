@@ -47,6 +47,9 @@ def check_binding(root,case,suite,group,report,*,study_group=None,scripted_agent
         wanted.update(diagnostic_tool=tool,validation_only=True)
     from .semantic_encoder import freeze_options
     freeze_options(wanted)
+    if 'role_layout' in config:wanted.setdefault('role_layout','six-role-v1')
+    if 'hypothesis_graph' in config:wanted.setdefault('hypothesis_graph',False)
+    if 'selection_policy' in config:wanted.setdefault('selection_policy','legacy-candidate-controls-v1')
     if 'source_novelty_guard' in config:wanted.setdefault('source_novelty_guard',True)
     if config!=wanted:raise ContractError('Amazon utility controller differs from frozen inputs')
     return config
@@ -68,7 +71,8 @@ def real_transports(root,config):
                 raise ContractError('Amazon isolated model transport differs')
             calls.append(event['payload']['task'])
         for index in range(1,config['max_rounds']+1):
-            for role in ['evidence','hypothesis','experiment','evaluation','lead','knowledge']:
+            roles=['researcher','experiment','reviewer','analyst'] if config.get('role_layout')=='compact-four-v1' else ['evidence','hypothesis','experiment','evaluation','lead','knowledge']
+            for role in roles:
                 if not any(task.startswith(f'round-{index}-{role}-') for task in calls):raise ContractError('Amazon utility lacks completed real research roles')
         return len(calls)
     finally:store.close()

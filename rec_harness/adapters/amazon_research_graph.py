@@ -30,16 +30,19 @@ def ingest_development(root, proposal_id, *, include_method_sources=False):
                 nodes=[node(ids[kind],typ,plan['cards'][kind],task,protocol,'agent_hypothesis')
                        for kind,typ in [('gap','GapHypothesis'),('method','Method'),('proposal','Proposal')]]
                 summary=report['summary']
+                candidate_eligible=summary['eligible_for_confirmation']
+                if summary.get('selection_policy')=='baseline-positive-v1':
+                    candidate_eligible=summary['model_minus_baseline'][plan['versions']['candidate']['model_version']]>0
                 nodes.append(node(fact_id,'Experiment',{'kind':'derived_development_comparison',
                     'partition':'development','valid':True,'status':'success','metric':summary['metric'],
                     'effect':summary['candidate_minus_comparator'][plan['baseline']],
-                    'effect_gate_passed':summary['eligible_for_confirmation'],
+                    'effect_gate_passed':candidate_eligible,
                     'minimum_effect':summary['minimum_effect'],'independent_run_id':prefix+'-development-aggregate',
                     'seed_ids':sorted({row['seed'] for row in summary['slices']}),
                     'scientific_unit':'declared development seed aggregate; not additional independent runs or category slices',
                     'evidence_dependency_ids':sources,'source_experiment_ids':sources,
                     'report_ref':ref,'scientific_conclusion':'unknown',
-                    'counterevidence':not summary['eligible_for_confirmation'],
+                    'counterevidence':not candidate_eligible,
                     'counterevidence_to':'candidate selection threshold; not a mechanism refutation'},task,protocol))
                 edges=[edge(prefix+'-targets',ids['proposal'],ids['gap'],'TARGETS',[],task,store.version+1),
                        edge(prefix+'-uses',ids['proposal'],ids['method'],'USES',[],task,store.version+1),
@@ -57,6 +60,13 @@ def ingest_development(root, proposal_id, *, include_method_sources=False):
                     nodes.append(node(identifier,'Observation',{**row,'partition':'development',
                         'independent_unit':False,'counterevidence':row['effects'][plan['baseline']]<0,
                         'evidence_dependency_ids':[fact_id],'report_ref':ref},task,protocol))
+                    edges.append(edge(identifier+'-produced',fact_id,identifier,'PRODUCES',[fact_id],task,store.version+1))
+                for comparison in summary.get('mechanism_comparisons', []):
+                    identifier=prefix+'-mechanism-'+digest(comparison)[:16]
+                    nodes.append(node(identifier,'Observation',{
+                        'kind':'mechanism_comparison','partition':'development',
+                        'independent_unit':False,'evidence_dependency_ids':[fact_id],
+                        'report_ref':ref,**comparison},task,protocol))
                     edges.append(edge(identifier+'-produced',fact_id,identifier,'PRODUCES',[fact_id],task,store.version+1))
                 store.patch({'base_version':store.version,'nodes':nodes,'edges':edges})
             from .amazon_contract_graph import attach_contracts

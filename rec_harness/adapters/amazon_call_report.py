@@ -10,6 +10,7 @@ from rec_harness.store import Store
 
 ROLE_ORDER={role:index for index,role in enumerate(['evidence','measurement','hypothesis','experiment','evaluation','lead','knowledge'])}
 
+ROLE_ORDER.update(researcher=0,reviewer=3.5,analyst=4)
 
 def submission_cadence(attempts):
     result={'submissions':len(attempts),'span_seconds':None,'minimum_interval_seconds':None,

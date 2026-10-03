@@ -44,7 +44,26 @@ def freeze_suite(path,root,spec):
 
 
 def check_response(case,context,response):
-    role=case['role'];validate_schema(response,schema_for(role));binding=context['bindings']
+    role=case['role'];validate_schema(response,schema_for(role))
+    if role=='reviewer':
+        if response['evidence_refs']!=[context['implementation_hash']]:raise ContractError('reviewer prefix identity differs')
+        if response['verdict']=='approve' and response['findings']:raise ContractError('reviewer approval has blocking findings')
+        return
+    if role=='analyst':
+        check_response({**case,'role':'lead'},context,response['decision'])
+        from .knowledge import validate_knowledge_patch
+        import json
+        validate_knowledge_patch(json.loads(response['knowledge']['patch_json']),context['graph'])
+        return
+    if role=='researcher':
+        check_response({**case,'role':'evidence'},context,response['gap'])
+        check_response({**case,'role':'hypothesis'},{**context,'gap':response['gap']},
+                       {k:response[k] for k in ('method','proposal')})
+        allowed={n['id'] for n in context['evidence_graph']['nodes']}
+        if not response['evidence_refs'] or not set(response['evidence_refs'])<=allowed or not response['gap']['observation_refs'] or not set(response['gap']['observation_refs'])<=allowed:
+            raise ContractError('researcher prefix evidence outside visible graph')
+        return
+    binding=context['bindings']
     if role=='evidence':
         validate_card('gap',response)
         if response['model_version']!=binding['base_model_id'] or response['protocol_hash']!=binding['train_protocol_hash']:

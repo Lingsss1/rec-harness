@@ -10,6 +10,8 @@
 
 [完整方案](docs/auto-research-plan.md) · [实验保留与回放契约](docs/dream-rsi-replay-contract.md) · [架构 SVG](docs/auto-research-2026-09-22/architecture.svg) · [知识图谱](docs/auto-research-2026-09-22/knowledge-graph.svg)
 
+最新实验：[Amazon NextItNet 20 轮续跑记录](docs/experiments/amazon-autoresearch-v5-v6.md)（含 GPT-6 Sol low 的 12 轮结果、失败分析与调用统计）。
+
 </div>
 
 ---

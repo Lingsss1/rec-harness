@@ -196,9 +196,9 @@ class CodexAgent:
             raise ContractError("unknown agent role")
         directory = Path(directory).resolve()
         directory.mkdir(parents=True, exist_ok=True)
-        from .bound_output import bound_schema
+        from .bound_output import bound_schema,service_schema
         schema = bound_schema(role, context)
-        write_json(directory / "schema.json", schema)
+        write_json(directory / "schema.json", service_schema(schema))
         if role == "knowledge":
             context = {**context, "graph_patch_contract": {
                 "exact_top_level_fields": ["base_version", "nodes", "edges"],
@@ -232,7 +232,7 @@ class CodexAgent:
         argv += ["-"]
         from .instruction_identity import manifest
         write_json(directory / "request.json", {"argv": argv, "role": role, "context": context, "prompt": prompt,
-            "instruction_identity":manifest(prompt,schema,skills),
+            "instruction_identity":manifest(prompt,service_schema(schema),skills),
             **({"role_skills":skills} if skills else {})})
         result = run_process(argv, directory, directory, stdin=prompt, timeout=self.timeout)
         usage = None

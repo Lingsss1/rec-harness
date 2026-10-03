@@ -30,3 +30,29 @@ class BoundOutputTests(unittest.TestCase):
         refs=bound_schema('evaluation',context)['properties']['evidence_refs']
         with self.assertRaises(ContractError):validate_schema(['wrong'],refs)
         validate_schema(['readout'],refs)
+
+    def test_graph_binding_does_not_constrain_unrelated_text(self):
+        context={'host_bound_output':True,'evidence_graph':{'nodes':[{'id':'node'}]}}
+        schema=bound_schema('researcher',context)
+        gap=schema['properties']['gap']['properties']
+        self.assertEqual(gap['observation_refs']['items']['enum'],['node'])
+        for field in ['affected_components','alternative_explanations','predicted_observations']:
+            self.assertNotIn('enum',gap[field]['items'])
+        self.assertNotIn('enum',schema_for('evidence')['properties']['observation_refs']['items'])
+
+    def test_service_projection_preserves_strict_host_validation(self):
+        from rec_harness.bound_output import service_schema
+        context={'host_bound_output':True,'bindings':{'proposal_id':'p','base_model_id':'b',
+            'controls':['b','c'],'train_protocol_hash':'h','seeds':[42,17]},'budget':{'remaining':50}}
+        host=bound_schema('hypothesis',context);wire=service_schema(host)
+        props=wire['properties']['proposal']['properties']
+        self.assertNotIn('enum',props['controls'])
+        self.assertEqual(props['controls']['items']['enum'],['b','c'])
+        self.assertEqual(props['controls']['minItems'],2)
+        self.assertEqual(props['controls']['maxItems'],2)
+        self.assertEqual(props['budget']['minimum'],0)
+        strict=host['properties']['proposal']['properties']
+        for value in [['c','b'],['b','b'],['b']]:
+            with self.assertRaises(ContractError):validate_schema(value,strict['controls'])
+        with self.assertRaises(ContractError):validate_schema(0,strict['budget'])
+        self.assertEqual(strict['controls']['enum'],[['b','c']])

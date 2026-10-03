@@ -1,9 +1,10 @@
 """Constrain mechanical role fields before generation, without rewriting replies."""
+import json
 from .agents import schema_for
 
 
 def bound_schema(role, context):
-    schema = schema_for(role)
+    schema = json.loads(json.dumps(schema_for(role)))
     if not context.get('host_bound_output'):
         return schema
     if role == 'researcher':
@@ -41,3 +42,25 @@ def bound_schema(role, context):
         exact(props, 'evidence_refs', [context['development']['hash']])
         props['conclusion_status']['enum'] = ['unknown', 'provisional']
     return schema
+
+
+def service_schema(schema):
+    """Project host contracts into Codex's structured-output subset.
+
+    Whole-array enums and exclusive bounds remain enforced against the original
+    schema after generation. No returned evidence is repaired or rewritten.
+    """
+    result=json.loads(json.dumps(schema))
+    def visit(node):
+        if not isinstance(node,dict):return
+        if node.get('type')=='array' and 'enum' in node:
+            values=node.pop('enum')
+            node['minItems']=min(map(len,values));node['maxItems']=max(map(len,values))
+            allowed=list(dict.fromkeys(item for value in values for item in value))
+            if allowed:node['items']['enum']=allowed
+        if 'exclusiveMinimum' in node:node['minimum']=node.pop('exclusiveMinimum')
+        if 'exclusiveMaximum' in node:node['maximum']=node.pop('exclusiveMaximum')
+        for child in node.get('properties',{}).values():visit(child)
+        if 'items' in node:visit(node['items'])
+    visit(result)
+    return result

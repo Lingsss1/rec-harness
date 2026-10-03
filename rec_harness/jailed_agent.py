@@ -90,9 +90,9 @@ class JailedCodexAgent:
                     original_files.append(name)
             for path in [workspace / 'model', *(workspace / 'model').rglob('*')]:
                 os.chown(path, uid, uid)
-        from .bound_output import bound_schema
+        from .bound_output import bound_schema,service_schema
         schema = bound_schema(role, context)
-        write_json(directory / 'schema.json', schema)
+        write_json(directory / 'schema.json', service_schema(schema))
         write_json(directory / 'context.json', context)
         for name in ('schema.json', 'context.json'):
             shutil.copyfile(directory / name, workspace / name)
@@ -109,7 +109,7 @@ class JailedCodexAgent:
                    'isolation': {'kind': 'chroot-unprivileged', 'uid': uid, 'run_id': run_id}}
         from .instruction_identity import manifest
         skills=self.role_skills.get(role,[])
-        request['instruction_identity']=manifest(prompt,schema,skills)
+        request['instruction_identity']=manifest(prompt,service_schema(schema),skills)
         if skills:request['role_skills']=skills
         write_json(directory / 'request.json', request)
         launch = [sys.executable, '-m', 'rec_harness.isolation', 'enter', str(jail), '--uid', str(uid), '--', *argv]

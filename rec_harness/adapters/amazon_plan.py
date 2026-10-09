@@ -97,6 +97,9 @@ def register_plan(root, cards, versions, *, selection_policy=None):
             if selection_policy is not None:
                 from .amazon_promotion import validate_policy
                 validate_policy(selection_policy)
+                if selection_policy=='baseline-single-seed-v1':
+                    from .amazon_promotion import validate_single_seed
+                    validate_single_seed(config)
                 identity_body['selection_policy'] = selection_policy
             identity = digest(identity_body)
             for event in store.events():

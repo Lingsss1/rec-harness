@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from rec_harness.adapters.amazon_campaign import continue_campaign,activate_campaign,campaign_guard
 from rec_harness.adapters.amazon_study import init_study,DATASETS
-from rec_harness.core import ContractError,read_json,write_json
+from rec_harness.core import ContractError,read_json,write_json,digest
 from rec_harness.store import Store
 
 
@@ -22,8 +22,12 @@ class CampaignContinuationTests(unittest.TestCase):
                 p.parent.mkdir(parents=True,exist_ok=True);p.write_text('fixture\n')
         self.old=self.root/'old';self.new=self.root/'new';init_study(self.old,self.project,budget=100)
         st=Store(self.old/'memory');st.reserve('historical',60);st.settle('historical',60,'success');st.close()
+        cfg=read_json(self.old/'study.json')
+        self.assertEqual(cfg['development_seeds'],[42])
+        self.assertEqual(cfg['confirmation_seeds'],[])
+        self.assertEqual(cfg['selection_policy'],'baseline-single-seed-v1')
         for dataset in DATASETS:
-            for seed in [42,17,83]:
+            for seed in cfg['development_seeds']+cfg['confirmation_seeds']:
                 job=f'legacy_incumbent-{dataset}-{seed}'
                 write_json(self.old/'jobs'/job/'completed.json',{'job_id':job})
         self.audit=patch('rec_harness.adapters.amazon_campaign.audit_job',side_effect=lambda root,c,v,d,s:
@@ -36,7 +40,7 @@ class CampaignContinuationTests(unittest.TestCase):
         try:
             self.assertEqual(st.budget(),{'limit':140.,'charged_or_reserved':60.,'remaining':80.})
             campaign_guard(read_json(self.new/'study.json'),st)
-            self.assertEqual(len(list((self.new/'jobs').glob('*/completed.json'))),12)
+            self.assertEqual(len(list((self.new/'jobs').glob('*/completed.json'))),4)
         finally:st.close()
         st=Store(self.old/'memory')
         try:
@@ -45,6 +49,21 @@ class CampaignContinuationTests(unittest.TestCase):
         finally:st.close()
         with self.assertRaisesRegex(ContractError,'already continued'):
             continue_campaign(self.root/'fork',self.old,self.project,40,'same authorization')
+
+    def test_legacy_continuation_retains_its_frozen_seeds(self):
+        cfg=read_json(self.old/'study.json')
+        cfg.update(confirmation_seeds=[17,83],selection_policy='baseline-positive-v1')
+        write_json(self.old/'study.json',cfg)
+        write_json(self.old/'study-lock.json',{'config_hash':digest(cfg)})
+        for dataset in DATASETS:
+            for seed in [17,83]:
+                job=f'legacy_incumbent-{dataset}-{seed}'
+                write_json(self.old/'jobs'/job/'completed.json',{'job_id':job})
+        continue_campaign(self.new,self.old,self.project,40,'authorized continuation')
+        new=read_json(self.new/'study.json')
+        self.assertEqual(new['confirmation_seeds'],[17,83])
+        self.assertEqual(new['selection_policy'],'baseline-positive-v1')
+        self.assertEqual(len(list((self.new/'jobs').glob('*/completed.json'))),12)
 
     def test_crash_after_sealing_cannot_spend_until_activation_recovers(self):
         with patch('rec_harness.adapters.amazon_campaign.activate_campaign',side_effect=RuntimeError('interrupted')):

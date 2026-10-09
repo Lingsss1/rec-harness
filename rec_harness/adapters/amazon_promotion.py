@@ -7,17 +7,25 @@ import statistics
 from rec_harness.core import ContractError, digest
 
 POLICY = 'baseline-positive-v1'
+SINGLE_SEED_POLICY = 'baseline-single-seed-v1'
+
+
+def validate_single_seed(config):
+    seeds=config.get('development_seeds')
+    if not isinstance(seeds,list) or len(seeds)!=1 or type(seeds[0]) is not int or config.get('confirmation_seeds')!=[]:
+        raise ContractError('single-seed promotion requires one development seed and no confirmation seeds')
 
 
 def validate_policy(policy):
-    if policy not in (POLICY, 'legacy-candidate-controls-v1'):
+    if policy not in (POLICY, SINGLE_SEED_POLICY, 'legacy-candidate-controls-v1'):
         raise ContractError('unknown Amazon selection policy')
 
 
 def development_summary(config, plan, means, effects, slices, rows):
     policy = plan['selection_policy']
-    if policy != POLICY:
+    if policy not in (POLICY, SINGLE_SEED_POLICY):
         raise ContractError('baseline promotion requires baseline-positive-v1')
+    if policy == SINGLE_SEED_POLICY:validate_single_seed(config)
     baseline = plan['baseline']
     candidate = plan['versions']['candidate']['model_version']
     controls = [v['model_version'] for v in plan['versions']['controls']]
@@ -54,11 +62,11 @@ def development_summary(config, plan, means, effects, slices, rows):
     return {'metric': config['protocol']['metric'], 'means': means,
             'candidate_minus_comparator': effects, 'slices': slices,
             'minimum_effect': 0, 'protocol_minimum_effect': config['protocol']['minimum_effect'],
-            'selection_policy': POLICY, 'model_minus_baseline': gains,
+            'selection_policy': policy, 'model_minus_baseline': gains,
             'eligible_models': order, 'promotion_order': order,
             'eligible_for_confirmation': bool(order),
             'mechanism_comparisons': comparisons,
-            'selection_rule': 'Each new candidate/control qualifies when development mean minus baseline > 0; each confirmation seed must also exceed baseline. Choose first passing model in frozen development ranking.',
+            'selection_rule': ('Promote the highest development mean among new candidate/controls exceeding baseline on the single frozen seed; no confirmation phase.' if policy == SINGLE_SEED_POLICY else 'Each new candidate/control qualifies when development mean minus baseline > 0; each confirmation seed must also exceed baseline. Choose first passing model in frozen development ranking.'),
             'qualification': 'Performance selection is separate from mechanism support; confirmation is not final test.'}
 
 

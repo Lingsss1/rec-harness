@@ -19,6 +19,17 @@ class PromotionTests(unittest.TestCase):
               for v,score in [('base',.5),('candidate',candidate),('control',control)] for d in ['a','b']]
         return config,plan,rows
 
+    def test_single_seed_selects_positive_models_without_confirmation(self):
+        config,plan,rows=self.fixture(.501,.502)
+        config['confirmation_seeds']=[]
+        plan['selection_policy']='baseline-single-seed-v1'
+        summary=summarize_development(config,plan,rows)
+        self.assertEqual(summary['promotion_order'],['control','candidate'])
+        self.assertIn('no confirmation',summary['selection_rule'])
+        config['confirmation_seeds']=[42]
+        with self.assertRaisesRegex(ContractError,'single-seed'):
+            summarize_development(config,plan,rows)
+
     def test_control_wins_without_vetoing_candidate(self):
         config,plan,rows=self.fixture()
         summary=summarize_development(config,plan,rows)

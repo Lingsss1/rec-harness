@@ -41,10 +41,15 @@ def seal_selection(study,output,models,test_directory,*,eval_seed,eval_users=100
             if store.db.execute("SELECT 1 FROM budget WHERE status='running'").fetchone():raise ContractError('research work is still unsettled')
             cfg=load_config(study,store)
             if any(m not in cfg['model_versions'] for m in models):raise ContractError('unregistered final model')
-            if not cfg['confirmation_seeds']:raise ContractError('confirmed checkpoints required before final evaluation')
+            final_seeds=cfg['confirmation_seeds']
+            if cfg.get('selection_policy')=='baseline-single-seed-v1':
+                from .amazon_promotion import validate_single_seed
+                validate_single_seed(cfg)
+                final_seeds=cfg['development_seeds']
+            if not final_seeds:raise ContractError('confirmed checkpoints required before final evaluation')
             jobs=[];identities=set();vocabularies={}
             for dataset in cfg['datasets']:
-                for seed in cfg['confirmation_seeds']:
+                for seed in final_seeds:
                     for model in models:
                         result,manifest=audit_job(study,cfg,model,dataset,seed)
                         source=cfg['model_versions'][model];checkpoint=study/'jobs'/f'{model}-{dataset}-{seed}'/'checkpoint.pt'
@@ -60,7 +65,7 @@ def seal_selection(study,output,models,test_directory,*,eval_seed,eval_users=100
             if len(identities)!=1:raise ContractError('final comparison mixes execution versions')
             plan={'schema':'amazon-final-selection-v1','request':request,'study_config_hash':digest(read_json(study/'study.json')),
                 'research_event_head':store.verify()['head'],'protocol_hash':cfg['protocol_hash'],
-                'datasets':cfg['datasets'],'seeds':cfg['confirmation_seeds'],'data':cfg['data'],'data_hashes':cfg['data_hashes'],
+                'datasets':cfg['datasets'],'seeds':final_seeds,'data':cfg['data'],'data_hashes':cfg['data_hashes'],
                 'jobs':jobs,'execution_id':next(iter(identities)),
                 'python':cfg['python'],
                 'package_code':package_code_hashes(),

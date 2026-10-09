@@ -38,7 +38,7 @@ def init_study(root, project, *, budget=14400, predecessor=None, continuation_re
     data = project / 'input/amazon-project-defaults/trainval'
     data_hashes = {f'{ds}_{split}.txt': file_hash(data / f'{ds}_{split}.txt') for ds in DATASETS for split in ['train', 'valid']}
     config = {
-        'study_id': root.name, 'datasets': DATASETS, 'development_seeds': [42], 'confirmation_seeds': [17, 83],
+        'study_id': root.name, 'datasets': DATASETS, 'development_seeds': [42], 'confirmation_seeds': [], 'selection_policy': 'baseline-single-seed-v1',
         'model_versions': {model_version: {'path': str(frozen / f'{model_version}.py'), 'sha256': file_hash(frozen / f'{model_version}.py')} for model_version in sources},
         'worker': str(frozen / 'worker.py'), 'worker_sha256': file_hash(frozen / 'worker.py'),
         'python': str(project / '.venv-run/bin/python'), 'data': str(data), 'data_hashes': data_hashes,
@@ -51,6 +51,11 @@ def init_study(root, project, *, budget=14400, predecessor=None, continuation_re
         'trusted_baselines_only': True, 'hidden_evaluation': 'not_available_to_worker',
     }
     if predecessor:
+        frozen_prior=read_json(Path(predecessor)/'study.json')
+        config['development_seeds']=frozen_prior['development_seeds']
+        config['confirmation_seeds']=frozen_prior['confirmation_seeds']
+        if 'selection_policy' in frozen_prior:config['selection_policy']=frozen_prior['selection_policy']
+        else:config.pop('selection_policy',None)
         prior = Store(Path(predecessor) / 'memory')
         config['predecessor'] = {'path': str(predecessor), 'charged_gpu_seconds': prior.budget()['charged_or_reserved'], 'event_head': prior.verify()['head']}
         prior.close()

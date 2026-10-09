@@ -48,7 +48,7 @@ def finalize_cycle(root, proposal_id, directory):
                 raise ContractError('development cannot finalize a scientific confirmation')
             selection=decision['selection']
             if not report['summary']['eligible_for_confirmation']: selection='discard'
-            if report['summary'].get('selection_policy')=='baseline-positive-v1':
+            if report['summary'].get('selection_policy') in {'baseline-positive-v1','baseline-single-seed-v1'}:
                 selection='keep' if report['summary']['eligible_for_confirmation'] else 'discard'
             identity=digest([proposal_id,report['hash'],decision,knowledge])
             prior=[e['payload'] for e in store.events() if e['kind']=='amazon_research_cycle_completed' and e['payload']['proposal_id']==proposal_id]

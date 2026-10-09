@@ -31,7 +31,7 @@ def ingest_development(root, proposal_id, *, include_method_sources=False):
                        for kind,typ in [('gap','GapHypothesis'),('method','Method'),('proposal','Proposal')]]
                 summary=report['summary']
                 candidate_eligible=summary['eligible_for_confirmation']
-                if summary.get('selection_policy')=='baseline-positive-v1':
+                if summary.get('selection_policy') in {'baseline-positive-v1','baseline-single-seed-v1'}:
                     candidate_eligible=summary['model_minus_baseline'][plan['versions']['candidate']['model_version']]>0
                 nodes.append(node(fact_id,'Experiment',{'kind':'derived_development_comparison',
                     'partition':'development','valid':True,'status':'success','metric':summary['metric'],

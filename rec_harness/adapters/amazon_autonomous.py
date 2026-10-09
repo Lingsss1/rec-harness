@@ -59,7 +59,7 @@ class AmazonAutoresearch:
         if config['role_layout']=='compact-four-v1' and not config['hypothesis_graph']:raise ContractError('compact research requires hypothesis_graph')
         if type(config['hypothesis_graph']) is not bool:raise ContractError('hypothesis_graph must be boolean')
         if type(config.get('hypothesis_graph_limit',64)) is not int or config.get('hypothesis_graph_limit',64)<2:raise ContractError('hypothesis_graph_limit must be at least two')
-        config.setdefault('selection_policy','legacy-candidate-controls-v1' if review_only else 'baseline-positive-v1')
+        config.setdefault('selection_policy','legacy-candidate-controls-v1' if review_only else load_config(config['study']).get('selection_policy','baseline-positive-v1'))
         from .amazon_promotion import validate_policy
         validate_policy(config['selection_policy'])
         config.setdefault('source_novelty_guard',True)
@@ -67,6 +67,9 @@ class AmazonAutoresearch:
         if type(config['require_method_sources']) is not bool:raise ContractError('require_method_sources must be boolean')
         if type(config['structured_insertion_contract']) is not bool:raise ContractError('structured_insertion_contract must be boolean')
         study=load_config(config['study']);identifier(config['task_id'])
+        if config['selection_policy']=='baseline-single-seed-v1':
+            from .amazon_promotion import validate_single_seed
+            validate_single_seed(study)
         from .amazon_role_sources import freeze_source_history
         freeze_source_history(config,study)
         if type(config.get('max_rounds')) is not int or config['max_rounds']<1:raise ContractError('positive max_rounds required')
@@ -158,7 +161,7 @@ class AmazonAutoresearch:
         with self.lock():return verify_campaign(self)
 
     def _role(self,folder,role,context,source=None,validator=None):
-        if getattr(self,'config',{}).get('selection_policy')=='baseline-positive-v1':
+        if getattr(self,'config',{}).get('selection_policy') in {'baseline-positive-v1','baseline-single-seed-v1'}:
             context={**context,'host_bound_output':True}
         target=folder/role
         artifacts=Artifacts(self.store.root.parent/'artifacts/objects')
@@ -481,7 +484,7 @@ class AmazonAutoresearch:
                   'controls':[{'model_version':v,'source':({'path':str(generated_sources[v]),'sha256':file_hash(generated_sources[v])}
                      if v in generated_sources else cfg['model_versions'][v])} for v in binding['controls']]}
         write_json(folder/'handoff.json',{'cards':cards,'versions':versions})
-        policy_args={'selection_policy':self.config['selection_policy']} if self.config.get('selection_policy')=='baseline-positive-v1' else {}
+        policy_args={'selection_policy':self.config['selection_policy']} if self.config.get('selection_policy') in {'baseline-positive-v1','baseline-single-seed-v1'} else {}
         if self.config.get('role_layout')=='compact-four-v1':
             from .amazon_compact import review_code
             review_code(self,folder,context,cards,source,candidate,generated_sources)
@@ -501,11 +504,22 @@ class AmazonAutoresearch:
             history=development_history(self,folder,binding)
         lead,cycle=self._review_roles(folder,context,binding,cards,versions,candidate,report,history)
         selected=False;confirmation=None;promoted_model=None
-        promotion=report['summary'].get('selection_policy')=='baseline-positive-v1'
+        promotion=report['summary'].get('selection_policy') in {'baseline-positive-v1','baseline-single-seed-v1'}
         if promotion and report['summary']['eligible_for_confirmation']:
             # Selection is a host metric decision; scientific prose cannot veto it.
             lead={**lead,'selection':'keep','rationale':'Host baseline-positive selection for independently eligible arms. Agent mechanism assessment retained in the development cycle.'}
-        if report['summary']['eligible_for_confirmation'] and lead['selection']=='keep':
+        single_seed=report['summary'].get('selection_policy')=='baseline-single-seed-v1'
+        if single_seed:
+            from .amazon_promotion import validate_single_seed
+            validate_single_seed(cfg)
+            order=report['summary']['promotion_order']
+            promoted_model=order[0] if order else None
+            selected=promoted_model is not None
+            write_json(folder/'promotion.json',{'selection_policy':'baseline-single-seed-v1',
+                'development_hash':report['hash'],'seed':cfg['development_seeds'][0],
+                'promotion_order':order,'promoted_model':promoted_model,'selected':selected,
+                'confirmation_executed':False,'scope':'Development-only selection on the frozen seed; not independent confirmation or final test.'})
+        if not single_seed and report['summary']['eligible_for_confirmation'] and lead['selection']=='keep':
             write_json(folder/'private-confirmation-started.json',{'scope':'host-only phase boundary; excludes later failures from agent context'})
             release_confirmation(self.study,pid,lead,report['hash'])
             # Comparators need not consume confirmation resources for rejected
@@ -605,7 +619,7 @@ class AmazonAutoresearch:
                                 'implementation_evidence reports host-verified admission checks; its report hashes are references, not files available in your workspace. When structural_changes is supplied, compare its actual changed methods and assigned fields with the proposal insertion contract; AST evidence does not prove that semantic contract. tensor_graph summarizes verified executed tensor paths; unavailable means no recorded coverage. Never infer unexecuted branch coverage or causal isolation from operator counts. sequence_semantics reports finite input-immutability and per-user batch-independence probes, not proof of the proposal-specific mechanism. Distinguish these checks from missing scientific evidence. Evaluation has no source file; lead receives candidate source separately.',
                                 'candidate_execution_evidence summarizes audited completed development training under the frozen worker and protocol. Use verified fields to assess actual execution settings, rather than local model helper defaults. training_contract distinguishes fresh pre-training probes from probes bound to the selected trained development checkpoint; unavailable means no archived gates. These are synthetic checks, not held-out recommendation quality. It does not prove a causal mechanism or expose confirmation results.',
                                 'Keep only if eligible_for_confirmation is true. No confirmation results are supplied; conclusion unknown/provisional.']}
-        if report['summary'].get('selection_policy')=='baseline-positive-v1':
+        if report['summary'].get('selection_policy') in {'baseline-positive-v1','baseline-single-seed-v1'}:
             review['instructions'].append('Promotion is decided by host baseline-only metrics for candidate AND generated controls. A control winning does not veto a useful candidate; scientific mechanism conclusions remain separate. Record alternative explanations and the next discriminating experiment, including negative and null contrasts.')
         if generated_evidence:
             review['generated_control_evidence']=generated_evidence

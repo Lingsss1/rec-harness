@@ -281,7 +281,10 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
     def test_compact_reviewer_rejection_prevents_training_and_is_not_retried(self):
         self.run_pipeline(False,compact=True,review_reject=True)
 
-    def run_pipeline(self,confirmation,measurement=False,legacy_measurement=False,history=False,interrupt_control=False,extra_control=False,control_metric=.6,generated_control=False,transport_archive=False,scoped_measurement=False,promotion=False,compact=False,review_reject=False):
+    def test_single_seed_promotes_control_without_confirmation_and_recovers(self):
+        self.run_pipeline(False,generated_control=True,promotion=True,compact=True,single_seed=True)
+
+    def run_pipeline(self,confirmation,measurement=False,legacy_measurement=False,history=False,interrupt_control=False,extra_control=False,control_metric=.6,generated_control=False,transport_archive=False,scoped_measurement=False,promotion=False,compact=False,review_reject=False,single_seed=False):
         import json
         from contextlib import ExitStack
         from rec_harness.autonomous import autoresearch
@@ -305,6 +308,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             cfg={'model_versions':{'legacy_incumbent':{'path':str(source),'sha256':file_hash(source)}},
                  'protocol_hash':'protocol','protocol':{'metric':'HR@10','minimum_effect':0.005},
                  'datasets':['tiny'],'development_seeds':[42],'confirmation_seeds':[17,83],'python':'python3'}
+            if single_seed:cfg.update(confirmation_seeds=[],selection_policy='baseline-single-seed-v1')
             if extra_control:
                 control=study/'control.py';control.write_text(SOURCE.replace('return self.block(x)','return self.block(x) * 0.8'))
                 cfg['model_versions']['mechanism_control']={'path':str(control),'sha256':file_hash(control)}
@@ -327,6 +331,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                 stack.enter_context(patch('rec_harness.adapters.amazon_baseline_history.baseline_history',return_value={'report_hash':'baseline-slices','rows':[]}))
                 stack.enter_context(patch('rec_harness.adapters.amazon_baseline_history.verify_visible_history'))
                 stack.enter_context(patch('rec_harness.adapters.amazon_history_graph.attach_history',side_effect=lambda c,f,g,p:g))
+            if single_seed:config['selection_policy']='baseline-single-seed-v1'
             write_json(root/'config.json',config);campaign=root/'campaign';calls=[];fits=[];control_fits=[]
             self_test=self
             class Agent:
@@ -457,8 +462,8 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                 'rows':[{'model_version':version,'dataset':'tiny','seed':42,'metrics':{'HR@10':.6 if version=='auto-round-1-model' else .5}}
                         for version in dict.fromkeys(['auto-round-1-model',*expected_controls])]}
             if promotion:
-                report['summary'].update(selection_policy='baseline-positive-v1',
-                    promotion_order=[control_id,'auto-round-1-model'], eligible_models=[control_id,'auto-round-1-model'])
+                report['summary'].update(selection_policy='baseline-single-seed-v1' if single_seed else 'baseline-positive-v1',
+                    eligible_for_confirmation=True, promotion_order=[control_id,'auto-round-1-model'], eligible_models=[control_id,'auto-round-1-model'])
             report['hash']=digest(report)
             def audited_job(root,config,version,dataset,seed):
                 value=.6 if (extra_control or generated_control) and seed in [17,83] and version!='legacy_incumbent' else .5
@@ -508,7 +513,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
             self.assertEqual(progress['costs']['study_cost_status'],'recorded')
             self.assertEqual((campaign/'rounds/round-1/private-confirmation.json').exists(),confirmation)
             if promotion:
-                private=read_json(campaign/'rounds/round-1/private-confirmation.json')
+                private=read_json(campaign/'rounds/round-1'/('promotion.json' if single_seed else 'private-confirmation.json'))
                 self.assertEqual(private['promoted_model'],control_id)
                 self.assertEqual(result['state']['incumbent'],control_id)
             elif extra_control or generated_control:

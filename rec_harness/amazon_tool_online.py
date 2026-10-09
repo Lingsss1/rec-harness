@@ -120,7 +120,7 @@ def freeze_cases(entries,base,objects,weights,*,require_diagnostics=True):
         worker=objects.put(study['worker']);study.pop('worker');study.pop('model_versions')
         config.pop('study');config.pop('task_id',None)
         config.setdefault('source_novelty_guard',True)
-        config.setdefault('selection_policy','baseline-positive-v1')
+        config.setdefault('selection_policy',study.get('selection_policy','baseline-positive-v1'))
         config.setdefault('hypothesis_graph',True)
         from .semantic_encoder import pin_options
         pin_options(config)

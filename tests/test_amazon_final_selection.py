@@ -8,11 +8,15 @@ from rec_harness.adapters.amazon_campaign import campaign_guard
 from rec_harness.adapters.amazon_final_selection import seal_selection,load_selection
 
 class FinalSelectionTests(unittest.TestCase):
-    def test_seal_uses_only_confirmed_receipts_and_prevents_research(self):
+    def test_single_seed_final_uses_development_checkpoint_without_confirmation(self):
+        self.test_seal_uses_only_confirmed_receipts_and_prevents_research(single_seed=True)
+
+    def test_seal_uses_only_confirmed_receipts_and_prevents_research(self,single_seed=False):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);study=root/'study';study.mkdir();source=root/'model.py';source.write_text('frozen source')
             cfg={'model_versions':{m:{'path':str(source),'sha256':file_hash(source)} for m in ['base','candidate']},
                  'datasets':['tiny'],'confirmation_seeds':[17,83],'protocol_hash':'p','data':'not-opened','data_hashes':{},'python':'/usr/bin/python3'}
+            if single_seed:cfg.update(selection_policy='baseline-single-seed-v1',development_seeds=[42],confirmation_seeds=[])
             write_json(study/'study.json',cfg)
             store=Store(study/'memory');store.configure_budget(100);store.close();calls=[]
             def audit(root,config,model,dataset,seed):
@@ -21,9 +25,11 @@ class FinalSelectionTests(unittest.TestCase):
                 return {'checkpoint_sha256':file_hash(checkpoint),'execution_id':'same'},{'itemnum':200}
             with patch('rec_harness.adapters.amazon_final_selection.load_config',return_value=cfg),patch('rec_harness.adapters.amazon_final_selection.audit_job',side_effect=audit):
                 plan=seal_selection(study,root/'final',['base','candidate'],root/'nonexistent-test',eval_seed=99)
-                self.assertEqual(len(calls),4)
+                self.assertEqual(len(calls),2 if single_seed else 4)
+                self.assertEqual({s for _,s in calls},{42} if single_seed else {17,83})
                 self.assertEqual(seal_selection(study,root/'final',['base','candidate'],root/'nonexistent-test',eval_seed=99),plan)
-                self.assertEqual(len(calls),4)
+                self.assertEqual(len(calls),2 if single_seed else 4)
+                self.assertEqual({s for _,s in calls},{42} if single_seed else {17,83})
                 with self.assertRaisesRegex(ContractError,'differs'):seal_selection(study,root/'final',['candidate','base'],root/'nonexistent-test',eval_seed=99)
             self.assertEqual(load_selection(root/'final'),plan)
             with patch('rec_harness.adapters.independent_scoring.scoring_runtime',return_value={'version':'different'}):

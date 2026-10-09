@@ -414,7 +414,7 @@ class AmazonPipelineRecoveryTests(unittest.TestCase):
                         self_test.assertEqual(context['implementation_sources']['baseline.py']['source'],SOURCE)
                         if generated_control:self_test.assertIn('control-1.py',context['implementation_sources'])
                         response.update(verdict='request_changes' if review_reject else 'approve',
-                            findings=['implementation differs'] if review_reject else [], evidence_refs=[context['implementation_hash']])
+                            checks=['source identity verified'], blocking_findings=['implementation differs'] if review_reject else [], evidence_refs=[context['implementation_hash']])
                     if role=='analyst':
                         self_test.assertEqual(context['code_review']['verdict'],'approve')
                         self_test.assertIn('patch_contract',context)

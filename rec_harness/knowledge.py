@@ -25,7 +25,10 @@ def validate_knowledge_patch(patch, graph):
         if item['type'] not in {'Claim','GapHypothesis','MeasurementGap'} or item['id'] in known or item['id'] in new_ids:
             raise ContractError('knowledge may only append new explanation nodes')
         if attrs.get('task_id')!=task or attrs.get('protocol_hash')!=protocol or attrs.get('origin')!='agent_hypothesis':
-            raise ContractError('knowledge scope or provenance differs from supplied graph')
+            raise ContractError('knowledge scope or provenance differs from supplied graph: node '+item['id']+
+                    ' attrs must include task_id='+repr(task)+', protocol_hash='+repr(protocol)+
+                    ', origin=agent_hypothesis; missing or mismatched fields: '+
+                    ', '.join(k for k,v in {'task_id':task,'protocol_hash':protocol,'origin':'agent_hypothesis'}.items() if attrs.get(k)!=v))
         if item['type']=='Claim' and attrs.get('status')!='provisional':
             raise ContractError('development claims must remain provisional')
         if item['type']=='Claim':required(attrs,['scope','status','evidence_refs'])

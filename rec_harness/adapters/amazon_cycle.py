@@ -29,8 +29,9 @@ def finalize_cycle(root, proposal_id, directory):
     decision=decision['decision'] if compact else decision
     validate_schema(decision,schema_for('lead'));validate_schema(knowledge,schema_for('knowledge'))
     if compact:
-        reviewer=read_json(directory/'reviewer/response.json');validate_schema(reviewer,schema_for('reviewer'))
-        if reviewer['verdict']!='approve' or reviewer['findings']:raise ContractError('compact cycle requires independent code approval')
+        reviewer=read_json(directory/'reviewer/response.json')
+        from rec_harness.code_review import validate_code_review
+        validate_code_review(reviewer,allow_legacy=True,require_approval=True)
     graph=read_json(root/'research-readouts'/(proposal_id+'-graph.json'))
     patch=json.loads(knowledge['patch_json']);validate_knowledge_patch(patch,graph)
     if (directory/'measurement').exists():

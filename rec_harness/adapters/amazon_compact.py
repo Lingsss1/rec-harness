@@ -39,18 +39,22 @@ def review_code(controller, folder, context, cards, baseline, candidate, control
              'cards':cards,'implementation_sources':implementation,'implementation_hash':identity,
              'generated_controls':context.get('generated_controls',[]),
              'implementation_author_report':read_json(folder/'experiment/response.json'),
+             'protocol':context.get('protocol',{}),
+             'baseline_execution_evidence':[{key:row[key] for key in ('dataset','seed','status','protocol','protocol_hash','receipt_hash','scope') if key in row}
+                 for row in context.get('baseline_execution_evidence',[])],
+             'review_stage':{'name':'source_review_before_host_admission',
+                 'candidate_cpu_checks':'pending: admit_plan runs after this review and before GPU training',
+                 'protocol_authority':'Host execution protocol and receipts, not unchanged helper defaults in model source',
+                 'scope':'Source approval does not certify runtime checks or proposal-specific scientific tests.'},
              'instructions':['Independently compare actual baseline, candidate and control code against the frozen design. Author checks are claims, not independent evidence.',
                              'Check correctness and declaration/implementation consistency. Reference implementation_hash exactly. Do not rerun training or relax the design.',
-                             'Approve only with no blocking findings. Unknown correctness or mismatched implementation must be unresolved/request_changes. Performance and mechanism judgments occur later.']}
+                             'Use checks for successful observations, limitations for nonblocking caveats, and blocking_findings only for concrete blockers; approve requires blocking_findings=[]. Missing scheduled host CPU results alone are a limitation at this stage. Concrete code defects, contradictory proposal checks, and declaration/implementation mismatches remain blockers. Never infer that pending generic host checks cover proposal-specific mechanism tests. Unchanged helper defaults are not evidence of a runtime protocol violation; use supplied host protocol and baseline receipts. Performance and mechanism judgments occur later.']}
+    from rec_harness.code_review import validate_code_review
     def validate(value,_):
-        if value['evidence_refs']!=[identity]:raise ContractError('reviewer implementation identity mismatch')
-        if value['verdict']=='approve' and value['findings']:
-            raise ContractError('approve cannot contain blocking findings; put nonblocking caveats in limitations')
+        validate_code_review(value,identity)
     review=controller._role(folder,'reviewer',request,validator=validate)
-    # A substantive rejection is final for this implementation, not an output
-    # formatting error to retry until the reviewer approves identical code.
-    if review['verdict']!='approve':
-        raise ContractError('independent code review blocked training: '+review['verdict']+'; '+'; '.join(review['findings']))
+    # Substantive rejection remains final, never a retry-until-approved loop.
+    validate_code_review(review,identity,require_approval=True)
     return review
 
 
@@ -59,6 +63,11 @@ def analyze(controller,folder,review,graph,report,decision_check):
     contract={'base_version':graph['graph_version'],'fields':['base_version','nodes','edges'],
               'allowed_node_types':['Claim','GapHypothesis','MeasurementGap'],'origin':'agent_hypothesis',
               'task_id':graph['task_id'],'protocol_hash':controller.protocol_hash,'status':'provisional',
+              'node_fields':['id','type','attrs'],
+              'node_attrs_required':['task_id','protocol_hash','origin','scope','status','evidence_refs'],
+              'node_attrs_template':{'task_id':graph['task_id'],'protocol_hash':controller.protocol_hash,
+                  'origin':'agent_hypothesis','scope':graph['task_id'],'status':'provisional','evidence_refs':[]},
+              'empty_patch':{'base_version':graph['graph_version'],'nodes':[],'edges':[]},
               'edge_fields':['id','source','target','relation','attrs'],
               'edge_attrs_required':['scope','evidence_refs','origin','status','created_at','revision_id'],
               'evidence_refs':[n['id'] for n in graph['nodes']]}
@@ -71,6 +80,7 @@ def analyze(controller,folder,review,graph,report,decision_check):
              'mechanism_comparisons':report['summary'].get('mechanism_comparisons',[]),
              'instructions':review['instructions']+[
                  'Return decision and knowledge in one response. knowledge.patch_json is an append-only graph patch at patch_contract.base_version. Use only supplied node IDs as evidence; empty patch is valid.',
+                 'Every new node.attrs must copy task_id, protocol_hash, origin, scope and status from patch_contract.node_attrs_template. Graph task_id may differ from the campaign task_id. Add evidence_refs and your scientific content inside attrs; do not omit scope on Claims.',
                  'Record candidate/control interventions, outcome differences, alternative explanations and next discriminating tests as provisional knowledge. Negative/null evidence is retained. Training success and code review do not establish causal mechanisms.',
                  'Existing historical explanation nodes may be linked by BASED_ON, SUPERSEDES or ALTERNATIVE_TO using current scoped development evidence. Never rewrite historical nodes.']}
     def validate(value,directory):

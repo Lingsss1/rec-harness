@@ -46,8 +46,8 @@ def freeze_suite(path,root,spec):
 def check_response(case,context,response):
     role=case['role'];validate_schema(response,schema_for(role))
     if role=='reviewer':
-        if response['evidence_refs']!=[context['implementation_hash']]:raise ContractError('reviewer prefix identity differs')
-        if response['verdict']=='approve' and response['findings']:raise ContractError('reviewer approval has blocking findings')
+        from .code_review import validate_code_review
+        validate_code_review(response,context['implementation_hash'])
         return
     if role=='analyst':
         check_response({**case,'role':'lead'},context,response['decision'])

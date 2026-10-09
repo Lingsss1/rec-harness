@@ -20,7 +20,7 @@ class CompactPrefixTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError,'outside visible graph'):check_response(case,context,value)
 
     def test_reviewer_does_not_need_hypothesis_bindings_and_rejection_is_valid(self):
-        value={'verdict':'request_changes','findings':['wrong intervention'],'evidence_refs':['codehash'],'limitations':[]}
+        value={'verdict':'request_changes','checks':['source identity verified'],'blocking_findings':['wrong intervention'],'evidence_refs':['codehash'],'limitations':[]}
         check_response({'role':'reviewer'},{'implementation_hash':'codehash'},value)
         value['verdict']='approve'
         with self.assertRaisesRegex(ContractError,'blocking'):check_response({'role':'reviewer'},{'implementation_hash':'codehash'},value)

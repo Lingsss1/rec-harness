@@ -1,0 +1,46 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Which Neurons Matter in IR｜ICTIR 2024 精讲</title><style>
+:root{--ink:#17211f;--muted:#64706d;--bg:#f4f1ea;--card:#fffdf8;--accent:#087f6d;--accent2:#f07b52;--line:#d9ddd8;--code:#10201d}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.7 system-ui,-apple-system,"PingFang SC",sans-serif}.wrap{max-width:1080px;margin:auto;padding:42px 24px 90px}header{padding:36px;border-radius:24px;background:linear-gradient(135deg,#10201d,#18483f);color:white}h1{margin:0 0 8px;font-size:38px;line-height:1.2}h2{margin-top:42px;border-left:5px solid var(--accent);padding-left:14px}h3{margin-top:24px}.tag{display:inline-block;padding:3px 10px;border:1px solid #ffffff55;border-radius:99px;margin:8px 6px 0 0}.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:24px;margin:18px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}.formula{overflow:auto;background:var(--code);color:#d9f4ed;border-radius:14px;padding:18px;font:17px/1.8 ui-monospace,SFMono-Regular,monospace}.warn{background:#fff1e9;border-color:#f3b99e}.ok{background:#eaf6f2}table{width:100%;border-collapse:collapse}th,td{padding:11px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted)}pre{white-space:pre-wrap;background:#10201d;color:#d9f4ed;padding:18px;border-radius:14px;overflow:auto}details{background:white;border:1px solid var(--line);border-radius:14px;padding:14px 18px;margin:10px 0}summary{cursor:pointer;font-weight:700}a{color:var(--accent)}.small{color:var(--muted);font-size:14px}.flow{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.flow b{padding:8px 11px;background:#e6f3ef;border-radius:9px}.arrow{color:var(--accent2)}@media(max-width:650px){h1{font-size:29px}header{padding:26px}.wrap{padding:22px 14px}}
+</style></head><body><main class="wrap"><header><div class="small" style="color:#bfe2d9">论文精讲 · 搜索/排序直接证据</div><h1>Which Neurons Matter in IR?</h1><p>Vast et al.，ICTIR 2024｜在 MonoBERT 精排 Cross-Encoder 中用 Neuron Integrated Gradients 找“相关/不相关”神经元，并用剪枝直接验证排序指标。</p><span class="tag">IR / 精排</span><span class="tag">Neuron IG</span><span class="tag">Pruning validation</span></header>
+
+<h2>1. 为什么这篇对我们更直接</h2><div class="card"><p>此前 Taylor pruning 多来自视觉。这篇把内部归因放进真实 IR reranking：输入是 query–passage 对，输出相关/不相关，最终用 <b>nDCG@10</b> 而非只看分类 loss 验证。研究三件事：能否区分相关与不相关神经元、域内/域外是否共用神经元、这些神经元被移除后是否真影响排序。</p></div>
+
+<h2>2. 核心流程</h2><div class="card"><div class="flow"><b>中性 baseline</b><span class="arrow">→</span><b>100 步输入插值</b><span class="arrow">→</span><b>每个线性输出算 NIG</b><span class="arrow">→</span><b>token 求和</b><span class="arrow">→</span><b>样本/数据集平均</b><span class="arrow">→</span><b>Top 0.01/0.1/1%</b><span class="arrow">→</span><b>置零剪枝验证</b></div></div>
+
+<h2>3. 关键公式</h2><div class="card"><p>从 baseline x′ 到真实输入 x：γ(t)=x′+t(x−x′)。令 γ<sub>y</sub>(t) 是中间神经元 y 在路径 t 的激活：</p><div class="formula">NIG<sub>y</sub>(x) = ∫₀¹ [ ∂F(γ(t)) / ∂γ<sub>y</sub>(t) ] · [ ∂γ<sub>y</sub>(t) / ∂t ] dt</div><p>第一项是“输出对该神经元的下游敏感度”，第二项是“输入沿路径移动时该神经元变化多快”。二者积分，得到该神经元承载的路径贡献（conductance）。</p><p>Transformer 同一线性维度会出现在所有 token 上。论文把该维度跨 token 的 conductance 求和，再跨多个样本取均值，形成 task-related neuron 分数：</p><div class="formula">S<sub>y,D,c</sub> = (1/|D<sub>c</sub>|) ∑<sub>x∈D<sub>c</sub></sub> ∑<sub>token</sub> NIG<sub>y,token</sub>(x)</div><p>c 分 relevant / non-relevant；D 分 MSMARCO 域内及多个 BEIR 域外数据集。</p></div>
+
+<h2>4. Baseline 是怎么选的</h2><div class="card ok"><p>IR 没有天然“黑图”。作者比较 [PAD] 替换和零向量等方案，用 1000 个 MSMARCO 输入测 baseline 是否把两类 softmax 差压到接近 0，最终选择把全部 embedding 替换为 fully padded counterpart。这个步骤很关键：不是随意指定零值，而是先验证 baseline 的“中性”。</p></div>
+
+<h2>5. 实验与可信证据</h2><div class="grid"><div class="card"><h3>模型/数据</h3><p><b>castorini/monobert-large-msmarco</b>。MSMARCO 为域内；FiQA、NQ、BioASQ、TREC-Covid、NFCorpus、TREC-News、Robust04 等为域外；LoTTE 和 MSMARCO dev 用于独立剪枝验证。</p></div><div class="card"><h3>机制发现</h3><p>同一数据集的 relevant 与 non-relevant Top 神经元集合几乎不重合，说明两类判断可能由不同内部单元承载；不同 OOD 数据集的共享情况也不同。</p></div><div class="card"><h3>干预验证</h3><p>随机同层剪枝几乎不影响指标；按 NIG 选出的 Top 神经元被置零后，部分方案带来显著 nDCG@10 下降。例如 MSMARCO “non-relevant” Top 1% 剪枝，在论文表中对 MSMARCO/LoTTE 都出现约 50% 量级相对下降。</p></div></div>
+<div class="card warn"><b>证据要准确讲：</b>不同 attribution scheme 的结果差异大；某些 relevant 交集剪枝几乎无影响。论文证明“部分 NIG 排序能找到关键神经元”，不是“任意 Top-NIG 集合必然关键”。</div>
+
+<h2>6. 实现伪代码</h2><pre><code>for dataset, label in attribution_splits:
+  score = zeros(all_linear_output_dims)
+  for x in correctly_predicted_examples(dataset, label):
+    for k in range(1, 101):
+      t = k / 100
+      x_t = baseline + t * (x - baseline)
+      y_t, dy_dt = capture_neurons_and_path_derivative(x_t)
+      grad_y = grad(target_probability(model(x_t), label), y_t)
+      score += sum_over_tokens(grad_y * dy_dt) / 100
+  score /= number_of_examples
+  top_sets[dataset, label] = top_percent(score, [0.01, 0.1, 1.0])
+
+# 独立验证：同层、同数量随机对照重复 50 次
+for neurons in top_sets:
+  delta_ndcg = evaluate(zero_neurons(model, neurons)) - evaluate(model)
+</code></pre>
+
+<h2>7. 迁移到当前 Kai Base</h2><table><tr><th>论文对象</th><th>Kai Base 对应</th><th>迁移建议</th></tr><tr><td>query–passage cross-encoder</td><td>user–item 精排多分支模型</td><td>解释目标从二分类概率改为各任务 logit/loss + 总 loss。</td></tr><tr><td>Transformer linear outputs</td><td>Share-bottom、Cross、TokenMix、HSTU、各 task tower</td><td>先按 channel/模块聚合，不建议一开始扫 Sparse embedding 每个 ID。</td></tr><tr><td>相关/不相关标签</td><td>点击、长播、转化等正负样本</td><td>分别算正/负样本 NIG，检查是否存在任务/标签专用通路。</td></tr><tr><td>ID/OOD 数据集</td><td>活跃度、内容类目、流量入口、新老用户、时间窗</td><td>计算 Top-K overlap，定位冷启追平时缺失的稳定核心或场景专用能力。</td></tr><tr><td>置零剪枝</td><td>zero / shuffle 干预</td><td>Top-NIG 只做候选；以同层随机、Bottom-K、条件 shuffle 校验。</td></tr></table>
+
+<h2>8. 边界与失败模式</h2><ul><li>单一 MonoBERT 架构，不能直接代表推荐多任务或 HSTU。</li><li>NIG 约 100 次梯度，成本高，适合候选复核，不适合每天全量扫描。</li><li>Baseline 与线性插值可能偏离离散 token/embedding 流形。</li><li>平均后得到“task neuron”会掩盖长尾用户和小场景；推荐必须分桶。</li><li>置零剪枝存在 OOD；应增加 shuffle，并保持同层同数量随机对照。</li><li>集合不重合不等于功能因果可解释，还需样本级与联合干预。</li></ul>
+
+<h2>9. Leader 尖锐问答</h2>
+<details open><summary>Q1：这篇比 MISO/Taylor 更能证明我们方向吗？</summary><p>它提供了排序精排模型、nDCG 和神经元剪枝的直接场景证据，但模型仍是 MonoBERT。它更接近业务问题，仍需在 Kai Base 做本地相关性和干预校准。</p></details>
+<details><summary>Q2：为什么用 NIG 而不是一次梯度？</summary><p>跨 baseline→输入路径积分能缓解终点梯度饱和，更适合确认稳定“任务神经元”；代价是约 100 倍梯度，因此我们用普通梯度粗筛、NIG 复核。</p></details>
+<details><summary>Q3：为什么 relevant 与 non-relevant 神经元几乎不重合？</summary><p>这是作者的集合观察，提示模型可能使用不同通路支持两类判断；它不是功能命名的最终证明。需要正负样本干预和跨数据复验。</p></details>
+<details><summary>Q4：为什么有些 Top 神经元剪掉不掉点？</summary><p>可能有冗余、归因正负抵消、集合交集过严或 baseline 偏差。论文结果本身说明 attribution 只能筛候选，干预才是验收。</p></details>
+<details><summary>Q5：Top 1% 掉 50%，是不是能直接拿来做剪枝？</summary><p>恰恰相反：Top 是关键单元，剪掉用于验证，不是压缩。若要剪枝应验证 Bottom-K，并微调恢复；本课题主要用 Top-K 定位依赖和瓶颈。</p></details>
+<details><summary>Q6：迁移到多任务后分数怎么算？</summary><p>每个任务单独算一份，再算线上权重总 loss；报告任务间 Top-K overlap 和梯度方向。只算总 loss 会被权重大的任务主导。</p></details>
+<details><summary>Q7：对冷启动追平有什么抓手？</summary><p>同一冻结数据上比较成熟 Base 与冷启模型的模块归因谱：成熟模型稳定高分而冷启缺失的分支，是蒸馏、初始化、损失重权或专项预训练的候选，不直接等于结论。</p></details>
+
+<h2>10. 原始来源</h2><div class="card"><p><a href="https://openreview.net/forum?id=hMdCIBgL8O">ICTIR 2024 OpenReview</a> · <a href="https://arxiv.org/abs/2406.19309">arXiv</a></p><p class="small">原论文模型：castorini/monobert-large-msmarco；论文代码链接见原文脚注。</p></div></main></body></html>

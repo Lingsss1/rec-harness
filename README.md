@@ -183,7 +183,7 @@ bash scripts/validate-core.sh
 
 ## 本地研究监控
 
-运行 `python3 -m rec_harness.monitor --run /path/to/campaign --port 4318`，访问 `http://127.0.0.1:4318`。面板显示真实迭代、晋升、训练进度、GPU 和各角色 token 用量；支持多个 `--run` 切换历史任务。它只读运行记录，不调用 Codex。启动和远程访问方式见[监控面板说明](docs/implementation/autoresearch-monitor.md)。
+运行 `python3 -m rec_harness.monitor --run /path/to/campaign --port 4318`，访问 `http://127.0.0.1:4318`。面板显示真实迭代、晋升、训练进度、GPU 和各角色 token 用量；支持多个 `--run` 切换历史任务。它只读运行记录，不调用 Codex。无法访问网页端口时，加上 `--html /path/to/monitor.html --interval 10` 持续生成可在服务器直接打开的独立 HTML 面板。启动方式见[监控面板说明](docs/implementation/autoresearch-monitor.md)。
 
 ## 文档与实验归档
 

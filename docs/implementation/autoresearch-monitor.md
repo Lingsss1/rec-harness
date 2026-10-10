@@ -19,7 +19,30 @@ python3 -m rec_harness.monitor \
 ssh -L 4318:127.0.0.1:4318 user@training-host
 ```
 
-然后打开客户端的 `http://127.0.0.1:4318`。服务仅绑定 loopback，并检查 Host；不会发布实验记录到外部网站。查看 GPU 遥测及进程状态需要在具有相应可见性的运行环境中启动服务；无权限时明确显示不可用，而不是显示空闲。
+然后打开客户端的 `http://127.0.0.1:4318`。默认仅绑定 loopback，并检查 Host；不会发布实验记录到外部网站。查看 GPU 遥测及进程状态需要在具有相应可见性的运行环境中启动服务；无权限时明确显示不可用，而不是显示空闲。
+
+## 无需端口的服务器本地 HTML 面板
+
+服务器无法使用 SSH 转发或 Web 端口时，可以持续生成一个独立 HTML 文件：
+
+```bash
+python3 -m rec_harness.monitor \
+  --run /path/to/current-campaign \
+  --run /path/to/previous-campaign \
+  --html /path/to/monitor.html --interval 10
+```
+
+在服务器文件管理器中双击 `monitor.html`，或在服务器浏览器中打开该文件。HTML 内置样式、脚本和聚合快照，不请求 HTTP API，不需要登录服务或开放端口。后台每 10 秒原子更新文件，页面每 10 秒重新载入；暂停刷新仅影响页面。切换任务与所选轮次在当前浏览器会话中保留。
+
+下载到其他电脑的副本只包含下载时的快照；只有服务器上的原文件持续更新。文件顶部和底部显示快照时间。省略 `--interval` 仅导出一次。
+
+## 无桌面环境的终端实时面板
+
+```bash
+python3 -m rec_harness.monitor --run /path/to/current-campaign --terminal --interval 10
+```
+
+在服务器终端每 10 秒刷新进度、模型、调用与 token 用量、GPU 占用、训练 epoch 和最近迭代。`Ctrl+C` 只退出监控，不停止训练。省略 `--interval` 输出一次快照；终端模式不启动 HTTP 服务。
 
 ## 展示与统计口径
 

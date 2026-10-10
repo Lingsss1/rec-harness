@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from urllib.parse import parse_qs, urlsplit
@@ -254,6 +255,59 @@ class Monitor:
             return value
 
 
+def export_html(monitor, destination):
+    """Self-contained server-local view, atomically replaced without opening a port."""
+    snapshots = {name: monitor.get(name) for name in monitor.runs}
+    payload = json.dumps(snapshots, ensure_ascii=False, allow_nan=False)
+    # Research text is data, never executable HTML, including literal </script>.
+    payload = payload.replace('&', '\\u0026').replace('<', '\\u003c').replace('>', '\\u003e')
+    css = (ASSETS / 'style.css').read_text()
+    js = (ASSETS / 'app.js').read_text()
+    html = (ASSETS / 'index.html').read_text()
+    html = html.replace('<link rel="stylesheet" href="/style.css">', '<style>' + css + '</style>')
+    html = html.replace('<script src="/app.js" defer></script>', '')
+    html = html.replace('</body>', '<script>window.__AUTORESEARCH_SNAPSHOTS__=' + payload + ';</script><script>' + js + '</script></body>')
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(destination.name + '.tmp')
+    temporary.write_text(html)
+    temporary.replace(destination)
+
+
+def terminal_text(data):
+    """Plain terminal view for servers without a desktop browser."""
+    def number(value):
+        return f'{value:,.0f}' if isinstance(value, (int, float)) else '—'
+    def safe(value):
+        return ''.join(c for c in str(value) if c.isprintable())
+    count, usage = data['counts'], data['usage']
+    lines = ['=' * 90, 'REC HARNESS / AUTORESEARCH 实时监控',
+             safe(data['id']) + '    ' + time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(data['observed_at'])),
+             '-' * 90, f"阶段: {safe(data['status'])}    PID: {data['controller']['pid']}    存活: {data['controller']['live']}",
+             f"完成实验: {count['completed']}/{data['target_rounds']}    已尝试: {count['attempted']}    失败: {count['failed']}    晋升: {count['promoted']}",
+             f"当前模型: {safe(data['state'].get('incumbent', '—'))}",
+             f"Codex 调用: {usage['calls']}    Token: {number(usage['total_tokens'])}    缓存输入: {number(usage['cached_input_tokens'])}",
+             '思考 token 已包含在输出中；未返回用量不计入当前合计。', '-' * 90, 'GPU   显存使用 / 总量 (GiB)    利用率    * 为本任务配置的 GPU']
+    for gpu in data['gpu']['devices']:
+        assigned = '*' if gpu['index'] in (data['protocol']['gpu_ids'] or []) else ' '
+        lines.append(f"{assigned}{gpu['index']:2}   {gpu['memory_used_mib']/1024:5.1f} / {gpu['memory_total_mib']/1024:4.0f}               {gpu['utilization']:3}%")
+    if not data['gpu']['available']:
+        lines.append('GPU 遥测不可用')
+    active = [j for j in data['jobs'] if j['status'] != 'success']
+    lines += ['-' * 90, f"训练任务: {len(data['jobs'])} 个 / 进行中或待确认: {len(active)}"]
+    for job in (active or data['jobs'][-4:])[:8]:
+        lines.append(f"GPU {job['gpu']}  {safe(job['dataset'] or job['id']):26}  {safe(job['status']):24}  epoch {job['epoch'] or '—'}")
+    lines += ['-' * 90, '最近迭代']
+    for item in data['rounds'][-5:]:
+        lines.append(f"R{item['number']:02}  {safe(item['status']):14}  修订 {item['revisions']}  晋升 {safe(item['promoted_model'] or '—')}")
+    if not data['rounds']:
+        lines.append('尚未进入第一轮')
+    if data['error']:
+        lines.append('错误: ' + safe(data['error'])[:400])
+    lines += ['=' * 90, '只读监控 · Ctrl+C 退出面板，不停止研究任务']
+    return '\n'.join(lines)
+
+
 def handler(monitor):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -299,11 +353,38 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', action='append', required=True, type=Path, help='Campaign root; repeat for historical runs')
     parser.add_argument('--port', type=int, default=4318)
+    parser.add_argument('--html', type=Path, help='Write a standalone local HTML dashboard instead of opening a port')
+    parser.add_argument('--terminal', action='store_true', help='Display a local terminal dashboard without opening a port')
+    parser.add_argument('--interval', type=int, default=0, help='Refresh HTML or terminal every N seconds; 0 renders once')
     args = parser.parse_args()
     for root in args.run:
         if not (root / 'research/amazon-auto.json').is_file():
             parser.error(f'Not an Amazon autoresearch campaign: {root}')
-    server = ThreadingHTTPServer(('127.0.0.1', args.port), handler(Monitor(args.run)))
+    if args.html and args.terminal:
+        parser.error('choose either --html or --terminal')
+    if args.interval < 0 or (args.interval and (not (args.html or args.terminal) or args.interval < 5)):
+        parser.error('--interval requires --html or --terminal and must be 0 or at least 5 seconds')
+    monitor = Monitor(args.run)
+    if args.html or args.terminal:
+        try:
+            while True:
+                try:
+                    if args.html:
+                        export_html(monitor, args.html)
+                    else:
+                        text = '\n\n'.join(terminal_text(monitor.get(name)) for name in monitor.runs)
+                        print(('\033[2J\033[H' if sys.stdout.isatty() else '') + text, flush=True)
+                except (OSError, ValueError, sqlite3.Error) as error:
+                    if not args.interval:
+                        raise
+                    print('Monitor refresh deferred: ' + redact(error), flush=True)
+                if not args.interval:
+                    break
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            pass
+        return
+    server = ThreadingHTTPServer(('127.0.0.1', args.port), handler(monitor))
     print(f'Autoresearch monitor: http://127.0.0.1:{server.server_port}', flush=True)
     try:
         server.serve_forever()

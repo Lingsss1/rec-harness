@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from rec_harness.core import write_json
-from rec_harness.monitor import Monitor, snapshot, redact
+from rec_harness.monitor import Monitor, snapshot, redact, export_html
 from rec_harness.store import Store
 
 
@@ -87,6 +87,20 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(result['jobs'][0]['epoch'], 5)
         self.assertEqual(result['jobs'][0]['status'], 'running')
         self.assertIsNone(result['jobs'][0]['hr10'])
+
+    def test_standalone_html_is_self_contained_and_escapes_research_text(self):
+        monitor = Monitor([self.root])
+        dangerous = '</script><script>bad()</script>'
+        destination = self.root / 'panel.html'
+        with patch.object(monitor, 'get', return_value={'mechanism': dangerous}):
+            export_html(monitor, destination)
+        text = destination.read_text()
+        self.assertNotIn(dangerous, text)
+        self.assertIn('\\u003c/script\\u003e', text)
+        self.assertIn('window.__AUTORESEARCH_SNAPSHOTS__=', text)
+        self.assertNotIn('src="/app.js"', text)
+        self.assertNotIn('href="/style.css"', text)
+        self.assertFalse(destination.with_name('panel.html.tmp').exists())
 
 
 if __name__ == '__main__':

@@ -24,12 +24,13 @@ def implementation_context(context,gap,generated):
     keys=('task_id','model_version','protocol_hash','bindings','source_contract',
           'insertion_contract_format','generated_controls','previous_development_sources')
     return {**{key:context[key] for key in keys if key in context},'gap':gap,**generated,
+            **({'review_revision':context['review_revision']} if 'review_revision' in context else {}),
             'instructions':['Implement the frozen proposal and each named control; do not redesign the hypothesis or run training.',
                             'Preserve imports, module settings, training helpers and score/encode consistency. changed_files must exactly match model.py followed by generated control files.',
                             'Source changes must stay inside insertion_contract_format; report actual checks and remaining limitations.']}
 
 
-def review_code(controller, folder, context, cards, baseline, candidate, controls):
+def review_code(controller, folder, context, cards, baseline, candidate, controls, *, require_approval=True):
     sources={'baseline.py':baseline,'model.py':candidate}
     sources.update({item['file']:controls[item['model_version']] for item in context.get('generated_controls',[])})
     implementation={name:{'sha256':file_hash(path),'source':path.read_text()} for name,path in sources.items()}
@@ -53,8 +54,8 @@ def review_code(controller, folder, context, cards, baseline, candidate, control
     def validate(value,_):
         validate_code_review(value,identity)
     review=controller._role(folder,'reviewer',request,validator=validate)
-    # Substantive rejection remains final, never a retry-until-approved loop.
-    validate_code_review(review,identity,require_approval=True)
+    # The controller may route a substantive rejection through bounded revisions.
+    validate_code_review(review,identity,require_approval=require_approval)
     return review
 
 

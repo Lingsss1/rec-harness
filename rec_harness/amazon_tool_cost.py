@@ -47,6 +47,7 @@ def check_binding(root,case,suite,group,report,*,study_group=None,scripted_agent
         wanted.update(diagnostic_tool=tool,validation_only=True)
     from .semantic_encoder import freeze_options
     freeze_options(wanted)
+    if 'review_revision_limit' in config:wanted.setdefault('review_revision_limit',2)
     if 'role_layout' in config:wanted.setdefault('role_layout','six-role-v1')
     if 'hypothesis_graph' in config:wanted.setdefault('hypothesis_graph',False)
     if 'selection_policy' in config:wanted.setdefault('selection_policy','legacy-candidate-controls-v1')

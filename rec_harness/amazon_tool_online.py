@@ -23,7 +23,7 @@ STUDY_KEYS={'datasets','development_seeds','confirmation_seeds','model_versions'
             'gpu_ids','trusted_baselines_only','hidden_evaluation'}
 CONTROLLER_KEYS={'adapter','base_model_id','control_model_ids','max_rounds','role_call_limit','rescore_recipe',
                  'uid_registry','agent_backend','role_timeout','diagnostic_budget','generated_control_count',
-                 'structured_insertion_contract','require_method_sources','minimum_round_gpu_seconds','activation_diagnostic','semantic_encoder','source_novelty_guard','selection_policy','hypothesis_graph','hypothesis_graph_limit','role_layout'}
+                 'structured_insertion_contract','require_method_sources','minimum_round_gpu_seconds','activation_diagnostic','semantic_encoder','source_novelty_guard','selection_policy','hypothesis_graph','hypothesis_graph_limit','role_layout','review_revision_limit'}
 
 
 def freeze_suite(specification,directory):

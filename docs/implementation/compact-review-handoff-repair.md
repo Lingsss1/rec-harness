@@ -50,3 +50,8 @@ Old failed rounds have not been reopened or counted as completed. Future researc
 can still correctly stop for source defects or invalid proposals. Per-agent
 bounded working memory and cumulative token limits are separate, unimplemented
 work; this patch does not claim to fix the token-volume problem.
+
+Subsequent change: new compact campaigns now support up to two substantive
+[returns for proposal/code revision](reviewer-return-for-revision.md) before
+stopping. This replaces the stop-on-first-rejection behavior described above;
+it does not reinterpret or reopen old campaign records.

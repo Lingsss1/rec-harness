@@ -55,6 +55,9 @@ class AmazonAutoresearch:
         config.setdefault('role_layout','six-role-v1')
         if config['role_layout'] not in {'six-role-v1','compact-four-v1'}:raise ContractError('unknown role_layout')
         if review_only and config['role_layout']!='six-role-v1':raise ContractError('historical review-only recovery requires six-role-v1')
+        config.setdefault('review_revision_limit',2)
+        if type(config['review_revision_limit']) is not int or not 0<=config['review_revision_limit']<=2:
+            raise ContractError('review_revision_limit must be an integer from 0 to 2')
         config.setdefault('hypothesis_graph',not review_only)
         if config['role_layout']=='compact-four-v1' and not config['hypothesis_graph']:raise ContractError('compact research requires hypothesis_graph')
         if type(config['hypothesis_graph']) is not bool:raise ContractError('hypothesis_graph must be boolean')
@@ -429,8 +432,11 @@ class AmazonAutoresearch:
 
     def _round(self,state,folder):
         folder.mkdir(parents=True,exist_ok=True)
+        from .amazon_review_repair import recover,context_for_revision
+        revision=recover(self,folder)
         if not (folder/'input.json').exists():write_json(folder/'input.json',self._context(state,folder))
-        context=read_json(folder/'input.json');binding=context['bindings'];pid=binding['proposal_id']
+        context=context_for_revision(folder,read_json(folder/'input.json'),revision)
+        binding=context['bindings'];pid=binding['proposal_id']
         if context.get('measurement_failure'):raise MeasurementDeferred(context['measurement_failure'])
         cfg=load_config(self.study);source=Path(cfg['model_versions'][binding['base_model_id']]['path'])
         def gap_check(value,_):
@@ -487,7 +493,11 @@ class AmazonAutoresearch:
         policy_args={'selection_policy':self.config['selection_policy']} if self.config.get('selection_policy') in {'baseline-positive-v1','baseline-single-seed-v1'} else {}
         if self.config.get('role_layout')=='compact-four-v1':
             from .amazon_compact import review_code
-            review_code(self,folder,context,cards,source,candidate,generated_sources)
+            review=review_code(self,folder,context,cards,source,candidate,generated_sources,require_approval=False)
+            if review['verdict']!='approve':
+                from .amazon_review_repair import revise
+                revise(self,folder,review)
+                return self._round(state,folder)
         plan=register_plan(self.study,cards,versions,**policy_args);write_json(folder/'preregistration.json',plan)
         write_json(folder/'admission.json',admit_plan(self.study,pid,recipe=self.config['rescore_recipe'],uid_registry=self.config['uid_registry']))
         run_phase(self.study,pid,'development',execution_id=self.config.get('execution_id'))

@@ -97,6 +97,10 @@ def finalize_cycle(root, proposal_id, directory):
                 roles[role]={'artifacts':refs,'resources':resources}
                 if reuse:roles[role]['reused_call']=reuse
                 if rejection:roles[role]['response_validation']=rejection
+            if (directory/'review-repair').exists():
+                history=directory/'review-repair'
+                roles['review-repair']={'artifacts':artifacts.snapshot(history,[str(p.relative_to(history)) for p in history.rglob('*') if p.is_file()]),
+                    'scope':'superseded pre-registration attempts, not final accepted design or implementation'}
             fact_id='amazon-cycle-'+identity[:24]
             patch['nodes'].append(node(fact_id,'DecisionTrace',{'selection':selection,
                 'scientific_conclusion':decision['conclusion_status'],'readout_hash':report['hash'],

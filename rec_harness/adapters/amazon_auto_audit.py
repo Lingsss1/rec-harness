@@ -115,6 +115,9 @@ def verify_campaign(controller):
     if digest(read_json(controller.study/'study.json'))!=config['study_config_hash']:raise ContractError('bound study changed')
     integrity=controller.store.verify();events=controller.store.events()
     verify_rejected_roles(controller.store,controller.artifacts)
+    from .amazon_review_repair import verify as verify_revisions
+    for folder in (root/'rounds').glob('round-*'):
+        verify_revisions(controller,folder)
     ledger=Store(controller.study/'memory',read_only=True);artifacts=Artifacts(controller.study/'artifacts/objects')
     role_count=0;local_only=0;partial=0;checked=set();cycles=0;measurement_bindings=0;legacy_measurements=0;reused_roles=0
     try:
@@ -125,7 +128,7 @@ def verify_campaign(controller):
             verify_predecessor(controller)
         reopened=verify_reopen_history(controller)
         records={e['payload']['identity']:e['payload'] for e in ledger.events() if e['kind']=='amazon_research_cycle_completed'}
-        for marker in (root/'rounds').glob('round-*/*/accepted.json'):
+        for marker in (root/'rounds').glob('round-*/**/accepted.json'):
             role=marker.parent.name
             if role not in {'evidence','measurement','hypothesis','experiment','evaluation','lead','knowledge','researcher','reviewer','analyst'}:continue
             accepted=read_json(marker);response=read_json(marker.parent/'response.json');validate_schema(response,schema_for(role))
@@ -142,7 +145,7 @@ def verify_campaign(controller):
             from .amazon_role_sources import verify_generated_sources
             verify_generated_sources(marker.parent,role,context,accepted)
             completed=[e['payload'] for e in events if e['kind']=='role_completed' and e['payload']['role']==role
-                and e['payload']['task'].startswith(marker.parent.parent.name+'-'+role+'-')]
+                and e['payload']['task'].startswith(marker.relative_to(root/'rounds').parts[0]+'-'+role+'-')]
             if completed:
                 matches=[value for value in completed if value['response_hash']==accepted['response_hash']]
                 if not matches:raise ContractError('accepted response differs from committed role')

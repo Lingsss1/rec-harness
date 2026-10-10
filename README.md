@@ -181,6 +181,10 @@ bash scripts/validate-core.sh
 
 该命令检查核心 Python 语法、已跟踪及未忽略新文件的公开边界，并运行合同、故障、回放与 CPU 闭环测试；不代表真实 GPU 实验已完成验收。贡献要求见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
+## 本地研究监控
+
+运行 `python3 -m rec_harness.monitor --run /path/to/campaign --port 4318`，访问 `http://127.0.0.1:4318`。面板显示真实迭代、晋升、训练进度、GPU 和各角色 token 用量；支持多个 `--run` 切换历史任务。它只读运行记录，不调用 Codex。启动和远程访问方式见[监控面板说明](docs/implementation/autoresearch-monitor.md)。
+
 ## 文档与实验归档
 
 - [完整 Auto Research 方案 v5](docs/auto-research-plan.md)

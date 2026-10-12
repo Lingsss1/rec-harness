@@ -59,6 +59,9 @@ def analyze(controller,folder,review,graph,report,decision_check):
     contract={'base_version':graph['graph_version'],'fields':['base_version','nodes','edges'],
               'allowed_node_types':['Claim','GapHypothesis','MeasurementGap'],'origin':'agent_hypothesis',
               'task_id':graph['task_id'],'protocol_hash':controller.protocol_hash,'status':'provisional',
+              'node_attrs_required':['task_id','protocol_hash','origin'],
+              'claim_attrs_required':['scope','status','evidence_refs'],
+              'visibility_default':'public',
               'edge_fields':['id','source','target','relation','attrs'],
               'edge_attrs_required':['scope','evidence_refs','origin','status','created_at','revision_id'],
               'evidence_refs':[n['id'] for n in graph['nodes']]}
@@ -73,6 +76,8 @@ def analyze(controller,folder,review,graph,report,decision_check):
                  'Return decision and knowledge in one response. knowledge.patch_json is an append-only graph patch at patch_contract.base_version. Use only supplied node IDs as evidence; empty patch is valid.',
                  'Record candidate/control interventions, outcome differences, alternative explanations and next discriminating tests as provisional knowledge. Negative/null evidence is retained. Training success and code review do not establish causal mechanisms.',
                  'Existing historical explanation nodes may be linked by BASED_ON, SUPERSEDES or ALTERNATIVE_TO using current scoped development evidence. Never rewrite historical nodes.']}
+    from .amazon_evidence_view import attach_analysis_history
+    request=attach_analysis_history(request,review.get('evidence_graph'))
     def validate(value,directory):
         decision_check(value['decision'],directory)
         validate_knowledge_patch(json.loads(value['knowledge']['patch_json']),graph)

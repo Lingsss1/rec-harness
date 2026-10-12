@@ -1,5 +1,7 @@
 # 假设前证据图与四阶段研究
 
+后续更新：新任务的 `prefix-evidence-v2` 读回策略见[证据图修复方案](evidence-graph-prefix-v2.md)和[20 轮前缀模拟](../experiments/evidence-graph-prefix-v2.md)。下文原生图限定描述对应最初的 `native-selected-v1`；旧冻结任务继续使用旧策略。v2 增加带来源标记的跨运行只读视图，不补造缺失的原生关系。
+
 Amazon 示例配置现在显式使用 `role_layout: compact-four-v1` 和
 `hypothesis_graph: true`。已有 campaign 保持冻结配置；未指定 role_layout 的
 旧格式配置仍使用 `six-role-v1`，不重写历史调用或费用。

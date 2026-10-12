@@ -69,6 +69,7 @@ def analyze(controller,folder,review,graph,report,decision_check):
               'node_attrs_template':{'task_id':graph['task_id'],'protocol_hash':controller.protocol_hash,
                   'origin':'agent_hypothesis','scope':graph['task_id'],'status':'provisional','evidence_refs':[]},
               'empty_patch':{'base_version':graph['graph_version'],'nodes':[],'edges':[]},
+              'visibility_default':'public',
               'edge_fields':['id','source','target','relation','attrs'],
               'edge_attrs_required':['scope','evidence_refs','origin','status','created_at','revision_id'],
               'evidence_refs':[n['id'] for n in graph['nodes']]}
@@ -84,6 +85,8 @@ def analyze(controller,folder,review,graph,report,decision_check):
                  'Every new node.attrs must copy task_id, protocol_hash, origin, scope and status from patch_contract.node_attrs_template. Graph task_id may differ from the campaign task_id. Add evidence_refs and your scientific content inside attrs; do not omit scope on Claims.',
                  'Record candidate/control interventions, outcome differences, alternative explanations and next discriminating tests as provisional knowledge. Negative/null evidence is retained. Training success and code review do not establish causal mechanisms.',
                  'Existing historical explanation nodes may be linked by BASED_ON, SUPERSEDES or ALTERNATIVE_TO using current scoped development evidence. Never rewrite historical nodes.']}
+    from .amazon_evidence_view import attach_analysis_history
+    request=attach_analysis_history(request,review.get('evidence_graph'))
     def validate(value,directory):
         decision_check(value['decision'],directory)
         validate_knowledge_patch(json.loads(value['knowledge']['patch_json']),graph)

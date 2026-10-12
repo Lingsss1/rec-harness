@@ -61,6 +61,9 @@ class AmazonAutoresearch:
         config.setdefault('hypothesis_graph',not review_only)
         if config['role_layout']=='compact-four-v1' and not config['hypothesis_graph']:raise ContractError('compact research requires hypothesis_graph')
         if type(config['hypothesis_graph']) is not bool:raise ContractError('hypothesis_graph must be boolean')
+        config.setdefault('evidence_graph_policy','native-selected-v1' if review_only else 'prefix-evidence-v2')
+        if config['evidence_graph_policy'] not in {'native-selected-v1','prefix-evidence-v2'}:
+            raise ContractError('unknown evidence_graph_policy')
         if type(config.get('hypothesis_graph_limit',64)) is not int or config.get('hypothesis_graph_limit',64)<2:raise ContractError('hypothesis_graph_limit must be at least two')
         config.setdefault('selection_policy','legacy-candidate-controls-v1' if review_only else load_config(config['study']).get('selection_policy','baseline-positive-v1'))
         from .amazon_promotion import validate_policy
@@ -339,11 +342,18 @@ class AmazonAutoresearch:
         failures=[]
         failure_paths=[path for path in sorted((self.root/'rounds').glob('*/failure.json'))
                        if path.parent!=folder and not (path.parent/'private-confirmation-started.json').exists()]
+        if self.config.get('evidence_graph_policy')=='prefix-evidence-v2':
+            from .amazon_evidence_view import prior_round_paths
+            failure_paths=prior_round_paths(failure_paths,folder)
         events=self.store.events() if failure_paths else []
         for path in failure_paths:
             failure=execution_failure(path.parent,events)
             if failure is not None:failures.append({'round':path.parent.name,**failure})
-        for path in sorted((self.root/'rounds').glob('*/development-readout.json')):
+        readout_paths=sorted((self.root/'rounds').glob('*/development-readout.json'))
+        if self.config.get('evidence_graph_policy')=='prefix-evidence-v2':
+            from .amazon_evidence_view import prior_round_paths
+            readout_paths=prior_round_paths(readout_paths,folder)
+        for path in readout_paths:
             if path.parent!=folder:
                 history.append(read_json(path))
                 entry={'round':path.parent.name,'development_hash':read_json(path)['hash']}
@@ -359,6 +369,20 @@ class AmazonAutoresearch:
             validate_readout(report,cfg['protocol_hash'],cfg['development_seeds'])
             history.append(report)
         available_history=history
+        available_memory=list(research_memory)
+        available_failures=list(failures)
+        if self.config.get('evidence_graph_policy')=='prefix-evidence-v2':
+            from .amazon_evidence_view import ordered_entries
+            available_memory=ordered_entries(available_memory)
+            report_map={r['hash']:r for r in available_history}
+            ordered_hashes=[e.get('development_hash') or e.get('development',{}).get('hash') for e in available_memory]
+            ordered_hashes=[h for h in ordered_hashes if h in report_map]
+            # Explicit history without a round identity has no recency claim;
+            # put it before round-bound records, not after the latest local round.
+            available_history=[r for r in available_history if r['hash'] not in set(ordered_hashes)]+[report_map[h] for h in dict.fromkeys(ordered_hashes)]
+            # Preserve documentary failure records from previous campaigns too.
+            available_failures=[{'round':e['round'],**e['execution_failure']}
+                                for e in available_memory if e.get('execution_failure')]+available_failures
         limit=self.config.get('research_policy',{}).get('retrieval_limit')
         from rec_harness.semantic_encoder import configured
         query,encoder=configured(self,'evidence')
@@ -401,7 +425,8 @@ class AmazonAutoresearch:
                 'instructions':'Proposal.insertion_contract MUST be a JSON-encoded object with exactly schema, allowed_methods (nonempty subset of this catalog), rationale. Declare all methods the candidate AND generated controls may change, including initialization. Experiment edits outside these methods or comment-only changes are rejected before CPU admission. Other proposal fields explain the mechanism and falsification; method scope is not causal proof.'}
         if self.config.get('hypothesis_graph'):
             from .amazon_hypothesis_graph import context_graph
-            diagnostics['evidence_graph']=context_graph(self,history,base,cfg['protocol_hash'],rows)
+            diagnostics['evidence_graph']=context_graph(self,history,base,cfg['protocol_hash'],rows,
+                available_history=available_history,entries=available_memory,failures=available_failures)
         return {**diagnostics,'task_id':self.config['task_id'],'model_version':base,'protocol_hash':cfg['protocol_hash'],
             **({'method_source_contract':METHOD_SOURCE_CONTRACT} if self.config.get('require_method_sources') else {}),
             'protocol':cfg['protocol'],'seeds':cfg['development_seeds']+cfg['confirmation_seeds'],
@@ -652,6 +677,9 @@ class AmazonAutoresearch:
             'patch_contract':{'base_version':graph['graph_version'],'fields':['base_version','nodes','edges'],
                 'allowed_node_types':['Claim','GapHypothesis','MeasurementGap'],'origin':'agent_hypothesis',
                 'task_id':graph['task_id'],'protocol_hash':cfg['protocol_hash'],'status':'provisional',
+                'node_attrs_required':['task_id','protocol_hash','origin'],
+                'claim_attrs_required':['scope','status','evidence_refs'],
+                'visibility_default':'public',
                 'edge_fields':['id','source','target','relation','attrs'],
                 'edge_attrs_required':['scope','evidence_refs','origin','status','created_at','revision_id'],
                 'evidence_refs':[n['id'] for n in graph['nodes']]},
@@ -660,6 +688,8 @@ class AmazonAutoresearch:
                             'Implementation author checks and limitations are reported claims, not host-verified test outcomes. Preserve relevant unresolved validation requirements; do not infer that every proposed diagnostic ran because the development cycle completed.']}
         if graph.get('historical_explanation_ids'):
             knowledge_context['instructions'].append('historical_explanation_ids are immutable prior local development explanations. You may append a current-scoped provisional interpretation and link FROM that new node TO an old explanation with SUPERSEDES, BASED_ON or ALTERNATIVE_TO. Edge attrs require current task scope, origin agent_hypothesis, status provisional and at least one current local_evidence development Experiment/Observation reference. Do not rewrite old nodes or assert cross-task SUPPORTS/CONTRADICTS. Missing external history remains prose context, not fabricated graph evidence.')
+        from .amazon_evidence_view import attach_analysis_history
+        knowledge_context=attach_analysis_history(knowledge_context,context.get('evidence_graph'))
         self._role(folder,'knowledge',knowledge_context,validator=lambda v,d:validate_knowledge_patch(json.loads(v['patch_json']),graph))
         cycle=finalize_cycle(self.study,pid,folder)
         return lead,cycle

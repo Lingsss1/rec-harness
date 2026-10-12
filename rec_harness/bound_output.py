@@ -36,6 +36,7 @@ def bound_schema(role, context):
         if context.get('gap'):
             exact(proposal, 'gap_ids', [context['gap']['gap_id']])
         proposal['budget'].update(exclusiveMinimum=0, maximum=context['budget']['remaining'])
+        proposal['budget']['description']='A strictly positive budget within the supplied remaining balance. Zero is invalid, including for a simulation-only ledger; this is a declared envelope, not actual measured spend.'
     elif role == 'experiment':
         exact(props, 'changed_files', ['model.py', *[c['file'] for c in context.get('generated_controls', [])]])
     elif role in ('evaluation', 'lead') and context.get('development'):

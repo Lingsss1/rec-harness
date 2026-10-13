@@ -18,15 +18,16 @@ def freeze(config):
             any(not isinstance(plan,dict) for plan in followups)):
         raise ContractError('tool_followup_plans must contain one complete plan for each subsequent tool update')
     config['tool_followup_plans']=[freeze_plan(plan) for plan in followups]
-    from .evolution import STAGES
+    from .evolution import validation_stages
     for plan in plans(config):
         required(plan,['budget','agent_cost','development_ids','identity','stages','rollback_version'])
         required(plan['identity'],['base_llm','tools','start','graph','budget','protocol'])
-        if set(plan['stages'])!=set(STAGES['tool']):raise ContractError('scheduled tool plan requires all validation stages')
+        if set(plan['stages'])!=set(validation_stages('tool',plan)):raise ContractError('scheduled tool plan requires all validation stages')
         for name in ['budget','agent_cost']:number(plan[name],name,0)
-        for rule in plan['stages'].values():
-            required(rule,['command','timeout','cost','minimum_gain','maximum_regression','maximum_total_cost'])
-            for name in ['timeout','cost','minimum_gain','maximum_regression','maximum_total_cost']:number(rule[name],name,0)
+        for stage,rule in plan['stages'].items():
+            numbers=['timeout','cost','maximum_total_cost']+([] if stage=='attribution' else ['minimum_gain','maximum_regression'])
+            required(rule,['command',*numbers])
+            for name in numbers:number(rule[name],name,0)
         if not isinstance(plan['development_ids'],list) or any(not isinstance(item,str) or not item for item in plan['development_ids']):
             raise ContractError('scheduled tool development IDs must be strings')
 

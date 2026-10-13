@@ -52,13 +52,14 @@ def freeze_tool(options,artifacts):
         if 'diagnostic.py' not in candidate['implementation']:raise ContractError('diagnostic.py entry required')
         if candidate['implementation']!=active['implementation']:raise ContractError('active tool implementation differs')
         snapshot={name:artifacts.put(registry.artifacts.verify(ref)) for name,ref in candidate['implementation'].items()}
-        from .evolution import STAGES
+        from .evolution import validation_stages
         stages={stage:{'status':'passed','report_hash':registry._accepted_stage(candidate,plan,stage)['report_hash']}
-                for stage in STAGES['tool']}
+                for stage in validation_stages('tool',plan)}
         context=read_json(registry.root/'candidates'/candidate['candidate_id']/'context.json')
         if digest(context)!=candidate['context_hash']:raise ContractError('tool registration context changed')
         registration={'schema':'validated-diagnostic-registration-v1','entrypoint':'diagnostic.py:measure',
             'contract':contract,'validated_conditions':plan['identity'],'validation_stages':stages,
+            'validation_basis':plan.get('validation_basis','independent_utility'),
             'usage':{'execution':'The controller automatically measures the current incumbent before research roles; use the committed diagnostic output and its limitations.',
                 'input':'task_id, model_version, protocol_hash, runs of seed/valid/metrics and optional dataset; public development aggregates only',
                 'output':'measurements: nonempty mapping of quantity names to finite numbers; limitations: list of strings',

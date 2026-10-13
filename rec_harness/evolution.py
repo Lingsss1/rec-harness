@@ -29,6 +29,23 @@ class ValidationGateRejected(ContractError):
         self.failed_gates=list(failed_gates)
 
 
+def validation_stages(kind, plan):
+    """Attribution plans need local information gain, not independent utility."""
+    mode = plan.get('validation_basis')
+    if mode not in {None, 'independent_utility', 'attribution_increment'}:
+        raise ContractError('unknown validation basis')
+    if mode == 'attribution_increment':
+        if kind != 'tool':
+            raise ContractError('attribution validation requires a tool')
+        return ['attribution']
+    return STAGES[kind]
+
+
+def check_attribution(report, candidate):
+    from .attribution import validate
+    validate(report, candidate)
+
+
 def numerical_gate_failures(report,rule):
     gain=number(report['gain'],'gain')
     regression=number(report['regression'],'regression',0)
@@ -140,16 +157,16 @@ class Evolution:
             raise ContractError("invalid candidate kind")
         if 'tool_method_contract' in plan and kind!='tool':raise ContractError('tool method contract requires a tool candidate')
         required(plan, ["budget", "agent_cost", "development_ids", "stages", "identity", "rollback_version"])
-        if set(plan["stages"]) != set(STAGES[kind]):
+        if set(plan["stages"]) != set(validation_stages(kind, plan)):
             raise ContractError("all frozen validation stages are required")
         required(plan["identity"], ["base_llm", "tools", "start", "graph", "budget", "protocol"])
         for stage, rule in plan["stages"].items():
-            required(rule, ["command", "timeout", "cost", "minimum_gain", "maximum_regression", "maximum_total_cost"])
+            required(rule, ["command", "timeout", "cost", "maximum_total_cost"] + ([] if stage == "attribution" else ["minimum_gain", "maximum_regression"]))
             if 'evaluation_mode' in rule and (not isinstance(rule['evaluation_mode'],str) or rule['evaluation_mode'] not in {'fixed_candidate_selection','end_to_end_candidate_generation','offline_measurement'}):
                 raise ContractError('unknown validation evaluation mode')
             if not isinstance(rule["command"], list) or not rule["command"]:
                 raise ContractError("validator command must be argv")
-            for key in ("timeout", "cost", "minimum_gain", "maximum_regression", "maximum_total_cost"):
+            for key in (["timeout", "cost", "maximum_total_cost"] + ([] if stage == "attribution" else ["minimum_gain", "maximum_regression"])):
                 number(rule[key], key, 0)
         validator_hashes = freeze_validator_files(plan['stages'])
         directory = self.root / "candidates" / candidate_id
@@ -205,6 +222,14 @@ class Evolution:
         task_dir = directory / "development"
         request_context={"context":context,"acceptance_plan":plan}
         if kind=='tool':
+            if plan.get('validation_basis') == 'attribution_increment':
+                request_context['validation_instructions'] = (
+                    'Admission is based on local attribution increment, not independent utility. '
+                    'Reuse source trajectories and frozen artifacts; no training or independent tasks are required. '
+                    'Run the diagnostic and basic controls. Report measured observations linked to competing '
+                    'explanations, before/after attribution and the resulting decision change, plus limitations. '
+                    'A proposed measurement or extra output alone does not establish increment. '
+                    'Source exclusions in inherited context do not prohibit local attribution evaluation.')
             from .tool_method import contract
             method_contract=contract(plan)
             if method_contract is not None:
@@ -340,7 +365,7 @@ class Evolution:
             if candidate['status']=='measurement_required':
                 result={'candidate_id':candidate_id,'kind':kind,'status':'measurement_required','measurement_gap':candidate['measurement_gap']}
             else:
-                for stage in STAGES[kind]:
+                for stage in validation_stages(kind, plan):
                     rejected=[e for e in self.store.events() if e['kind']=='validation_rejected' and e['payload']['candidate_id']==candidate_id and e['payload']['stage']==stage]
                     if rejected:raise ContractError('frozen validation previously rejected: '+stage)
                     self.validate(candidate_id,stage)
@@ -374,7 +399,7 @@ class Evolution:
         for path, sha in candidate["validator_hashes"].items():
             if file_hash(path) != sha:
                 raise ContractError("frozen validator changed")
-        stages = STAGES[candidate["kind"]]
+        stages = validation_stages(candidate["kind"], plan)
         if stage not in stages:
             raise ContractError("unknown validation stage")
         if candidate["status"] == "proposed":
@@ -435,6 +460,19 @@ class Evolution:
     def _check_report(self, candidate, plan, stage, report):
         if not isinstance(report,dict):raise ContractError("validation report must be an object")
         public_only(report)
+        if stage == 'attribution':
+            if report.get('identity') != plan['identity']:
+                raise ContractError('attribution identity differs')
+            check_attribution(report, candidate)
+            context_path = self.root / 'candidates' / candidate['candidate_id'] / 'context.json'
+            context = read_json(context_path) if context_path.exists() else {}
+            gap = context.get('measurement_gap', {})
+            if gap and report['attribution']['gap_id'] != gap['measurement_gap_id']:
+                raise ContractError('attribution report addresses a different measurement gap')
+            rule = plan['stages'][stage]
+            if number(report['total_cost'], 'total_cost', 0) > rule['maximum_total_cost']:
+                raise ValidationGateRejected('attribution cost budget exceeded', ['maximum_total_cost'])
+            return
         groups = report.get("comparison_groups", report.get("arms"))
         if "comparison_groups" in report and "arms" in report and report["comparison_groups"] != report["arms"]:
             raise ContractError("conflicting comparison group fields")
@@ -474,9 +512,9 @@ class Evolution:
         if digest(candidate["implementation"]) != candidate["implementation_hash"]:
             raise ContractError("candidate implementation identity changed")
         self._verify_proposal(candidate)
-        for stage in STAGES[candidate["kind"]]:
+        for stage in validation_stages(candidate["kind"], plan):
             if self._accepted_stage(candidate,plan,stage) is None:
-                raise ContractError(f"missing independent validation: {stage}")
+                raise ContractError(f"missing required validation: {stage}")
         for ref in candidate["implementation"].values():
             self.artifacts.verify(ref)
         return candidate
@@ -541,7 +579,7 @@ class Evolution:
             if 'implementation' in candidate:
                 if digest(candidate['implementation'])!=candidate['implementation_hash']:raise ContractError('candidate implementation changed')
                 for ref in candidate['implementation'].values():self.artifacts.verify(ref);count+=1
-            for stage in STAGES[candidate['kind']]:self._accepted_stage(candidate,plan,stage)
+            for stage in validation_stages(candidate['kind'], plan):self._accepted_stage(candidate,plan,stage)
         for kind in STAGES:
             active=self._active(kind)
             if active:self.verified_candidate(active['candidate_id'])

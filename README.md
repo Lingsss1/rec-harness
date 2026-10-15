@@ -22,6 +22,12 @@
 
 **当前仓库提供 Python 研究运行时、三组 Codex Skills 和设计文档。** 运行时直接调用 `codex exec`，实现顺序角色交付、SQLite 事件与图知识、冻结公开评估、预算、产物归档、受限历史回放，以及工具/Harness 候选验证和版本回退。已完成 CPU 小型示例、Amazon NextItNet 配对实验及工具/Harness 的部分真实在线验收。运行成功不等于候选有效；完整覆盖与未完成项见[实现清单](docs/implementation/completion-matrix.md)。
 
+## 独立方法研究：阶段规划与归因
+
+[`staged-autoresearch/`](staged-autoresearch/README.md) 是独立子项目，检验在 Karpathy 原生编码 agent 循环外增加事前阶段规划、清空上下文后的证据评审及按需归因实验，能否改善相同实验调用预算下的最终成果。计划在 ColoredMNIST、OpenOOD、Opacus 上比较四组方法，共 60 条轨迹、6000 次训练/验证调用。
+
+研究问题、四组对照、预算、指标和结论边界见[实验方案与设计目标](staged-autoresearch/EXPERIMENT_DESIGN.md)。当前仅完成控制框架和离线测试，尚未启动模型调用或训练；真实 FML 评估环境仍需适配和验收。该子项目不依赖下述 RecHarness 运行时。
+
 ## 快速运行
 
 已封存选中的 Amazon NextItNet 候选、对应基线及单行改动补丁见[模型源码交付](examples/amazon/selected-nextitnet-v3/README.md)。源码保持验收时的精确哈希；开发/确认结果及限制见同页，不包含最终测试结论。

@@ -105,7 +105,9 @@ def bubblewrap_command(argv, bindings, *, cwd, network, roots, files, gpu=False)
               "--unshare-pid", "--unshare-ipc", "--unshare-uts"]
     if not network:
         result += ["--unshare-net"]
-    result += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+    # PyTorch DataLoader workers and POSIX semaphores require a writable shm
+    # mount even though the enclosing host /dev is intentionally hidden.
+    result += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/dev/shm", "--tmpfs", "/tmp"]
     for path in ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc/ssl", "/etc/ld.so.cache", "/etc/resolv.conf", "/etc/hosts"):
         if Path(path).exists():
             result += ["--ro-bind", path, path]

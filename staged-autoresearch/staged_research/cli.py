@@ -17,6 +17,10 @@ from .study import check_config, freeze, initialize, load_registration, matrix
 
 
 def main(argv=None):
+    return interruptible(dispatch, argv)
+
+
+def interruptible(function, argv=None):
     received = []
     def terminate(signum, frame):
         received.append(signum)
@@ -24,7 +28,7 @@ def main(argv=None):
     install_handler = threading.current_thread() is threading.main_thread()
     previous = signal.signal(signal.SIGTERM, terminate) if install_handler else None
     try:
-        return dispatch(argv)
+        return function(argv)
     except KeyboardInterrupt:
         print("Interrupted; workers stopped where possible. Rerun the same command to resume; unknown hidden tests are never repeated.", file=sys.stderr)
         return 128 + (received[-1] if received else signal.SIGINT)

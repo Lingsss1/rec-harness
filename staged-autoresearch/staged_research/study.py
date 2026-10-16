@@ -140,6 +140,15 @@ def check_config(config, root, check_images=False):
         require(att.get("test_labels_absent_from_public_and_validation") is True, label + "attest data isolation")
         require(att.get("evaluator_outside_candidate_process") is True, label + "attest trusted external scoring")
         require(bool(att.get("protocol")) and bool(att.get("evidence")), label + "document evaluator contract and isolation audit evidence")
+        if "builtin_fml" in task:
+            from .fml.data import verify_data
+            from .fml.specs import DATA_PROTOCOL
+            require(task["builtin_fml"].get("protocol") == DATA_PROTOCOL and task["builtin_fml"].get("profile") == "full", label + "only full built-in FML data may be registered")
+            for phase in ("validation", "test"):
+                try:
+                    verify_data(task.get(phase + "_data", ""), name, phase)
+                except (OSError, ProtocolError, ValueError, KeyError) as exc:
+                    errors.append(label + "prepared dataset: " + str(exc))
         paths = [task.get(x, "") for x in ("public_source", "validation_data", "test_data", "baseline_checkpoint")]
         if not all(paths):
             errors.append(label + "bind public/validation/test/baseline-checkpoint directories")

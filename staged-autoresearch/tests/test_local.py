@@ -182,6 +182,8 @@ class LocalTests(Fixture):
             argv = self.runtime.agent_command(self.base / "work", self.base / "evidence", self.base / "session", "s", False, "review", {})
             eval_argv = self.runtime.evaluation_command(self.config["tasks"]["openood"], self.base / "candidate", self.base / "out", "validation")
         self.assertIn("--unshare-net", eval_argv)
+        self.assertIn("/dev/shm", eval_argv)
+        self.assertEqual(eval_argv[eval_argv.index("/dev/shm") - 1], "--tmpfs")
         self.assertNotIn("--unshare-net", argv)
         self.assertIn("--ro-bind", argv)
         self.assertNotIn(self.config["tasks"]["openood"]["test_data"], argv + eval_argv)

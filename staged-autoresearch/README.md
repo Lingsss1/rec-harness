@@ -5,14 +5,27 @@
 Python 3.9+，控制器无第三方 Python 依赖。
 
 **实现已包含调度器、Claude Code 原生编辑适配器、本地进程/Docker 后端、一键评测、
-冻结登记、预算与恢复、记录和统计报告。当前未运行任何真实模型调用或 GPU 实验。**
-真实任务需要另行准备并审核 FML 的本地评估器或验证/测试镜像、数据和基线检查点；本项目不会
-把 FML 的现有评估脚本未经数据隔离直接包装成“安全镜像”。详见 [评估器契约](EVALUATORS.md)。
-离线测试使用明确标注的合成响应，不是 FML 成绩，也不能替代真实模型/容器集成测试。
+冻结登记、预算与恢复、记录和统计报告。当前未调用模型 API，也未进行 GPU 或完整 FML 实验。**
+三个任务已内置真实训练、预测和外部评分，并提供环境/数据准备与自动基线校准。
+服务器无需编写评估脚本，使用下面的内置任务入口；目标 GPU 环境仍需通过自动小规模检查
+与完整基线验收。评估行为与隔离边界见 [评估器说明](EVALUATORS.md)。
+协议测试使用合成响应；另已完成三个真实模型的小规模 CPU 集成检查，详见
+[验证状态](VERIFICATION.md)。这些检查不产生 FML 研究成绩。
 
 ## 无 Docker 服务器一键入口
 
-先生成并补齐服务器的模型、评估命令、数据和基线配置：
+**三个内置 FML 任务直接使用：**
+
+```sh
+./run_fml.sh --prefix /srv/staged-fml --model YOUR_FIXED_MODEL_ID --gpu 0
+```
+
+先在环境中配置 `ANTHROPIC_API_KEY`。该入口自动准备依赖、数据、真实评估器和基线，
+随后开始正式训练与模型搜索。只下载准备用 `setup_fml.sh`；不做任何操作的计划预览用
+`./run_fml.sh --prefix /srv/staged-fml --stage plan`。已有原始数据加 `--data-dir /your/torchvision-cache`。
+完整说明见 **[内置 FML 任务一键部署](FML_SETUP.md)**。
+
+如需接入自定义评估器，保留通用后端配置入口：
 
 ```sh
 python3 -m staged_research init --backend local --root /srv/research/fml-study
@@ -26,7 +39,7 @@ python3 -m staged_research init --backend local --root /srv/research/fml-study
 ```
 
 支持独立配置文件 `--config /absolute/server.json` 和失败后继续其他单元的 `--keep-going`。
-**[服务器部署、配置和评估命令接口](SERVER.md)** 说明完整操作。
+**[通用后端配置和评估命令接口](SERVER.md)** 说明手动配置方式，内置任务无需手填评估命令。
 普通进程模式不强制文件/网络隔离；严格实验可选 Linux bubblewrap，不能将目录约定视为
 沙箱保证。本地后端无需 Docker，下面的镜像准备步骤仅适用于 Docker 后端。
 

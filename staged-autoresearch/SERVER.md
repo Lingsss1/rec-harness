@@ -1,12 +1,16 @@
 # 无 Docker 服务器：本地进程后端与一键评测
 
+**ColoredMNIST、OpenOOD、Opacus 已有内置真实评估器与安装/数据脚本，直接使用
+[FML_SETUP.md](FML_SETUP.md)，无需手写下文的评估脚本。**
+本页保留通用后端接口，适合自定义任务或已有评估服务。
+
 这个后端直接调用服务器上的原生 Claude Code、任务 Python 环境和可信评估器。
 不启动 Docker、不下载模型/数据、不安装训练依赖。各任务可以用不同的 venv/conda
 Python；调度器本身只需 Python 3.9+ 与 POSIX 系统。正式评测建议 Linux GPU 服务器。
 
 一键入口会依次执行：配置与环境预检 → 首次冻结 → 顺序运行/继续 60 条轨迹 → 导出报告。
 它保留原四组设计、100 次预算、10 阶段及每轨迹一次最终隐藏测试。
-**依赖、任务评估器、数据与基线需要先准备；本项目没有附带三个任务的已验收训练环境。**
+自定义评估器需要先准备依赖、数据和基线；内置任务由 `run_fml.sh` 自动完成这些步骤。
 
 ## 1. 首次配置
 
@@ -83,7 +87,7 @@ python3 -m staged_research init --backend local --root /srv/research/fml-study
 }
 ```
 
-示例里的脚本名称表示需要部署的可信任务适配器，项目不预装这些路径。
+示例里的脚本名称表示自定义任务适配器，不是内置 FML 入口；内置入口由脚本自动生成。
 评估器必须在验证后写 `{result}/metrics.json` 和非空 `{result}/checkpoint/`；隐藏测试
 只加载 `{checkpoint}`，不能重新训练或搜索。指标、Opacus 隐私会计和三个任务的约定见
 [EVALUATORS.md](EVALUATORS.md)。执行工作目录为 scratch，评估器应在其中准备完整固定

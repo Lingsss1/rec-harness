@@ -26,7 +26,7 @@
 
 [`staged-autoresearch/`](staged-autoresearch/README.md) 是独立子项目，检验在 Karpathy 原生编码 agent 循环外增加事前阶段规划、清空上下文后的证据评审及按需归因实验，能否改善相同实验调用预算下的最终成果。计划在 ColoredMNIST、OpenOOD、Opacus 上比较四组方法，共 60 条轨迹、6000 次训练/验证调用。
 
-研究问题、四组对照、预算、指标和结论边界见[实验方案与设计目标](staged-autoresearch/EXPERIMENT_DESIGN.md)。支持[无 Docker 服务器本地后端与一键评测](staged-autoresearch/SERVER.md)。当前完成控制框架和离线测试，尚未启动真实模型调用或训练；真实 FML 评估环境仍需适配和验收。该子项目不依赖下述 RecHarness 运行时。
+研究问题、四组对照、预算、指标和结论边界见[实验方案与设计目标](staged-autoresearch/EXPERIMENT_DESIGN.md)。支持[无 Docker 服务器本地后端](staged-autoresearch/SERVER.md)，并已内置[三任务真实评估器、环境与数据下载、一键运行](staged-autoresearch/FML_SETUP.md)，无需手写评估脚本。正式研究实验尚未启动，目标服务器需先通过自动小规模检查和基线验收。该子项目不依赖下述 RecHarness 运行时。
 
 ## 快速运行
 

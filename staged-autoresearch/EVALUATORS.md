@@ -1,8 +1,14 @@
 # FML 任务评估器契约与真实集成验收
 
-控制器只接收受信任的外部评估器结果。这里定义接口，不提供虚假的“开箱即用”FML
-镜像：本工作区尚无 FML 数据、GPU 容器和已审核的任务镜像。
-三个任务的依赖和检查点格式不同，必须按固定 FML checkout 编写/审核适配器。
+控制器只接收受信任的外部评估器结果。三个 FML 任务的真实实现已位于
+`staged_research/fml/`，通过 `run_fml.sh` 自动安装环境、下载数据、测量基线并运行；
+操作见 [FML_SETUP.md](FML_SETUP.md)。用户无需编写或绑定评估脚本。
+本页同时保留通用 Docker/本地评估契约；本项目不提供预构建的 Docker 镜像。
+
+内置评估器先在子进程中训练候选，再由无标签预测子进程产出 logits/OOD scores，
+最后由未导入候选的父进程计算指标。Opacus 从实际 accountant history 独立重算隐私预算。
+最终测试校验源码/检查点身份，仅调用推理分支。Linux bubblewrap 模式还对候选子进程
+做内层隔离；普通进程模式仍不强制文件不可访问，不能声称抵抗恶意 Python。
 
 无 Docker 的服务器使用 [本地进程后端](SERVER.md)：下文容器路径依次对应
 `{candidate}`、`{data}`、`{result}`、`{scratch}`、`{checkpoint}` 占位符。
@@ -67,15 +73,15 @@ Opacus 必须额外提供受信任的隐私会计结果：
 
 ## 各任务的适配要点
 
-- **ColoredMNIST**：固定 env2 的验证/测试划分和原训练随机设置；沿用固定 ERM 入口，
+- **ColoredMNIST**：固定 env2 的验证/测试划分、种子与 5001 次更新；沿用固定 ERM 接口，
   将 agent 修改的 `domainbed/algorithms.py`、`domainbed/networks.py` 接入训练。
 - **OpenOOD**：保持 CIFAR-100 作开发 OOD、SVHN 作隐藏 OOD，分离 CIFAR-10 的隐藏测试
-  标签。现有 FML 脚本会在验证入口初始化部分测试数据，不能直接把所有原始数据挂载进去。
+  标签。内置准备器已在训练前物化独立数组，验证不加载 SVHN/隐藏 ID。
   agent 修改 `algorithm.py`，split_config 固定。训练检查点在一次验证后保留，最终测试只加载。
 - **Opacus**：agent 修改 `algorithm.py`，split_config 固定。目标 ε=8、δ=1e-5；从实际
   PrivacyEngine/accountant 读取预算，验证模型兼容性和训练配置，不信任 agent 自报。
 
-## 冻结前的真实集成验收（本次未执行）
+## 冻结前的服务器集成验收（完整 GPU/数据尚未执行）
 
 1. 检查验证镜像、数据和 public source 内没有隐藏测试标签；保存文件清单与审核证据。
 2. 在同一任务基线上复现原始验证和测试指标，保存检查点，并记录准备成本。
@@ -84,5 +90,6 @@ Opacus 必须额外提供受信任的隐私会计结果：
 5. 检查测试模型与验证选中版本/检查点一致；最终测试不重新训练，测试结果不会被后续 agent 读取。
 6. 检查原生 CLI 的 session resume、fresh session 与 token 回执格式确实符合已固定镜像。
 
-这些验收可能涉及模型/API 和 GPU 成本，需在正式执行阶段进行。本次只完成离线
-调度、数据挂载构造和协议校验测试，没有用合成测试冒充这一验收。
+服务器入口会先执行开发数据的小规模真实模型检查和三任务完整基线，再开始正式评测。
+开发机的真实 CPU/小规模数据检查不能替代服务器 CUDA/完整数据的验收；实际检查记录
+与边界见 [VERIFICATION.md](VERIFICATION.md)，不会用合成数据指标充当 FML 成绩。

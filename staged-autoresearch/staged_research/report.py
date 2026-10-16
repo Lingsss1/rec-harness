@@ -150,6 +150,10 @@ def report(root, registration, output):
                   "Exact code repetition is not semantic repetition.",
                   "Decision changes do not prove causal attribution is correct.",
                   "Missing/failed cells are retained; no complete-suite aggregate is published for incomplete arms."]}
+    execution = registration["config"].get("execution", {"backend": "docker"})
+    summary["execution"] = execution
+    if execution.get("isolation") == "process":
+        summary["limitations"].append("Trusted local process mode does not enforce filesystem/network isolation or prevent access to old sessions and hidden assets; full isolation claims require an audited OS boundary.")
     write(output / "summary.json", summary)
     with (output / "curves.csv").open("w", newline="") as f:
         fields = ["task", "arm", "replicate", "trial_budget", "trial", "valid", "metric", "best_metric", "normalized_validation_gain"]

@@ -4,11 +4,31 @@
 这是仓库内的独立子项目，不依赖现有 RecHarness 运行时，也不修改历史实验。
 Python 3.9+，控制器无第三方 Python 依赖。
 
-**实现已包含调度器、Claude Code 原生编辑适配器、Docker 执行边界、冻结登记、
-预算与恢复、记录和统计报告。当前未运行任何模型调用或 GPU 实验。**
-真实任务需要另行准备并审核 FML 的验证/测试镜像、数据和基线检查点；本项目不会
+**实现已包含调度器、Claude Code 原生编辑适配器、本地进程/Docker 后端、一键评测、
+冻结登记、预算与恢复、记录和统计报告。当前未运行任何真实模型调用或 GPU 实验。**
+真实任务需要另行准备并审核 FML 的本地评估器或验证/测试镜像、数据和基线检查点；本项目不会
 把 FML 的现有评估脚本未经数据隔离直接包装成“安全镜像”。详见 [评估器契约](EVALUATORS.md)。
 离线测试使用明确标注的合成响应，不是 FML 成绩，也不能替代真实模型/容器集成测试。
+
+## 无 Docker 服务器一键入口
+
+先生成并补齐服务器的模型、评估命令、数据和基线配置：
+
+```sh
+python3 -m staged_research init --backend local --root /srv/research/fml-study
+```
+
+配置完成后检查；去掉 `--check-only` 即顺序执行预检、首次冻结、运行/继续完整矩阵和报告：
+
+```sh
+./evaluate.sh --root /srv/research/fml-study \
+  --output /srv/research/fml-report --check-only
+```
+
+支持独立配置文件 `--config /absolute/server.json` 和失败后继续其他单元的 `--keep-going`。
+**[服务器部署、配置和评估命令接口](SERVER.md)** 说明完整操作。
+普通进程模式不强制文件/网络隔离；严格实验可选 Linux bubblewrap，不能将目录约定视为
+沙箱保证。本地后端无需 Docker，下面的镜像准备步骤仅适用于 Docker 后端。
 
 ## 设计目标
 
@@ -54,7 +74,7 @@ Python 3.9+，控制器无第三方 Python 依赖。
 原指令完整保留在包资源内，来源 commit 为
 `228791fb499afffb54b46200aca536f79142f117`，上游为 MIT 项目。
 
-## 不调用模型的准备步骤
+## Docker 后端：不调用模型的准备步骤
 
 在本目录运行，不需要安装即可使用：
 
@@ -102,7 +122,7 @@ python3 -m staged_research freeze --root ./runs/fml-study
 `freeze` 要求 Docker 与本地镜像存在，不会拉取镜像、启动模型或训练。
 数据、评估器是否真的遵守契约还需独立审核；布尔声明不是隔离证明。
 
-## 实际运行接口（本次未执行）
+## Docker 后端：实际运行接口（本次未执行）
 
 在准备好的 Docker/NVIDIA GPU 主机使用；Claude Code 镜像支持 `--bare` 和 JSON schema 输出，
 通过环境变量 `ANTHROPIC_API_KEY` 认证，不读取宿主机 OAuth、钥匙串或用户配置。

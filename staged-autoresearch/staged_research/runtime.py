@@ -70,6 +70,17 @@ def usage_from_response(response):
         "input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")}
 
 
+def native_agent_command(cfg, session, resume, role, schema):
+    tools = "Read,Glob,Grep,Edit,Write" if role == "experiment" else "Read,Glob,Grep"
+    return [cfg["binary"], "--bare", "--print", "--model", cfg["model"],
+            "--effort", cfg["effort"], "--output-format", "json", "--tools", tools,
+            "--allowedTools", tools, "--permission-mode", "dontAsk",
+            "--setting-sources", "", "--disable-slash-commands", "--strict-mcp-config",
+            "--mcp-config", '{"mcpServers":{}}',
+            "--max-budget-usd", str(cfg["max_budget_usd_per_call"]),
+            "--json-schema", json.dumps(schema), "--resume" if resume else "--session-id", session]
+
+
 class DockerRuntime:
     def __init__(self, agent_config, gpu_device="0"):
         self.agent_config = agent_config
@@ -84,23 +95,15 @@ class DockerRuntime:
         # Native editors may atomically replace files. Admit only allowlisted changes
         # after the call, before anything is executed; reviewers receive a read-only tree.
         argv += mount(work, "/work", role != "experiment") + mount(evidence, "/evidence") + mount(session_home, "/agent", False)
-        tools = "Read,Glob,Grep,Edit,Write" if role == "experiment" else "Read,Glob,Grep"
-        argv += ["--entrypoint", cfg["binary"], cfg["image"], "--bare", "--print", "--model", cfg["model"],
-                 "--effort", cfg["effort"], "--output-format", "json", "--tools", tools,
-                 "--allowedTools", tools, "--permission-mode", "dontAsk",
-                 "--setting-sources", "", "--disable-slash-commands", "--strict-mcp-config",
-                 "--mcp-config", '{"mcpServers":{}}',
-                 "--max-budget-usd", str(cfg["max_budget_usd_per_call"]),
-                 "--json-schema", json.dumps(schema),
-                 "--resume" if resume else "--session-id", session]
-        return argv
+        native = native_agent_command(cfg, session, resume, role, schema)
+        return argv + ["--entrypoint", native[0], cfg["image"]] + native[1:]
 
     def call_agent(self, *, work, evidence, session_home, session, resume, role, schema, prompt, receipt_dir):
         if not os.environ.get("ANTHROPIC_API_KEY"):
             raise ProtocolError("ANTHROPIC_API_KEY is required for bare native-agent execution")
         session_home.mkdir(parents=True, exist_ok=True)
         argv = self.agent_command(work, evidence, session_home, session, resume, role, schema)
-        result = invoke(argv, self.agent_config["timeout_seconds"], prompt)
+        result = self.invoke_agent(argv, prompt, work, evidence, session_home, receipt_dir)
         # Raw conversations/CLI output never enter an evidence packet or a later fresh home.
         write(receipt_dir / "transport.json", result, exclusive=True)
         try:
@@ -117,6 +120,9 @@ class DockerRuntime:
         if not isinstance(output, dict):
             raise ProtocolError("Native CLI did not return structured_output")
         return output
+
+    def invoke_agent(self, argv, prompt, work, evidence, session_home, receipt_dir):
+        return invoke(argv, self.agent_config["timeout_seconds"], prompt)
 
     def evaluation_command(self, task, artifact, output, split, name=None, checkpoint=None):
         if split not in ("validation", "test"):

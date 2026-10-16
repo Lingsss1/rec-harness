@@ -342,6 +342,8 @@ class Trajectory:
             raise ProtocolError("Final direction review is missing")
         if state["test"] is not None:
             if state["test"]["status"] == "started":
+                if state["test"].get("container_name"):
+                    self.runtime.stop(state["test"]["container_name"])
                 raise ProtocolError("Hidden-test outcome unknown after interruption; never rerun it")
             return
         state["test"] = {"status": "started", "selected_trial": state["best_trial"], "started_at": now(),

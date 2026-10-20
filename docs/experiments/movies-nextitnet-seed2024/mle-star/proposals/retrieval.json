@@ -1,0 +1,38 @@
+{
+  "directions": [
+    {
+      "description": "Correct the right-aligned sequence readout first. This is a correctness fix, not an architectural improvement.",
+      "urls": [
+        "https://github.com/fajieyuan/WSDM2019-nextitnet",
+        "https://www.recbole.io/docs/v1.1.1/_modules/recbole/model/sequential_recommender/nextitnet.html"
+      ],
+      "implementation": "In score_candidates, replace count_nonzero-1 indexing with user_emb = out[0, -1], preserving the existing single-user candidate-scoring interface. For [0,0,a,b], the baseline reads position 1, which is padding; the correct position is 3. For empty histories, multiply user_emb by (seq[0] != 0).any().to(out.dtype) to produce neutral scores. The author repository explicitly documents beginning padding; RecBole provides corresponding last-position NextItNet readout code. Have the host evaluate the original and corrected readouts on the same checkpoint to isolate the scoring bug, then use the corrected version as the control for every architectural candidate. No training or evaluation was run here."
+    },
+    {
+      "description": "Tune the causal dilation schedule using the original NextItNet two-convolution residual design.",
+      "urls": [
+        "https://fajieyuan.github.io/papers/nextitnet6.pdf",
+        "https://raw.githubusercontent.com/fajieyuan/WSDM2019-nextitnet/master/ops.py",
+        "https://raw.githubusercontent.com/fajieyuan/WSDM2019-nextitnet/master/nextitnet_topk.py"
+      ],
+      "implementation": "Keep eight blocks, width 64, kernel 3, and the existing normalization, activation, and dropout to isolate dilation. Compare baseline per-block pairs (d,d) with reference-style pairs (d,2*d), using block-base cycles [1,2,4,8] and [1,4]. Construct conv2 with dilation=2*dilation and change _causal_conv to compute left padding from conv.dilation[0] and conv.kernel_size[0], avoiding incorrect padding for conv2. With eight blocks, baseline receptive field is 121 positions; the two proposed schedules yield 181 and 121 respectively. All convolutions remain left padded. Select using host validation HR@10 at seed 2024; reference settings are hypotheses for Movies_and_TV, not demonstrated gains."
+    },
+    {
+      "description": "Try the paper's bottleneck residual block to reduce convolution parameters while retaining causal dilated NextItNet.",
+      "urls": [
+        "https://fajieyuan.github.io/papers/nextitnet6.pdf",
+        "https://raw.githubusercontent.com/fajieyuan/WSDM2019-nextitnet/master/ops.py"
+      ],
+      "implementation": "Implement reference nextitnet_residual_block_one inside the existing NextItNetBlock class: LayerNorm(H), ReLU, pointwise Conv1d(H,H//2), LayerNorm(H//2), ReLU, causal dilated Conv1d(H//2,H//2,k), LayerNorm(H//2), ReLU, pointwise Conv1d(H//2,H), then residual addition. Register additional modules only as attributes inside __init__; add no class or import. Keep dropout rate fixed and retain masking after each block. At H=64 and k=3, convolution weights decrease from 24576 to 7168 per block, excluding biases. A single dilated convolution per bottleneck changes receptive field: compare eight blocks with dilations [2,4,8,16] repeated twice to match the baseline's nominal 121-position receptive field. Treat reduced capacity as a regularization hypothesis and select against the corrected control."
+    },
+    {
+      "description": "Add a learnable residual scale inspired by StackRec's NextItNet implementation.",
+      "urls": [
+        "https://github.com/wangjiachun0426/StackRec",
+        "https://raw.githubusercontent.com/wangjiachun0426/StackRec/master/ops.py"
+      ],
+      "implementation": "Inside NextItNetBlock.__init__, add self.residual_scale = nn.Parameter(torch.zeros(())); return residual + self.residual_scale * y in forward. StackRec's nextitnet_residual_block_alpha includes a zero-initialized scalar even in its from_scratch path. Adapt only this mechanism: retain the baseline causal convolutions, eight blocks, normalization, GELU, and dropout, and include the readout correction. The scalar initially makes each block an identity mapping; branch weights begin receiving loss gradients after the scalar moves away from zero. Do not adopt checkpoint loading, iterative stacking, extra stages, or a different loss. For all four candidates, preserve constructor and method interfaces, the three imports, eight top-level numeric constants, and two classes; leave host-owned training settings unchanged, learn only from training interactions, and select solely by validation HR@10 at seed 2024. No Movies_and_TV improvement is claimed without host results."
+    }
+  ],
+  "search_performed": true
+}

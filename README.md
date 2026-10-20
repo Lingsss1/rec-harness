@@ -28,6 +28,19 @@
 
 研究问题、四组对照、预算、指标和结论边界见[实验方案与设计目标](staged-autoresearch/EXPERIMENT_DESIGN.md)。支持[无 Docker 服务器本地后端](staged-autoresearch/SERVER.md)，并已内置[三任务真实评估器、环境与数据下载、一键运行](staged-autoresearch/FML_SETUP.md)，无需手写评估脚本。正式研究实验尚未启动，目标服务器需先通过自动小规模检查和基线验收。该子项目不依赖下述 RecHarness 运行时。
 
+## KuaiRand 长序列四模型基准
+
+[`benchmarks/kuairand-longseq/`](benchmarks/kuairand-longseq/README.md) 提供独立的 Linux/A800 一键入口，自动下载和校验 KuaiRand-27K、预处理、训练 HSTU、ULTRA-HSTU-adapted、DARE-adapted、CCFormer-adapted，并汇总 JSON/CSV/Markdown。统一采用 FuXi-Linear 的 1024 历史长度、128 维、128 负样本、全局 batch 128 和固定最终 epoch 评测协议。
+
+```bash
+cd benchmarks/kuairand-longseq
+CUDA_VISIBLE_DEVICES=0,1 bash scripts/oneclick_a800.sh \
+  --data-root /data/kuairand-27k \
+  --output /data/kuairand-results-four-models
+```
+
+适配差异、数据口径和恢复方式见[子项目说明](benchmarks/kuairand-longseq/README.md)。已通过 45 项 CPU 测试及四模型合成训练/恢复检查；真实 A800 全量训练尚未执行。源码以 Apache-2.0 发布，保留独立 [LICENSE](benchmarks/kuairand-longseq/LICENSE) 与 [NOTICE](benchmarks/kuairand-longseq/NOTICE)，不提交数据、checkpoint 或训练结果。
+
 ## 快速运行
 
 已封存选中的 Amazon NextItNet 候选、对应基线及单行改动补丁见[模型源码交付](examples/amazon/selected-nextitnet-v3/README.md)。源码保持验收时的精确哈希；开发/确认结果及限制见同页，不包含最终测试结论。
@@ -211,3 +224,5 @@ bash scripts/validate-core.sh
 ## License
 
 This project is released under the [MIT License](LICENSE).
+
+`benchmarks/kuairand-longseq/` 子项目按其 Apache-2.0 LICENSE 和 NOTICE 发布；该子项目的上游归属说明随源码保留。

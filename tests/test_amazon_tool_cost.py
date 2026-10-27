@@ -63,6 +63,24 @@ class AmazonToolCostTests(unittest.TestCase):
         path=folder/'study/study.json';study=read_json(path);study['development_seeds']=[999];write_json(path,study)
         with self.assertRaisesRegex(ContractError,'study differs'):audit_utility(self.utility,self.suite_path)
 
+    def test_changed_research_policies_rejected_after_valid_binding(self):
+        self.prepare()
+        audit_utility(self.utility,self.suite_path)
+        path=self.online/self.case['id']/'candidate_tool/campaign/amazon-auto.json'
+        original=read_json(path)
+        self.assertEqual(original['evidence_graph_policy'],'prefix-evidence-v2')
+        for key,value in [('evidence_graph_policy','native-selected-v1'),
+                          ('hypothesis_graph',False),
+                          ('selection_policy','legacy-candidate-controls-v1')]:
+            with self.subTest(policy=key):
+                self.assertNotEqual(original[key],value)
+                write_json(path,{**original,key:value})
+                try:
+                    with self.assertRaisesRegex(ContractError,'controller differs'):
+                        audit_utility(self.utility,self.suite_path)
+                finally:
+                    write_json(path,original)
+
     def test_weighted_abandoned_gpu_cost_and_outer_bcu_are_retained_once(self):
         self.prepare();gpu=self.root/'abandoned-study/memory';cfg={'budget_gpu_seconds':100}
         write_json(gpu.parent/'study.json',cfg);write_json(gpu.parent/'study-lock.json',{'config_hash':digest(cfg)})

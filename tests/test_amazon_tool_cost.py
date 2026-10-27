@@ -50,7 +50,8 @@ class AmazonToolCostTests(unittest.TestCase):
         stack.enter_context(patch('rec_harness.amazon_tool_cost.audit_exposure',side_effect=lambda root:{'exposures':[] if root.parent.name=='no_tool' else [{'measurement_status':'success','transport_completed':True}]}))
 
     def test_bound_utility_recomputed_and_inflated_score_rejected(self):
-        self.prepare();report,suite,receipts,used=audit_utility(self.utility,self.suite_path)
+        self.prepare();self.assertIn('evidence_graph_policy',self.configs['candidate_tool'])
+        report,suite,receipts,used=audit_utility(self.utility,self.suite_path)
         self.assertEqual(report,self.report);self.assertEqual(len(receipts),3);self.assertEqual(len(used),6)
         report['gain']=1;write_json(self.utility,report)
         with self.assertRaisesRegex(ContractError,'aggregate differs'):audit_utility(self.utility,self.suite_path)

@@ -51,6 +51,8 @@ def check_binding(root,case,suite,group,report,*,study_group=None,scripted_agent
     if 'role_layout' in config:wanted.setdefault('role_layout','six-role-v1')
     if 'hypothesis_graph' in config:wanted.setdefault('hypothesis_graph',False)
     if 'selection_policy' in config:wanted.setdefault('selection_policy','legacy-candidate-controls-v1')
+    if 'evidence_graph_policy' in config:
+        wanted.setdefault('evidence_graph_policy','native-selected-v1' if wanted.get('review_only') else 'prefix-evidence-v2')
     if 'source_novelty_guard' in config:wanted.setdefault('source_novelty_guard',True)
     if config!=wanted:raise ContractError('Amazon utility controller differs from frozen inputs')
     return config

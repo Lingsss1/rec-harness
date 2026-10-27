@@ -1,0 +1,71 @@
+{
+  "markdown_report": "Select **multi-negative next-item discrimination**: change training supervision before adding another recent-history branch. At 0% research progress, this offers a small, testable intervention without changing inference.\n\n**Insights from the starting point.** (1) Electronics has the weakest sampled training separation across the supplied attempts: negative-beats-positive rates range from 10.72% to 13.08%. This motivates investigating supervision, but does not establish its cause. (2) Recent-history residuals have no supplied validation results establishing improvement. Their training margins cannot determine which architecture generalizes better. (3) The stable diagnostic interface permits changing the loss while preserving scoring. Missing gradient observations and unavailable metadata must remain unknown.\n\n**Insights from related work.** (1) Prakash et al. [1] report that training samplers affect aggregate and popularity-stratified performance. Negative selection therefore deserves an isolated experiment rather than an assumed benefit. (2) Dallmann et al. [2] show that sampled evaluation can disagree with full-catalog evaluation. Preserve pinned validation selection and qualify conclusions about practical recommendation quality. (3) Oh and Cho [3] investigate excessive recency dependence. User feedback about recent interests therefore does not justify automatically strengthening recency.\n\nThese insights define three directions: improve discrimination, audit evaluation sensitivity, and test contextual specificity. The framework below separates their mechanisms and evidence requirements.\n\n| Atomic idea | Mechanism / evidence | Originality; potential; difficulty, each /10 |\n|---|---|---|\n| **32-negative sampled cross-entropy** [1] | Change loss; select by pinned validation | 2: controlled application / established method; 7: tests a plausible bottleneck / false negatives; 3: small loss change / sampler integration |\n| Frequency-band ranking audit [1,2] | Change diagnostic candidates only; measure rank disagreement | 3: useful synthesis / established controls; 6: exposes sensitivity / training audit lacks generalization evidence; 4: reuse scoring / candidate bookkeeping |\n| Frozen TF-IDF residual | Add title/description similarity; test whether lexical specificity helps | 3: task-specific fusion / standard representation; 5: uses available text / may amplify broad associations; 5: no pretrained weights / predictor serialization |\n\nFor the selected idea, retain SASRec and replace paired binary supervision with cross-entropy over one observed successor and 32 uniformly sampled unseen items. Average valid positions within each sequence, then average sequences. More competing negatives may improve discrimination; this remains an untested hypothesis, and unobserved items are not confirmed dislikes.\n\nCompare against the unchanged baseline using remaining shared compute, identical checkpoint rules, and all four categories. Preserve seeds, splits, routing, environment defaults, and predictor generation. Select exclusively by host macro validation HR@10. Extend diagnosis with candidate-group target rank and loss, clearly labeled training diagnostics; retain existing margins, return null for undefined statistics, and restore module modes. Do not infer ownership, compatibility, satisfaction, or simulator traits.\n\nReferences: [1] https://arxiv.org/abs/2410.17276; [2] https://arxiv.org/abs/2107.13045; [3] https://arxiv.org/abs/2409.09722. No new experiments were executed.",
+  "idea": {
+    "description": "Keep per-dataset SASRec unchanged and train with a 33-way sampled cross-entropy objective: one observed next item and 32 unique uniform training negatives per valid position.",
+    "motivation": "Electronics repeatedly exhibits the weakest supplied training separation, while no supplied validation evidence establishes benefits from recent-history residuals. Testing stronger competing-item supervision is a feasible early-stage direction, although larger negative sets can introduce false negatives and need not improve the pinned benchmark.",
+    "implementation_notes": "Integrate the supplied loss into the existing RecHarness sasrec_perdataset loop; it is an integration component, not a standalone train.py. Preserve the original backbone, tied scoring, optimizer, regularization, batching, truncation, and checkpoint schedule. Draw 32 unique IDs uniformly without replacement from each user's eligible catalog, excluding padding, the positive target, and that user's observed training items. Use training histories only; never consult validation or test interactions for exclusions. If fewer than 32 eligible items exist, use the available count and mask unused candidate slots. If none exist, omit that position. Generate negatives using a persistent dedicated seeded generator, preserve its state in checkpoints, and log sampling time. Use raw logits with temperature 1 and no popularity correction; this is a sampled classification objective, not an unbiased full-catalog softmax estimate. Explicitly report the sequence-balanced reduction as part of the objective change. Score candidates through the actual model scoring function and preserve gradients to encoder and candidate embeddings. Compare one unchanged baseline against this configuration, allocating equal predeclared compute from the actual remaining shared 43,200 GPU-second budget; include diagnostics, debugging, and failures. Preserve DATA_DIR = os.environ['GAGC_DATA_DIR'], Movies_and_TV, Industrial_and_Scientific, Electronics, CDs_and_Vinyl, preprocessing seed 0, training seed 42, and SASREC_EPOCHS environment behavior with default 200. Train each trial on one GPU and place artifacts beneath its trial directory. Inference architecture remains SASRec; the predictor writer must still reconstruct the exact saved baseline configuration, call eval(), and retain all routes. Verify exported/in-memory candidate-score parity. Retain DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. Keep view.model as the actual module and preserve item_emb, log2feats, predict_score, user_train, meta_data, and review_data contracts. Keep clean loader-negative diagnostics, adding separately named fixed-candidate sampled-loss and target-rank diagnostics if budget permits. These are training diagnostics, not validation estimates. Save and restore each submodule's training flag in finally; use no_grad, isolated diagnostic randomness, null for undefined statistics, and empty unavailable metadata breakdowns. Twenty training users' unseen-item full-catalog recommendations remain exploratory. Select only through unchanged host validation: 200 users per category, 99 unique negatives, evaluation seed 42, equal-weight macro HR@10. No improvement or full-catalog generalization is claimed.",
+    "pseudocode": "import torch\nimport torch.nn.functional as F\n\n\ndef sampled_next_item_loss(features, positive, negative_ids,\n                           negative_valid, score_candidates):\n    \"\"\"Integrate into the existing SASRec training loop.\n\n    features: [B,L,D], produced by the unchanged causal encoder.\n    positive: [B,L], with zero marking unsupervised positions.\n    negative_ids: [B,L,K], padded with zero where unavailable.\n    negative_valid: [B,L,K], boolean availability mask.\n    score_candidates(features, ids) must return [B,L,1+K]\n    using the model's actual differentiable scoring function.\n\n    Caller samples unique negatives from training-only eligible sets.\n    \"\"\"\n    usable_neg = negative_valid.bool() & negative_ids.ne(0)\n    usable_neg = usable_neg & negative_ids.ne(positive.unsqueeze(-1))\n    valid_position = positive.ne(0) & usable_neg.any(dim=-1)\n    if not valid_position.any():\n        return features.sum() * 0.0\n\n    candidates = torch.cat([positive.unsqueeze(-1), negative_ids], dim=-1)\n    logits = score_candidates(features, candidates).float()\n    allowed = torch.cat([\n        torch.ones_like(positive.unsqueeze(-1), dtype=torch.bool),\n        usable_neg,\n    ], dim=-1)\n    logits = logits.masked_fill(~allowed, float('-inf'))\n\n    # Evaluate only supervised rows with at least one eligible negative.\n    selected = logits[valid_position]\n    losses = F.cross_entropy(\n        selected,\n        torch.zeros(selected.shape[0], dtype=torch.long,\n                    device=selected.device),\n        reduction='none',\n    )\n    batch_rows = valid_position.nonzero(as_tuple=True)[0]\n    sums = losses.new_zeros(features.shape[0]).scatter_add(\n        0, batch_rows, losses)\n    counts = losses.new_zeros(features.shape[0]).scatter_add(\n        0, batch_rows, torch.ones_like(losses))\n    return (sums[counts > 0] / counts[counts > 0]).mean()\n\n\n# Example only for the unchanged tied-dot-product SASRec scorer:\n# def score_candidates(features, ids):\n#     return (features.unsqueeze(-2) * model.item_emb(ids)).sum(-1)\n#\n# Each step:\n# features = model.log2feats(sequence)\n# negatives, available = sampler.sample_training_only(\n#     user_ids, positive, k=32, generator=negative_generator)\n# loss = sampled_next_item_loss(\n#     features, positive, negatives, available, score_candidates)\n# loss = loss + unchanged_baseline_regularization\n# optimizer.zero_grad(set_to_none=True)\n# loss.backward()\n# optimizer.step()\n#\n# Preserve baseline predictor export; verify reload score parity.\n# Select checkpoints/configurations only using pinned host validation.",
+    "originality": {
+      "score": 2,
+      "positive": "Provides a distinct, controlled supervision experiment relative to the supplied input-dropout and recent-residual attempts.",
+      "negative": "Multi-negative sampled classification is established; neither the objective nor the choice of 32 negatives constitutes a new algorithmic principle."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Can establish whether candidate competition is a useful bottleneck to investigate before adding architectural complexity.",
+      "negative": "More negatives may increase false-negative pressure and computation; sampled validation gains would not establish compatibility or practical usefulness."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Requires a loss and sampler change while preserving the encoder and inference architecture.",
+      "negative": "Efficient unique sampling, training-only exclusions, sparse-catalog handling, and reproducible sampler resumption require careful integration."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Prakash et al. (2024): sequential-recommendation training-sampler study",
+      "link": "https://arxiv.org/abs/2410.17276",
+      "contributions": [
+        "The supplied research summary reports that training samplers affect aggregate accuracy and head/mid/tail behavior.",
+        "Motivates treating negative sampling as an explicit experimental choice."
+      ],
+      "limitations": [
+        "Does not establish that the proposed 32-negative objective improves this benchmark.",
+        "Popularity balancing and overall accuracy can trade off."
+      ]
+    },
+    {
+      "title": "Dallmann et al. (2021): sampled evaluation in sequential recommendation",
+      "link": "https://arxiv.org/abs/2107.13045",
+      "contributions": [
+        "Reports inconsistencies between sampled and full-catalog evaluation, including small candidate sets."
+      ],
+      "limitations": [
+        "Does not authorize changing the pinned evaluator.",
+        "Training-history ranking audits cannot establish held-out generalization."
+      ]
+    },
+    {
+      "title": "Oh and Cho (2024): excessive dependence on recent interactions",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "Investigates excessive recency dependence and its mitigation."
+      ],
+      "limitations": [
+        "Does not establish excessive recency dependence in the supplied SASRec models.",
+        "Does not imply that all recent-history pathways should be removed."
+      ]
+    },
+    {
+      "title": "Scikit-learn TfidfVectorizer documentation",
+      "link": "https://scikit-learn.org/1.0/modules/generated/sklearn.feature_extraction.text.TfidfVectorizer.html",
+      "contributions": [
+        "Provides a practical representation for the alternative title/description specificity experiment without pretrained weights."
+      ],
+      "limitations": [
+        "Lexical similarity does not establish compatibility, ownership, complementarity, or current intent.",
+        "Documentation supplies implementation support rather than evidence of recommendation gains."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,118 @@
+{
+  "markdown_report": "### Insights\n\n**Starting point.** (1) Preserve the compatibility interface while scoring the actual trained architecture. Training, diagnosis, and generated inference must compute identical features. (2) Loader-negative margins measure training discrimination, not the pinned sampled validation HR@10. Empty diagnostic samples require explicit unavailable values. (3) Feedback suggests testing sustained recent interests. Purchases do not establish ownership, compatibility, or satisfied needs.\n\n**Related work.** (1) SASRec already aggregates history adaptively [1]; pooling therefore adds an inductive bias, not a new capability. Fossil provides a historical-embedding precedent [2]. (2) Sampling affects evaluation [3], and repeated selection can overfit validation [4]. Fixed candidates enable paired comparisons without removing selection bias. (3) CoDeR motivates investigating noisy histories [5]. It does not establish that isolated interactions are noise.\n\n### Directions and framework\n\n| Direction | Existing capability | Proposed extension | Evidence boundary |\n|---|---|---|---|\n| Representation | SASRec sequence features | Gated causal history pooling | Interaction evidence only |\n| Diagnosis | Training-negative margins | Fixed training-prefix retrieval audit | Separate from official validation |\n| Robustness | Unperturbed histories | Matched masking and pooling controls | Sensitivity, not causal preference |\n\n### Candidate ideas\n\nScores are originality / future potential / code difficulty; higher difficulty means harder implementation.\n\n1. **Gated recency pooling: 3/6/4.** Originality: offers a diagnosis-driven combination, but closely follows established history aggregation [1,2]. Potential: enables controlled study of history contributions, although gains may reflect smoothing or recent-item shortcuts. Difficulty: one pooling branch is simple; causal masking, scale matching, and predictor parity require care.\n2. **Training-prefix retrieval audit: 3/7/3.** Originality: combines useful controls, but introduces no new estimator [3]. Potential: exposes misleading margins, although audit improvements need not predict validation gains. Difficulty: existing scoring hooks suffice, but catalog scoring needs caps.\n3. **Matched masking consistency: 5/6/6.** Originality: combines controlled perturbations and established regularization [5]. Potential: may reduce isolated-event dependence, but suppress genuine demand shifts. Difficulty: masking is simple; matched controls and additional forward passes increase cost.\n\n### Selected idea: gated recency pooling\n\nAt 0% progress, retain this small, falsifiable change. Add a normalized causal exponential embedding mean to each SASRec feature through a sigmoid scalar initialized at logit −4. Repeated recent interactions contribute repeatedly; this alone does not establish sustained-interest modeling.\n\nCompare unchanged SASRec with uniform, exponential, and last-item residuals under identical settings. Reserve pooling-only and older-history controls for mechanism diagnosis. Gains matching last-item pooling support a recency explanation; popularity-stratified audits test shortcut dependence.\n\nPredeclare at most eight four-category configurations, synchronized checkpoints every 40 epochs through 200, and a deterministic tie rule. Select solely by pinned macro sampled validation HR@10. Report category scores, macro scores, epochs, and GPU time; reduce trials to respect 43,200 GPU-seconds.\n\nKeep preprocessing seed 0, training/evaluation seed 42, routing, and `DATA_DIR = os.environ['GAGC_DATA_DIR']`. Save architecture and weights beneath the trial directory; update the predictor writer. Preserve `DiagnosisProbe(view, device)`, restore model mode, and report missing evidence explicitly. Cap audits at baseline plus two predefined contenders; retain twenty-user full-catalog recommendations as diagnostic evidence. Bootstrap cached paired user hits within categories, while acknowledging selection bias and unmeasured training-seed variability.",
+  "idea": {
+    "description": "Test whether a weakly initialized, learned residual from a causal exponentially weighted history-embedding mean improves SASRec under the pinned four-category sampled validation protocol. Treat uniform-history and last-item residuals as essential controls, preserving all dataset routing and diagnostic interfaces.",
+    "motivation": "Qualitative feedback suggests that sustained recent interests may receive insufficient weight. SASRec already models historical dependencies, and Fossil already combines historical embeddings with sequential components, so the contribution is a controlled benchmark hypothesis rather than a novel sustained-interest mechanism. Any improvement could arise from smoothing, recency, embedding-scale changes, or popularity shortcuts; the proposed controls distinguish some of these explanations.",
+    "implementation_notes": "Preserve baseline splits, preprocessing seed 0, training seed 42, sampling, loss, optimizer, history window, and environment handling; SASREC_EPOCHS defaults to 200. Keep DATA_DIR = os.environ['GAGC_DATA_DIR'] and write all artifacts beneath the trial directory. Retain all four category models and routing. Use only allowed interactions, timestamps, titles, and descriptions; do not access review fields, item categories, ratings, prices, stores, or hidden test data.\n\nAt position t, pool unscaled shared item embeddings from nonpadding positions j <= t, including the current input item, to predict the next item. Start with decay 0.9, explicitly a proposed hyperparameter. Append the normalized pooling residual after the baseline final feature normalization; do not modify baseline embedding scaling, attention, feed-forward residuals, or output scoring. Use an affine-free LayerNorm on pooled embeddings and a learned scalar sigmoid gate initialized at logit -4, approximately 0.018. This starts near the baseline, not exactly at it. Apply the identical normalization and gate to uniform and last-item controls. Mask padded outputs and exclude padded targets from every loss. Preserve baseline positional indexing and right alignment. If attention masking is changed, True blocks attention in PyTorch MultiheadAttention; handle fully masked query rows before attention to avoid NaNs, rather than relying on multiplication by zero afterward.\n\nPredeclare the full configuration table before observing results: baseline, uniform residual, exponential residual at decay 0.9, and last-item residual are the primary four configurations. Any additional configurations, including pooling-only or older-history-only mechanism controls, must be specified in that table and keep the total at most eight. For an older-history control, explicitly define the excluded recent window before running it. These mechanism controls do not establish causality. Evaluate synchronized checkpoints at epochs 40, 80, 120, 160, and 200, with at most 40 configuration-checkpoint selection opportunities. Select solely by pinned four-category macro sampled validation HR@10; break exact ties by earlier epoch, then preregistered configuration order. Do not assume local evaluation can replace the host evaluator. If the host exposes only one validation result per trial, checkpoint selection must follow the host-supported protocol and its actual opportunity count must be reported.\n\nMeasure costs and reduce the configuration count before exceeding the shared 43,200 GPU-second ceiling, counting training, failures, debugging, and diagnostics. Keep each execution single-GPU. Report every evaluated configuration's four category scores, macro score, selected epoch, and GPU time, including unsuccessful runs. A fixed seed supports controlled comparisons but leaves training-seed variability unmeasured.\n\nRetain DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. view.model must reference the actual trained module; view.item_emb, log2feats, predict_score, user_train, meta_data, and review_data must retain their compatibility contracts. Adapt tensor handling to the actual model device and input types. Preserve existing collapse and margin diagnostics, label margins as training-only, leave unavailable category breakdowns empty with an explicit availability indicator, return null rather than zero for absent observations, and restore the original training mode in a finally block. Cap expanded diagnostics at baseline plus two contenders whose configuration identities are declared beforehand, one pass each. Define fixed training-prefix targets strictly within training histories and use identical targets and candidates for paired comparisons. Exclude prefix-seen items for unseen-catalog audits and explicitly count targets excluded by that rule. Keep target-rank changes, top-10 overlap, coverage, training-frequency concentration, and history-length/popularity strata descriptive. Bound users, prefixes, and catalog batches and record actual runtime. Preserve the required twenty real training-user full-catalog unseen-item recommendation exercise; its qualitative feedback is exploratory evidence, not the selection objective.\n\nWhere official per-user validation hits are exposed, cache them without changing evaluation. Use 10,000 CPU bootstrap resamples of paired user indices within each category, recomputing the four-category macro difference each time. Report category and macro 95% percentile intervals and subgroup counts. One changed hit changes category HR by 0.005 and macro HR by 0.00125. These intervals condition on fixed trained models and candidates; they do not correct adaptive selection bias, candidate uncertainty, or training-seed variability.\n\nSerialize decay, pooling variant, normalization settings, gate, complete model configuration, parameters, and buffers. Update the predictor writer to reconstruct the identical computation, load strictly, call eval(), and score the final feature for right-aligned nonempty histories. Verify checkpoint-reload candidate-logit parity within a declared numerical tolerance on ordinary, short, and padded histories. Verify prefix causality by changing future inputs and checking earlier features, and verify finite empty-prefix behavior without changing benchmark input policy. Do not claim padding invariance across shifted positional indices unless the baseline position convention supports it.",
+    "pseudocode": "class RecencyResidualSASRec(BaseSASRec):\n    # Initialize once:\n    # gate_logit = Parameter(tensor(-4.0))\n    # pool_norm = LayerNorm(hidden_dim, elementwise_affine=False)\n    # decay = 0.9; serialize configuration and state.\n\n    def log2feats(self, sequence):\n        sequence = as_long_tensor_on_model_device(sequence)\n        h = super().log2feats(sequence)\n        e = self.item_emb(sequence)  # unscaled embeddings\n        numerator = zeros_like(e[:, 0])\n        denominator = zeros_like(e[:, 0, 0])\n        pooled = []\n        for t in range(sequence.shape[1]):\n            valid = (sequence[:, t] != 0)\n            numerator = self.decay * numerator + e[:, t] * valid[:, None]\n            denominator = self.decay * denominator + valid.to(e.dtype)\n            mean = numerator / denominator.clamp_min(1e-8)[:, None]\n            mean = where((denominator > 0)[:, None], mean, zeros_like(mean))\n            pooled.append(mean)\n        p = stack(pooled, dim=1)\n        features = h + sigmoid(self.gate_logit) * self.pool_norm(p)\n        return features.masked_fill((sequence == 0)[..., None], 0)\n\n# Uniform control: decay = 1.0.\n# Last-item control: p_t = item_emb(sequence_t), with the same norm and gate.\n# All residual controls retain baseline next-item targets, loss, and scoring.\n# Check valid target positions only; never pool future inputs.\n# Inference uses the final feature of right-aligned histories.\n# Predictor writer reconstructs this architecture and loads state strictly.\n# Select solely through host-supported pinned macro sampled validation HR@10.",
+    "originality": {
+      "score": 3,
+      "positive": "A diagnosis-driven, controlled residual experiment makes competing explanations for history aggregation gains explicit.",
+      "negative": "SASRec already aggregates history, while historical embedding pooling, exponential weighting, and gates have established precedents."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "A small implementation can provide evidence about when explicit history summaries complement a sequential encoder.",
+      "negative": "Observed gains may be benchmark-specific smoothing or recency effects; pooling cannot establish current intent, ownership, compatibility, or sustained preferences."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "The model addition requires one causal pooling branch and a scalar gate while preserving baseline training.",
+      "negative": "Reliable implementation also requires causal alignment, padding handling, scale controls, diagnostic adaptation, checkpoint parity, and synchronized predictor generation."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Uses self-attention to combine historical interactions for next-item recommendation.",
+        "Provides the baseline against which explicit pooling must demonstrate additional value."
+      ],
+      "limitations": [
+        "Does not establish that the proposed residual improves the pinned Amazon benchmark."
+      ]
+    },
+    {
+      "title": "Fusing Similarity Models with Markov Chains for Sparse Sequential Recommendation",
+      "link": "https://cseweb.ucsd.edu/~jmcauley/pdfs/icdm16a.pdf",
+      "contributions": [
+        "Fossil combines historical item-embedding information with personalized higher-order sequential components.",
+        "Provides a direct precedent limiting claims of novelty for history-pooling residuals."
+      ],
+      "limitations": [
+        "Its architecture and experimental setting differ from the proposed SASRec residual."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Explains why sampled recommendation metrics need not preserve full-catalog model rankings."
+      ],
+      "limitations": [
+        "Does not justify replacing the pinned sampled evaluator or interpreting diagnostic catalog gains as official benchmark gains."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://jmlr.csail.mit.edu/beta/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how model-selection procedures can overfit evaluation criteria and bias reported performance."
+      ],
+      "limitations": [
+        "A bounded search and paired bootstrap do not eliminate selection bias."
+      ]
+    },
+    {
+      "title": "CoDeR (2025; supplied reference)",
+      "link": "https://ojs.aaai.org/index.php/AAAI/article/view/33379",
+      "contributions": [
+        "Studies demand shifts obscured by noisy interaction histories."
+      ],
+      "limitations": [
+        "Does not establish that isolated interactions are noise or that exponential pooling improves this task."
+      ]
+    },
+    {
+      "title": "Sequential recommendation negative-sampling study (2024; supplied reference)",
+      "link": "https://arxiv.org/abs/2410.17276",
+      "contributions": [
+        "Reports sensitivity of accuracy and popularity-group performance to negative-sampling choices."
+      ],
+      "limitations": [
+        "Supports diagnostic caution rather than a demonstrated benefit of the proposed architecture."
+      ]
+    },
+    {
+      "title": "SASRec.pytorch reference implementation",
+      "link": "https://github.com/pmixer/SASRec.pytorch",
+      "contributions": [
+        "Provides concrete next-item sampler alignment, embedding scaling, sequence encoding, and final-position candidate scoring."
+      ],
+      "limitations": [
+        "The pinned RecHarness baseline remains authoritative where implementation details differ."
+      ]
+    },
+    {
+      "title": "PyTorch Saving and Loading Models",
+      "link": "https://docs.pytorch.org/tutorials/beginner/saving_loading_models.html",
+      "contributions": [
+        "Documents state-dictionary serialization and evaluation-mode requirements."
+      ],
+      "limitations": [
+        "Architecture reconstruction and predictor parity still require task-specific verification."
+      ]
+    },
+    {
+      "title": "RepeatNet: A Repeat Aware Neural Recommendation Machine for Session-based Recommendation",
+      "link": "https://arxiv.org/abs/1812.02646",
+      "contributions": [
+        "Explicitly distinguishes repeat consumption from exploration."
+      ],
+      "limitations": [
+        "Repeat-item recommendation cannot directly explain gains in the required unseen-item recommendation exercise; repeated interests across different items require separate evidence."
+      ]
+    }
+  ]
+}

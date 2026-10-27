@@ -1,0 +1,56 @@
+{
+  "markdown_report": "At 0% progress, prioritize a reliable diagnostic adapter and one inexpensive model change. No measured improvement is established by the supplied evidence.\n\n**Insights from the starting point.** (1) Training margins depend on score scale and sampled negatives. They cannot establish improvement in validation HR@10. (2) Existing probes aggregate all valid positions. Final-prefix probes better match next-item inference. (3) User feedback distinguishes recent, repeated interests from incidental history. Perturbations can measure model dependence on these signals, but cannot identify user intent.\n\n**Insights from related work.** (1) [Sampling reliability](https://doi.org/10.1145/3705328.3748086) shows that sampled evaluation can change model ordering. Diagnostic candidate sets therefore need freezing, while the official evaluator remains authoritative. (2) [Disentangling sequence patterns](https://doi.org/10.1145/3705328.3748042) separates behavioral order from availability effects. History perturbations require cautious interpretation. (3) [Repetition and Exploration](https://staff.fnwi.uva.nl/m.derijke/wp-content/papercite-data/pdf/li-2023-repetition.pdf) documents repetition shortcuts. Repeated semantic interests must be distinguished from recommending already consumed items.\n\n**Framework and directions.** Organize research along three axes: ranking reliability, dependence on history, and supported usefulness. For each, distinguish observable evidence, diagnostic measurements, and trainable interventions.\n\n| Direction | Evidence and probe | Minimal intervention |\n|---|---|---|\n| Ranking reliability | Frozen prefix ranks; popularity strata | Mixed training negatives |\n| History dependence | Recent versus matched random deletion | Recency residual |\n| Supported usefulness | Titles/descriptions plus explicit feedback | Evidence-supported pairwise constraints |\n\n**Candidate ideas.** Scores are originality / future potential / implementation difficulty, each out of ten; higher difficulty means harder.\n\n- **Recency residual with paired diagnostics: 4/7/3.** Positive: directly tests and addresses weak recent-history dependence cheaply. Negative: recency pooling is established and may amplify incidental purchases.\n- **Frozen rank audit across negative pools: 5/7/4.** Positive: exposes sampler-dependent conclusions. Negative: adds diagnostic cost without directly improving recommendations; full-catalog replay is not a proven benchmark surrogate.\n- **Evidence-supported relation constraints: 7/6/7.** Positive: targets specific usefulness failures. Negative: twenty users and incomplete compatibility evidence offer limited supervision; unknown relationships must remain unlabeled.\n\n**Selected idea: recency residual with paired diagnostics.** Add a scalar-gated, recency-weighted item-embedding pool to SASRec’s sequence representation. Initialize its gate near zero, preserving a close starting approximation to the baseline. This supplies a direct recent-interest path while retaining learned sequence interactions.\n\nFor position t, compute r_t = Σ(j≤t) exp(−(t−j)/τ)E[x_j] / Σ(j≤t) exp(−(t−j)/τ), excluding padding; score candidates with h′_t = h_t + sigmoid(a)·LayerNorm(r_t). Compare the baseline and this single modification using unchanged macro validation HR@10.\n\nRetain `DiagnosisProbe(view, device)`. On frozen training-prefix replay examples, compare target ranks after recent deletion and equally sized random deletion, alongside last-item-preserving shuffles. Restore model mode afterward and return missing measurements explicitly. These are sensitivity diagnostics, not compatibility or causal labels. Preserve routing, seeds, splits, artifact placement, and predictor-writer architecture parity.",
+  "idea": {
+    "description": "Add a small gated recency-pooling residual to each dataset's SASRec model, accompanied by final-prefix rank diagnostics that compare recent-history perturbations with matched controls.",
+    "motivation": "Qualitative feedback suggests that recent, repeated interests sometimes receive insufficient influence. A direct recency path is a feasible initial hypothesis, while paired diagnostics help determine whether the model actually becomes more dependent on recent evidence. Only unchanged official macro validation HR@10 determines selection.",
+    "implementation_notes": "Keep DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, all four dataset routes, and SASREC_EPOCHS default 200. Use causal position-distance weights, mask padding, and compute the pool at every training position without accessing future items. Start with fixed tau=5 and gate parameter a=-4; these are proposed settings, not validated optima. Preserve the baseline loss, optimizer, and other settings for the first comparison. Save the gate and residual LayerNorm parameters in each category checkpoint and update the predictor writer to reproduce the exact architecture. Keep view.model bound to the trained nn.Module; expose residual-adjusted log2feats and the existing scoring contract. DiagnosisProbe.run_full_diagnosis must return metrics and metric_definitions, restore the previous training mode using try/finally, use deterministic replay examples and candidate sets, and represent unavailable results with null plus counts. Derive replay targets only from training histories. Use fixed-length, consistently repadded histories after deletions, report the positional-distance confound, and exclude consumed items consistently when computing unseen-item ranks. Do not infer equipment ownership, compatibility, ratings, or simulator traits from titles. Keep execution single-GPU and budget diagnostic passes explicitly.",
+    "pseudocode": "class RecencyResidualSASRec(SASRec):\n    initialize gate_parameter = -4.0\n    initialize residual_norm = LayerNorm(hidden_dim)\n\n    log2feats(sequence):\n        h = baseline_log2feats(sequence)\n        e = item_emb(sequence)\n        numerator, denominator = zeros_for_batch()\n        outputs = []\n        decay = exp(-1 / 5.0)\n        for t in sequence_positions:\n            valid = sequence[:, t] != 0\n            numerator = decay * numerator + valid[:, None] * e[:, t]\n            denominator = decay * denominator + valid\n            recent = numerator / clamp_min(denominator[:, None], 1e-8)\n            combined = h[:, t] + sigmoid(gate_parameter) * residual_norm(recent)\n            outputs.append(combined * valid[:, None])\n        return stack(outputs, axis=1)\n\nclass DiagnosisProbe:\n    run_full_diagnosis(train_loader):\n        prior_mode = view.model.training\n        try:\n            view.model.eval()\n            with no_grad():\n                replay = deterministic_training_prefix_examples()\n                candidates = frozen_candidates(replay)\n                original_ranks = target_ranks(replay, candidates)\n                recent_ranks = target_ranks(delete_recent(replay), candidates)\n                control_ranks = target_ranks(delete_equal_count_random(replay), candidates)\n                shuffled_ranks = target_ranks(shuffle_preserving_last(replay), candidates)\n                metrics = paired_rank_changes_and_counts(\n                    original_ranks, recent_ranks, control_ranks, shuffled_ranks)\n                return {'metrics': metrics, 'metric_definitions': definitions}\n        finally:\n            view.model.train(prior_mode)\n\ntrain baseline and residual variant under the same prescribed configuration\nwrite architecture-matched working/predict.py for each trial\nselect using host-reported macro validation HR@10 only",
+    "originality": {
+      "score": 4,
+      "positive": "Combines a minimal recency intervention with controlled sensitivity measurements tied to the observed failure pattern.",
+      "negative": "Gated residuals and recency-weighted pooling are established techniques; the contribution is primarily experimental discipline."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides an inexpensive foundation for testing when sequential representations benefit from direct recent-interest evidence across categories.",
+      "negative": "Qualitative feedback does not establish that recency causes the benchmark failures, and pooled embeddings do not enforce practical compatibility."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Adds a scalar gate, one normalization layer, and a linear-time recurrence while preserving the scoring interface.",
+      "negative": "Correct padding, predictor parity, deterministic replay, and controlled perturbations still require careful implementation."
+    }
+  },
+  "related_work": [
+    {
+      "title": "On the Reliability of Sampling Strategies in Offline Recommender Evaluation",
+      "link": "https://doi.org/10.1145/3705328.3748086",
+      "contributions": [
+        "Examines reliability dimensions of sampled recommendation evaluation, including recovery of model rankings."
+      ],
+      "limitations": [
+        "Does not establish any proposed diagnostic negative pool as a reliable surrogate for this pinned benchmark."
+      ]
+    },
+    {
+      "title": "Disentangling User and Item Sequence Patterns",
+      "link": "https://doi.org/10.1145/3705328.3748042",
+      "contributions": [
+        "Distinguishes user sequence patterns from item availability effects using different shuffling controls."
+      ],
+      "limitations": [
+        "History perturbations alone do not establish intent or causal effects of recent interactions."
+      ]
+    },
+    {
+      "title": "Repetition and Exploration",
+      "link": "https://staff.fnwi.uva.nl/m.derijke/wp-content/papercite-data/pdf/li-2023-repetition.pdf",
+      "contributions": [
+        "Investigates repetition shortcuts and repetitive bias in recommendation."
+      ],
+      "limitations": [
+        "Repeated-item behavior does not directly establish how repeated semantic interests should guide unseen-item recommendations."
+      ]
+    }
+  ]
+}

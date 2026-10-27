@@ -1,0 +1,66 @@
+{
+  "markdown_report": "## Insights and directions\n\n**Starting point.** (1) Feedback identifies broad relatedness crowding out specific matches. This motivates testing whether recent, repeated interaction evidence improves next-item ranking; it does not establish latent intent. (2) Existing margins measure separation from sampled training negatives. They cannot establish top-10 accuracy or useful complements. (3) Category metadata and review fields are unavailable despite the generic input examples. Diagnostics must use histories, timestamps, titles and descriptions, and represent missing evidence explicitly.\n\n**Related work.** (1) *Measuring Recency Bias* cautions that stronger recency can reduce accuracy, supporting a learned, ablated contribution rather than mandatory recent-history weighting. (2) Krichene and Rendle show that sampled ranking can reverse model comparisons, so full-catalog diagnostics cannot replace pinned validation selection. (3) ECCR distinguishes compatible complements from co-purchases; titles alone provide incomplete evidence for hard compatibility filtering.\n\nThese insights suggest three directions: adaptive history aggregation, controlled history interventions, and evidence-aware compatibility diagnostics.\n\n## Framework\n\n| Direction | Observable evidence | Intervention | Main limitation |\n|---|---|---|---|\n| History aggregation | Ordered training interactions | Learned recent-history residual | Recent activity may be incidental |\n| Dependence diagnosis | Natural training prefixes | Equal-size recent/older edits | Sensitivity does not prove usefulness |\n| Compatibility diagnosis | Titles/descriptions | Supported/contradicted/unknown labels | Missing prerequisites remain unknown |\n\n## Candidate ideas\n\nScores are originality/potential/code difficulty; higher difficulty means harder implementation.\n\n1. **Gated recent-interest residual — 4/7/3.** Originality: + combines adaptive aggregation with controlled diagnosis; − closely related to established pooling mixtures. Potential: + directly tests the reported history-weighting weakness; − may duplicate SASRec attention. Difficulty: + adds a small gate and pooling operation; − requires consistent scoring and predictor serialization. Motivated by the recency-bias study.\n2. **Paired prefix intervention probe — 3/6/3.** Originality: + connects dependence with held-out training-prefix accuracy; − intervention diagnostics already exist. Potential: + identifies harmful history reliance; − produces no direct ranking improvement. Difficulty: + reuses the scorer; − requires careful matched edits and leakage controls. Motivated by the supplied attribution studies.\n3. **Evidence-aware compatibility reranker — 5/5/7.** Originality: + explicit unknown states constrain filtering; − compatibility recommendation is established. Potential: + addresses concrete equipment mismatches; − limited applicability to entertainment. Difficulty: + deterministic evidence is auditable; − reliable parsing across four catalogs is substantial. Motivated by ECCR.\n\n## Selected idea\n\nAt 0% progress, select the **gated recent-interest residual**. Combine SASRec’s representation with a normalized mean of the last five nonpadding input embeddings through a learned scalar gate initialized near zero. Train using the baseline objective and negatives, then compare against unchanged SASRec and a fixed-gate ablation.\n\nRetain preprocessing seed 0, training seed 42, all four routes, and the 200-epoch environment default. Select exclusively using pinned macro validation HR@10. Update the predictor writer and compatibility view together; diagnose padding correctness, gate distributions and prefix-intervention accuracy. No improvement is claimed before measurement.",
+  "idea": {
+    "description": "Add a small learned recent-history residual to each per-dataset SASRec model. At each valid sequence position, blend the original contextual feature with a normalized mean of up to five preceding input item embeddings, including the current input item. Use the identical blend during training, diagnosis and prediction.",
+    "motivation": "The qualitative feedback suggests that incidental or older interactions sometimes overwhelm recent evidence. An adaptive residual provides a low-cost test of this hypothesis while allowing the model to retain its original representation when recent pooling is unhelpful. Histories do not directly reveal intent, ownership, compatibility or satisfaction.",
+    "implementation_notes": "Keep DATA_DIR = os.environ['GAGC_DATA_DIR'], existing splits, dataset routing, seed settings and trial-local artifacts. Preserve the baseline optimizer, sampling and loss initially to isolate the architecture change. Normalize pooled features using LayerNorm, compute a scalar sigmoid gate from concatenated contextual and pooled features, and initialize the gate bias to -4 with zero gate weights. Mask padding in pooling and loss. Compute all windows causally; no target embeddings may enter their own input windows. Keep padding features zero. Update the generated working/predict.py to recreate and load the gate, pooling normalization and backbone. The compatibility view must expose the actual trained module through view.model and return blended B x L x D features from log2feats; predict_score must support B x L x 2 candidate tensors. DiagnosisProbe(view, device).run_full_diagnosis(train_loader) must return metrics and metric_definitions, restore the module's original training mode, and report unavailable measurements as null with counts rather than healthy-looking zeros. Use only training-prefix holdouts for auxiliary intervention experiments; exclude their targets from learned auxiliary statistics. Cap auxiliary work because it shares the 43,200 GPU-second budget. Choose checkpoints only through the existing pinned macro validation protocol.",
+    "pseudocode": "for category in four_existing_routes:\n    model = existing_SASRec_with_recent_gate()\n    for batch in existing_training_loader:\n        seq, pos, neg = batch.sequence, batch.positive, batch.negative\n        h = model.backbone.log2feats(seq)\n        e = model.item_emb(seq)\n        r = causal_masked_window_mean(e, seq != 0, width=5)\n        r = model.recent_norm(r)\n        g = sigmoid(model.gate(concat(h, r)))\n        z = ((1 - g) * h + g * r) * (seq != 0)[..., None]\n        loss = existing_loss(score(z, pos), score(z, neg), mask=pos != 0)\n        optimize(loss)\n    save_all_parameters_beneath_trial_directory()\n    emit_predictor_with_identical_feature_and_scoring_paths()\nselect_using_existing_pinned_macro_validation_HR10()",
+    "originality": {
+      "score": 4,
+      "positive": "Combines a minimal adaptive history pathway with interventions that test whether its contribution helps next-item ranking.",
+      "negative": "Gated mixtures and recent-history pooling are established techniques; architectural novelty is limited."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides a controlled foundation for learning when short-term evidence helps across distinct recommendation domains.",
+      "negative": "The branch may duplicate SASRec attention, and validation gains would not establish better compatibility or immediate purchase intent."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Requires a causal pooling operation, normalization and a small scalar gate without additional datasets or pretrained weights.",
+      "negative": "Training, per-position diagnosis and generated inference must share exactly the same causal masking and feature construction."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Measuring Recency Bias (2024)",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "The supplied summary reports that excessive recency emphasis can impair recommendation accuracy, motivating adaptive weighting and ablations."
+      ],
+      "limitations": [
+        "Does not establish that the proposed residual improves the four Amazon datasets."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation — Krichene and Rendle",
+      "link": "https://ijcai.org/proceedings/2021/651",
+      "contributions": [
+        "Shows that sampled ranking metrics can disagree with full-ranking comparisons, motivating strict separation of selection and auxiliary diagnostics."
+      ],
+      "limitations": [
+        "Does not justify changing the pinned host evaluator or guarantee that a particular loss improves its HR@10."
+      ]
+    },
+    {
+      "title": "Explainable and Coherent Complement Recommendation Based on Large Language Models",
+      "link": "https://www.amazon.science/publications/explainable-and-coherent-complement-recommendation-based-on-large-language-models",
+      "contributions": [
+        "Distinguishes relevance and compatibility in complement recommendation."
+      ],
+      "limitations": [
+        "Co-purchase and title similarity alone do not establish compatibility, prerequisites or ownership in this task."
+      ]
+    },
+    {
+      "title": "Counterfactual Explanations via Genetic Algorithms (2025)",
+      "link": "https://arxiv.org/abs/2508.03606",
+      "contributions": [
+        "The supplied summary describes searching for small sequence edits that alter recommendations, motivating history-dependence probes."
+      ],
+      "limitations": [
+        "Recommendation changes reveal model sensitivity rather than correctness of inferred user preferences."
+      ]
+    }
+  ]
+}

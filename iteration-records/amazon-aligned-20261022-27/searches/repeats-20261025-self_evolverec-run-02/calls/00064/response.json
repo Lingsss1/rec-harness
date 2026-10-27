@@ -1,0 +1,76 @@
+{
+  "markdown_report": "At 0% research progress, prioritize a small, falsifiable extension: **a recent-history directed-transition residual for SASRec**. Improvements remain hypotheses until measured with pinned macro validation HR@10.\n\n**Insights from the starting point.** (1) SASRec learns sequential relevance through causal attention. Its scores can nevertheless favor broad associations over an immediate purpose, as the user diagnosis reports. (2) Older incidental interactions can compete with repeated recent interests. A separate recent-history signal makes that competition explicit. (3) Electronics has 14.95% wrong pairwise rankings and a −0.4812 tenth-percentile margin. Embedding similarity near the zero-cosine reference does not establish severe collapse, so prioritize ranking evidence over embedding dispersion.\n\n**Insights from related work.** (1) Directed graph projections encode asymmetric relationships [1]. Observed next-item edges provide usable supervision here, although they cannot identify compatibility or complementarity. (2) SComGNN distinguishes complementarity from simple similarity [2]. This motivates retaining transition evidence separately from embedding smoothing. (3) FAME supports combining distinct preference signals [3]. A scalar residual offers a cheaper first experiment than multiple experts. (4) gSASRec and UFNRec motivate examining negative supervision [4,5]. Their results do not establish gains under this evaluator.\n\n**Framework and candidate directions.** Sequence modeling captures contextual relevance; directed transitions capture observed continuation; sampling determines which distinctions training emphasizes. The gap is whether inexpensive continuation evidence improves precise, timely ranking.\n\nScores below are prospective judgments, not measured outcomes. O/P/U/M/D denote originality, potential, user alignment, model alignment, and implementation difficulty; higher D means harder.\n\n| Atomic idea | O/P/U/M/D | Positive assessment | Main limitation |\n|---|---|---|---|\n| Recent directed-transition residual [1,2] | 5/7/8/7/3 | Targets broad associations, stale evidence, and confusing rankings | Sparse edges and popularity can mislead |\n| Gated recent/recurrent history pooling [3] | 4/7/8/6/5 | Separates repeated interests from incidental history | Latent pools may remain redundant |\n| Mostly-uniform multi-negative training [4,5] | 3/6/4/8/3 | Directly increases ranking competition | Does not explicitly resolve two user-facing failures |\n\n**Selected algorithm.** Build a sparse directed count graph exclusively from adjacent training interactions. Normalize outgoing counts and aggregate edge evidence from the latest five history items with exponential positional decay. Add a bounded, trainable residual to SASRec scores; initialize its weight at zero. Repeated recent source items accumulate support, while older incidental items receive no residual weight.\n\nThis explicitly targets broadly related recommendations lacking observed continuation support and excessive influence from old incidental interests. Joint ranking training targets positive–negative confusion, especially in Electronics. Transitions remain behavioral evidence, not verified prerequisites or purchase intent.\n\n**Implementation and evaluation.** Preserve all four routes, seeds, splits, and `DATA_DIR = os.environ['GAGC_DATA_DIR']`. Serialize graph parameters and identical scoring logic through the predictor writer. Retain the diagnosis adapter and compute margins from combined scores. Compare baseline, transition-only, and combined scoring using pinned validation; inspect per-category results and residual coverage. Report no gains before evaluation.",
+  "idea": {
+    "description": "Add a bounded, learned directed-transition residual from the latest five history items to each category's SASRec candidate scores.",
+    "motivation": "The user diagnosis identifies broad relatedness without a reason to choose now and excessive influence from older incidental interactions. Recent observed transitions provide an explicit continuation signal addressing both. Joint training also targets the observed positive–negative ranking confusion, without treating modest embedding alignment as severe collapse.",
+    "implementation_notes": "Construct adjacent-item edge counts only from training histories. For each source item retain at most 64 outgoing edges; normalize retained counts by the original outgoing total so pruning does not inflate probabilities. Apply log1p scaling and exponential positional weights over five recent items. Bound the nonnegative residual weight to [0,2], initialized at zero, and retain the baseline loss and sampling for the first ablation. Implement sparse candidate lookup without a dense item-by-item matrix. Save graph arrays and the learned scalar under the trial directory, and update the predictor writer with identical combined scoring. Keep DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, all four category routes, single-GPU execution, and SASREC_EPOCHS default 200. DiagnosisProbe(view, device).run_full_diagnosis(train_loader) must return metrics and metric_definitions; retain view.model as the actual trained module and expose combined scores through predict_score. Cache the causal source sequence in log2feats if needed by the compatibility interface, ensuring each training position sees only its prefix. Do not infer product compatibility, replacement needs, ratings, or simulator traits. Select only using pinned macro validation HR@10; diagnostic margins are secondary.",
+    "pseudocode": "for category in FOUR_CATEGORIES:\n    graph = adjacent_transition_counts(training_histories[category])\n    graph = retain_top_edges_and_normalize(graph, max_edges=64)\n    model = SASRecWithTransitionResidual(graph, initial_weight=0.0)\n\n    def score(prefix, candidates):\n        base = model.sasrec_score(prefix, candidates)\n        residual = zeros_like(base)\n        for lag, source in enumerate(reversed(prefix[-5:])):\n            probability = graph.lookup(source, candidates, default=0.0)\n            residual += exp(-lag) * log1p(100.0 * probability)\n        return base + clamp(model.residual_weight, 0.0, 2.0) * residual\n\n    for batch in training_loader:\n        # Each position uses only its own causal prefix.\n        positive_scores, negative_scores = score_training_positions(batch)\n        loss = baseline_ranking_loss(positive_scores, negative_scores)\n        optimize(loss)\n\n    save_model_graph_and_scoring_configuration(trial_directory)\n    write_predictor_with_identical_scoring_and_category_routing()\n# Host evaluates pinned validation; no evaluator or split changes.",
+    "originality": {
+      "score": 5,
+      "positive": "Combines established sequential and directed-transition evidence through a small, diagnosis-driven recent-history residual.",
+      "negative": "Graph-assisted sequential recommendation and score fusion are established; this is an incremental hypothesis."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides a cheap, interpretable foundation for later support-aware gating and temporal transition modeling.",
+      "negative": "Sparse transitions and popularity bias may limit generalization, and observed transitions cannot verify practical compatibility."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Requires sparse graph construction, candidate lookup, one scalar, and predictor serialization without replacing SASRec.",
+      "negative": "Causal per-position lookup and exact agreement between training, diagnostics, and exported inference require care."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Graph Projections (2025)",
+      "link": "https://arxiv.org/abs/2506.09209",
+      "contributions": [
+        "Uses directed weighted interaction projections for complementary recommendation, motivating asymmetric transition evidence."
+      ],
+      "limitations": [
+        "Does not establish improvements under this pinned benchmark or make training transitions verified complement labels."
+      ]
+    },
+    {
+      "title": "SComGNN (AAAI 2024)",
+      "link": "https://arxiv.org/abs/2401.02130",
+      "contributions": [
+        "Models complementary recommendation using graph filtering that preserves distinctions beyond simple similarity."
+      ],
+      "limitations": [
+        "Its relationship setting cannot be assumed available from this task's interaction histories."
+      ]
+    },
+    {
+      "title": "FAME (WSDM 2025)",
+      "link": "https://arxiv.org/abs/2411.01457",
+      "contributions": [
+        "Combines predictions from distinct attention-head representations through gating."
+      ],
+      "limitations": [
+        "Does not validate the proposed scalar transition residual or its user-facing effects."
+      ]
+    },
+    {
+      "title": "gSASRec (IJCAI 2024)",
+      "link": "https://www.ijcai.org/proceedings/2024/939",
+      "contributions": [
+        "Examines sampled-BCE overconfidence and proposes generalized BCE with more negatives."
+      ],
+      "limitations": [
+        "Reported gains on other datasets and metrics do not establish Electronics HR@10 improvements."
+      ]
+    },
+    {
+      "title": "UFNRec",
+      "link": "https://arxiv.org/abs/2208.04116",
+      "contributions": [
+        "Uses teacher soft labels and consistency regularization to address suspected false negatives."
+      ],
+      "limitations": [
+        "Adds training machinery and does not establish that transition-supported candidates are true preferences."
+      ]
+    }
+  ]
+}

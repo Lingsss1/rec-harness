@@ -1,0 +1,180 @@
+{
+  "markdown_report": "The best first experiment is **identity-preserving recent-interest SASRec with separately tested multi-negative supervision**. It targets stale interests, loosely adjacent recommendations, and weak lower-tail separation. Improvements remain hypotheses until measured by pinned macro validation HR@10.\n\n**Insights and directions.** Three starting-point insights motivate the design: (1) Positive mean margins support preserving SASRec’s collaborative pathway. (2) Electronics’ 14.95% ordering-error rate and −0.4812 margin p10 motivate stronger discrimination. (3) Users prefer specific recent/repeated interests over broad historical associations, motivating recent-context conditioning. Purchases do not establish satisfaction, compatibility, or unmet need; exact-item recurrence must first be measured.\n\nThree literature insights refine the alternatives: (1) LSTASRec motivates separating transient and persistent interests [2]. (2) gSASRec demonstrates loss–negative-count interactions, while R²NS cautions against immediate hard mining [3,4]. (3) TedRec and WhitenRec motivate selective text use, but pretrained results do not validate scratch-text gains [5,6]. ReZero supplies an exact identity initialization [7]; ComiRec distinguishes latent recurring interests from repeated IDs [8].\n\n| Direction | Existing mechanism | Proposed experiment | Remaining gap |\n|---|---|---|---|\n| Intent | Long/short extractors [2] | Causal recent residual | Specific fit remains latent |\n| Supervision | Generalized BCE [3] | Matched-count loss comparisons | False negatives remain |\n| Content | Text–ID fusion [5,6] | Bounded scratch-text residual | Compatibility unverified |\n| Recurrence | Multi-interest representations [8] | Training-only recurrence audit | Repeats may be removed |\n\n**Candidate assessments.** Scores are 0–10; higher difficulty means more implementation effort. Each score includes positive (+) and negative (−) reasoning.\n\n1. **Recent residual with staged supervision, selected.** Originality 3: + targeted integration; − established components. Potential 7: + extensible context conditioning; − uncertain transfer. User alignment 7: + targets stale and adjacent interests; − cannot verify unmet need. Model alignment 7: + tests competing-score discrimination; − training margins may mislead. Difficulty 4: + small branch; − parity and controlled sampling require care.\n2. **Sixteen-negative candidate cross-entropy alone.** Originality 2: + clean hypothesis; − established. Potential 6: + reusable baseline; − limited architectural insight. User alignment 4: + improved discrimination possible; − no temporal correction. Model alignment 8: + targets weak margins; − negatives may be easy. Difficulty 3: + vectorized; − sampling costs matter.\n3. **Bounded scratch-text residual.** Originality 4: + task-compatible adaptation; − familiar fusion. Potential 7: + content-sensitive matching; − sparse supervision. User alignment 7: + possible format cues; − compatibility unproven. Model alignment 5: + additional signal; − possible confusion. Difficulty 6: + compact encoder; − serving/tokenization changes.\n\n**Selected algorithm.** Add `α·LN(project(causal_recent_pool))` to unchanged SASRec features, initializing α=0. Use a five-position window with decay 0.8; remove unconditional repeat boosting because deduplication may eliminate its signal. Separately test 16-negative candidate cross-entropy, then combine validated components. Preserve embedding conventions and verify zero-gate equality, padding handling, and causality. Compare last-item, uniform-window, and exponential pooling under identical branch settings; reserve learned pooling and recurrence weighting for supported follow-ups. Preserve all routes, seeds, predictor parity, diagnostics, and the shared budget. Report category results, search extent, and paired uncertainty; sampled HR@10 does not establish full-catalog quality [9,10].",
+  "idea": {
+    "description": "Extend each category’s SASRec with a causal recent-interest residual while preserving the original model exactly at initialization. At position t, pool at most the five most recent nonpadding input embeddings at positions j ≤ t using normalized weights 0.8^(t−j). Let b_t = LayerNorm(project(pool_t)) and h_t = h_SASRec,t + α b_t, where α is a learned scalar initialized to zero. Preserve the backbone, its final normalization, and its scoring embeddings. Test multi-negative supervision separately before combining it with the residual. Exact-item repeat weighting becomes a conditional follow-up rather than a required component.",
+    "motivation": "The selected idea explicitly addresses two user-facing failures: older or occasional interests receiving excessive influence, and loosely adjacent items displacing choices supported by current behavior. Recent-context features provide a hypothesis for improving both, although recency alone cannot establish specific functional fit, compatibility, or unmet need. Richer negative supervision addresses the model-facing weak-margin and wrong-ordering failures, especially Electronics’ margin p10 of −0.4812 and 14.95% negative-over-positive rate. Embedding similarity scores of 0.5392–0.5566 are near the mapped zero-cosine baseline of 0.5 and do not support prioritizing collapse regularization. Exact-ID repetition cannot represent repeated interests when preprocessing removes user–item duplicates; latent recurring interests across distinct IDs require separate evidence.",
+    "implementation_notes": "Retain DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, unchanged input splits, all four category routes, and trial-local artifacts. Respect SASREC_EPOCHS, whose host default is 200. Execute each trial on one GPU and account for all training, diagnostics, debugging, and failed trials within the shared 43,200 GPU-second budget. Use only permitted training interactions, titles, descriptions, and timestamps; the broader metadata examples do not authorize unavailable reviews, ratings, prices, stores, or item categories.\n\nPreserve the actual RecHarness SASRec backbone conventions. The original SASRec implementation scales encoder input embeddings by sqrt(d), leaves scoring embeddings unscaled, and applies final feature normalization; verify and retain the supplied baseline’s corresponding behavior. For the primary residual, pool raw unscaled item embeddings, use a bias-free d-by-d linear projection, and place LayerNorm inside the residual branch with eps=1e-5. Initialize the projection with a recorded initialization rule and initialize α to exactly zero. Initialize new modules without changing the baseline parameter initialization or training-data random streams. A finite-bias sigmoid gate is not an exact identity initializer, and adding LayerNorm after fusion would change the baseline even when α=0. Compare sqrt(d)-scaled pooling only as a separately logged ablation because normalization epsilon and optimization can still affect equivalence.\n\nFor each training position t, include only nonpadding input items at j ≤ t within the five-position window. Define weights as 0.8^(t−j), normalize over valid positions, and return a zero pool for empty windows. Explicitly zero the normalized branch for empty windows so learned LayerNorm offsets cannot introduce padding features. Do not broadcast the final window’s pool across earlier training positions. Keep the baseline attention and padding masks unchanged during the fusion comparison; any backbone mask correction requires a separate experiment. A zero-gate equality check assumes finite branch outputs. Check future-token invariance of earlier valid outputs and padding invariance of the pooling operation; do not require the positional backbone to be invariant to shifts in absolute positions.\n\nBefore any repetition extension, report from permitted training histories the fraction of events beyond each user’s first occurrence of an item and the fraction of next-item training targets already present in their causal input prefix. Record both denominators. These audit results do not establish purchase frequency. If all user–item pairs are unique, omit exact-ID repeat weighting. If recurrence survives, test it separately using count c from the available causal input prefix and multiplier min(2, 1 + log(1 + max(c − 1, 0))); the explicit cap corrects the earlier unbounded formula. Window truncation limits observable prefix counts. Distinct-ID recurrence could later be studied using training-only collaborative clusters, but cluster assignments and any fit decisions must exclude validation/test interactions and must not be described as verified semantic interests.\n\nStage experiments to preserve attribution. First compare unchanged SASRec against the residual using the baseline loss and negative protocol. Next compare losses at a matched negative count of 16 on the unchanged architecture. For a fully specified controlled comparison, draw 16 negatives independently and uniformly with replacement from the category’s nonpadding catalog excluding the current positive. Retain duplicate draws in both losses. Define BCE as softplus(−s_pos) + mean_k softplus(s_neg,k), giving the positive and aggregate negative terms equal weight. Define candidate cross-entropy as −log_softmax([s_pos, s_neg,1, ..., s_neg,16])[0] with temperature 1.0 and no sampling-probability correction. Call this uncorrected candidate cross-entropy, rather than corrected sampled softmax. Share negative draws, initial backbone weights, training examples, minibatch order, optimizer settings, training schedule, and checkpoint-selection opportunities across the matched-count loss comparison. Use a separate sampler RNG so negative generation does not change dropout or data-order streams. Comparing one versus 16 negatives changes supervision count and should be reported separately from the matched-count loss comparison.\n\nExclude padding and the current target in the controlled sampler; treat exclusion of every observed training-history item as a separate sampling ablation because it changes the negative distribution. Never inspect held-out positives to filter negatives. Detect empty eligible catalogs rather than allowing infinite rejection loops. Record realized negative counts, duplicate rates, and sampling exclusions. Uniform sampling does not remove false negatives. Do not import gSASRec calibration claims into a different sampling scheme or objective.\n\nUse a fixed predeclared subset of controls within the remaining budget: unchanged SASRec, last-item residual, uniform five-position residual, and exponential five-position residual. Hold projection, normalization, embedding scale, optimization, and validation opportunities constant. Standalone last-item and exponential-pool dot-product scorers can reveal whether gains mainly reflect local co-occurrence; learned pooling is a later control, not a prerequisite. Test the combined residual and candidate-cross-entropy model only after the component comparisons. Keep the baseline optimizer, batch size, maximum sequence length, and other unspecified settings unchanged and serialize their concrete values. Record every trial configuration, elapsed GPU time, epoch, and selected checkpoint. Keep the baseline validation cadence fixed across compared variants; break exact validation ties by the earlier checkpoint, then by a predeclared configuration order. Do not expand search opportunistically after small gains.\n\nSelect solely using the pinned macro validation HR@10 for 200 users per category and 99 unique negative candidates with evaluation seed 42. Report all four category results. One changed hit moves category HR by 0.5 percentage points and macro HR by 0.125 percentage points. When authorized evaluator outputs expose per-user hits, compute paired differences and a stratified paired bootstrap interval over the fixed users; otherwise mark paired uncertainty unavailable rather than reconstructing or modifying the evaluator. Such intervals are conditional on the fixed candidate sets and do not correct selection bias from repeated search. Record search extent and reserve held-out evaluation for final confirmation. Full-catalog simulator feedback from twenty real training users remains a separate qualitative assessment and must not be substituted for the selection metric.\n\nSerialize the exact architecture configuration, α, projection, branch normalization, backbone, and scoring weights beneath the trial directory. Update the predictor writer so working/predict.py reconstructs the same model and all four routes. Keep seen-item filtering consistent with the existing evaluation/recommendation interfaces. Test checkpoint round-trip score agreement, zero-gate feature/logit equality in evaluation mode, causal prefix behavior, and empty-window handling.\n\nRetain DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). view.model must be the actual trained module; view.item_emb must expose the deployed scoring embeddings; view.log2feats must return fused features; and view.predict_score must reproduce deployed candidate scoring. Accept batches (None, sequence, positive, negative) of shape B x L, use only valid positive positions, and return metrics with their measured definitions and denominators. Preserve the original margin and collapse definitions and hold diagnosis users, negative draws, epsilon=0.5, and sampling protocol fixed across variants. Measure collapse on the actual scoring embeddings without treating its mapped value as a calibrated diversity score. Category breakdowns must explicitly be unavailable because item categories are unavailable. The interpretation prompt must use measured metrics and definitions, distinguish training-position diagnostics from validation HR@10, and avoid inventing compatibility, satisfaction, or user-trait measurements.",
+    "pseudocode": "freeze experiment list, validation cadence, tie rules, and GPU-budget allocation\nfor category in four_categories:\n    load unchanged permitted split with preprocessing seed 0\n    audit training-only exact-ID recurrence; do not alter preprocessing\n    initialize baseline backbone with training seed 42\n    initialize residual using an isolated RNG; alpha = 0\n    for epoch in configured_epochs:  # host default SASREC_EPOCHS=200\n        for _, sequence, positive, negative in train_loader:\n            base = unchanged_SASRec.log2feats(sequence)\n            recent, nonempty = causal_pool(\n                raw_item_embeddings(sequence), sequence != 0,\n                window=5, decay=0.8)\n            branch = LayerNorm(bias_free_projection(recent))\n            branch = where(nonempty, branch, 0)\n            fused = base + alpha * branch\n            valid = positive != 0\n            if experiment uses baseline supervision:\n                loss = unchanged_baseline_loss(fused, positive, negative, valid)\n            else:\n                candidates = uniform_draws_with_replacement(\n                    count=16, exclude_padding=True,\n                    exclude_current_target=True, separate_rng=True)\n                pos_score = dot(fused, scoring_embedding(positive))\n                neg_scores = dot(fused, scoring_embedding(candidates))\n                if matched_count_BCE:\n                    loss = mean_valid(softplus(-pos_score)\n                                      + mean_neg(softplus(neg_scores)))\n                else:\n                    logits = concat(pos_score, neg_scores) / 1.0\n                    loss = mean_valid(-log_softmax(logits)[..., 0])\n            optimize(loss, unchanged_optimizer_configuration)\n        at fixed baseline validation opportunities:\n            save eligible trial-local checkpoints and measured validation outputs\n    serialize exact architecture and emit matching predictor\nrun predeclared architecture and matched-count loss controls within shared budget\ncombine components only after their separate comparisons\nselect configuration using pinned four-category macro validation HR@10\nreport category results, search extent, uncertainty availability, and diagnostic limits",
+    "originality": {
+      "score": 3,
+      "positive": "The identity-preserving residual and staged loss comparison provide a targeted, interpretable response to the observed temporal and ranking failures.",
+      "negative": "Recent pooling, zero-initialized residuals, and multi-negative objectives are established methods; their combination is an engineering hypothesis rather than a seminal contribution."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides a controlled foundation for testing when local context helps, then extending to supported distinct-item recurrence or selective content signals.",
+      "negative": "Recency can become a co-occurrence shortcut, deduplication may remove repeat evidence, and gains on sampled candidates may not transfer to full-catalog recommendations."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Reuses the SASRec backbone, category routing, and scoring embeddings; the primary branch is a small causal pool, projection, normalization, and scalar.",
+      "negative": "Reproducible loss comparisons, independent random streams, sampling edge cases, diagnostic compatibility, and exact predictor parity require more care than the branch alone."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Introduces causal self-attention for sequential next-item recommendation.",
+        "Provides the collaborative sequence encoder retained by the proposal."
+      ],
+      "limitations": [
+        "Historical affinity does not establish current unmet needs, satisfaction, or equipment compatibility.",
+        "The actual RecHarness implementation must determine the preserved baseline behavior."
+      ]
+    },
+    {
+      "title": "LSTASRec (2025 preprint)",
+      "link": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5238143",
+      "contributions": [
+        "The supplied search summary describes separate long- and short-term interest extraction with adaptive fusion.",
+        "Motivates testing explicit recent-context features."
+      ],
+      "limitations": [
+        "Reported results do not establish improvements on this pinned benchmark.",
+        "The lightweight residual is an adaptation rather than a reproduction."
+      ]
+    },
+    {
+      "title": "gSASRec",
+      "link": "https://arxiv.org/html/2308.07192v1",
+      "contributions": [
+        "Investigates overconfidence from sampled BCE and introduces generalized BCE.",
+        "The supplied factorial comparison evaluates BCE, generalized BCE, and sampled softmax at matched negative counts, supporting loss–sampling interaction rather than universal superiority."
+      ],
+      "limitations": [
+        "Headline improvements combine changes in negative count and objective and cannot isolate either effect.",
+        "Its calibration assumptions do not automatically apply after changing replacement, exclusion, or sampling distributions.",
+        "Results on other datasets do not establish gains on the requested Amazon categories."
+      ]
+    },
+    {
+      "title": "R²NS, WWW 2026",
+      "link": "https://renzhaochun.github.io/assets/pdf/WWW_2026_Camera_Ready.pdf",
+      "contributions": [
+        "The supplied summary supports uniform-negative warm-up before progressive hard sampling.",
+        "Motivates avoiding immediate deterministic hardest-negative mining."
+      ],
+      "limitations": [
+        "Does not guarantee that harder negatives improve this task.",
+        "Unobserved items can remain false negatives."
+      ]
+    },
+    {
+      "title": "TedRec",
+      "link": "https://arxiv.org/abs/2402.18166",
+      "contributions": [
+        "Combines text and collaborative ID sequences through frequency-domain operations."
+      ],
+      "limitations": [
+        "Uses pretrained language representations, so reported gains do not validate the allowed scratch-trained text alternative.",
+        "Text similarity does not establish compatibility or current demand."
+      ]
+    },
+    {
+      "title": "WhitenRec",
+      "link": "https://arxiv.org/abs/2402.10602",
+      "contributions": [
+        "Highlights discrimination limitations in text representations for sequential recommendation."
+      ],
+      "limitations": [
+        "Semantic similarity does not certify functional compatibility or a valid next-item transition.",
+        "Its findings do not establish scratch-text gains under this task’s restrictions."
+      ]
+    },
+    {
+      "title": "ReZero Is All You Need: Fast Convergence at Large Depth",
+      "link": "https://arxiv.org/abs/2003.04887",
+      "contributions": [
+        "Uses zero-initialized learnable residual scaling.",
+        "Supports the proposed exact identity initialization when the original backbone and scorer are preserved and branch outputs are finite."
+      ],
+      "limitations": [
+        "Does not establish validation gains for SASRec.",
+        "Identity initialization does not guarantee that subsequent training preserves baseline performance."
+      ]
+    },
+    {
+      "title": "Controllable Multi-Interest Framework for Recommendation (ComiRec)",
+      "link": "https://arxiv.org/abs/2005.09347",
+      "contributions": [
+        "Learns multiple interest representations through dynamic routing or self-attention.",
+        "Provides a precedent for representing recurring interests across distinct item IDs."
+      ],
+      "limitations": [
+        "Latent interests are not measured semantic preferences or simulator traits.",
+        "A multi-interest extension adds complexity and requires separate validation."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled ranking evaluations can disagree with full-catalog comparisons.",
+        "Clarifies the scope of HR@10 measured against 99 negatives."
+      ],
+      "limitations": [
+        "Does not invalidate the prescribed selection metric.",
+        "Cannot infer full-catalog quality from the supplied diagnostic margins."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/beta/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how repeated model selection can overfit finite validation data and produce optimistic estimates."
+      ],
+      "limitations": [
+        "Paired uncertainty conditional on fixed validation users does not eliminate adaptive selection bias.",
+        "Held-out confirmation remains necessary."
+      ]
+    },
+    {
+      "title": "Original SASRec implementation",
+      "link": "https://github.com/kang205/SASRec/blob/master/model.py",
+      "contributions": [
+        "Documents encoder input embedding scaling, unscaled scoring embeddings, causal masking, and final feature normalization.",
+        "Provides implementation context for preserving baseline conventions."
+      ],
+      "limitations": [
+        "The original implementation does not establish the exact behavior of the supplied RecHarness template.",
+        "Implementation conventions are not evidence that the residual improves recommendation quality."
+      ]
+    },
+    {
+      "title": "Amazon Review Data documentation",
+      "link": "https://cseweb.ucsd.edu/~jmcauley/datasets/amazon_v2/index.html",
+      "contributions": [
+        "Documents Amazon data and duplicate-related issues.",
+        "Motivates auditing recurrence in the actual permitted training histories."
+      ],
+      "limitations": [
+        "Does not establish which deduplication policy the pinned preprocessing uses.",
+        "Review interactions cannot establish actual purchase frequency and do not authorize unavailable review fields."
+      ]
+    },
+    {
+      "title": "RepeatNet: A Repeat Aware Neural Recommendation Machine for Session-based Recommendation",
+      "link": "https://ojs.aaai.org/index.php/AAAI/article/view/4408",
+      "contributions": [
+        "Separates repeat and exploration behavior through an explicit repeat-aware mechanism.",
+        "Clarifies the distinction between selecting previously seen items and learning recurring interests."
+      ],
+      "limitations": [
+        "Its repeat-selection mechanism requires surviving repetitions and eligible seen-item candidates.",
+        "The unseen-item recommendation task requires transferring recurring-interest evidence to distinct items."
+      ]
+    }
+  ]
+}

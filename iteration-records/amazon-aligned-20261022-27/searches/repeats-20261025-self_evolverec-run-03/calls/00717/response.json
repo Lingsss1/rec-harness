@@ -1,0 +1,183 @@
+{
+  "markdown_report": "**Synthesis.** Three starting-point insights motivate a small SASRec extension. (1) Causal attention already represents changing interests; an added retrieval branch therefore needs controls demonstrating value beyond existing attention. (2) The simulator distinguishes repeated narrow preferences from isolated actions; reinforcement should depend on relevant preceding observations, although repetition does not establish independent evidence. (3) Electronics has 14.95% wrong rankings and margin p10 −0.4812. These training diagnostics motivate separation experiments without establishing validation performance.\n\nThree literature insights refine the experiment. (1) [gSASRec](https://arxiv.org/abs/2308.07192) supports multi-negative calibration, but sampler and loss reduction determine the implemented objective. (2) [STAMP](https://www.kdd.org/kdd2018/accepted-papers/view/stamp-short-term-attentionmemory-priority-model-for-session-based-recommend), SASRec and [TiSASRec](https://jiachengli1995.github.io/files/wsdm20.pdf) establish close attention and temporal precedents; [HyperHawkes](https://evazangerle.at/publication/peintner-www-2025/) motivates separating retained interests from activation. (3) [DuoRec](https://arxiv.org/abs/2110.05730) motivates checking representation degeneration. Retrieval mass can reflect anisotropy, popularity, history length or duplicates rather than relevance. Recformer and SCRM require resources or behavior distinctions unavailable here.\n\n**Framework and directions.**\n\n| Direction | Existing mechanism | Proposed experiment | Remaining gap |\n|---|---|---|---|\n| Temporal evidence | SASRec; STAMP; TiSASRec; prior pooled residual | Recent-anchor kernel retrieval with shrinkage | Similarity and mass are not verified intent or confidence |\n| Ranking objective | gSASRec | Explicitly specified multi-negative gBCE | Sampler assumptions and false negatives |\n| Interest persistence | HyperHawkes | Three causal interest slots | Assignment and optimization cost |\n\n**Candidate assessment.** Scores are originality/potential/user alignment/model alignment/difficulty, each 0–10; higher difficulty means harder implementation. Each dimension gives a positive and negative reason.\n\n- **A: Support-gated recent-anchor retrieval — 3/6/7/6/5.** Originality: explicit shrinkage / close attention precedents. Potential: compact testable mechanism / shortcut-prone mass. User alignment: recent narrow matches and restrained extrapolation / cannot establish practical utility. Model alignment: changes candidate margins / correction is indirect. Difficulty: tensor features retained / quadratic retrieval, controls and export integration.\n- **B: Multi-negative gBCE — 2/7/4/9/4.** Originality: task adaptation / established objective. Potential: direct ranking intervention / dataset dependence. User alignment: stronger competition / no explicit intent-support mechanism. Model alignment: targets separation / false negatives remain. Difficulty: unchanged encoder / exact sampling, weighting and memory management matter.\n- **C: Three persistent interest slots — 4/6/8/6/7.** Originality: retention–activation separation / substantial precedent. Potential: recurring interests / unstable assignments. User alignment: preserves narrow preferences / slots may mix them. Model alignment: specialized states / indirect margin effect. Difficulty: compact memory / substantial integration.\n\n**Selected: A**, prioritizing feasibility at 0% progress. B remains a strong independent alternative; C is premature. Retrieve strictly preceding embeddings using current-item agreement and positional recency:\n\n```text\nx = smoothly_normalized_item_embeddings(prefix)\na[t,s] = exp(-nonpadding_age(t,s)/10) * relu(dot(x[t],x[s]))², s<t\nW[t] = sum_s a[t,s]\nr[t] = sum_s a[t,s]*x[s] / (1 + W[t])\nf[t] = SASRec(prefix)[t] + 2*sigmoid(theta)*r[t]\nscore(t,j) = dot(f[t], item_embedding[j])\n```\n\nInitialize amplitude to 0.01. Since r equals the weighted mean times W/(1+W), weak mass attenuates reinforcement, analogous algebraically to a null-value attention option. This targets broad older associations outranking recent intent and unsupported extrapolation from isolated actions; it cannot establish compatibility or unmet needs. Preserve baseline, A and B comparisons within the shared budget, with diagnostic controls specified below. Preserve routes, seeds, splits, interfaces and predictor parity. Select exclusively by pinned macro validation HR@10; no gains are claimed.",
+  "idea": {
+    "description": "Add a bounded recent-anchor kernel-retrieval residual to each dataset-specific SASRec. At every causal position, use the current item embedding to retrieve similar, recent, strictly preceding interactions. Divide the weighted sum by one plus its unnormalized mass, so weak mass produces a weak correction rather than a unit-mass attention allocation. Preserve the original candidate dot-product scorer. This is a specific attention-and-shrinkage adaptation, not a new model class or a calibrated evidence estimator.",
+    "motivation": "The intervention explicitly targets two user-facing failures: broad older associations competing with recent narrow intent, and isolated interactions receiving unsupported preference reinforcement. Recency and current-item agreement select preceding observations; mass shrinkage attenuates the additional influence of weak matches. These mechanisms constrain only the added branch: unsupported extrapolation can still arise through SASRec, and one predecessor or repeated duplicate interactions can still produce reinforcement. The unchanged backbone retains a pathway for legitimate new interests. The model-facing target is weak positive–negative separation, especially Electronics’ reported 14.95% wrong-ranking rate and −0.4812 lower-tail margin. These training diagnostics and historical aggregate scores do not establish a gain for this mechanism. Neither retrieval nor transition evidence establishes ownership, compatibility, replacement needs or purchase satisfaction. At 0% progress, retain this compact hypothesis rather than introducing persistent intent slots; retain objective-only gBCE as a strong independent comparison.",
+    "implementation_notes": "Use only public training interaction histories in the initial experiment. Ignore conflicting generic metadata examples: ratings, review text, item categories, prices, stores and simulator traits are unavailable. Titles, descriptions and timestamps are permitted but unnecessary here. Recformer’s pretrained results and SCRM’s behavior-separated graphs do not justify importing unavailable resources or treating interaction similarity as verified complementarity.\n\nExact retrieval construction: let e_t be the backbone item-table embedding before positional embeddings, backbone scaling and dropout. Compute x_t=e_t/sqrt(sum(e_t²)+1e-4) in float32 and explicitly zero padding. For each valid position t and strictly preceding valid position s, define age as the difference between their cumulative nonpadding interaction indices. The immediate predecessor has age one. Set a_ts=exp(-age/10)*relu(dot(x_t,x_s))². Mask the current position, future positions and padding. Compute the exponential on nonnegative ages before masking to avoid large intermediate values for future positions. The age is an interaction-count distance, not elapsed timestamp time. Its fixed e-folding distance is ten interactions.\n\nDefine W_t=sum_s a_ts, r_t=sum_s(a_ts*x_s)/(1+W_t), and f_t=h_t+A*r_t, where h_t is the original SASRec feature and A=2*sigmoid(theta). Initialize theta=logit(0.005), giving A=0.01. Keep gradients through embeddings, kernel weights and the scale. Use float32 retrieval arithmetic, then cast the correction to the backbone feature dtype. Apply the valid-position mask to returned features. No learned routing network or auxiliary loss is added. Serialize normalization epsilon, decay distance, kernel exponent, denominator constant, scale bounds and initialization.\n\nFor W>0, r=[W/(1+W)]*weighted_mean(x); for W=0, r=0. This permits low-mass attenuation, algebraically related to a null-value attention option such as softmax₁, but the proposed positive kernel is not softmax₁. Since ||x||<1, ||r||<1 and ||A*r||<2. Candidate-logit changes additionally depend on candidate embedding norms. ReLU excludes nonpositive similarities and squaring sharpens positive similarities; neither choice is empirically justified here. The smoothed vectors are approximately unit vectors, so their dot product is a smoothed cosine-like kernel rather than exact cosine.\n\nAn empty preceding history gives exactly zero correction. A single matching predecessor can contribute. Duplicating an interaction can increase mass and weaken shrinkage without adding independent information. Older observations are downweighted but coherent older interests can still dominate. Learned anisotropy, popularity, item norms and repeated-item frequency can create shortcuts. Consequently call W retrieval mass, not calibrated confidence, independent support or identified user intent. Shared embeddings receive gradients from both pathways; the small scale suppresses the additional retrieval-gradient contribution, while the backbone continues updating the same table.\n\nKeep the backbone architecture, baseline sampled BCE, optimizer settings, negative sampler and training examples unchanged for A. Put theta in a parameter group without weight decay; preserve the baseline policy for existing parameters. Initialize theta deterministically without consuming the baseline initialization RNG. Baseline mode completely bypasses retrieval. Save and restore identical initial backbone weights for compatible comparisons instead of assuming seed reuse alone guarantees identity. Preserve baseline sampling, loader-worker and dropout streams where possible; document mismatches and do not claim paired optimization if they cannot be isolated.\n\nThe small sigmoid scale may learn slowly: initially dA/dtheta is approximately 0.00995. Track theta, A, its gradient, retrieval-attributable gradients on a fixed diagnostic batch, residual-to-backbone norms and actual candidate-score changes. Separate retrieval-path gradients from total shared-embedding gradients; the latter do not establish branch learning. Additional gradient diagnostics consume the shared budget and must not update model or optimizer state. Fixed-scale comparisons are diagnostic interventions unless independently retrained.\n\nRetain DATA_DIR=os.environ['GAGC_DATA_DIR'], all four dataset routes, preprocessing seed 0, training seed 42, unchanged input splits, and int(os.environ.get('SASREC_EPOCHS','200')). An explicitly supplied epoch setting takes precedence over the default. Save configurations, mappings, initializations, weights, optimizer/RNG states and logs beneath the trial directory. Keep each trial single-GPU. The predictor writer must emit the identical architecture, causal mask, age calculation, normalization, amplitude and scorer. No inference metadata is required.\n\nPrimary candidates are unchanged SASRec, retrieval residual A, and objective-only B. Precisely define B as a RecHarness-sampler gBCE variant with K=32 and t=0.75, not an exact reproduction of the official gSASRec sampling/calibration setup. K=32 is a custom compute choice; the authors recommend K=256. Preserve the existing RecHarness negative distribution and exclusions, documenting them. Draw K negatives using that sampler without inventing new rejection rules; record replacement behavior, duplicates, target collisions and history exclusions. If baseline exclusions differ from the earlier proposed history-filtered sampler, retain and document the actual baseline behavior for this comparison. Never consult held-out interactions.\n\nFor B, let N be the number of real items excluding padding, alpha=K/(N−1), and beta=1−t+t*alpha=0.25+24/(N−1). Require N>1. Using this beta with a history-excluding sampler is a declared heuristic: it does not correct the changed sampling distribution. The official port instead draws independently with replacement from IDs 1…N, allowing positives and history items, while still using N−1 in alpha. An exact official-sampler reproduction would be a separate candidate requiring its own budget allocation.\n\nImplement B’s explicitly defined unclipped objective stably as [beta*softplus(-positive_logit)+sum_k softplus(negative_logit_k)]/(K+1), averaged over valid supervised positions. Do not separately average the positive and negative terms. Algebraically this equals applying BCEWithLogits to the transformed positive gamma(s)=-log(expm1(beta*softplus(-s))) and unchanged negative logits, before candidate averaging, without numerical clipping. The official implementation uses float64 transformation and clamps; the stable algebraic objective is equivalent only before those clamps. Label this distinction and check value/gradient agreement in the nonsaturated regime. Do not claim bitwise reproduction. Log objective reduction, precision, N, K, beta and sampler details. B changes both the objective and negative count, so it is a practical alternative rather than an isolated calibration ablation. A alone supplies the selected idea’s two explicit user-failure mechanisms.\n\nAllocate at most 12,000 GPU-seconds to each candidate’s four-category training bundle, split as 3,000 seconds/category, and reserve 7,200 GPU-seconds for all diagnostics, validation, simulator execution, parity checks, debugging and failures. This totals the shared 43,200-second ceiling. Charge and sum occupied GPU time across concurrent slots; concurrency does not increase the budget. Synchronize CUDA at timing boundaries, use conservative charging, and checkpoint early enough to cover stopping overhead. Stop at the configured epoch limit or category time cap. Baseline timing and any pilot work are charged. Permit one documented schedule revision before comparative execution and validation inspection if the allocation is impractical. Do not run C or additional trained ablations within this allocation. Equal time may imply different update counts; log effective epochs, valid positions, updates, throughput and peak memory.\n\nUse one terminal complete four-category checkpoint bundle per primary candidate for selection; recovery checkpoints do not create additional validation-selection opportunities. Retain failures, incomplete attempts and all costs. If a complete bundle cannot be produced within the budget, report the failure rather than substituting scores or silently reallocating after inspecting validation.\n\nPredeclare no-retraining diagnostic controls on A’s fixed checkpoint: branch disabled; division by W instead of 1+W with exact zero handling; a uniform preceding-history mean; recency-only weights; similarity-only weights; unsquared positive similarity; exact cosine versus the smoothed-dot kernel; and softmax of the same finite kernel logits over allowed predecessors. For softmax, use the log of the positive kernel where positive, mask zero-weight sources, and return zero for an empty support set. This isolates normalization on the same support; standard learned softmax attention is a different control. Preserve the history window, self-exclusion, embeddings and scale where the intervention permits. Report any scale/distribution changes. These interventions measure checkpoint sensitivity, not independently trained algorithm performance, and cannot enter primary selection.\n\nAdd a duplicate-sensitivity diagnostic using fixed training prefixes: retain only the most recent preceding occurrence of each item while keeping the current query and original nonpadding ages fixed. This tests a defined retrieval intervention rather than changing the backbone input or silently recomputing chronology. Compare mass, residual norms and score changes. A trained deduplicated model, independent mean-pooling model, normalized-attention model, or fixed-scale model requires a separately declared allocation before training and validation inspection. The current comparison cannot establish which kernel component causes any measured gain.\n\nMaintain DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. The public loader remains (None, sequence, positive, negative), each tensor B x L. view.model must reference the actual complete trained module; view.item_emb remains its backbone item table. log2feats returns augmented B x L x D features. predict_score must explicitly distinguish aligned B x L items, B x L x K candidates, and final-state shared or per-user candidate sets to avoid accidental broadcasting. Preserve user_train, meta_data and review_data without filling unavailable fields.\n\nCompute original margin probes through the complete scorer on identical valid positions. Report mean margin, p10, negative-beats-positive fraction, margin<0.5 fraction and evaluated-position counts; also report backbone-versus-augmented margins, mass, amplitude, residual norms and exact-zero coverage. Define averaging and sampling explicitly. Metadata-category and review probes must report unavailable, not substantive empty-category findings. Mean item cosine does not establish full-model collapse or recommendation diversity.\n\nOn a deterministic seed-42 sample of training-only positions and nonpadding items, report cosine distributions and effective rank of the centered sampled item matrix using exp(-sum p_k*log p_k), where p_k are normalized squared singular values; define effective rank as zero for zero total variance. Record sample IDs, sizes and sampling rules. Report Spearman associations of mass with prefix length, current-item training frequency and duplicate count, marking constant-variable correlations undefined. These are association diagnostics; correlated quantities do not establish shortcut causation. Inspect margins by training-defined length and popularity bins. Report validation HR@10 strata only if the unchanged host exposes per-user hits and IDs; use training-defined bins and never infer unavailable outputs. Aggregate macro HR@10 remains the only selection metric.\n\nBefore costly training, verify strict-prefix invariance in evaluation mode: changing future suffixes cannot change earlier features. Verify age calculation, strict self-exclusion, empty and short histories, left padding, truncation, finite gradients near zero, bounded residuals and checkpoint reloads. Test retrieval behavior with internal padding separately; if the original backbone does not support internal padding, document that limitation and preserve its actual input contract rather than claiming end-to-end support. The latest item at position t is observed input for predicting t+1; no positive target enters retrieval at t.\n\nCompare exported and training-path scores in float32, including candidate versus chunked full-catalog scoring restricted to identical IDs, using atol=1e-5 and rtol=1e-4. Record maximum errors and ranking disagreements. Resolve top-10 disagreements and verify every dataset route, candidate layout, final valid position, item mapping, seen-item masking, ties, batch size and catalog chunk size. Encode each sequence once for full-catalog scoring. Preserve the host evaluator, candidate construction and masking rules; use deterministic item-ID tie handling for the separate simulator where needed.\n\nRun the required twenty-real-training-user full-catalog unseen-item simulator protocol, five users/category. Record the selected user IDs and preserve the native selection protocol. Track recent narrow matches, clear relevance, uncertain relevance and unsupported extrapolation separately from equipment assumptions, compatibility and satisfied-need failures. Do not infer unobserved diversity/conformity traits or claim those practical failures are solved by retrieval.\n\nSelect solely by pinned four-category macro validation HR@10: 200 users/category, 99 unique negatives and evaluation seed 42. Exact ties prefer baseline, then A, then B. Record category scores where exposed and every attempted candidate’s cost. Historical inspiration scores already reflect adaptive search; the current plan does not erase selection optimism. If the unchanged host exposes paired per-user hit indicators, bootstrap users independently within each category using the same sampled indices across candidates, average category differences equally, and use 10,000 CPU replicates with analysis seed 42 for percentile 95% intervals. One changed hit changes category HR by 0.005 and macro HR by 0.00125. These intervals condition on trained models and fixed candidates and do not correct winner selection, training-seed uncertainty or candidate variability. Omit intervals when inputs are unavailable. Sampled validation HR does not establish full-catalog quality. Freeze the selected predictor before independent held-out evaluation; never inspect hidden test files or metrics. No experiments or improvement claims are made here.",
+    "pseudocode": "DATA_DIR = os.environ['GAGC_DATA_DIR']\nepoch_limit = int(os.environ.get('SASREC_EPOCHS', '200'))\n\n# Integration specification: retain the existing RecHarness data/training contracts.\n# All runs, diagnostics and failures consume the shared 43,200 GPU-second budget.\nfor category in FOUR_CATEGORIES:\n    restore_saved_seed42_backbone_initialization(category)\n    model = baseline_SASRec_with_optional_retrieval(category)\n    # Register theta on the actual model; initialize deterministically.\n    model.theta = Parameter(logit(0.005))  # zero weight decay\n\n    def log2feats(sequence):\n        h = model.backbone.log2feats(sequence)\n        if mode != 'retrieval':\n            return h\n        valid = sequence.ne(0)\n        e = model.item_emb(sequence).float()\n        x = e / sqrt(sum(e * e, dim=-1, keepdim=True) + 1e-4)\n        x = x * valid[..., None]\n        rank = cumsum(valid, dim=1)\n        age = rank[:, :, None] - rank[:, None, :]\n        allowed = strictly_lower_triangular_mask(sequence.shape[1])\n        allowed = allowed & valid[:, :, None] & valid[:, None, :]\n        similarity = matmul(x, transpose_last_two(x))\n        weights = exp(-clamp(age, min=0).float() / 10.0)\n        weights = weights * relu(similarity).square() * allowed\n        mass = sum(weights, dim=-1, keepdim=True)\n        residual = matmul(weights, x) / (1.0 + mass)\n        amplitude = 2.0 * sigmoid(model.theta)\n        return (h + (amplitude * residual).to(h.dtype)) * valid[..., None]\n\n    def predict_score(features, items, candidate_layout):\n        # Explicit layouts: aligned, per-position K, shared catalog, per-user candidates.\n        return explicit_layout_dot(features, model.item_emb(items), candidate_layout)\n\n    for batch in unchanged_baseline_training_stream:\n        sequence, positive = batch.sequence, batch.positive\n        features = log2feats(sequence)\n        if mode == 'gbce_variant':\n            negative = draw_K_using_actual_RecHarness_sampler(batch, K=32)\n            pos = predict_score(features, positive, 'aligned')\n            neg = predict_score(features, negative, 'per_position_K')\n            beta = 0.25 + 24.0 / (number_of_real_items - 1)\n            per_position = (beta * softplus(-pos) + softplus(neg).sum(-1)) / 33.0\n            loss = per_position[baseline_supervised_mask(batch)].mean()\n        else:\n            # Baseline and A retain the same loss, negatives and examples.\n            loss = unchanged_baseline_loss(model, features, batch)\n        optimize_with_declared_parameter_groups(loss)\n        checkpoint_and_stop_within_epoch_and_charged_time_limits()\n\n    save_complete_checkpoint_config_mapping_optimizer_and_rng_under_trial_directory()\n    write_predictor_using_identical_model_implementation()\n    verify_causality_bounds_gradients_reload_routes_and_score_parity()\n    run_compatible_diagnosis_and_required_training_user_simulator()\n    run_budgeted_no_retraining_controls_as_diagnostics_only()\n\n# Three candidates: baseline, retrieval A, RecHarness-sampler gBCE B.\n# Training caps: 12,000 GPU-seconds/candidate, 3,000/category.\n# Reserve: 7,200 GPU-seconds for every remaining GPU activity and failure.\n# Select among terminal complete four-category bundles only, using pinned macro HR@10.\n# Ties: baseline, A, B. Freeze export before the host's held-out evaluation.",
+    "originality": {
+      "score": 3,
+      "positive": "The exact combination of latest-item kernel retrieval, positional decay and explicit mass shrinkage defines a falsifiable adaptation beyond the previous recent/full mean residual.",
+      "negative": "STAMP, SASRec and temporal-attention methods provide close precedents; null-value normalization also precedes the shrinkage interpretation. The contribution is an experimentally specific combination rather than a new model class."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "A compact branch can support controlled studies of relevance-specific historical reinforcement, abstention-like attenuation and the distinction between retaining interests and activating them.",
+      "negative": "Retrieval mass is endogenous and sensitive to anisotropy, popularity, duplicates and history length. Practical utility remains unobserved, and attribution requires independently trained controls beyond the initial allocation."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "The main architecture uses standard masked matrix operations and one scalar while retaining tensor features, existing item embeddings and dot-product inference.",
+      "negative": "Quadratic retrieval, shared-gradient attribution, sampler-specific gBCE, causal chronology, diagnostic controls, budget accounting and generated-predictor parity make the complete experiment more demanding than the original rating suggested."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Provides the causal self-attention backbone and item dot-product scoring used by the baseline.",
+        "Already performs query-dependent retrieval over causal histories, providing a close architectural precedent."
+      ],
+      "limitations": [
+        "Its attention does not implement the proposed raw-item positive kernel with explicit mass shrinkage.",
+        "Interaction prediction does not verify compatibility, ownership or unmet needs."
+      ]
+    },
+    {
+      "title": "STAMP: Short-Term Attention/Memory Priority Model for Session-based Recommendation",
+      "link": "https://www.kdd.org/kdd2018/accepted-papers/view/stamp-short-term-attentionmemory-priority-model-for-session-based-recommend",
+      "contributions": [
+        "Conditions attention on the latest interaction and session context.",
+        "Provides a closer precedent for latest-item-conditioned retrieval than generic history pooling."
+      ],
+      "limitations": [
+        "Does not establish novelty for latest-item querying itself.",
+        "Its mechanism and session setting do not establish gains for this precise kernel, shrinkage rule or benchmark."
+      ]
+    },
+    {
+      "title": "Time Interval Aware Self-Attention for Sequential Recommendation",
+      "link": "https://jiachengli1995.github.io/files/wsdm20.pdf",
+      "contributions": [
+        "Adds learned time-interval and positional representations to sequential attention.",
+        "Clarifies the distinction between elapsed-time modeling and positional interaction age."
+      ],
+      "limitations": [
+        "Does not justify a fixed exponential decay over interaction counts as optimal.",
+        "Temporal conditioning does not identify causal user intent."
+      ]
+    },
+    {
+      "title": "gSASRec",
+      "link": "https://arxiv.org/abs/2308.07192",
+      "contributions": [
+        "Studies generalized BCE calibration and increased negative sampling while retaining SASRec.",
+        "Provides a strong objective-focused alternative for weak ranking separation.",
+        "The supplied evidence reports a recommended configuration of K=256 and t=0.75."
+      ],
+      "limitations": [
+        "Its findings do not identify the cause of Electronics’ supplied diagnostic margins.",
+        "Calibration does not identify false negatives or directly model supported current intent.",
+        "K=32 is a custom experimental choice, and history-excluding sampling changes the calibration setting."
+      ]
+    },
+    {
+      "title": "Official gSASRec PyTorch implementation",
+      "link": "https://github.com/asash/gSASRec-pytorch",
+      "contributions": [
+        "Specifies the positive-logit transformation, float64 numerical handling and averaging across K+1 candidates.",
+        "Uses independent uniform sampling with replacement over real item IDs, allowing duplicates, target collisions and history items.",
+        "Provides implementation details needed to distinguish an official reproduction from a RecHarness-sampler variant."
+      ],
+      "limitations": [
+        "Uses alpha=K/(N−1) despite sampling from all N real items.",
+        "The unclipped algebraic loss is not numerically identical to the implementation’s clamped transformation at extremes.",
+        "Retaining its beta does not correct a different history-filtered negative distribution."
+      ]
+    },
+    {
+      "title": "DuoRec",
+      "link": "https://arxiv.org/abs/2110.05730",
+      "contributions": [
+        "Documents representation degeneration in sequential recommendation.",
+        "Motivates inspecting embedding geometry before interpreting similarity-based retrieval mass."
+      ],
+      "limitations": [
+        "Does not establish severe degeneration in the supplied four datasets.",
+        "Embedding geometry diagnostics alone do not establish recommendation diversity or explain ranking errors."
+      ]
+    },
+    {
+      "title": "Gradient analysis of popularity bias",
+      "link": "https://arxiv.org/abs/2211.01154",
+      "contributions": [
+        "The supplied search summary describes frequency-dependent gradient magnitudes and directions.",
+        "Motivates examining retrieval mass and score changes by training-item frequency."
+      ],
+      "limitations": [
+        "Does not demonstrate that popularity causes errors in the proposed branch.",
+        "Frequency correlations require controls before being interpreted as shortcut learning."
+      ]
+    },
+    {
+      "title": "Attention Is Off By One / softmax₁",
+      "link": "https://www.evanmiller.org/attention-is-off-by-one.html",
+      "contributions": [
+        "Proposes an attention normalization with a null-value option.",
+        "Provides an algebraic analogy for attenuating the weighted mean by W/(1+W)."
+      ],
+      "limitations": [
+        "The proposed retrieval kernel is not the same as exponential softmax₁ attention.",
+        "The normalization analogy supplies no benchmark evidence or calibrated-confidence interpretation."
+      ]
+    },
+    {
+      "title": "Sigmoid-attention research",
+      "link": "https://arxiv.org/abs/2409.04431",
+      "contributions": [
+        "The supplied search summary emphasizes normalization and initialization in alternatives to softmax attention."
+      ],
+      "limitations": [
+        "Does not validate the proposed positive-similarity kernel or its initialization on this benchmark."
+      ]
+    },
+    {
+      "title": "Gradient Starvation",
+      "link": "https://arxiv.org/abs/2011.09468",
+      "contributions": [
+        "Explains how readily learned predictive features can suppress learning of other features.",
+        "Motivates tracking branch-specific gradients and effective residual contributions."
+      ],
+      "limitations": [
+        "Does not prove gradient starvation occurs in this shared-embedding residual.",
+        "Small branch gradients alone do not identify their cause."
+      ]
+    },
+    {
+      "title": "HyperHawkes",
+      "link": "https://evazangerle.at/publication/peintner-www-2025/",
+      "contributions": [
+        "The supplied search summary describes latent-intent discovery, recurring-intent dynamics and short-term attention mixtures.",
+        "Motivates separating retained preferences from currently active interests."
+      ],
+      "limitations": [
+        "A more elaborate intent model increases implementation and optimization cost.",
+        "The supplied evidence does not establish performance under this pinned benchmark."
+      ]
+    },
+    {
+      "title": "Recformer",
+      "link": "https://arxiv.org/abs/2305.13731",
+      "contributions": [
+        "Combines textual item representations with sequential recommendation and pretraining.",
+        "The supplied search summary reports a weaker no-pretraining ablation."
+      ],
+      "limitations": [
+        "Reported pretrained results do not establish gains for a randomly initialized text encoder under this task’s restrictions.",
+        "Text similarity alone does not establish compatibility or purchase utility."
+      ]
+    },
+    {
+      "title": "SCRM",
+      "link": "https://arxiv.org/abs/2312.14957",
+      "contributions": [
+        "The supplied search summary describes separate relationship graphs from click and purchase sequences with denoising and relationship constraints."
+      ],
+      "limitations": [
+        "The required behavior distinctions are unavailable in the shared task.",
+        "Observed sequential association cannot be treated as a verified complement label."
+      ]
+    }
+  ]
+}

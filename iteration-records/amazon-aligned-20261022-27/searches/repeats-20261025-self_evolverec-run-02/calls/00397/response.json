@@ -1,0 +1,132 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting point.** (1) Feedback favors recent, repeated interests over incidental associations; recency alone does not identify repetition. (2) Sampled margins depend on score scale and negatives, so selection must use pinned macro validation HR@10. (3) Histories cannot establish ownership, compatibility, or rejection motives; retain unknown outcomes.\n\n**Related work.** (1) BSARec [1] motivates investigating oversmoothing, without establishing that pooling fixes it. (2) Measuring Recency Bias [2] motivates recent/distant perturbations and shortcut checks. (3) Repetition and Exploration [3] distinguishes repetition shortcuts from useful exploration. (4) HGN, SHAN, HAM, and ANIIP [4–7] establish pooling/fusion precedents; their different protocols prevent transferring reported gains.\n\nThese insights define three directions: representation adaptation, controlled sensitivity diagnosis, and evidence-grounded interpretation.\n\n### Framework\n\n| Layer | Existing approach | Proposed addition | Remaining uncertainty |\n|---|---|---|---|\n| Representation | SASRec features | Zero-initialized recent-history residual | Recency benefit versus shortcut |\n| Diagnosis | Cosines and sampled margins | Matched pooling controls; recent/distant edits | Sensitivity is not preference causality |\n| Interpretation | Broad-relatedness feedback | Supported/contradicted/unknown evidence | Ownership and traits remain unobserved |\n\n### Candidate ideas\n\nScores are originality/potential/implementation difficulty; difficulty 10 means hardest.\n\n- **Recent-history residual [1,2,4–8]: 3/6/3.** Originality: interpretable adaptation; strong precedents. Potential: cheap falsifiable intervention; vulnerable to recency shortcuts. Difficulty: small branch; causal windows and predictor alignment need care.\n- **Position-balanced masking consistency [2]: 5/6/5.** Originality: controlled augmentation; familiar regularization. Potential: reduces incidental dependence; may erase useful transitions. Difficulty: simple masking; additional forwards consume budget.\n- **Separate repeat/exploration scores [3]: 4/7/6.** Originality: tailored separation; established concept. Potential: addresses shortcuts; repeated purchases may be sparse. Difficulty: modular heads; routing/calibration complicate training.\n\n### Selected idea: gated recent-history residual\n\nAt 0% progress, retain the smallest falsifiable intervention, revised to preserve baseline logits initially. Additional normalization of the SASRec skip path would change its scoring geometry even at zero gate [9].\n\n```python\nh = sasrec(sequence)              # unchanged baseline features\nr = causal_pool(raw_item_emb(sequence), window=5, decay=1)\nz = h + alpha * r                # alpha initialized exactly zero\nlogits = z @ candidate_embeddings.T\n```\n\nUse a separate scalar per dataset. At position t, pool only t through t−4, exclude padding, renormalize weights, and return zero for empty windows; predict t+1. Use raw, unscaled embeddings, no additional normalization/dropout, and unchanged baseline input/output scaling. Keep the branch nonzero so the zero gate receives gradients [8]. Exponential weights allocate approximately 87% to the newest two items; this is a recency hypothesis, not repeated-interest modeling.\n\nCompare unchanged baseline, last-item, uniform-five, and exponential-five residuals with identical fusion/settings; defer learned nonnegative decay until justified. Match backbone initialization, data order, optimizer, epochs, and checkpoint selection; avoid shifting backbone RNG. Verify initial evaluation logits match baseline. Report category HR@10, gates, branch/base norms, branch removal, and recent/distant perturbations. HRLI requires a separate seen-inclusive ranking; unseen-only HRLI is zero by construction [2]. Diagnostics measure dependence, not causal preferences.\n\nPreserve seeds 0/42, splits, four-category routing, single GPU, `os.environ['GAGC_DATA_DIR']`, trial-local artifacts, and the 200-epoch environment default. Select only by pinned macro validation HR@10. Update checkpoint configuration, predictor writer, and compatibility features. Preserve the diagnosis API, restore model mode, and mark empty samples unavailable. All runs consume the shared 43,200 GPU-second budget; no improvement is claimed before evaluation.\n\nReferences: [1] BSARec; [2] Measuring Recency Bias; [3] Repetition and Exploration; [4] HGN; [5] SHAN; [6] HAM; [7] ANIIP; [8] ReZero; [9] Layer Normalization.",
+  "idea": {
+    "description": "Add a zero-initialized, dataset-specific scalar residual from a causal recent-item pool to unchanged SASRec features, with matched last-item and uniform-pooling controls.",
+    "motivation": "Qualitative feedback suggests insufficient attention to recent interests, but the original exponential pool mostly emphasizes the latest item. A function-preserving residual tests this hypothesis cheaply while acknowledging established pooling and fusion precedents.",
+    "implementation_notes": "Retain the baseline SASRec feature computation, loss, optimizer, embedding scales, data order, and checkpoint-selection procedure. For every position, pool raw, unscaled item embeddings from that position and up to four preceding positions; mask padding, renormalize weights, and return zero for empty windows. Add alpha times this pool directly to the baseline feature, with one unconstrained scalar alpha initialized to zero per dataset; do not normalize the skip path or zero the pool. The learned scalar can become negative, so interpret it as a residual coefficient rather than a probability. Use no additional branch normalization or dropout in the initial experiment. Compare no branch, last-item pooling, uniform-five pooling, and exponential-five pooling under identical fusion and training settings; learned nonnegative decay is a subsequent experiment, not an additional initial search dimension. Construct or load the backbone before introducing new parameters, preserving its RNG stream and training data order. Verify evaluation-mode logits agree with the baseline at initialization within numerical tolerance. Record the selected epoch, category-level validation HR@10, macro HR@10, alpha, and the norms of h, r, and alpha*r. Validation comparisons share fixed candidates and seeds; any paired user bootstrap measures evaluation uncertainty, not training-seed variability. Freeze the control list before examining results to limit validation-driven overfitting. Run lightweight branch-removal and recent/distant perturbation diagnostics with fixed candidates and unchanged-history numerical controls; treat these as dependence measurements. A separately trained last-item model and seen-inclusive HRLI are optional budgeted diagnostics, not substitutes for the pinned evaluator. Update the predictor writer and checkpoint configuration to load the same architecture. Expose blended per-position features through log2feats and the actual module through view.model; preserve item_emb, predict_score, user_train, meta_data, review_data, and DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. Restore model mode after probes and represent empty measurements explicitly as unavailable. Never access unavailable metadata fields, reviews, hidden test files, or inferred simulator traits. Preserve all four datasets, preprocessing seed 0, training seed 42, the SASREC_EPOCHS environment default of 200, DATA_DIR = os.environ['GAGC_DATA_DIR'], single-GPU execution, trial-local artifacts, and the shared 43,200 GPU-second budget.",
+    "pseudocode": "For each dataset, initialize the unchanged SASRec backbone using the baseline seed procedure.\nCreate alpha = Parameter(0.0), without consuming random numbers.\nFor each training batch:\n  h = baseline_log2feats(sequence)\n  e = raw_item_embedding(sequence)\n  For each position t:\n    ids = sequence[max(0,t-4):t+1]\n    weights = exp(-age_in_positions), masked where ids == 0\n    r_t = weighted_sum(e_window) / sum(weights), or zero if empty\n    z_t = h_t + alpha * r_t\n    Score the baseline positive and negative targets with unchanged output embeddings.\n  Optimize the unchanged baseline loss.\nAt inference, apply the identical causal pool and residual at the baseline prediction position.\nBefore training, verify alpha=0 reproduces baseline evaluation logits.\nCompare baseline, last-item residual, uniform-five residual, and exponential-five residual using matched settings and pinned macro validation HR@10.\nSave architecture, pooling configuration, scalar, and backbone state; generate the matching working/predict.py.",
+    "originality": {
+      "score": 3,
+      "positive": "Combines a function-preserving residual with a focused diagnostic and ablation protocol for this benchmark.",
+      "negative": "Recent-item aggregation, additive item–item scoring, fusion, and zero-initialized residual gates have substantial precedents."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "Offers an inexpensive foundation for testing whether direct recent-item information adds value beyond SASRec before pursuing adaptive pooling.",
+      "negative": "The scalar cannot distinguish useful repetition from noise, establish compatibility, or prevent last-item shortcuts; any benefit may be dataset-specific."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Requires a small causal pooling operation and one scalar per dataset, without additional encoder passes.",
+      "negative": "Faithful controls, padding behavior, RNG preservation, checkpoint loading, predictor generation, and diagnosis alignment require careful implementation."
+    }
+  },
+  "related_work": [
+    {
+      "title": "SASRec: Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Provides the baseline adaptive sequence encoder and shared item-embedding scoring architecture.",
+        "Its original implementation distinguishes scaled sequence-input embeddings from unscaled output embeddings and normalizes final sequence features."
+      ],
+      "limitations": [
+        "Does not establish benefits from the proposed five-item residual.",
+        "The actual RecHarness implementation must govern baseline behavior when implementation details differ."
+      ]
+    },
+    {
+      "title": "BSARec (AAAI 2024)",
+      "link": "https://ojs.aaai.org/index.php/AAAI/article/view/28747",
+      "contributions": [
+        "Identifies oversmoothing as a concern in attention-based sequential recommendation."
+      ],
+      "limitations": [
+        "Does not establish oversmoothing in this trained baseline or show that recent-item pooling remedies it."
+      ]
+    },
+    {
+      "title": "Measuring Recency Bias (2024)",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "Motivates quantifying recent-item dependence, including last-observed-item recommendation frequency."
+      ],
+      "limitations": [
+        "High last-item recommendation frequency alone does not establish harmful shortcuts.",
+        "HRLI requires seen-inclusive diagnostic ranking and becomes zero under unseen-only filtering."
+      ]
+    },
+    {
+      "title": "Repetition and Exploration (2023)",
+      "link": "https://staff.fnwi.uva.nl/m.derijke/wp-content/papercite-data/pdf/li-2023-repetition.pdf",
+      "contributions": [
+        "Reports repetition shortcuts and shared-embedding bias."
+      ],
+      "limitations": [
+        "Repeated item IDs do not directly measure recurring semantic interests, ownership, or replenishment needs."
+      ]
+    },
+    {
+      "title": "Hierarchical Gating Networks for Sequential Recommendation (HGN)",
+      "link": "https://arxiv.org/abs/1906.09217",
+      "contributions": [
+        "Combines user-conditioned gates, recent-item pooling, long-term user embeddings, and additive item–item scores."
+      ],
+      "limitations": [
+        "Provides strong precedent that reduces the proposed fusion idea's originality.",
+        "Its training and evaluation protocols differ from this benchmark, and reported ablations do not isolate gating against an otherwise identical ungated mean pool."
+      ]
+    },
+    {
+      "title": "Sequential Recommender System Based on Hierarchical Attention Network (SHAN)",
+      "link": "https://www.ijcai.org/Proceedings/2018/0546.pdf",
+      "contributions": [
+        "Uses hierarchical attention to combine historical and recent interests."
+      ],
+      "limitations": [
+        "Uses attention-based fusion and different datasets rather than the proposed scalar residual on SASRec."
+      ]
+    },
+    {
+      "title": "HAM",
+      "link": "https://arxiv.org/abs/2002.11890",
+      "contributions": [
+        "Studies mean-pooled longer and recent histories, motivating simple pooling controls."
+      ],
+      "limitations": [
+        "Architectural and protocol differences prevent attributing its comparisons specifically to pooling or gating."
+      ]
+    },
+    {
+      "title": "ANIIP",
+      "link": "https://peerj.com/articles/cs-867.pdf",
+      "contributions": [
+        "Studies recency attenuation and normalization in item–item recommendation."
+      ],
+      "limitations": [
+        "Its normalization operates on matching scores rather than LayerNorm.",
+        "Its published results do not predict gains under pinned sampled HR@10."
+      ]
+    },
+    {
+      "title": "ReZero is All You Need: Fast Convergence at Large Depth",
+      "link": "https://arxiv.org/abs/2003.04887",
+      "contributions": [
+        "Provides precedent for zero-initialized residual coefficients that preserve the initial skip-path function."
+      ],
+      "limitations": [
+        "Does not establish recommendation gains.",
+        "Zeroing both branch output and coefficient can block learning; the proposed pool must remain nonzero."
+      ]
+    },
+    {
+      "title": "Layer Normalization",
+      "link": "https://arxiv.org/abs/1607.06450",
+      "contributions": [
+        "Defines feature centering, rescaling, and learned affine transformations."
+      ],
+      "limitations": [
+        "LayerNorm is not an identity at unit gain and zero bias; adding it to the baseline skip path can alter candidate rankings."
+      ]
+    }
+  ]
+}

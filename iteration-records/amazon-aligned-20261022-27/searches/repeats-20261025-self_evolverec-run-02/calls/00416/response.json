@@ -1,0 +1,128 @@
+{
+  "markdown_report": "## Insights\n\n**Starting evidence.** (1) Training negatives lose at 92.85–97.87% of measured positions; stronger comparisons merit testing, without proving overfitting. (2) Feedback favors repeated, specific evidence, motivating history-use experiments without assuming recency helps. (3) Unsupported residual probes require architecture verification and export parity before interpretation.\n\n**Related evidence.** (1) Oh–Cho [1] and Spotify [2] motivate separating recency, pairwise transitions and accumulated evidence. (2) Krichene–Rendle [3] establish evaluation-sampling limitations, not training-loss superiority. (3) ANAH [4] supports evidence-linked diagnosis without inferring ownership. (4) gSASRec [5] finds no universal softmax advantage under matched negative counts; loss and negative count need separate controls.\n\n## Framework and directions\n\n| Direction | Observable evidence | Proposed intervention | Main uncertainty |\n|---|---|---|---|\n| Training discrimination | Sampled margins and ranks | Matched multiple-negative objectives | Generalization, false negatives |\n| History aggregation | Repetition, timestamps, perturbations | Recent/history residual | Excessive recency |\n| Evidence grounding | Exact title/description spans | Auditable diagnostic flags | Missing prerequisites |\n\n## Candidate ideas\n\nScores are originality/potential/difficulty; higher difficulty means harder implementation. Assessments follow that order.\n\n| Idea | Scores | Positive assessment | Negative assessment |\n|---|---|---|---|\n| Matched multiple-negative objectives [5] | 2/6/5 | Isolated comparison; useful foundation; unchanged inference | Established; uncertain gains; sampling/autograd integration |\n| Zero-initialized recent residual [1,2] | 3/6/3 | Controlled initialization; reusable branch; compact change | Incremental; potentially redundant; export integration |\n| Evidence-linked rejection audit [4] | 4/5/4 | Useful synthesis; transferable audit; bounded scope | Mainly annotation; indirect accuracy benefit; ambiguous evidence |\n\n## Selected idea: multiple-negative competition\n\nAt 0% progress, retain the minimal loss intervention but compare three arms: baseline BCE-1, BCE-32 and softmax-32. Reuse identical negative draws between the latter two. This separates negative-count and objective changes; existing margins predict neither success nor immediate usefulness.\n\n```text\nH = SASRec(sequence); Z = detach(H).requires_grad_()\nzero_grad(); N = count(nonpadding targets)\nfor position chunk, keeping all candidates together:\n    negatives = unique_uniform(32, exclude=complete_training_history + target)\n    logits = score(Z[chunk], fresh_attached_candidate_embeddings)\n    backward(sum(position_losses(logits)) / N)\nbackward(H, Z.grad); apply_baseline_update()\n```\n\nUse masked shortfalls, category-local IDs and stable sample identifiers; preserve user IDs internally before exposing diagnostic batches. BCE-32 averages one positive and K negative terms by K+1. Softmax uses one 33-way competition without temperature tuning. Immediate chunk backward releases scoring graphs; tied embeddings receive scorer and encoder gradients [6].\n\nPreserve seeds, splits, routing, DATA_DIR, epoch settings and trial-local artifacts. Predeclare checkpoint cadence, ties and validation queries; select solely by pinned four-category macro validation HR@10. Match optimizer settings and report compute. Track ranks, popularity slices, negative-sampling costs and per-category outcomes; unknown positives remain possible negatives. Retain DiagnosisProbe, null unavailable measurements, empty category lists, twenty users’ unseen-item recommendations and exported-score parity. Charge all work to the shared budget. Full-catalog gains remain unestablished.\n\nReferences: [1] https://arxiv.org/abs/2409.09722; [2] https://research.atspotify.com/2026/10/do-sequential-recommendation-benchmarks-require-higher-order-sequence-modelling; [3] https://research.google/pubs/on-sampled-metrics-for-item-recommendation/; [4] https://aclanthology.org/2024.acl-long.442/; [5] https://arxiv.org/html/2308.07192; [6] https://docs.pytorch.org/docs/stable/generated/torch.autograd.backward.html.",
+  "idea": {
+    "description": "Test 32-negative softmax training for the unchanged four-dataset SASRec architecture, using baseline BCE-1 and matched-negative BCE-32 controls to distinguish objective effects from increased negative competition.",
+    "motivation": "Strong separation against individual sampled training negatives does not establish generalization or identify the cause of broad recommendations. Multiple-negative competition is a feasible early-stage intervention, but gSASRec's matched-negative results do not support assuming softmax superiority. The experiment therefore targets the pinned macro validation HR@10 while treating practical usefulness and full-catalog ranking as separate questions.",
+    "implementation_notes": "Retain sasrec_perdataset, Movies_and_TV, Industrial_and_Scientific, Electronics and CDs_and_Vinyl; preprocessing seed 0, training seed 42, DATA_DIR = os.environ['GAGC_DATA_DIR'], unchanged splits and category-local item mappings, and SASREC_EPOCHS with environment default 200. Preserve baseline architecture, optimizer, regularization, scoring scale, precision and checkpoint rules initially. Plan baseline BCE-1, BCE-32 and softmax-32 with equal declared tuning effort; do not describe BCE-1 versus softmax-32 alone as an isolated loss comparison. Report epochs, updates, GPU seconds and validation queries because matched updates do not imply matched compute. Use a predefined shared-budget allocation and retain time for diagnostics and export verification; incomplete runs must be labeled and included in the cost ledger.\n\nKeep user IDs in internal dataset records or the collator. Never infer identity from truncated sequences. Diagnostic batches retain (None, sequence, positive, negative) with B x L tensors, while training's multiple negatives use a separate B x L x K representation or on-demand position chunks. Define eligible IDs as 1..category_catalog_size excluding the user's complete training-history set and the active target. Do not substitute causal-prefix exclusion, consult validation/test interactions, or sample across categories. Use bounded uniform rejection without replacement, then fill from an exact sorted remaining eligible array using rng.choice(replace=False). Record shortfalls when fewer than 32 items are eligible, mask unused logits, and exclude padding. For zero eligible negatives, use a differentiable zero data loss and report the count. Use dedicated NumPy SeedSequence-derived generators keyed by category, epoch, stable example identifier and position, plus deterministic batch ordering; record software versions. Match draws between BCE-32 and softmax-32, and use the first draw for BCE-1 when this preserves the baseline sampler's uniform exclusion policy.\n\nKeep baseline BCE-1's exact reduction documented. Define BCE-32 per position as [softplus(-positive_logit) + sum(softplus(valid_negative_logits))] / (K_valid + 1), then average over all nonpadding target positions. Separately averaging positive and negative losses would change their relative weights and is a different intervention. Define softmax-32 as cross-entropy over the positive and all valid negatives together, with padding logits masked to negative infinity. Uniform sampled softmax here is a candidate-set objective, not an unbiased full-catalog softmax estimator. Do not split a position's candidate denominator, introduce normalization or temperature tuning, or silently alter the baseline regularizer.\n\nTo bound candidate-scoring memory, compute encoder features H once, create Z = H.detach().requires_grad_(True), zero parameter gradients once, and process valid positions in chunks. For every chunk, freshly look up graph-connected candidate embeddings, compute its summed position losses divided by the total valid-position count N, and backward immediately. This accumulates Z.grad and direct scoring-parameter gradients while freeing the chunk scoring graph. After all chunks, call H.backward(Z.grad), apply the baseline regularizer once where applicable, preserve baseline clipping behavior, and step once. Tied item embeddings must receive both direct candidate and encoder gradients. Never detach candidate embeddings or precompute their graph-connected lookups across chunks. The encoder graph, feature gradients and parameter gradients still occupy memory; this is not constant-memory training. Handle batches with no valid targets explicitly. If mixed precision is used, keep loss scaling consistent across chunk and encoder backward, unscale once, and avoid double scaling the accumulated feature gradient. Verify loss and parameter-gradient equivalence against an unchunked small deterministic batch, including an uneven final chunk and tied embeddings, before spending full training budget.\n\nPredeclare validation cadence, eligible checkpoints, patience, deterministic ties, maximum validation queries and selection across the three complete four-category configurations. Use existing baseline rules where available. Select only by the host's pinned macro validation HR@10 with 200 users per category, 99 unique negatives and evaluation seed 42. Report per-category HR and training-only popularity/history-length slices with sizes; margins and logit spread remain scale-dependent diagnostics. Paired user-bootstrap intervals, when host hit indicators are available, condition on trained models and fixed candidates and do not correct repeated-selection bias. Uniform unobserved negatives may be relevant despite complete-history exclusion; check popularity associations and avoid claims that the intervention resolves compatibility, duplication or intent.\n\nRetain DiagnosisProbe(view, device), run_full_diagnosis(train_loader), metrics and metric_definitions, actual trained view.model, item_emb, log2feats, predict_score, user_train, meta_data and review_data hooks. Preserve bounded embedding and sampled-margin probes, use separate diagnostic random streams and restore every module's prior training state. Return null for unavailable measurements and keep unavailable category lists empty. Produce full-catalog unseen-item recommendations for five real training users per category. Ground qualitative claims in available history IDs, timestamps and exact title/description spans; unavailable reviews, ratings, categories, prices, stores, ownership and simulator traits remain unknown. Explicit feedback is required for immediate-choice claims.\n\nKeep artifacts beneath the trial directory. Record configuration, code, seeds, runtime, negative-exclusion policy and loss reductions; save model and optimizer states, scheduler state where applicable and RNG states for resumption. The inference architecture remains SASRec, but the predictor writer must export the actual selected weights and all four routes. Reload working/predict.py and verify scores within declared precision-appropriate tolerances, top-10 rankings, padding, truncation, item mappings and routing. Charge training, diagnostics, failures and export checks to the shared 43,200 GPU-second budget. No validation or full-catalog improvement is established in advance.",
+    "pseudocode": "arms = [baseline_BCE_1, BCE_32, softmax_32]\nfor arm in predeclared_budgeted_order:\n    for category in four_fixed_categories:\n        initialize identical baseline SASRec using training seed 42\n        preserve preprocessing seed 0 and baseline epoch environment\n        for epoch in declared_schedule:\n            for internal_batch in deterministic_training_order:\n                users, sequence, positive = internal_batch\n                valid_indices = nonzero(positive != 0)\n                N = len(valid_indices)\n                if N == 0: continue\n                optimizer.zero_grad(set_to_none=True)\n                H = model.log2feats(sequence)\n                Z = H.detach().requires_grad_(True)\n                for indices in position_chunks(valid_indices):\n                    negatives, mask = sample_uniform_without_replacement(\n                        category_local_catalog,\n                        exclude=complete_training_history_of_each_user_and_target,\n                        K=1 if arm == baseline_BCE_1 else 32,\n                        rng=stable_sample_position_stream(category, epoch, indices))\n                    # Matching 32-negative arms use identical candidates.\n                    # Lookups remain attached and are created inside this chunk.\n                    logits = score_with_fresh_candidate_lookups(Z[indices], positive[indices], negatives)\n                    if arm == softmax_32:\n                        mask_unused_negative_logits_to_minus_infinity(logits, mask)\n                        losses = cross_entropy(logits.float(), positive_class_zero, reduction='none')\n                    elif arm == BCE_32:\n                        losses = (softplus(-logits[:, 0]) + sum_masked(softplus(logits[:, 1:]), mask)) / (1 + mask.sum(-1))\n                    else:\n                        losses = exact_baseline_BCE_reduction_per_position(logits, mask)\n                    losses = zero_data_loss_for_positions_without_eligible_negatives(losses, mask)\n                    (losses.sum() / N).backward()\n                H.backward(Z.grad)\n                backward_baseline_regularizer_once_if_present()\n                apply_baseline_gradient_clipping_if_present()\n                optimizer.step()\n            save_and_validate_only_at_declared_checkpoints()\n    evaluate_complete_four_category_configuration_with_pinned_macro_HR10()\nselect_configuration_using_declared_macro_validation_and_tie_rules()\nrun_bounded_compatible_diagnostics_and_required_training_user_recommendations()\nexport_selected_four_models_through_predictor_writer()\nreload_export_and_verify_scores_top10_masks_item_ids_and_dataset_routing()\nrecord_all_costs_in_shared_search_budget()",
+    "originality": {
+      "score": 2,
+      "positive": "The controlled design isolates negative-count and objective effects within the task's observable diagnostic gap.",
+      "negative": "Multiple-negative softmax and matched-negative comparisons are established, including in gSASRec."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "A reproducible comparison can support later research on negative sampling, false negatives and history-conditioned ranking across domains.",
+      "negative": "It may improve the sampled benchmark through popularity shortcuts without improving full-catalog recommendations or the specific failures identified in feedback."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "The encoder and deployed inference architecture remain unchanged, keeping the intervention localized to training.",
+      "negative": "Reliable user-aware sampling, deterministic streams, matched reductions and memory-bounded tied-embedding gradients require more work than a simple loss replacement."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Oh and Cho (2024): excessive recency emphasis in sequential recommendation",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "The supplied search summary reports excessive recency emphasis and improvements after mitigation."
+      ],
+      "limitations": [
+        "Does not establish that adding recency pooling will improve this task."
+      ]
+    },
+    {
+      "title": "Do sequential recommendation benchmarks require higher-order sequence modelling?",
+      "link": "https://research.atspotify.com/2026/10/do-sequential-recommendation-benchmarks-require-higher-order-sequence-modelling",
+      "contributions": [
+        "The supplied summary reports strong pairwise transition baselines, motivating separate checks of last-item and accumulated-history effects."
+      ],
+      "limitations": [
+        "Reported benchmark findings do not establish outcomes for these four Amazon datasets."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled evaluation can change model comparisons, motivating narrow interpretation of the pinned benchmark."
+      ],
+      "limitations": [
+        "Analyzes evaluation sampling and does not establish the effectiveness or superiority of the proposed training loss."
+      ]
+    },
+    {
+      "title": "ANAH (2024)",
+      "link": "https://aclanthology.org/2024.acl-long.442/",
+      "contributions": [
+        "Provides reference-linked annotation principles useful for grounding diagnostic claims in observable text."
+      ],
+      "limitations": [
+        "Does not validate recommendation-specific labels or reveal latent preferences and ownership."
+      ]
+    },
+    {
+      "title": "gSASRec: Petrov and Macdonald (2023)",
+      "link": "https://arxiv.org/html/2308.07192",
+      "contributions": [
+        "The supplied section 6.2.4 summary compares BCE, generalized BCE and sampled softmax with matched uniform negative counts.",
+        "Provides a direct precedent for separating loss effects from negative-count effects and specifying BCE weighting."
+      ],
+      "limitations": [
+        "Reports no universal softmax advantage.",
+        "Its full-catalog results do not predict the outcome under this pinned sampled Amazon evaluation."
+      ]
+    },
+    {
+      "title": "Turning Dross Into Gold Loss",
+      "link": "https://arxiv.org/abs/2309.07602",
+      "contributions": [
+        "Supports investigating softmax-based SASRec training."
+      ],
+      "limitations": [
+        "The supplied summary notes that the headline full-softmax versus one-negative BCE comparison does not isolate objective choice from negative count."
+      ]
+    },
+    {
+      "title": "Original SASRec sampler",
+      "link": "https://github.com/kang205/SASRec/blob/master/sampler.py",
+      "contributions": [
+        "Retains user identity and excludes the complete training history during negative sampling."
+      ],
+      "limitations": [
+        "The diagnostic adapter exposes None in the user slot, so internal training records must preserve identity separately."
+      ]
+    },
+    {
+      "title": "PyTorch autograd backward documentation",
+      "link": "https://docs.pytorch.org/docs/stable/generated/torch.autograd.backward.html",
+      "contributions": [
+        "Documents gradient accumulation and vector-Jacobian backward used by the detached-feature chunking strategy."
+      ],
+      "limitations": [
+        "The proposed two-stage backward implementation still requires explicit equivalence checks for the actual scorer, regularizer and precision settings."
+      ]
+    },
+    {
+      "title": "NumPy parallel random number generation",
+      "link": "https://numpy.org/doc/stable/reference/random/parallel.html",
+      "contributions": [
+        "Documents SeedSequence-based random streams suitable for reproducible sampling."
+      ],
+      "limitations": [
+        "Worker seeds alone do not guarantee deterministic asynchronous batch consumption or stable sample-to-stream assignment."
+      ]
+    },
+    {
+      "title": "On the Effectiveness of Sampled Softmax",
+      "link": "https://arxiv.org/html/2201.02327",
+      "contributions": [
+        "Analyzes normalization, temperature and representation magnitudes in collaborative filtering."
+      ],
+      "limitations": [
+        "Does not provide a controlled SASRec loss comparison; normalization and temperature require separate ablations."
+      ]
+    }
+  ]
+}

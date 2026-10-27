@@ -1,0 +1,146 @@
+{
+  "markdown_report": "### Insights\n\n**Starting point.** (1) Feedback favors recent activity and repeated narrow interests; category-specific benefits remain hypotheses. (2) Embedding and training-margin probes cannot establish generalization; selection requires pinned validation HR@10. (3) Compatibility and purchase need are partially observed; missing equipment information remains unknown.\n\n**Related work.** (1) [Sequence audits](https://arxiv.org/abs/2408.12008) motivate perturbations; [availability-aware analyses](https://doi.org/10.1145/3705328.3748042) caution against interpreting sensitivity as intent. (2) [Sampling research](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/) supports fixed candidates, while [selection-bias research](https://www.jmlr.org/beta/papers/v11/cawley10a.html) limits post-selection confidence claims. (3) [TREC relations](https://trec-product-search.github.io/recommendations.html) distinguish association from compatibility, without establishing demand. (4) [Fossil](https://arxiv.org/abs/1609.09152) establishes substantial precedent for combining historical preferences and recent interactions; [SASRec](https://arxiv.org/abs/1808.09781) already contextualizes both.\n\n### Directions and framework\n\n| Direction | Observable evidence | Intervention | Limitation |\n|---|---|---|---|\n| Temporal relevance | Recent versus older history | Recent-history residual | Similarity can become a shortcut |\n| Reliable diagnosis | Paired rankings and hits | Controlled perturbations | Masking introduces distribution shift |\n| Practical suitability | Explicit title/description spans | Conflict-only pair audits | Ownership and need remain unknown |\n\n### Candidate ideas\n\nScores are originality / potential / implementation difficulty, each 0–10; higher difficulty means harder.\n\n1. **Scalar-gated recent-history residual: 3/6/3.** Originality: diagnostic integration is useful, but historical/recent mixtures have precedent. Potential: directly tests temporal feedback, but may amplify redundancy. Difficulty: small addition, but causal pooling and serialization require care.\n2. **Matched temporal perturbation probe: 4/6/4.** Originality: controls strengthen established audits, but introduce no new model class. Potential: reusable diagnostics, but sensitivity does not establish usefulness. Difficulty: existing hooks suffice, but position preservation and masking confounds complicate interpretation.\n3. **Explicit-conflict pair audit: 5/6/6.** Originality: evidence-grounded diagnosis is promising, but compatibility audits exist. Potential: addresses practical mismatch, but coverage may be sparse. Difficulty: scoring is simple, but reliable extraction is substantial.\n4. **Context-gated residual: 3/7/5.** Originality: adaptive mixing extends established gates. Potential: conditional recency may help, but adds overfitting risk. Difficulty: compact network, but requires matched scalar controls.\n\n### Selected idea: gated recent-history residual\n\nAt 0% progress, select idea 1. Add a learned scalar times the normalized mean of the latest five nonpadding embeddings to each causal SASRec feature. Initialize the scalar at zero, following [ReZero](https://arxiv.org/abs/2003.04887); normalize only the branch. This creates an explicit similarity pathway, without establishing compatibility or order reasoning.\n\nCompare baseline and intervention with identical seeds, loss, optimizer, epoch setting, and checkpoint rules. Prioritize a last-item residual control within budget; defer context gating. Select solely by four-category macro validation HR@10. Preserve paired hits and bootstrap users within categories; intervals after adaptive selection are exploratory, conditional on checkpoint and candidates.\n\nPreserve routing, splits, artifact placement, predictor parity, and `DiagnosisProbe`. Audit branch norms, margins, and matched recent/old/random masking with final items and positions fixed. Restore model mode. Report masking shift and denominators; mean-window shuffling is invariant. Neither diagnostics nor twenty qualitative users establish population gains.",
+  "idea": {
+    "description": "Add a zero-initialized, directly learned scalar residual from the last five nonpadding item embeddings to each causal SASRec representation. Keep training, generated prediction, and diagnostic scoring identical.",
+    "motivation": "Qualitative feedback suggests insufficient emphasis on recent, specific interests, but SASRec already models recent and older interactions. The residual tests whether an explicit recent-item similarity pathway helps under the pinned evaluator. This is a feasible engineering hypothesis with substantial historical precedent, rather than a new theory of intent or compatibility.",
+    "implementation_notes": "Use DATA_DIR = os.environ['GAGC_DATA_DIR']. Preserve Movies_and_TV, Industrial_and_Scientific, Electronics, and CDs_and_Vinyl, their dataset routing, original splits, preprocessing seed 0, training seed 42, and SASREC_EPOCHS environment behavior with default 200. Execute each trial on one GPU; all training, diagnostics, and failures count against the shared 43,200 GPU-second budget. Write checkpoints and generated working/predict.py beneath the trial directory. Do not access hidden test data or fetch weights or datasets.\n\nAt each training position t, pool up to five most recent nonzero item IDs at positions j <= t, including t. Define this as the latest five valid interactions, rather than five absolute slots. Use raw tied item embeddings before positional embeddings and dropout; divide by valid counts and clamp empty denominators. Apply a dedicated LayerNorm to the pooled vector, explicitly zero its output for empty prefixes, then compute z_t = h_t + alpha * normalized_pool_t. Mask padded output positions. Do not normalize the sum, which would change the encoder path at alpha=0. Initialize the directly learned scalar alpha=0 and leave the branch nonzero; alpha is unconstrained and therefore may become negative. This replaces the earlier sigmoid parameterization deliberately: sigmoid(-4) is approximately 0.018, while sigmoid(0) is 0.5, and small sigmoid gates attenuate gradients. At zero alpha the branch-specific parameters initially receive no gradient, but alpha can learn. Use the baseline optimizer settings for the new parameters and document their actual weight decay. Preserve the baseline loss, embedding initialization, optimizer, data sampler, and checkpoint rules for the primary comparison. Record branch and encoder norms, alpha, branch score contributions, and finite gradients to assess scale mismatch and learning.\n\nPredeclare a baseline and five-item scalar-residual comparison. If budget permits, prioritize an otherwise identical last-item residual; subsequent controls are ungated five-item pooling, earlier/random five-item pooling, and context-dependent gating. Score-only last-item and five-item similarity controls require no additional training. Match settings and tuning budgets; log every attempted trial and its actual compute. Improvements over last-item pooling support multi-item context, improvements over nonrecent pooling support recency, and neither establishes order reasoning. Context gating requires evidence beyond the scalar control and is deferred at this early stage. A fixed recent window and shared scalar limit extra capacity but cannot prevent overfitting or a local-similarity shortcut.\n\nUse only host-provided validation outputs for selection under the unchanged 200-users-per-category, 99-unique-negative-candidate, seed-42 benchmark. Preserve per-user hit indicators if available through the authorized evaluation interface; do not modify the evaluator to obtain them. Compute equal-weight category means and their macro average. For paired uncertainty, jointly resample each category's user indices across conditions, using 10,000 bootstrap replicates with bootstrap seed 42, then take percentile 95% intervals of macro hit differences. These estimate user-sampling uncertainty conditional on fixed checkpoints and candidates, not training-seed variability, full-catalog quality, or adaptive-selection uncertainty. Report intervals after adaptive selection as exploratory. Leave final held-out evaluation to the host.\n\nPreserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. view.model remains the actual trained nn.Module; view.item_emb exposes the trained tied embeddings; log2feats returns augmented features; predict_score uses the same trained scoring function. Preserve existing diagnostic outputs, explain that the mapped cosine score is directional alignment rather than definitive collapse, and restore the actual model's previous training mode in finally. Category metadata breakdowns remain empty; never infer unavailable categories or fabricate review content, ratings, ownership, purchase needs, or simulator traits.\n\nFor optional frozen-model perturbation audits, disable dropout and use a fixed training-user cohort. Predeclare histories with at least 11 observed interactions, mask two positions among the five most recent interactions preceding the final item, compare with two positions among earlier interactions, and include a two-position random control excluding the final item. Use ten deterministic draws per user with seed 42 and report eligible-user denominators. Retain the final observed item, target when available, candidates, padding layout, and original position IDs; never compact sequences. Use a training-supported masking mechanism if one exists. Otherwise label zero-padding perturbations as potentially out of distribution and report replacement perturbations separately, since replacement changes item content and has its own confounds. Report top-10 overlap and rank displacement on identical candidate sets; report target-rank or HR changes only when authorized target outputs exist. Do not interpret these as causal recency effects. Shuffling inside an isolated mean pool is invariant; full-model changes can still arise through SASRec.\n\nSave architecture type, window size, normalization settings, alpha, and all parameters in each category checkpoint; update the predictor writer to reconstruct exactly that architecture and preprocessing. Select the final valid sequence position consistently with the baseline padding convention. Verify eval-mode training/prediction candidate-score parity before and after loading through generated predict.py for all four routes. Check future-token invariance, padding exclusion, empty and singleton histories, finite gradients, alpha movement, exact baseline parity at initialization with matched base weights, and equality between gathered full-catalog logits and direct candidate scoring. No performance improvement is claimed before host evaluation.",
+    "pseudocode": "class RecentResidualSASRec(SASRec):\n    initialize alpha = Parameter(0.0)\n    initialize recent_norm = LayerNorm(hidden_dim)\n    window_size = 5\n\n    log2feats(sequence):\n        base = original_sasrec_log2feats(sequence)\n        embeddings = item_emb(sequence)\n        # For each t, choose the last <=5 nonzero positions j <= t.\n        pooled, counts = causal_mean_last_k_nonpadding(\n            embeddings, sequence, k=window_size)\n        branch = recent_norm(pooled)\n        branch = where(counts > 0, branch, zeros_like(branch))\n        return (base + alpha * branch) * nonpadding_mask(sequence)\n\n    # Preserve tied item scoring, baseline loss, and optimizer settings.\n\npredeclare trials, compute allocation, and baseline checkpoint rules\ntrain baseline and five-item residual with unchanged splits and required seeds\nif budget permits: train matched last-item residual control\nsave all four category checkpoints and write matching working/predict.py\nverify causal, padding, scoring, reload, and routing parity\nobtain host-provided validation outcomes using pinned users and candidates\nselect by equal-weight mean of the four category HR@10 values\nif paired hits are available:\n    for 10000 bootstrap replicates using seed 42:\n        resample users within each category jointly across compared conditions\n        compute category mean paired hit differences\n        average the four category differences equally\n    report percentile 95% interval with conditional/exploratory qualification\n\nDiagnosisProbe.run_full_diagnosis(loader):\n    prior_mode = view.model.training\n    try:\n        view.model.eval()\n        with no_grad():\n            compute existing embedding and augmented-feature margin diagnostics\n            log alpha, encoder/branch norms, and branch score contributions\n            optionally run predefined recent/old/random perturbation contrasts\n            return {metrics, metric_definitions}\n    finally:\n        view.model.train(prior_mode)",
+    "originality": {
+      "score": 3,
+      "positive": "Pairs a minimal, architecture-consistent intervention with explicit diagnostic hypotheses and controlled benchmark comparisons.",
+      "negative": "Fossil and related historical/recent mixtures establish substantial precedent; SASRec already combines temporal context, and scalar residual gating is established."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "Provides a tractable foundation for determining whether multi-item recent similarity helps across categories before investing in adaptive gating.",
+      "negative": "May amplify redundant purchases or local-similarity shortcuts; sampled validation gains need not improve full-catalog practical utility."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "The model change is small and preserves the baseline objective and item-scoring interface.",
+      "negative": "Causal valid-item pooling, masking semantics, diagnostic interpretation, and generated predictor parity require careful implementation; the broader audit costs more than the layer itself."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Does It Look Sequential? (2024)",
+      "link": "https://arxiv.org/abs/2408.12008",
+      "contributions": [
+        "Uses shuffled-history comparisons to examine sequential structure across recommendation datasets."
+      ],
+      "limitations": [
+        "Dataset-level results do not establish what a frozen encoder uses or whether this residual improves the benchmark."
+      ]
+    },
+    {
+      "title": "Disentangling User and Item Sequence Patterns (2025)",
+      "link": "https://doi.org/10.1145/3705328.3748042",
+      "contributions": [
+        "Distinguishes arbitrary history shuffling from controls respecting item first-appearance times."
+      ],
+      "limitations": [
+        "Order sensitivity can reflect item availability rather than personal intent."
+      ]
+    },
+    {
+      "title": "RecSys 2025 sampling-reliability study",
+      "link": "https://doi.org/10.1145/3705328.3748086",
+      "contributions": [
+        "Examines how candidate sampling can change model rankings."
+      ],
+      "limitations": [
+        "Does not justify changing the pinned evaluator or replacing its selection objective."
+      ]
+    },
+    {
+      "title": "TREC 2025 Product Recommendation task definitions",
+      "link": "https://trec-product-search.github.io/recommendations.html",
+      "contributions": [
+        "Separates substitutes, complements, unknown compatibility, explicit incompatibility, and insufficient evidence."
+      ],
+      "limitations": [
+        "Product relationships do not establish ownership, replacement need, or individual purchase intent."
+      ]
+    },
+    {
+      "title": "Fossil: Fusing Similarity Models with Markov Chains for Sparse Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1609.09152",
+      "contributions": [
+        "Combines normalized historical item aggregation with higher-order recent-item terms and user-specific plus global lag weights."
+      ],
+      "limitations": [
+        "Provides precedent rather than evidence for the exact SASRec residual; its lag-specific recent component differs from an unweighted mean."
+      ]
+    },
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Uses causal attention, positional embeddings, and residual connections to contextualize interaction histories."
+      ],
+      "limitations": [
+        "Its contextual representation is not an explicit stable user vector; the paper does not establish a benefit from the proposed additional similarity pathway."
+      ]
+    },
+    {
+      "title": "ReZero is All You Need: Fast Convergence at Large Depth",
+      "link": "https://arxiv.org/abs/2003.04887",
+      "contributions": [
+        "Introduces directly learned, zero-initialized residual scaling."
+      ],
+      "limitations": [
+        "Does not demonstrate recommendation gains; branch-specific gradients initially vanish under zero scaling."
+      ]
+    },
+    {
+      "title": "A Benchmark for Interpretability Methods in Deep Neural Networks",
+      "link": "https://papers.nips.cc/paper/2019/file/fe4b8556000d0f0cae99daa5c5c5a410-Paper.pdf",
+      "contributions": [
+        "ROAR highlights distribution-shift problems in feature-removal evaluations and uses retraining to assess them."
+      ],
+      "limitations": [
+        "Its retraining protocol answers a different question from frozen-model sequence perturbation sensitivity."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Analyzes discrepancies between sampled and full-catalog recommendation metrics."
+      ],
+      "limitations": [
+        "Does not provide permission to replace the task's pinned sampled HR@10 objective."
+      ]
+    },
+    {
+      "title": "Statistical Significance Tests for Machine Translation Evaluation",
+      "link": "https://aclanthology.org/W04-3250.pdf",
+      "contributions": [
+        "Provides precedent for paired bootstrap comparisons, adapted here by resampling users within each category."
+      ],
+      "limitations": [
+        "Does not establish interval calibration for this small recommendation benchmark or correct adaptive model selection."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/beta/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how optimizing a finite validation criterion can produce selection optimism."
+      ],
+      "limitations": [
+        "Bootstrapping a selected checkpoint does not remove this bias; untouched host evaluation remains necessary."
+      ]
+    },
+    {
+      "title": "Accounting for Variance in Machine Learning Benchmarks",
+      "link": "https://arxiv.org/abs/2103.03098",
+      "contributions": [
+        "Distinguishes sources of benchmark variability relevant to interpreting measured improvements."
+      ],
+      "limitations": [
+        "User bootstraps with training seed fixed at 42 cannot estimate training-seed variability."
+      ]
+    }
+  ]
+}

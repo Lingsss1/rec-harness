@@ -1,0 +1,62 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting point.** (1) The existing adapter exposes embeddings and position-level scores. Preserving these hooks enables comparable diagnostics after architecture changes. (2) Training-pair margins do not measure whether recommendations address sustained interests. Training-prefix perturbations can test reliance on recurring versus isolated interactions. (3) Feedback identifies broad relevance and unsupported compatibility assumptions. Histories establish interactions, while titles and descriptions provide only partial evidence of purpose or compatibility.\n\n**Related work.** (1) Oh and Cho [1] motivate measuring excessive recency dependence. Their findings support testing recency weighting rather than assuming the latest interaction deserves maximum influence. (2) Krichene and Rendle [2] demonstrate limitations of sampled evaluation. Therefore, diagnostic margins cannot replace the pinned validation HR@10. (3) ECCR [3] distinguishes complementarity from item-level compatibility. Text similarity should consequently represent recurring interests, without being interpreted as equipment ownership or compatibility evidence.\n\nThese insights suggest three directions: improve accumulated-interest modeling, measure history dependence, and make evidence limitations explicit.\n\n### Framework\n\n| Layer | Existing approach | Proposed addition | Remaining uncertainty |\n|---|---|---|---|\n| Representation | SASRec sequence encoding | Recurring-interest residual | Semantic recurrence is a proxy |\n| Diagnosis | Sampled margins, cosine alignment | Matched history perturbations | Dependence is not causal preference |\n| Decision evidence | Broad item associations | Literal specification checks | Missing facts remain unknown |\n| Selection | Pinned macro HR@10 | Preserve unchanged | Full-catalog usefulness remains separate |\n\n### Candidate ideas\n\nScores are originality / future potential / implementation difficulty, each 0–10; higher difficulty means harder implementation.\n\n1. **Recurring-interest residual: 5/7/4.** Originality: useful combination, but familiar pooling ingredients. Potential: directly addresses sustained-interest evidence, but may suppress legitimate new interests. Difficulty: a small branch, but requires identical training and prediction implementations. [1]\n2. **Matched perturbation probes: 4/7/3.** Originality: task-specific controls, but established sensitivity analysis. Potential: actionable diagnostics, but no direct accuracy guarantee. Difficulty: reuses scoring hooks, but masking can introduce positional artifacts. [1,2]\n3. **Specification evidence flags: 5/6/6.** Originality: combines abstention with recommendation inspection, but follows existing compatibility reasoning. Potential: useful explanations, but sparse descriptions limit coverage. Difficulty: transparent extraction rules, but heterogeneous product language complicates precision. [3]\n\n### Selected proposal: recurring-interest residual\n\nAt 0% progress, prioritize a small, falsifiable model change. Fit TF–IDF using training-item titles/descriptions only. For each causal prefix, weight historical item embeddings by recency and repeated textual similarity, then add their normalized weighted mean to the SASRec representation through a bounded learned gate initialized near zero.\n\n```text\nfor each training prefix:\n    recurrence = similarity_to_other_items_in_prefix()\n    weights = normalize(recency * (epsilon + recurrence))\n    pooled = weighted_sum(item_embeddings, weights)\n    features = SASRec(prefix) + bounded_gate * normalize(pooled)\n    optimize_original_next_item_loss(features)\n```\n\nCompute recurrence causally at every training position; exclude padding and self-similarity. Keep preprocessing seed 0, training seed 42, four-category routing, and SASREC_EPOCHS default 200. Preserve DATA_DIR and trial-local artifacts; update the predictor writer and compatibility view together. Retain DiagnosisProbe and report missing diagnostics explicitly. Compare against baseline and recency-only pooling using pinned macro validation HR@10, within the shared GPU budget. No improvement is claimed.",
+  "idea": {
+    "description": "Add a bounded recurring-interest pooling residual to each causal SASRec representation, using training-only title/description TF–IDF similarity and recency to weight historical item embeddings.",
+    "motivation": "The qualitative feedback suggests that sustained, specific interests are sometimes displaced by broad associations or isolated purchases. A small residual branch tests whether explicit accumulated-interest evidence improves the pinned validation objective without requiring unavailable traits, ratings, or pretrained models.",
+    "implementation_notes": "Fit the text vocabulary and IDF on items appearing in training histories. Compute sparse similarities on demand or retain bounded top-neighbor lists to avoid a dense catalog matrix. At position t, use only nonpadding history through t; exclude self-similarity and avoid using future items to compute recurrence. For histories without usable text or recurring evidence, fall back to recency pooling. Use the baseline dimension and next-item loss initially, with a scalar sigmoid gate initialized near zero. Apply the residual at every supervised position and at final inference. Serialize text features, gate configuration, and model parameters beneath the trial directory, and update the predictor writer. The compatibility view must expose the actual module through view.model and route log2feats and predict_score through the trained architecture. DiagnosisProbe(view, device).run_full_diagnosis(train_loader) must return metrics and metric_definitions, restore the model's previous training mode, and represent missing observations as unavailable rather than successful zero values. Use only training-prefix probes for auxiliary ranking diagnostics; preserve their candidate sets and original seen-item exclusions under perturbations. Keep os.environ['GAGC_DATA_DIR'], original splits, all four dataset routes, preprocessing seed 0, training seed 42, and the environment epoch default of 200. Limit initial comparisons to baseline, recency pooling, and recurrence pooling; select solely by host macro validation HR@10 and account for all runs against the shared 43,200 GPU-second budget.",
+    "pseudocode": "text = fit_tfidf(training_item_titles_and_descriptions)\nfor sequence, positive, negative in train_loader:\n    base = sasrec.log2feats(sequence)\n    for valid position t:\n        prefix = sequence[:t+1]\n        similarity = nonnegative_text_similarity(prefix, prefix)\n        similarity.diagonal = 0\n        recurrence = similarity.sum(axis=1) / max(len(prefix)-1, 1)\n        weight = normalize(exp(-decay * age(prefix)) * (epsilon + recurrence))\n        pooled[t] = sum(weight * item_embedding(prefix))\n    features = base + sigmoid(gate) * normalize(pooled)\n    loss = baseline_loss(predict_score(features, positive), predict_score(features, negative))\n    optimize(loss)\nwrite_predictor_with_identical_feature_path_and_trial_local_artifacts()\nselect_using_pinned_macro_validation_HR_at_10()",
+    "originality": {
+      "score": 5,
+      "positive": "Combines causal textual recurrence evidence with a small SASRec residual to test the specific sustained-interest failure described in feedback.",
+      "negative": "Attention, recency weighting, and pooled residual representations are established techniques; novelty lies mainly in the particular combination and evaluation."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides an interpretable intervention that can be extended to adaptive interest timescales and checked with controlled history perturbations.",
+      "negative": "Text recurrence can reflect generic terminology, and stronger recurrence weighting may hurt users exploring new interests; benchmark gains remain untested."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Requires a modest pooling branch and scalar gate while retaining the existing encoder, scoring contract, and training objective.",
+      "negative": "Efficient causal similarity computation, artifact serialization, and exact predictor parity require care."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Oh and Cho (2024): recency-bias analysis in sequential recommendation",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "Introduces a recency-bias metric and reports that excessive emphasis on recent items can harm recommendation accuracy.",
+        "Motivates comparing recency-only pooling with recurrence-aware accumulated evidence."
+      ],
+      "limitations": [
+        "Does not establish optimal recency weighting for these four Amazon datasets.",
+        "History sensitivity does not establish causal user preferences."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled evaluation can produce model comparisons inconsistent with full-catalog evaluation.",
+        "Motivates treating sampled margins as auxiliary diagnostics while preserving the mandated selection metric."
+      ],
+      "limitations": [
+        "Does not prescribe an architecture improvement for this task.",
+        "Does not justify changing the host's pinned candidate sampling or evaluator."
+      ]
+    },
+    {
+      "title": "ECCR: Explainable and Coherent Complement Recommendation Based on Large Language Models",
+      "link": "https://assets.amazon.science/6a/b5/41364589408ead2fc48043b0ea5c/eccr-explainable-and-coherent-complement-recommendation-based-on-large-language-models.pdf",
+      "contributions": [
+        "Distinguishes broad complementarity from specific relevance and compatibility.",
+        "Motivates evidence-aware inspection of unsupported compatibility assumptions."
+      ],
+      "limitations": [
+        "Its language-model approach is not adopted because this task prohibits fetching pretrained weights.",
+        "Available interaction histories and sparse descriptions cannot establish current ownership or purchase necessity."
+      ]
+    }
+  ]
+}

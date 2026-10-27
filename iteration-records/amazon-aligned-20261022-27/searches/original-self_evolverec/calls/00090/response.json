@@ -1,0 +1,147 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting point.** (1) SASRec’s final state can obscure candidate-specific evidence. Its contextual states overlap, so distinct positions do not establish independent support. (2) Electronics has 14.95% wrong sampled-pair rankings and a −0.4812 lower-decile margin. These motivate discrimination experiments, without establishing generalization. (3) Embedding alignment near the diagnostic midpoint gives weaker justification for collapse regularization.\n\n**Related work.** (1) NAIS/DIN establish candidate-conditioned aggregation; D2MFRec extends interest matching. Originality is therefore limited. (2) SASRec/BSARec caution against treating correlated contextual states as separate evidence. Raw historical item embeddings avoid contextual duplication, although semantic correlation remains. (3) gSASRec/R2NS motivate objective and sampling alternatives. Neither resolves uncertain negatives or guarantees HR@10 gains.\n\nThese suggest three directions: history aggregation, ranking objectives, and sampling curricula.\n\n### Framework and alternatives\n\n| Direction | Minimal idea | Mechanism and precedent |\n|---|---|---|\n| Representation | **Recent second-match residual** | Second-highest candidate similarity across distinct recent item embeddings; NAIS/DIN, D2MFRec |\n| Objective | Multiple-negative generalized BCE | Change sampled discrimination; gSASRec |\n| Sampling | Moderate-hard curriculum | Uniform warm-up followed by mixed difficulty; R2NS |\n\nScores are originality/potential/user alignment/model alignment/difficulty; higher difficulty means greater burden.\n\n- **Second-match residual: 3/6/7/6/4.** Originality: explicit second-match statistic; aggregation is established. Potential: compact evidence hypothesis; legitimate new interests may suffer. User: targets broad associations and isolated-purchase overweighting; compatibility remains unknown. Model: may sharpen confusing rankings; margins can improve without generalization. Difficulty: small module; causal masking and inference parity require care.\n- **Generalized BCE: 3/7/4/8/2.** Originality: useful adaptation; established objective. Potential: inexpensive; sampling-sensitive. User: sharper relevance; no explicit repeated-interest mechanism. Model: discrimination gradients; margins may mislead. Difficulty: localized change; calibration needs tuning.\n- **Curriculum: 4/7/5/8/4.** Originality: practical combination; established strategy. Potential: confusing alternatives; false negatives persist. User: challenges plausible distractors; complements remain ambiguous. Model: targets weak margins; mining may destabilize. Difficulty: manageable pools; scheduling adds overhead.\n\n### Selected algorithm\n\nAt 0% progress, select the **recent second-match residual**, revising the two-support proposal. It targets broad relevance and isolated-purchase overweighting, with lower-tail separation as its model-facing hypothesis.\n\nRetain SASRec’s base score. Among the last 16 causal, nonpadding history positions, retain the latest occurrence of each item ID. Compute candidate cosine similarities to their raw item embeddings and add the second-highest similarity through a small nonnegative learned gate. Use the base alone with fewer than two distinct items. Unlike top-two averaging, one exceptional match cannot compensate for a weak second match; two similarities still do not prove independent evidence, compatibility, or fulfilled needs.\n\nInitially retain BCE. Prespecify baseline, max, top-two mean, and second-highest variants; compare under matched GPU caps. Keep raw embeddings fixed as the representation choice for this initial comparison. Contextual states, mean/FISM-style sums, softmax/NAIS pooling, and dot products are deferred alternatives.\n\nSelect using pinned **sampled validation HR@10**, four-category macro averaging, 99 unique negatives, seed 42. Freeze evaluation cadence, trial limits, checkpoint ties, and stopping rules beforehand; log every comparison. Report category scores, catalog inference cost, and paired stratified bootstrap intervals as descriptive after selection. Sampled ranking and selected-winner intervals establish neither full-catalog quality nor unbiased significance; no gains are claimed before measurement.",
+  "idea": {
+    "description": "Add a recent second-match candidate-scoring residual to each dataset’s SASRec. For each candidate, take its second-highest cosine similarity to raw embeddings of distinct items in the most recent 16 valid history positions. Add this signed similarity through a learned nonnegative scalar gate to the original SASRec score. Fall back to the base score when fewer than two distinct items are available.",
+    "motivation": "The user diagnosis identifies broad associations and excessive influence from isolated purchases. A second-match statistic explicitly tests a remedy for both, while recent-window restriction favors current evidence. Electronics’ 14.95% sampled-pair error rate and negative lower-decile margin motivate testing confusing rankings. The original contextual-state proposal overstated corroboration: different causal states can encode the same event, and top-two averaging allows a strong first similarity to compensate for a weak second. Raw item embeddings remove contextual duplication, but distinct IDs can still represent duplicates or correlated products. These are hypotheses about relevance, not evidence of compatibility, satisfied needs, or benchmark improvement.",
+    "implementation_notes": "Preserve all four independent dataset models, routing, preprocessing seed 0, training seed 42, baseline splits, optimizer, architecture, and initial sampled BCE objective. Keep DATA_DIR=os.environ['GAGC_DATA_DIR'], trial-local artifacts, single-GPU execution, and the existing SASREC_EPOCHS environment override with default 200. Do not use unavailable reviews, ratings, categories, prices, stores, simulator traits, external data, or pretrained weights.\n\nAt each valid training position t, use sequence indices max(0,t-15) through t, inclusive. Remove padding and retain only the latest occurrence of each item ID within that positional window; do not backfill from older positions. Score raw shared item embeddings, not contextual states, using F.normalize(..., eps=1e-8). Define s=dot(h_t,e_candidate)+softplus(a)*r, with a initialized to -3 independently per dataset. For at least two distinct historical IDs, r is the second-highest cosine similarity; otherwise r=0. Similarities are signed: a negative second match lowers the score. Keep gradients through both embedding arguments and selected similarities. The second-highest statistic is an order statistic, not a verified two-interest detector; sparse gradients and suppression of new interests are material risks.\n\nImplement one scorer accepting contextual features, aligned history IDs, candidate IDs, and causal position information. Preserve the baseline-compatible tensor output of log2feats(sequence), item_emb, and ordinary predict_score(features, items) calls. To carry the extra history explicitly, extend the shared scorer and predict_score with an optional history_ids argument and update every training, validation, simulator, and diagnostic caller to provide it. Do not rely on mutable cached history. If a baseline caller cannot pass history IDs, provide an explicit adapter carrying features and IDs and update that caller; never silently evaluate only the base score. view.model must be the actual trained module. Preserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. Its loader still yields (None, sequence, positive, negative); compute margins with the actual shared scorer. Preserve embedding-alignment metrics and report category-based breakdowns as unavailable rather than inventing metadata. Do not treat improved training margins as validation evidence.\n\nThe predictor writer must emit the identical architecture and scoring code, save/load the gate in each dataset checkpoint, and reproduce deduplication, windowing, fallback, and routing. Cache final states and recent distinct-item embeddings for each recommendation request; score catalog items in chunks of 4096 and exclude seen items in the existing full-catalog recommendation path. Verify batched/chunked score agreement and checkpoint reload agreement on public training histories. Record full-catalog wall time and peak GPU memory; the existing 20 training-user simulator recommendations remain qualitative evidence, not the selection metric.\n\nPrespecify four initial trials: unchanged baseline and raw-embedding residuals with max, top-two mean, and second-highest pooling. Use the same fewer-than-two fallback across residual variants to isolate pooling. Keep window=16 and initial a=-3 fixed. Cap each complete trial, including diagnostics and failures, at 10,800 GPU-seconds, with a global 43,200 GPU-second ceiling; terminate at the earlier of the cap or the configured epoch limit. Evaluate all four datasets every 10 epochs and at the final completed checkpoint, with no adaptive extra evaluations or early stopping. Compare only completed four-dataset checkpoints using the pinned macro validation HR@10; keep the earliest checkpoint on exact within-trial ties and prefer baseline, max, top-two mean, then second-highest on exact cross-trial ties. Log all evaluated checkpoint scores, failures, time, and any budget truncation. Selection may retain the baseline; the proposed residual is not presumed superior. Defer representation, window, objective, and sampler searches to avoid an uncontrolled combinatorial sweep.\n\nIf the unchanged host evaluation exposes per-user validation hits, compute 2,000 paired bootstrap replicates with bootstrap seed 42: resample the same 200 user indices for both models independently within each category, then equally average the four category differences. Report the observed macro difference and percentile 95% interval alongside category scores. If per-user hits are unavailable, omit the interval rather than reconstructing observations. One changed hit moves category HR by 0.005 and macro HR by 0.00125. Intervals are conditional on fixed trained models and candidates, exclude training and negative-sampling variability, and do not correct repeated selection. Freeze the selected predictor before independent held-out evaluation; never inspect hidden test files.",
+    "pseudocode": "score(context, history_ids, candidates, t, pooling='second'):\n    base = dot(context[t], item_emb[candidates])\n    window_ids = history_ids[max(0, t-15):t+1]\n    ids = retain_latest_distinct_nonzero_ids(window_ids)\n    if len(ids) < 2:\n        return base\n    similarities = normalize(item_emb[ids], eps=1e-8) @ normalize(item_emb[candidates], eps=1e-8).T\n    largest_two = topk(similarities, k=2, dim=history).values\n    if pooling == 'max': residual = largest_two[0]\n    if pooling == 'mean2': residual = mean(largest_two, dim=history)\n    if pooling == 'second': residual = largest_two[1]\n    return base + softplus(a) * residual\n\nfor each baseline training batch:\n    context = sasrec(sequence)\n    positive_scores = causal_shared_score(context, sequence, positive)\n    negative_scores = causal_shared_score(context, sequence, negative)\n    optimize baseline_masked_BCE(positive_scores, negative_scores)\n\nfor each prespecified evaluation checkpoint:\n    evaluate all four categories with unchanged pinned validation protocol\n    record category HR@10, equal-weight macro HR@10, and consumed GPU time\n\nselect highest macro HR@10 using prespecified tie rules\nwrite predictor with identical model, history-aware scorer, and saved gate\nverify checkpoint reload and candidate-chunk agreement on training histories",
+    "originality": {
+      "score": 3,
+      "positive": "The second-highest statistic provides a precise, minimal hypothesis about repeated recent item similarity.",
+      "negative": "Candidate-conditioned history aggregation is established in NAIS, DIN, and related models; exact-combination novelty is unverified."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "A controlled comparison can clarify whether repeated recent similarity helps beyond a single strong association.",
+      "negative": "Correlated item embeddings, duplicate products, preference changes, and weak relevance proxies limit the interpretation and likely scope."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "The encoder and objective remain unchanged, and the scorer adds one scalar plus a short history similarity operation.",
+      "negative": "Causal deduplication, history-aware diagnostic interfaces, sparse order-statistic gradients, checkpoint parity, and catalog inference require careful integration."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Provides the causal self-attention sequential recommendation baseline.",
+        "Contextual states attend to earlier interactions, explaining why distinct positions need not represent separate evidence."
+      ],
+      "limitations": [
+        "Does not establish that candidate-conditioned second-match residuals improve ranking."
+      ]
+    },
+    {
+      "title": "BSARec",
+      "link": "https://ojs.aaai.org/index.php/AAAI/article/view/28747",
+      "contributions": [
+        "Discusses oversmoothing in sequential recommendation, supporting caution about similar contextual representations."
+      ],
+      "limitations": [
+        "Does not establish severe collapse in these supplied diagnostics or validate the proposed residual."
+      ]
+    },
+    {
+      "title": "D2MFRec",
+      "link": "https://www.nature.com/articles/s41598-025-31190-z",
+      "contributions": [
+        "Uses candidate-dependent aggregation over interest vectors alongside recent-history modeling."
+      ],
+      "limitations": [
+        "Does not establish gains on this pinned benchmark or independent corroboration from multiple history matches."
+      ]
+    },
+    {
+      "title": "gSASRec extended abstract",
+      "link": "https://www.ijcai.org/proceedings/2024/0939.pdf",
+      "contributions": [
+        "Connects negative sampling with overconfidence and motivates generalized BCE with multiple negatives."
+      ],
+      "limitations": [
+        "Calibration improvements do not independently establish better HR@10 or repeated-interest evidence."
+      ]
+    },
+    {
+      "title": "R2NS",
+      "link": "https://renzhaochun.github.io/assets/pdf/WWW_2026_Camera_Ready.pdf",
+      "contributions": [
+        "Motivates warm-start training and controlled introduction of harder negatives."
+      ],
+      "limitations": [
+        "Unobserved items can be false negatives, and sampler improvements require benchmark-specific validation."
+      ]
+    },
+    {
+      "title": "FISM: Factored Item Similarity Models for Top-N Recommender Systems",
+      "link": "https://experts.umn.edu/en/publications/fism-factored-item-similarity-models-for-top-n-recommender-system/",
+      "contributions": [
+        "Establishes factorized item–item similarity aggregation as a simpler historical-item scoring precedent."
+      ],
+      "limitations": [
+        "Its history weights are not candidate-conditioned attention, and it does not validate the proposed sequential residual."
+      ]
+    },
+    {
+      "title": "NAIS: Neural Attentive Item Similarity Model for Recommendation",
+      "link": "https://arxiv.org/abs/1809.07053",
+      "contributions": [
+        "Uses target-conditioned attention over historical items with smoothed normalization."
+      ],
+      "limitations": [
+        "Candidate-conditioned attention does not establish independent support or benchmark superiority here."
+      ]
+    },
+    {
+      "title": "Deep Interest Network for Click-Through Rate Prediction",
+      "link": "https://arxiv.org/abs/1706.06978",
+      "contributions": [
+        "Uses candidate-conditioned local activation to aggregate user history."
+      ],
+      "limitations": [
+        "Its advertising task differs from personalized next-item recommendation."
+      ]
+    },
+    {
+      "title": "CARCA",
+      "link": "https://arxiv.org/abs/2204.06519",
+      "contributions": [
+        "Provides precedent for candidate-conditioned aggregation across historical items."
+      ],
+      "limitations": [
+        "Does not establish that multiple historical matches constitute independent corroboration."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled recommendation metrics can reverse model comparisons, motivating precise labeling of the fixed candidate protocol."
+      ],
+      "limitations": [
+        "Does not supply a conversion from this benchmark’s sampled HR@10 to full-catalog ranking quality."
+      ]
+    },
+    {
+      "title": "Statistical Significance Tests for Machine Translation Evaluation",
+      "link": "https://aclanthology.org/W04-3250/",
+      "contributions": [
+        "Provides a paired-bootstrap precedent adapted here to category-stratified per-user hit comparisons."
+      ],
+      "limitations": [
+        "The recommendation adaptation is proposed; its intervals exclude training variability and do not correct winner selection."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains selection optimism from repeatedly optimizing validation performance."
+      ],
+      "limitations": [
+        "Prespecified search controls limit researcher flexibility but do not remove selection bias from the selected validation score."
+      ]
+    }
+  ]
+}

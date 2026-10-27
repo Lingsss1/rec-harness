@@ -1,0 +1,515 @@
+from __future__ import annotations
+
+import json
+import math
+import os
+import pickle
+import random
+import time
+from collections import defaultdict
+
+import numpy as np
+import torch
+from torch import nn
+from torch.utils.data import Dataset, DataLoader
+
+DATA_DIR = os.environ["GAGC_DATA_DIR"]
+DATASETS = [
+    "Movies_and_TV",
+    "Industrial_and_Scientific",
+    "Electronics",
+    "CDs_and_Vinyl",
+]
+HERE = os.path.dirname(os.path.abspath(__file__))
+WORKING = os.path.join(HERE, "working")
+EPOCHS = int(os.environ.get("SASREC_EPOCHS", "200"))
+BATCH_SIZE = int(os.environ.get("SASREC_BATCH", "128"))
+MAXLEN = int(os.environ.get("SASREC_MAXLEN", "64"))
+HIDDEN = int(os.environ.get("SASREC_HIDDEN", "96"))
+BLOCKS = int(os.environ.get("SASREC_BLOCKS", "2"))
+HEADS = int(os.environ.get("SASREC_HEADS", "2"))
+DROPOUT = float(os.environ.get("SASREC_DROPOUT", "0.2"))
+LR = float(os.environ.get("SASREC_LR", "0.0006"))
+NEGATIVES = 256
+PATIENCE = 25
+CATEGORY_SECONDS = 2400
+
+
+def seed_everything(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def read_split(path):
+    result = defaultdict(list)
+    with open(path) as f:
+        for line in f:
+            fields = line.split()
+            if len(fields) == 2:
+                result[int(fields[0])].append(int(fields[1]))
+    return dict(result)
+
+
+def load_dataset(name):
+    train = read_split(os.path.join(DATA_DIR, name + "_train.txt"))
+    valid = read_split(os.path.join(DATA_DIR, name + "_valid.txt"))
+    path = os.path.join(DATA_DIR, "dataset_stats.json")
+    itemnum = max(max(items) for items in train.values() if items)
+    if os.path.isfile(path):
+        with open(path) as f:
+            stats = json.load(f)
+        if name in stats:
+            itemnum = int(stats[name]["itemnum"])
+    return train, valid, itemnum
+
+
+def prediction_sequence(history, itemnum, maxlen):
+    # The final position is always the query mask, during training and inference.
+    context = list(history[-(maxlen - 1) :])
+    result = [0] * maxlen
+    result[-len(context) - 1 : -1] = context
+    result[-1] = itemnum + 1
+    return result
+
+
+class MaskedHistories(Dataset):
+    def __init__(self, train, itemnum, maxlen):
+        self.histories = [h for h in train.values() if len(h) >= 2]
+        self.itemnum = itemnum
+        self.maxlen = maxlen
+
+    def __len__(self):
+        return len(self.histories)
+
+    def __getitem__(self, index):
+        history = self.histories[index]
+        # Every training user is visited each epoch. Half the examples emphasize
+        # the latest observed transition; the rest cover earlier prefixes.
+        end = (
+            len(history) - 1
+            if random.random() < 0.5
+            else random.randrange(1, len(history))
+        )
+        original = history[max(0, end - self.maxlen + 1) : end + 1]
+        sequence = np.zeros(self.maxlen, dtype=np.int64)
+        labels = np.zeros(self.maxlen, dtype=np.int64)
+        offset = self.maxlen - len(original)
+        sequence[offset:] = original
+        for position in range(offset, self.maxlen):
+            if position == self.maxlen - 1 or random.random() < 0.2:
+                labels[position] = sequence[position]
+                sequence[position] = self.itemnum + 1
+        # Preserve the original corruption draws and window for reconstruction.
+        # The selected target occurrence is masked and never reconstructed here;
+        # earlier occurrences of the same item remain legitimate context.
+        auxiliary_sequence = sequence
+        auxiliary_labels = labels
+        auxiliary_labels[-1] = 0
+
+        # Final-target supervision sees exactly the inference-time clean context.
+        sequence = np.asarray(
+            prediction_sequence(history[:end], self.itemnum, self.maxlen),
+            dtype=np.int64,
+        )
+        labels = np.zeros(self.maxlen, dtype=np.int64)
+        labels[-1] = history[end]
+        return (
+            torch.from_numpy(sequence),
+            torch.from_numpy(labels),
+            torch.from_numpy(auxiliary_sequence),
+            torch.from_numpy(auxiliary_labels),
+        )
+
+
+def worker_init(worker_id):
+    seed = torch.initial_seed() % (2**32)
+    random.seed(seed)
+    np.random.seed(seed)
+
+
+class MaskedSASRec(nn.Module):
+    def __init__(
+        self,
+        itemnum,
+        hidden_units=96,
+        num_blocks=2,
+        num_heads=2,
+        dropout_rate=0.2,
+        maxlen=64,
+        relative_num_buckets=32,
+        relative_max_distance=128,
+    ):
+        super().__init__()
+        self.itemnum = itemnum
+        self.maxlen = maxlen
+        self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+        self.pos_emb = nn.Embedding(maxlen, hidden_units)
+        self.input_norm = nn.LayerNorm(hidden_units)
+        self.dropout = nn.Dropout(dropout_rate)
+        layer = nn.TransformerEncoderLayer(
+            hidden_units,
+            num_heads,
+            dim_feedforward=hidden_units * 4,
+            dropout=dropout_rate,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(
+            layer, num_layers=num_blocks, enable_nested_tensor=False
+        )
+        # Independent signed-distance biases for every layer and attention head.
+        # Zero initialization preserves the original attention logits initially
+        # and consumes no random draws from the existing initialization stream.
+        if relative_num_buckets < 4 or relative_num_buckets % 4:
+            raise ValueError("relative_num_buckets must be a positive multiple of four")
+        half = relative_num_buckets // 2
+        exact = half // 2
+        if relative_max_distance <= exact:
+            raise ValueError("relative_max_distance must exceed the exact bucket range")
+        positions = torch.arange(maxlen)
+        offsets = positions[None, :] - positions[:, None]  # key minus query
+        distance = offsets.abs()
+        logarithmic = exact + (
+            torch.log(distance.float().clamp_min(exact) / exact)
+            / math.log(relative_max_distance / exact)
+            * (half - exact)
+        ).long()
+        buckets = torch.where(
+            distance < exact, distance, logarithmic.clamp(max=half - 1)
+        )
+        buckets = buckets + offsets.gt(0).long() * half
+        self.register_buffer("relative_buckets", buckets, persistent=False)
+        self.relative_attention_bias = nn.Parameter(
+            torch.zeros(num_blocks, num_heads, relative_num_buckets)
+        )
+        self.output = nn.Sequential(
+            nn.Linear(hidden_units, hidden_units), nn.GELU(), nn.LayerNorm(hidden_units)
+        )
+        # This bias is fitted jointly with all other network parameters.
+        self.item_bias = nn.Embedding(itemnum + 2, 1, padding_idx=0)
+        self.apply(self._initialize)
+        with torch.no_grad():
+            self.item_emb.weight[0].zero_()
+            self.item_bias.weight.zero_()
+
+    @staticmethod
+    def _initialize(module):
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            nn.init.normal_(module.weight, std=0.02)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                nn.init.zeros_(module.bias)
+
+    def forward(self, sequence):
+        positions = torch.arange(sequence.shape[1], device=sequence.device)
+        x = self.item_emb(sequence) + self.pos_emb(positions)[None]
+        x = self.dropout(self.input_norm(x))
+        length = sequence.shape[1]
+        buckets = self.relative_buckets[:length, :length]
+        padding = sequence.eq(0)[:, None, None, :]
+        # Fold padding exclusion into the additive mask. Attention remains
+        # bidirectional, with the original encoder layers and residual paths.
+        for index, layer in enumerate(self.encoder.layers):
+            bias = self.relative_attention_bias[index][:, buckets].to(x.dtype)
+            mask = bias[None].expand(sequence.shape[0], -1, -1, -1)
+            mask = mask.masked_fill(padding, float("-inf"))
+            x = layer(
+                x,
+                src_mask=mask.reshape(-1, length, length),
+                is_causal=False,
+            )
+        if self.encoder.norm is not None:
+            x = self.encoder.norm(x)
+        return self.output(x)
+
+    def predict(self, sequence, candidates):
+        query = self(sequence)[:, -1]
+        return (self.item_emb(candidates) * query[:, None]).sum(-1) + self.item_bias(
+            candidates
+        ).squeeze(-1)
+
+
+def make_validation(train, valid, itemnum, maxlen):
+    rng = random.Random(42)
+    users = [u for u in valid if u in train]
+    if len(users) > 200:
+        users = rng.sample(users, 200)
+    sequences, candidates = [], []
+    for user in users:
+        if not valid[user]:
+            continue
+        excluded = set(train[user]) | set(valid[user])
+        if itemnum - len(excluded) < 99:
+            raise ValueError("Official validation requires 99 unique negatives")
+        negatives = set()
+        while len(negatives) < 99:
+            item = rng.randint(1, itemnum)
+            if item not in excluded:
+                negatives.add(item)
+        sequences.append(prediction_sequence(train[user], itemnum, maxlen))
+        candidates.append([valid[user][0]] + list(negatives))
+    if not sequences:
+        raise ValueError("No eligible validation users")
+    return torch.tensor(sequences), torch.tensor(candidates)
+
+
+@torch.no_grad()
+def evaluate(model, validation, device):
+    model.eval()
+    sequences, candidates = validation
+    hits, ndcg = 0.0, 0.0
+    for start in range(0, len(sequences), 64):
+        scores = model.predict(
+            sequences[start : start + 64].to(device),
+            candidates[start : start + 64].to(device),
+        )
+        # Stable descending ordering matches target-first candidate tie handling.
+        ordering = torch.argsort(scores, dim=1, descending=True, stable=True)
+        ranks = ordering.eq(0).long().argmax(dim=1)
+        hits += ranks.lt(10).float().sum().item()
+        ndcg += (ranks.lt(10).float() / torch.log2(ranks.float() + 2)).sum().item()
+    return hits / len(sequences), ndcg / len(sequences)
+
+
+def train_one(name, device):
+    seed_everything(42)
+    train, valid, itemnum = load_dataset(name)
+    meta = dict(
+        itemnum=itemnum,
+        hidden_units=HIDDEN,
+        num_blocks=BLOCKS,
+        num_heads=HEADS,
+        dropout_rate=DROPOUT,
+        maxlen=MAXLEN,
+        relative_num_buckets=32,
+        relative_max_distance=128,
+    )
+    model = MaskedSASRec(**meta).to(device)
+    dataset = MaskedHistories(train, itemnum, MAXLEN)
+    if not len(dataset):
+        raise ValueError("No training histories with two or more items")
+    loader = DataLoader(
+        dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=2,
+        worker_init_fn=worker_init,
+        pin_memory=device.type == "cuda",
+        persistent_workers=True,
+        generator=torch.Generator().manual_seed(42),
+    )
+    validation = make_validation(train, valid, itemnum, MAXLEN)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=LR, betas=(0.9, 0.98), weight_decay=0.01
+    )
+    checkpoint = os.path.join(WORKING, name + "_model.pt")
+    best, best_epoch = (-1.0, -1.0), 0
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    start_time = time.monotonic()
+    for epoch in range(1, EPOCHS + 1):
+        model.train()
+        total_loss, steps = 0.0, 0
+        for sequence, labels, auxiliary_sequence, auxiliary_labels in loader:
+            sequence = sequence.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            auxiliary_labels = auxiliary_labels.to(device, non_blocking=True)
+            # Both views train the same network and tied scoring parameters.
+            features = model(sequence)
+            query = features[:, -1]
+            targets = labels[:, -1]
+            final_count = len(targets)
+            active = auxiliary_labels.ne(0)
+            has_auxiliary = active.any().item()
+            if has_auxiliary:
+                auxiliary_sequence = auxiliary_sequence.to(device, non_blocking=True)
+                auxiliary_features = model(auxiliary_sequence)
+                query = torch.cat((query, auxiliary_features[active]), dim=0)
+                targets = torch.cat((targets, auxiliary_labels[active]), dim=0)
+            # Uniform negatives match the benchmark's candidate distribution.
+            negatives = torch.randint(1, itemnum + 1, (NEGATIVES,), device=device)
+            positive_logits = (query * model.item_emb(targets)).sum(-1)
+            positive_logits = positive_logits + model.item_bias(targets).squeeze(-1)
+            negative_logits = query @ model.item_emb(negatives).T
+            negative_logits = negative_logits + model.item_bias(negatives).view(1, -1)
+            negative_logits = negative_logits.masked_fill(
+                targets[:, None].eq(negatives[None]), -1e4
+            )
+            logits = torch.cat((positive_logits[:, None], negative_logits), dim=1)
+            per_position = nn.functional.cross_entropy(
+                logits,
+                torch.zeros(len(query), device=device, dtype=torch.long),
+                reduction="none",
+            )
+            # One shared negative sample serves both views. Only clean queries
+            # supervise the final target; only corrupted queries reconstruct history.
+            final_loss = per_position[:final_count].mean()
+            if has_auxiliary:
+                loss = 0.5 * final_loss + 0.5 * per_position[final_count:].mean()
+            else:
+                loss = final_loss
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
+            optimizer.step()
+            total_loss += loss.detach().item()
+            steps += 1
+        hr, ndcg = evaluate(model, validation, device)
+        if (hr, ndcg) > best:
+            best, best_epoch = (hr, ndcg), epoch
+            torch.save(model.state_dict(), checkpoint)
+        print(
+            f"{name} epoch={epoch} loss={total_loss/max(steps,1):.4f} "
+            f"HR@10={hr:.4f} NDCG@10={ndcg:.4f}",
+            flush=True,
+        )
+        if (
+            epoch - best_epoch >= PATIENCE
+            or time.monotonic() - start_time >= CATEGORY_SECONDS
+        ):
+            break
+    with open(os.path.join(WORKING, name + "_meta.pkl"), "wb") as f:
+        pickle.dump(meta, f)
+    # Report the selected checkpoint's actual validation metric.
+    model.load_state_dict(
+        torch.load(checkpoint, map_location=device, weights_only=True), strict=True
+    )
+    score, selected_ndcg = evaluate(model, validation, device)
+    if (score, selected_ndcg) != best:
+        raise RuntimeError("Selected checkpoint validation changed after strict loading")
+    # Exercise the actual generated predictor against the selected checkpoint
+    # on the unchanged validation candidates. This is a temporary reload of
+    # the same checkpoint, never a second fitted predictor or combined score.
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "selected_predictor_parity", os.path.join(WORKING, "predict.py")
+    )
+    predictor = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(predictor)
+    sequences, candidates = validation
+    predictor_hits, predictor_ndcg = 0.0, 0.0
+    with torch.inference_mode():
+        for sequence, items in zip(sequences, candidates):
+            history = sequence[:-1][sequence[:-1].ne(0)].tolist()
+            actual = torch.tensor(
+                predictor.predict(
+                    0, history, items.tolist(), dataset_name=name
+                ),
+                dtype=torch.float32,
+                device=device,
+            )
+            expected = model.predict(
+                sequence[None].to(device), items[None].to(device)
+            )[0].float()
+            torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+            if not torch.isfinite(actual).all():
+                raise RuntimeError("Generated predictor produced nonfinite scores")
+            ordering = torch.argsort(actual, descending=True, stable=True)
+            rank = ordering.eq(0).long().argmax().item()
+            predictor_hits += float(rank < 10)
+            predictor_ndcg += float(rank < 10) / math.log2(rank + 2)
+    predictor_score = predictor_hits / len(sequences)
+    if abs(predictor_score - score) > 1e-7 or abs(
+        predictor_ndcg / len(sequences) - selected_ndcg
+    ) > 1e-6:
+        raise RuntimeError("Generated predictor validation differs from selected checkpoint")
+    print(f"{name} generated_predictor_score_parity=passed", flush=True)
+    predictor._models.clear()
+    del predictor
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elapsed_seconds = time.monotonic() - start_time
+    print(
+        f"{name} selected_epoch={best_epoch} HR@10={score:.4f} "
+        f"elapsed_seconds={elapsed_seconds:.3f}",
+        flush=True,
+    )
+    del loader, model
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    return score
+
+
+def write_predict_script():
+    script = r"""from __future__ import annotations
+import importlib.util
+import os
+import pickle
+import torch
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_DATASETS = ['Movies_and_TV', 'Industrial_and_Scientific',
+             'Electronics', 'CDs_and_Vinyl']
+_models = {}
+_metas = {}
+_module = None
+_device = None
+
+
+def _load(dataset_name):
+    global _module, _device
+    if dataset_name in _models:
+        return
+    if _module is None:
+        spec = importlib.util.spec_from_file_location(
+            'masked_sasrec_architecture', os.path.join(_HERE, '..', 'train.py'))
+        _module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_module)
+        _device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    with open(os.path.join(_HERE, dataset_name + '_meta.pkl'), 'rb') as f:
+        meta = pickle.load(f)
+    if not {'relative_num_buckets', 'relative_max_distance'}.issubset(meta):
+        raise RuntimeError('Checkpoint metadata lacks relative-position architecture')
+    model = _module.MaskedSASRec(**meta).to(_device)
+    state = torch.load(os.path.join(_HERE, dataset_name + '_model.pt'),
+                       map_location=_device, weights_only=True)
+    if 'relative_attention_bias' not in state:
+        raise RuntimeError('Checkpoint lacks learned relative-position biases')
+    model.load_state_dict(state, strict=True)
+    model.eval()
+    _models[dataset_name] = model
+    _metas[dataset_name] = meta
+
+
+def predict(user_id, history, candidates, *, dataset_name=None):
+    name = dataset_name if dataset_name is not None else _DATASETS[0]
+    if name not in _DATASETS:
+        raise ValueError('Unknown dataset: ' + str(name))
+    _load(name)
+    meta = _metas[name]
+    sequence = _module.prediction_sequence(history, meta['itemnum'], meta['maxlen'])
+    sequence = torch.tensor([sequence], dtype=torch.long, device=_device)
+    items = torch.tensor([candidates], dtype=torch.long, device=_device)
+    with torch.inference_mode():
+        return _models[name].predict(sequence, items)[0].cpu().tolist()
+"""
+    with open(os.path.join(WORKING, "predict.py"), "w") as f:
+        f.write(script)
+
+
+def main():
+    torch.set_num_threads(4)
+    seed_everything(42)
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    os.makedirs(WORKING, exist_ok=True)
+    write_predict_script()
+    scores = [train_one(name, device) for name in DATASETS]
+    score = float(np.mean(scores))
+    print(
+        f"Validation comparison: macro_HR@10={score:.4f} "
+        f"delta_vs_parent_0.5475={score - 0.5475:+.4f} "
+        f"delta_vs_reference_0.5800={score - 0.5800:+.4f}",
+        flush=True,
+    )
+    print(f"Final Validation Score: {score}")
+
+
+if __name__ == "__main__":
+    main()

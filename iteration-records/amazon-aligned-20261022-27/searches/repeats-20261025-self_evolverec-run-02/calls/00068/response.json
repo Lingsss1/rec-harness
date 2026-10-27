@@ -1,0 +1,66 @@
+{
+  "markdown_report": "At 0% progress, prioritize a small, falsifiable extension to SASRec. The supplied diagnoses motivate better current-intent ranking; they do not establish its cause or demonstrate validation gains.\n\n**Insights from the starting point.** (1) SASRec can retrieve distant interactions. The user diagnosis suggests that incidental older events sometimes receive excessive influence. (2) Dot-product scoring captures association. Users nevertheless reject broad matches with unsupported prerequisites or little immediate value. (3) Electronics has 14.95% negative-over-positive rankings and a −0.4812 tenth-percentile margin. These sampled training-position diagnostics motivate discrimination experiments, without predicting validation HR@10.\n\n**Insights from related work.** (1) [Denoising Long- and Short-term Interests](https://arxiv.org/abs/2407.14743) separates persistent and transient interests. This supports testing explicit recency alongside the existing encoder. (2) [TGCL4SR](https://ojs.aaai.org/index.php/AAAI/article/view/28789) models global temporal transitions. Directional evidence could distinguish plausible next choices from symmetric relatedness, although it cannot establish compatibility. (3) [gSASRec](https://www.ijcai.org/proceedings/2024/0939.pdf) addresses sampling-induced overconfidence. Its loss is a useful alternative hypothesis to architectural deficiency.\n\n**Framework and candidate assessment.** Three directions isolate evidence selection, directional relations, and training competition. Scores below are originality/potential/user alignment/model alignment/difficulty; higher difficulty means harder implementation. Each assessment gives a benefit (+) and limitation (−).\n\n| Candidate | Scores | Critical assessment |\n|---|---|---|\n| Recent-history residual | 3/6/7/5/2 | O: + focused adaptation, − familiar pooling; P: + cheap extension, − may miss persistent interests; U: + reduces stale influence, − cannot resolve prerequisites; M: + tests representation noise, − margin effect uncertain; D: + few operations, − padding needs care. |\n| **Recent directional residual** | **4/7/8/7/4** | O: + compact synthesis, − established ingredients; P: + extensible relation modeling, − sparse transitions; U: + targets broad matches and stale evidence, − no compatibility labels; M: + adds discriminative transition evidence, − gains unproven; D: + retains SASRec, − scorer/adapter changes required. |\n| Multi-negative gBCE | 2/7/4/8/3 | O: + clear hypothesis, − published method; P: + reusable objective, − task dependence; U: + stronger competition, − no explicit intent mechanism; M: + targets weak separation, − margins may mislead; D: + local loss change, − sampling costs. |\n\n**Selected algorithm.** Add a gated, recency-weighted directional residual to SASRec. Separate source and target projections learn ordered transition evidence from training prefixes; recent repeated interests contribute multiple terms. This explicitly targets broad relatedness and excessive influence from older incidental interactions, while testing whether directional evidence reduces positive–negative confusion. It does not infer satisfaction or promise compatibility.\n\nKeep the baseline loss initially. Compare residual strengths including zero, selecting exclusively by four-category macro validation HR@10. Preserve seeds, splits, routing, and the 200-epoch environment default; report actual GPU cost. Implement identical scoring in the predictor writer and diagnosis adapter. Treat all improvements as hypotheses until measured.",
+  "idea": {
+    "description": "Recent directional residual for SASRec: augment its candidate score with a gated sum of asymmetric transition scores from recent prefix items. Preserve the existing encoder and initially retain its training objective.",
+    "motivation": "The user diagnosis identifies broad associations crowding out precise next choices and older incidental events overpowering repeated recent interests. A recent directional scorer explicitly addresses both patterns. Electronics' weak lower-tail margins motivate testing whether this added evidence improves discrimination, without assuming that diagnostic margins imply validation gains.",
+    "implementation_notes": "Train a separate model for each of the four original datasets. DATA_DIR remains os.environ['GAGC_DATA_DIR']; save artifacts beneath the trial directory. Preserve preprocessing seed 0, training seed 42, baseline splits, dataset routing, single-GPU execution, and SASREC_EPOCHS default 200. Use distinct learned source and target projections of item embeddings, with a small projection dimension such as 32. Pool only the last K valid prefix items using exponential positional decay; start with K=5 and fixed decay 0.7. Repeated items contribute through repeated occurrences, without claiming that repetition reveals satisfaction. Score with SASRec plus alpha times a sigmoid-gated directional dot product; initialize the gate conservatively and include alpha=0 as the control. Use causal prefix pooling at every training position, never the positive target or later events. Initially preserve baseline negative sampling and loss to isolate this change. Expose concatenated sequence and gated directional features through log2feats and implement their shared scoring in predict_score; view.model must remain the actual trained module. Retain DiagnosisProbe(view, device) and run_full_diagnosis(train_loader), returning metrics and metric_definitions; margin probes must use the combined score. Keep item-embedding cosine diagnostics clearly labeled as measuring the base embedding table. Do not produce metadata category breakdowns when categories are unavailable. Update the predictor writer to reconstruct the projections, gate, hyperparameters, and scoring exactly. Use only supplied training interactions; titles/descriptions are optional unused inputs, and unavailable review, rating, compatibility, or simulator-trait labels must never be inferred as observed. Select using the pinned macro validation HR@10, with category results and measured GPU cost recorded. No empirical gain is claimed.",
+    "pseudocode": "class RecentDirectionalSASRec(nn.Module):\n    # Includes the unchanged baseline SASRec, source/target projections,\n    # a gate, and serialized K, decay, alpha hyperparameters.\n    def log2feats(self, sequence):\n        h = self.sasrec.log2feats(sequence)\n        e = self.item_emb(sequence)\n        source = self.source_projection(e)\n        # At position t, include sequence[t] and earlier valid items only.\n        r = causal_recent_weighted_mean(source, sequence != 0,\n                                        K=self.K, decay=self.decay)\n        gate = sigmoid(self.gate(h))\n        return concatenate([h, self.alpha * gate * r], dim=-1)\n\n    def predict_score(self, features, items):\n        h, r = split_features(features)\n        target = self.target_projection(self.item_emb(items))\n        return aligned_dot(h, self.item_emb(items)) + aligned_dot(r, target)\n\nfor category in ORIGINAL_FOUR_CATEGORIES:\n    # Retain baseline loading, splits, seeds, optimizer, and loss.\n    for _, sequence, positive, negative in train_loader:\n        features = model.log2feats(sequence)\n        pos = model.predict_score(features, positive)\n        neg = model.predict_score(features, negative)\n        loss = baseline_loss(pos, neg, valid=(positive != 0))\n        optimizer.zero_grad()\n        loss.backward()\n        optimizer.step()\n    save_model_and_complete_scoring_configuration(trial_directory)\n    write_predictor_using_identical_model_and_scoring()\n# Host evaluates candidates; choose by fixed macro validation HR@10 only.",
+    "originality": {
+      "score": 4,
+      "positive": "A compact adaptation connects recent evidence selection with asymmetric next-item scoring and the supplied diagnoses.",
+      "negative": "Recency pooling, gating, and directional transition modeling are established techniques."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides an inexpensive foundation for testing richer temporal or supplied-text relations after a controlled baseline comparison.",
+      "negative": "Sparse transitions and rapidly changing interests may limit transfer, and compatibility remains unobserved."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Retains the encoder, baseline training loop, dataset routing, and initial objective.",
+      "negative": "Requires causal pooling, correctly broadcast candidate scoring, complete checkpoint configuration, and synchronized prediction and diagnosis implementations."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Provides the causal sequence encoder and item-scoring baseline."
+      ],
+      "limitations": [
+        "Its architecture alone does not establish compatibility, satisfaction, or current demand."
+      ]
+    },
+    {
+      "title": "Denoising Long- and Short-term Interests",
+      "link": "https://arxiv.org/abs/2407.14743",
+      "contributions": [
+        "Provides precedent for distinguishing persistent interests from noisy short-term behavior."
+      ],
+      "limitations": [
+        "Does not establish that the proposed lightweight recency residual improves this matched benchmark."
+      ]
+    },
+    {
+      "title": "TGCL4SR",
+      "link": "https://ojs.aaai.org/index.php/AAAI/article/view/28789",
+      "contributions": [
+        "Combines global temporal transitions with local sequence modeling."
+      ],
+      "limitations": [
+        "Observed transitions provide uncertain evidence of complementarity and do not supply prerequisite or compatibility labels."
+      ]
+    },
+    {
+      "title": "gSASRec: Reducing Overconfidence in Sequential Recommendation",
+      "link": "https://www.ijcai.org/proceedings/2024/0939.pdf",
+      "contributions": [
+        "Motivates multi-negative generalized BCE as a separate experiment on sampling-induced overconfidence."
+      ],
+      "limitations": [
+        "Does not explicitly resolve stale intent, false-negative labels, or unsupported equipment prerequisites."
+      ]
+    }
+  ]
+}

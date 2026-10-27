@@ -1,0 +1,62 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting-point insights.** (1) Electronics and Industrial have training negative-outranking rates of 12.55% and 10.33%. These identify discrimination weaknesses, but do not establish validation failures. (2) Electronics’ alignment score is 0.7816. Mean cosine alone cannot distinguish useful shared structure from low-dimensional collapse. (3) Qualitative feedback favors specific interests over broad associations. An additive history mean could reinforce those associations, motivating a centered alternative without assuming observable purchase necessity.\n\n**Related-work insights.** (1) [Klenitskiy et al.](https://arxiv.org/abs/2408.12008) motivate testing history-order dependence. Last-item and uniform controls help distinguish recency from aggregation. (2) [Guo et al.](https://proceedings.mlr.press/v235/guo24e.html) motivate examining embedding dimensionality. Spectral diagnostics complement cosine measurements without becoming optimization targets. (3) [Sampled-metric analysis](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/) warns that candidate sampling changes comparisons. The pinned evaluator must therefore remain the selection authority.\n\n### Framework\n\n| Direction | Existing mechanism | Gap addressed |\n|---|---|---|\n| History timescale | SASRec; exponential residual | Separate recent deviations from persistent associations |\n| Representation geometry | Cosine and spectral diagnostics | Identify alignment without presuming harmful collapse |\n| Behavioral evidence | Training-prefix interventions | Measure model reliance without inferring intent |\n\n### Candidate ideas\n\nScores are originality/potential/difficulty, each 0–10; higher difficulty means harder implementation.\n\n| Idea | Scores | Positive assessment | Negative assessment |\n|---|---|---|---|\n| Controlled exponential residual | 3/6/3 | Established pooling makes a feasible reference | Limited novelty; may amplify broad associations |\n| **Centered exponential residual** | **5/7/4** | Isolates recent departure from the prefix mean | Subtraction may erase stable narrow preferences |\n| Spectral embedding penalty | 3/5/5 | Directly tests a geometry hypothesis | Alignment diagnostics do not establish a need for regularization |\n\n### Selected idea: centered exponential residual\n\nAt 20% progress, prioritize one small architectural change. At each valid position, subtract the causal uniform embedding mean from the causal exponential mean, normalize the difference, and add it through a weak scalar gate to SASRec’s final features. This tests whether emphasizing recent departures improves ranking; it does not identify current intent, ownership, or compatibility.\n\n```text\nE, Z, U, C = 0\nfor each input position t:\n    v = input[t] != padding\n    E = rho*E + v*embedding(input[t])\n    Z = rho*Z + v\n    U = U + v*embedding(input[t]); C = C + v\n    d = E/max(Z, eps) - U/max(C, 1)\n    output[t] = valid_mask(SASRec[t] + sigmoid(g)*LayerNorm(d))\n```\n\nInitialize retention at 0.9 and gate logit at −4; learn both, bounding retention with a sigmoid. Compare baseline, uniform, last-item, exponential, and centered-exponential variants with matched baseline initialization and training randomness. Select only by host-supported four-category macro validation HR@10, within 43,200 GPU-seconds. Preserve seeds, splits, routing, environment paths and the 200-epoch default. Retain diagnostic contracts, update predictor generation, and verify causality, finite padding behavior and checkpoint-logit parity. Report unsuccessful trials; no gains are established yet.",
+  "idea": {
+    "description": "Add a weakly gated centered causal history residual to each dataset’s SASRec: subtract the causal uniform item-embedding mean from a learned exponential mean, apply affine-free LayerNorm, and add the result after SASRec’s final feature normalization.",
+    "motivation": "The qualitative diagnosis suggests that broad historical associations sometimes dominate more specific recent interests. Centering tests whether recent departures from a user’s observed prefix provide useful ranking information. Training-margin and embedding-alignment diagnostics motivate investigation but do not establish that this intervention will improve validation HR@10.",
+    "implementation_notes": "Preserve DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, all four dataset routes, existing splits, and baseline training settings, including SASREC_EPOCHS default 200. Use shared unscaled item embeddings for both pools, including the current input item when predicting its successor. Initialize retention at 0.9 through a learned sigmoid parameter and residual gate logit at -4. Use affine-free LayerNorm and explicitly zero padded outputs. A one-item prefix has zero centered residual by construction. Preserve baseline attention and positional conventions. Predeclare five configurations: baseline, uniform, last-item, exponential, centered exponential; use identical gate and normalization for residual controls. Preserve baseline parameter initialization and data randomness by initializing additional parameters without consuming the baseline RNG stream. Keep checkpoint opportunities matched and host-supported; select solely by pinned macro validation HR@10 and record actual selection opportunities. Count all training, diagnostics and failures against 43,200 GPU-seconds and reduce configurations before exceeding it. Keep executions single-GPU. Retain DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions; view.model must be the trained module and compatibility hooks must expose its actual features and scores. Report unavailable fields explicitly, preserve training-only margin labels, and restore model modes. Retain the twenty real training-user unseen-catalog recommendation exercise as exploratory evidence. Serialize architecture, pooling variant, retention, gate and normalization configuration; update the predictor writer and load state strictly. Verify final-position candidate-logit parity after reload, prefix causality and finite padded behavior. No hidden test access, external weights, unavailable metadata, or inferred simulator traits.",
+    "pseudocode": "Initialize gate_logit = -4 and retention_logit = logit(0.9).\nlog2feats(sequence):\n    h = baseline_log2feats(sequence)\n    e = item_emb(sequence)\n    rho = sigmoid(retention_logit)\n    numerator, denominator, total, count = zeros\n    for t in sequence positions:\n        valid = sequence[:, t] != 0\n        numerator = rho * numerator + where(valid, e[:, t], 0)\n        denominator = rho * denominator + valid\n        total = total + where(valid, e[:, t], 0)\n        count = count + valid\n        recent = numerator / clamp_min(denominator, eps)\n        uniform = total / clamp_min(count, 1)\n        delta = recent - uniform\n        features[:, t] = h[:, t] + sigmoid(gate_logit) * affine_free_layernorm(delta)\n    return features.masked_fill(padding_mask, 0)\nTrain with unchanged baseline targets, loss, optimizer and sampler.\nGenerate a predictor implementing this identical computation.\nSelect among predeclared controls using only host-supported pinned macro validation HR@10.",
+    "originality": {
+      "score": 5,
+      "positive": "Centering the residual creates a focused comparison between persistent prefix associations and recent deviations within the existing SASRec experiment.",
+      "negative": "Exponential smoothing, centering and gated residuals are established techniques; conceptual novelty is modest and priority is not established."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "A successful controlled result could motivate interpretable studies of when persistent and recent history components complement sequential encoders.",
+      "negative": "Stable preferences may be removed by centering, and gains may depend on this benchmark’s candidate protocol."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "The architecture adds two causal accumulators and two scalar parameters without changing the training objective.",
+      "negative": "Matched randomness, padding correctness, predictor reconstruction and bounded diagnostic comparisons require careful integration."
+    }
+  },
+  "related_work": [
+    {
+      "title": "History-order analysis by Klenitskiy et al. (2024), supplied search reference",
+      "link": "https://arxiv.org/abs/2408.12008",
+      "contributions": [
+        "The supplied summary describes original-versus-shuffled-history comparisons across multiple datasets.",
+        "Motivates uniform-history and last-item controls when interpreting sequential improvements."
+      ],
+      "limitations": [
+        "Shuffle sensitivity measures dependence on an intervention, not causal user intent.",
+        "Does not establish the effectiveness of a centered residual on the pinned Amazon benchmark."
+      ]
+    },
+    {
+      "title": "Recommendation representation dimensionality study by Guo et al., ICML 2024",
+      "link": "https://proceedings.mlr.press/v235/guo24e.html",
+      "contributions": [
+        "Studies low-dimensional embedding structure as a limitation in recommendation models.",
+        "Motivates spectral measurements alongside average embedding cosine."
+      ],
+      "limitations": [
+        "Mean directional alignment alone does not establish dimensional collapse.",
+        "Increasing effective rank is not guaranteed to improve validation HR@10."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Analyzes discrepancies between sampled and full-catalog recommendation metrics.",
+        "Supports retaining the exact pinned candidate protocol for model selection."
+      ],
+      "limitations": [
+        "Does not provide evidence that a particular architectural change improves this task.",
+        "Full-catalog training-user audits cannot substitute for the official validation objective."
+      ]
+    }
+  ]
+}

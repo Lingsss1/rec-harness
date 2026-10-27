@@ -1,0 +1,62 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting point.** (1) Feedback favors recent behavior and repeated narrow preferences. This motivates testing a recent-history signal, without treating feedback as held-out relevance labels. (2) Broad associations sometimes imply unsupported equipment or replacement needs. Histories cannot establish ownership or satisfaction, so automatic compatibility penalties lack adequate evidence. (3) Existing probes measure embedding alignment and training margins. Neither directly establishes validation ranking quality, and margins change with score scale.\n\n**Related work.** (1) History-shuffling research [1] motivates testing whether sequence order contributes useful information. Order sensitivity alone cannot establish current intent. (2) Recency-bias research [2] motivates separating recent-item dependence from broader history use. Additional recency weighting could worsen existing overemphasis, making a zero-weight control essential. (3) Sampled-ranking research [3] shows that sampled and full-catalog evaluations can disagree. The pinned validation HR@10 remains the selection criterion; full-catalog audits answer a separate question.\n\nThese insights suggest three directions: controlled recent-history modeling, ranking-based diagnostics, and evidence-qualified recommendation audits.\n\n### Framework\n\n| Component | Observable evidence | Proposed use | Limitation |\n|---|---|---|---|\n| SASRec | Ordered interaction prefixes | Sequence score | Mechanism requires intervention tests |\n| Recent-history residual | Recent item embeddings | Additional candidate affinity | Similarity need not imply utility |\n| Evidence audit | Titles/descriptions | Supported, conflicting, or unknown specifications | Cannot infer ownership |\n| Ranking diagnosis | Fixed candidates and scores | Rank dependence and validation comparison | Unobserved items lack relevance labels |\n\n### Candidate ideas\n\nScores are originality / future potential / implementation difficulty; higher difficulty means harder.\n\n1. **Recent-history score residual: 4/7/3.** Simple controlled combination with SASRec; feasible early experiment. Its novelty is modest, and recent similarity may amplify redundant recommendations [2].\n2. **Matched history interventions: 5/7/4.** Compare recent deletion and earlier-history shuffling against matched controls [1]. This can distinguish dependencies, but perturbations introduce distribution shift and do not themselves improve ranking.\n3. **Specification-evidence audit: 6/6/6.** Attach exact supporting or conflicting description spans to recommendations. This addresses unsupported compatibility claims, but extraction coverage may be poor and ranking benefits remain uncertain.\n\n### Selected idea: recent-history score residual\n\nAt 0% progress, prioritize a small, reversible experiment. Freeze each trained per-category SASRec checkpoint. Form an exponentially weighted mean of its last five nonpadding item embeddings; compute cosine affinity between that mean and each candidate embedding. Add this bounded affinity to the original score using a category-specific coefficient selected from a small validation grid that includes zero.\n\nCache validation component scores to avoid retraining during coefficient selection. Preserve dataset routing, seeds, splits, candidate sampling, and macro HR@10 selection. Update the predictor writer to reproduce normalization, history truncation, and saved coefficients exactly.\n\nKeep `DiagnosisProbe(view, device)` and its return schema. Expose the actual scoring architecture through the view, add paired residual-on/off rank diagnostics, restore model mode afterward, and mark unavailable metadata probes missing. Treat any improvement as validation evidence subject to selection noise, without claiming improved compatibility or full-catalog accuracy.",
+  "idea": {
+    "description": "Add a validation-selected recent-history cosine-affinity residual to each category's trained SASRec scores, with coefficient zero preserving the baseline.",
+    "motivation": "The qualitative diagnosis suggests recent, specific preferences may be underrepresented. A small residual tests this hypothesis cheaply while allowing validation to reject additional recency emphasis.",
+    "implementation_notes": "Use only training-prefix interactions and trained item embeddings. For the last five nonpadding items, weight positions by 2^(-age/2), average embeddings, and L2-normalize; L2-normalize candidate embeddings separately. Score with original SASRec logits plus alpha times cosine affinity. Tune alpha per category over [0, 0.1, 0.3, 1.0] on the pinned validation candidates, retaining zero on ties. Report the resulting four-category macro HR@10 without fabricating results. Use os.environ['GAGC_DATA_DIR']; store checkpoints and coefficients beneath the trial directory. Preserve preprocessing seed 0, training seed 42, and the SASREC_EPOCHS environment override, whose host default is 200. The predictor writer must emit the identical scoring wrapper and load saved coefficients. The compatibility view must expose the actual wrapper as view.model and implement residual scoring for per-position prefixes in predict_score. Do not infer ownership, dislike, satisfaction, or simulator traits. Budget coefficient tuning through cached scores; do not access test labels.",
+    "pseudocode": "for category in four_categories:\n    base = train_baseline_sasrec(category, preprocessing_seed=0, training_seed=42)\n    freeze(base)\n    for validation_user in pinned_validation_users(category):\n        history = permitted_training_prefix(validation_user)\n        base_scores = base.score(history, pinned_candidates(validation_user))\n        recent = last_nonpadding(history, count=5)\n        vector = normalize(weighted_mean(base.item_emb(recent), half_life=2))\n        residual = cosine(vector, base.item_emb(pinned_candidates(validation_user)))\n        cache(base_scores, residual, validation_target)\n    alpha = argmax_validation_hr10([0, 0.1, 0.3, 1.0], tie_break='smallest')\n    save_under_trial(base, alpha, residual_configuration)\nwrite_predictor_with_identical_category_routing_and_scoring()\nreport_macro_validation_hr10_across_all_four_categories()",
+    "originality": {
+      "score": 4,
+      "positive": "A controlled residual provides an interpretable test of a diagnosis-derived hypothesis without requiring new data.",
+      "negative": "Combining sequential scores with recent-item similarity is an incremental use of established techniques."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Paired ranking interventions can guide later work on when recent-history affinity helps each category.",
+      "negative": "Recent similarity may increase redundancy, and validation gains may not transfer to full-catalog recommendations."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Requires a small scoring wrapper, cached validation components, and predictor serialization.",
+      "negative": "Per-position diagnostic compatibility and exact training/inference parity require careful handling of padding and prefix boundaries."
+    }
+  },
+  "related_work": [
+    {
+      "title": "[1] Does It Look Sequential? An Analysis of Datasets for Evaluation of Sequential Recommendations",
+      "link": "https://arxiv.org/abs/2408.12008",
+      "contributions": [
+        "Uses shuffled-history comparisons to investigate sequential structure across recommendation datasets.",
+        "Motivates controlled tests of dependence on interaction order."
+      ],
+      "limitations": [
+        "Does not establish the strength of sequential structure in this specific four-category task.",
+        "Order dependence does not by itself identify current intent."
+      ]
+    },
+    {
+      "title": "[2] Measuring Recency Bias in Sequential Recommendation Systems",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "Introduces diagnostics for recent-item emphasis in sequential recommendation.",
+        "Motivates testing recency weighting against a baseline control."
+      ],
+      "limitations": [
+        "Does not establish that adding recency weighting improves these Amazon categories.",
+        "Recency dependence alone cannot demonstrate practical recommendation utility."
+      ]
+    },
+    {
+      "title": "[3] On Sampled Metrics for Item Recommendation",
+      "link": "https://arxiv.org/abs/1912.02263",
+      "contributions": [
+        "Shows that sampled ranking metrics can disagree with full-catalog evaluation.",
+        "Supports keeping benchmark selection claims separate from full-catalog audit claims."
+      ],
+      "limitations": [
+        "Does not replace the task's prescribed sampled validation objective.",
+        "Does not supply relevance labels for unobserved catalog items."
+      ]
+    }
+  ]
+}

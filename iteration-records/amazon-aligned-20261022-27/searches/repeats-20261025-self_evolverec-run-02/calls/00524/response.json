@@ -1,0 +1,167 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting point.** (1) Sampled training margins are generally positive, yet Electronics has a 7.15% negative-beats-positive rate. This motivates stronger negative competition without assuming training separation predicts validation HR@10. (2) Logit dispersion differs across datasets. Margin comparisons therefore require score-scale context. (3) Qualitative feedback identifies broad associations and redundant alternatives. It motivates investigating ranking specificity, but does not establish loss choice as their cause.\n\n**Related work.** (1) Di Teodoro et al. connect single-negative categorical cross-entropy to BPR and provide favorable worst-case bounds for BCE [1]. Softmax superiority remains a hypothesis. (2) Scaled cross-entropy and logQ studies motivate explicit normalization and sampling controls [2,3]. (3) Sequentiality audits caution against equating accuracy with long-history reasoning [4]. (4) Sampled metrics can reverse full-catalog model ordering [7]; repeated validation selection also creates optimism [8].\n\n### Framework and candidate ideas\n\n| Direction | Atomic intervention | Question |\n|---|---|---|\n| Competition | BCE-1 versus BCE-32 | Does averaging more sampled negatives help? |\n| Objective | BCE-32 versus softmax-32 | How does the complete objective change performance? |\n| Mechanism | Fixed-pool gradient audit | Which negatives receive learning signal? |\n\nScores are originality/potential/difficulty, each 0–10; higher difficulty means harder implementation.\n\n1. **Matched-negative objective comparison: 3/7/4.** Originality: separates major confounds, but uses established objectives. Potential: provides actionable evidence, but remains benchmark-dependent. Difficulty: preserves architecture, but reproducible sampling and fair optimization controls require care.\n2. **BCE negative-count increase alone: 2/6/3.** Originality: clean exposure intervention, but conventional. Potential: inexpensive candidate, but may reinforce popularity shortcuts. Difficulty: vectorized loss is simple, but unique sampling and memory management add work.\n3. **Fixed-pool gradient concentration audit: 5/6/4.** Originality: links objectives to negative allocation, but is descriptive. Potential: guides sampling research, but cannot establish generalization. Difficulty: logit derivatives are simple, but tied-embedding attribution is harder.\n\n### Selected idea: matched-negative objective comparison\n\nAt 10% progress, retain idea 1. Compare four independent baseline SASRec models under BCE-1, balanced BCE-32 and softmax-32, pairing initialization, batches and negative pools. Follow the original training-history exclusion policy [5]; sample K=min(32, eligible count) distinct nonpadding negatives per position. BCE-1 uses the first pool member. Repeats across positions remain allowed; held-out interactions are never consulted.\n\n```python\nBCE1  = softplus(-p) + softplus(n_first)  # zero negative term if K=0\nBCE32 = softplus(-p) + mean_valid(softplus(n))\nSM32  = logsumexp([p] + valid_negative_logits) - p\nloss = selected_loss.mean()  # valid targets; skip empty batches\n```\n\nBCE preserves original positive-plus-negative scaling [6]. At K=0, BCE is positive-only and softmax contributes zero, retained in the target average. Mask softmax slots with −∞; never apply BCE to infinite placeholders.\n\nUse temperature 1 without logQ correction: this is restricted-candidate CE. At zero logits and K=32, its gradients are 64/33 times balanced BCE gradients. Add CE×33/64 as a bounded scale control; Adam, score anchoring and hardness weighting prevent interpreting this as complete optimization equivalence [9]. Record gradient norms, clipping, logits, embedding norms and actual updates; reserve equally budgeted learning-rate checks before broader temperature exploration.\n\nPreserve seeds, splits, routing, epoch defaults, diagnostic interfaces and export parity. Select solely by pinned macro validation HR@10 under declared checkpoint rules. Report paired category results, training-popularity slices and compute. Bootstrap paired users within each category, then average category differences; intervals omit training and selection uncertainty. Keep twenty-user full-catalog audits descriptive. Cap all training and diagnostics at 43,200 GPU-seconds; no accuracy, intent or full-catalog improvement is established beforehand.\n\nReferences: [1] arXiv:2411.07770; [2] arXiv:2408.14238; [3] arXiv:2507.09331; [4] arXiv:2408.12008; [5,6] original SASRec sampler/model; [7] Krichene–Rendle sampled-metric analysis; [8] Cawley–Talbot selection bias; [9] arXiv:2012.09740. Links and reproduction details follow.",
+  "idea": {
+    "description": "Compare unchanged four-dataset SASRec trained with BCE-1, balanced BCE-32 and restricted-candidate softmax-32 using paired initialization, examples and negative pools, with bounded controls for optimization scale and popularity shortcuts.",
+    "motivation": "Existing diagnostics show separation from sampled training negatives, particularly strong in Movies_and_TV and weaker in Electronics, but do not establish validation ranking quality. BCE-32 versus BCE-1 tests the effect of averaging additional negatives; softmax-32 versus BCE-32 compares objectives under matched exposure. Qualitative failures motivate the experiment without establishing that loss choice causes unsupported associations or redundant recommendations. At 10% research progress, this controlled, architecture-preserving experiment remains preferable to adding an untested architectural mechanism.",
+    "implementation_notes": "Preserve DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, evaluation seed 42, all four categories, existing item mappings, dataset routing and unchanged splits. Respect SASREC_EPOCHS and its host default of 200. Write checkpoints, configurations, diagnostics and exports beneath the trial directory. Use one GPU per trial; all training, failures and diagnostics count toward the aggregate 43,200 GPU-second budget.\n\nSampler: define each user's eligible set as nonpadding catalog IDs excluding that user's entire training-item set, including training events after the current prefix. This matches the supplied original SASRec sampler policy; it is not a prefix-only exclusion policy. Never consult validation or test interactions for eligibility. Draw an ordered uniform sample without replacement of K=min(32, eligible_count) items independently per target position. Repeated items across positions are permitted. BCE-1 receives the first member, whose marginal distribution is uniform over eligible IDs. Record eligible counts, actual K, zero-eligible positions and skipped empty batches. Avoid rejection loops when eligibility is empty or small. Use deterministic complement sampling or bounded rejection with an exact uniform fallback; cache complements only when memory permits. Existing one-negative loader tensors can remain unchanged; generate the auxiliary pool through a separate sampler using the batch's training-user identity or an aligned side channel. Do not reconstruct user identity from potentially nonunique sequence tensors.\n\nLosses: retain positions with nonzero sequence and positive IDs; a missing negative does not invalidate a positive target. BCE-1 is mean[softplus(-positive)+softplus(first_negative)], with zero negative contribution when K=0. BCE-32 replaces the negative term with its within-position mean over K valid negatives. This preserves the original SASRec data-loss scaling at K=1; averaging all positive and negative terms together would change it. Compute BCE only from finite logits and mask finite unreduced negative losses before summation. Restricted softmax uses the positive plus valid negatives, temperature 1, invalid negative logits set to negative infinity, and logsumexp-minus-positive. Remove padding rows first. K=0 gives exactly zero softmax loss and gradient, retained in the valid-target average; BCE remains positive-only. Skip batches containing no valid targets and report this boundary-case difference. Apply identical, explicitly documented baseline regularization, reductions, dropout, optimizer settings and clipping rules. Document whether regularization is a loss penalty or optimizer weight decay, including parameter groups and Adam versus AdamW semantics. No logQ correction is used, and the objective is not claimed to be an unbiased full-catalog likelihood.\n\nPairing: initialize each arm from the same saved model state and identically initialized optimizer state for each dataset. Reproduce minibatch order, negative pools and model-dropout RNG streams by resetting or restoring independent states at each arm's start. Use separate generators for auxiliary sampling and diagnostics so changing negative count does not change dropout or data order. Log initial-state hashes and verify identical evaluation-mode scores before updates. Generate pools deterministically from dataset, epoch and batch identity, or persist their sampler state. Validate uniqueness, exclusion, ID bounds and masks. Score valid training positions in chunks when necessary; normalize chunk sums by the total valid-target count, apply regularization once per optimizer update and keep clipping at the original update boundary.\n\nControls and interpretation: BCE-32 versus BCE-1 changes gradient variance and negative coverage, not only 'competition'; their expected negative BCE term is the same under uniform sampling. Softmax-32 versus BCE-32 changes candidate coupling, absolute-score anchoring and gradient allocation. At all-zero logits with K=32, CE gradients are 64/33 times balanced BCE gradients. Include a constant CE multiplier of 33/64 as a bounded initialization-scale control; no constant equates these losses away from equal logits. Adam can cancel much constant scaling, while epsilon, clipping and regularization complicate equivalence. Temperature changes relative hardness as well as scale, so learning-rate adjustment cannot reproduce it. The primary comparison keeps temperature 1. Report a fixed-configuration result as such; if budget remains, prioritize the same small learning-rate grid for BCE-32 and CE-32 before one predeclared CE temperature check. Match update opportunities for scientific comparisons, report actual GPU time separately, and use equal allocated compute for any tuning comparison. Record all incomplete and failed arms rather than hiding budget-driven truncation.\n\nDiagnostics: preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), metrics and metric_definitions, and view.model as the actual trained nn.Module. Retain item_emb, log2feats, predict_score, user_train, meta_data and review_data compatibility fields. Existing one-negative margin and embedding-alignment probes remain bounded auxiliary measurements, with the same fixed diagnostic examples and negatives across arms. Architecture-specific residual probes remain inapplicable. Add bounded fixed-pool measurements of top-1/top-5 shares of absolute negative-logit gradients, encoder/item-embedding gradient norms and per-parameter RMS, clipping frequency, score distributions and embedding norms. For K=0 or a zero total negative derivative, concentration is null rather than zero; report K alongside concentration. Use analytic derivatives or an isolated no-update probe, exclude regularization from logit-gradient concentration, and restore RNG states and module modes afterward. Tied embedding gradients mix sequence-input and candidate-scoring paths; label aggregate measurements accordingly unless separate path attribution is implemented. These probes do not establish intent, semantic compatibility or representation collapse.\n\nSelection and uncertainty: retain the pinned 200 validation users/category and 99 unique negative candidates, without changing the host evaluator. Before launching, declare checkpoint cadence, eligibility, patience and deterministic ties using baseline rules where available; write the effective rules and allocated GPU time into the trial configuration. Select only by the four-category macro validation HR@10, retaining one jointly selected four-route predictor rather than silently choosing each category's best epoch. If host outputs expose per-user hits, record paired binary outcomes on identical candidates; otherwise mark paired analyses unavailable rather than substituting another evaluator. Use 10,000 bootstrap replicates with diagnostic seed 1042, resampling 200 users independently within each category while preserving model pairing; equally average four category differences per replicate and report percentile 95% intervals, category intervals and win/loss/tie counts. These intervals condition on fitted models, candidates and observed users; they omit training-seed, split and candidate-draw uncertainty and do not correct adaptive selection. Record every trial, validation query, checkpoint and configuration, labeling comparisons exploratory until the host's untouched final evaluation.\n\nShortcut analysis and qualitative evidence: define popularity from training interaction counts, including zero-count catalog items. Freeze category-specific item-count tertile boundaries before validation analysis and report cutpoints, ties and stratum sizes. Report paired validation changes and target counts by stratum, plus a training-popularity-only baseline on pinned candidates when supported by the host. Do not select checkpoints from slices. Retain full-catalog unseen-item recommendations for five real training users/category; record mean log(1+training_count), head share, coverage and item exposure concentration using a fixed list length and deterministic ties. Treat these twenty users as descriptive. Audit candidate/history IDs, timestamps and exact available title/description spans; label compatibility, complementarity and redundancy claims supported, contradicted or unknown. Missing requirements or current intent remain unknown. Preserve simulator-feedback provenance and never fabricate reviews, ratings, categories, prices, stores or diversity/conformity traits. Sampled HR gains and popularity diagnostics cannot establish full-catalog accuracy or causal preference improvement.\n\nExport and reproducibility: keep the unchanged architecture and exact scoring configuration in the predictor writer. Save selected weights, objective/sampler configuration, item mappings and routing; save optimizer, scheduler and RNG states when supporting resumption. Record software versions, precision/backend settings, effective hyperparameters and actual updates/GPU time. Reload the generated working/predict.py and verify per-category scores within predeclared precision-appropriate tolerances, top-10 rankings, padding, truncation, IDs and routing. Investigate ranking differences. Reserve budget for export checks and stop when the aggregate budget is exhausted even if planned comparisons remain incomplete.",
+    "pseudocode": "import torch\nimport torch.nn.functional as F\n\ndef objective(pos_logits, neg_logits, neg_mask, mode):\n    # Padding targets have already been removed.\n    # pos_logits: [N]; neg_logits and bool neg_mask: [N, M].\n    # All supplied logits must be finite, including unused placeholders.\n    # Return None for an empty target batch: caller skips optimizer update.\n    if pos_logits.numel() == 0:\n        return None\n    if not torch.isfinite(pos_logits).all() or not torch.isfinite(neg_logits).all():\n        raise ValueError('Nonfinite input logits')\n    counts = neg_mask.sum(dim=-1)\n    positive_loss = F.softplus(-pos_logits)\n    if mode == 'bce1':\n        # Ordered masks place valid samples first; first member is uniform.\n        negative_loss = torch.zeros_like(pos_logits)\n        if neg_logits.shape[1] > 0:\n            negative_loss = torch.where(\n                counts > 0, F.softplus(neg_logits[:, 0]), negative_loss)\n        per_target = positive_loss + negative_loss\n    elif mode == 'bce32':\n        finite_losses = F.softplus(neg_logits)\n        negative_sum = finite_losses.masked_fill(~neg_mask, 0.0).sum(-1)\n        per_target = positive_loss + negative_sum / counts.clamp_min(1)\n    elif mode in ('softmax32', 'softmax32_scaled'):\n        masked_negative_logits = neg_logits.masked_fill(~neg_mask, -torch.inf)\n        candidates = torch.cat([pos_logits[:, None], masked_negative_logits], -1)\n        per_target = torch.logsumexp(candidates, dim=-1) - pos_logits\n        # Make the specified K=0 value and gradient explicit.\n        per_target = torch.where(counts > 0, per_target, torch.zeros_like(per_target))\n        if mode == 'softmax32_scaled':\n            per_target = per_target * (33.0 / 64.0)\n    else:\n        raise ValueError(mode)\n    return per_target.mean()\n\n# For each of the four datasets:\n# 1. Preserve baseline preprocessing/mappings and save one initial model state.\n# 2. Build eligibility from each user's complete TRAINING history only.\n# 3. Generate the same ordered unique pools for every arm using a separate RNG.\n#    K=min(32, eligible_count); handle K=0 without rejection loops.\n# 4. Restore paired initialization, optimizer initialization and training RNG state.\n# 5. Remove padding targets, score positives/pools, and compute selected objective.\n#    Add unchanged baseline regularization once; backward, clip and update normally.\n# 6. Keep matched update/checkpoint opportunities; record actual GPU costs.\n# 7. Compare BCE32-BCE1 for negative averaging/exposure and CE32-BCE32 for\n#    complete objective effects. A constant-rescaled CE arm probes initial scale.\n# 8. Run bounded diagnostics without updating weights or consuming training RNG.\n# 9. Select a four-category checkpoint bundle only by pinned macro HR@10.\n# 10. If available, bootstrap paired per-user hit differences within categories.\n# 11. Export through the predictor writer; reload and verify scores/rankings/routes.\n# Stop at the shared 43,200 GPU-second limit; report unfinished comparisons.",
+    "originality": {
+      "score": 3,
+      "positive": "The paired sampler and explicit optimization controls separate several commonly confounded effects in this four-category task.",
+      "negative": "BCE, restricted softmax, multiple-negative training and gradient-scale controls are established techniques; the contribution is primarily experimental."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "A reproducible comparison can guide subsequent negative-sampling and gradient-allocation research while preserving the deployed architecture.",
+      "negative": "The result may depend on sampled evaluation, optimizer settings and selection budget, and does not directly resolve semantic compatibility or current intent."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Architecture and inference remain unchanged, and the core losses are short vectorized operations.",
+      "negative": "Unique eligible sampling, user alignment, RNG pairing, zero-eligible cases, bounded diagnostics and fair checkpoint accounting require substantial integration care."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Di Teodoro et al.: analysis of recommendation losses under negative sampling",
+      "link": "https://arxiv.org/abs/2411.07770",
+      "contributions": [
+        "The supplied search summary reports equivalence between single-negative categorical cross-entropy and BPR.",
+        "Provides theoretical motivation for retaining BCE as a serious control."
+      ],
+      "limitations": [
+        "Worst-case ranking bounds do not determine empirical macro validation HR@10 in this task.",
+        "The theoretical comparison does not eliminate optimization and loss-scaling confounds in a finite-budget experiment."
+      ]
+    },
+    {
+      "title": "Scaled cross-entropy",
+      "link": "https://arxiv.org/abs/2408.14238",
+      "contributions": [
+        "The supplied summary reports benefits from increasing the sampled normalizing term, motivating explicit normalization controls."
+      ],
+      "limitations": [
+        "Reported benefits do not establish that ordinary softmax-32 will outperform balanced BCE-32 here.",
+        "Changing the sampled normalizer is distinct from multiplying the entire CE loss by a constant."
+      ]
+    },
+    {
+      "title": "RecSys 2025 work on logQ correction",
+      "link": "https://arxiv.org/abs/2507.09331",
+      "contributions": [
+        "Distinguishes deterministically included positives from sampled negatives and highlights consequences for gradient weighting."
+      ],
+      "limitations": [
+        "Correction choices depend on the sampling scheme and intended objective; they should not be added without specifying both.",
+        "The proposed uncorrected restricted-candidate CE is not an unbiased full-catalog likelihood estimator."
+      ]
+    },
+    {
+      "title": "Does It Look Sequential?",
+      "link": "https://arxiv.org/abs/2408.12008",
+      "contributions": [
+        "Compares original and shuffled interaction sequences across multiple datasets, motivating caution about claims of temporal reasoning."
+      ],
+      "limitations": [
+        "Sequentiality findings do not identify the best training objective for these four Amazon datasets.",
+        "An objective improvement alone cannot establish improved long-history reasoning or current-intent understanding."
+      ]
+    },
+    {
+      "title": "Original SASRec negative sampler",
+      "link": "https://github.com/kang205/SASRec/blob/master/sampler.py",
+      "contributions": [
+        "Specifies uniform one-negative sampling excluding padding and the user's entire training-item set.",
+        "Permits repeated negatives across positions and does not consult held-out interactions."
+      ],
+      "limitations": [
+        "Unbounded rejection sampling hangs when the eligible set is empty.",
+        "Distinct multi-negative sampling and zero-eligible handling are explicit extensions rather than original behavior."
+      ]
+    },
+    {
+      "title": "Original SASRec model and loss",
+      "link": "https://github.com/kang205/SASRec/blob/master/model.py",
+      "contributions": [
+        "Defines positive and negative BCE terms summed and averaged over nonpadding targets, plus regularization.",
+        "Supports preserving BCE-1 scaling as mean softplus(-positive) plus mean softplus(negative)."
+      ],
+      "limitations": [
+        "The original implementation does not specify the proposed multi-negative or restricted-softmax extensions.",
+        "The matched RecHarness baseline's effective settings must remain the implementation authority where they differ."
+      ]
+    },
+    {
+      "title": "Krichene and Rendle: On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled ranking metrics can disagree with full-catalog metrics and reverse model ordering.",
+        "Motivates limiting conclusions to the pinned candidate-set benchmark."
+      ],
+      "limitations": [
+        "Does not justify modifying the host's fixed evaluation protocol.",
+        "Does not determine the direction or magnitude of evaluation bias for this particular experiment."
+      ]
+    },
+    {
+      "title": "Cawley and Talbot: On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/beta/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how optimizing model-selection criteria can create optimistic performance estimates.",
+        "Motivates recording search breadth and reserving confirmation for untouched final evaluation."
+      ],
+      "limitations": [
+        "Ordinary paired bootstrap intervals do not remove adaptive checkpoint or trial-selection bias.",
+        "The work does not prescribe the exact budget or checkpoint schedule for this task."
+      ]
+    },
+    {
+      "title": "Wang and Liu: Understanding the Behaviour of Contrastive Loss",
+      "link": "https://arxiv.org/abs/2012.09740",
+      "contributions": [
+        "Analyzes temperature-dependent hardness sensitivity in contrastive objectives.",
+        "Motivates distinguishing temperature changes from constant loss scaling or learning-rate adjustment."
+      ],
+      "limitations": [
+        "Its analysis does not establish a temperature optimum for this SASRec benchmark.",
+        "Contrastive-loss findings do not establish that harder negatives improve recommendation generalization."
+      ]
+    },
+    {
+      "title": "PyTorch BCEWithLogitsLoss definition",
+      "link": "https://docs.pytorch.org/docs/stable/generated/torch.nn.BCEWithLogitsLoss.html",
+      "contributions": [
+        "Documents stable logit-based binary cross-entropy and reduction semantics.",
+        "Supports deriving independent positive and negative logit gradients."
+      ],
+      "limitations": [
+        "Default reductions do not automatically implement the proposed per-position balanced negative averaging.",
+        "Masking and zero-eligible behavior require explicit implementation."
+      ]
+    },
+    {
+      "title": "PyTorch CrossEntropyLoss definition",
+      "link": "https://docs.pytorch.org/docs/stable/generated/torch.nn.CrossEntropyLoss.html",
+      "contributions": [
+        "Documents coupled categorical cross-entropy and its candidate normalization.",
+        "Supports the restricted-candidate logsumexp formulation and gradient-scale calculation."
+      ],
+      "limitations": [
+        "The API does not choose negative-sampling policy or establish full-catalog likelihood equivalence.",
+        "Variable candidate masks and empty target batches require explicit handling."
+      ]
+    },
+    {
+      "title": "Dror et al.: The Hitchhiker's Guide to Testing Statistical Significance in Natural Language Processing",
+      "link": "https://www.aclweb.org/anthology/P18-1128.pdf",
+      "contributions": [
+        "Provides paired-resampling principles relevant to comparing models on shared evaluation examples.",
+        "Supports preserving per-user pairing during bootstrap or randomization comparisons."
+      ],
+      "limitations": [
+        "The proposed category-stratified macro bootstrap is an adaptation to this task.",
+        "User resampling does not capture training-seed, split, candidate-draw or adaptive-selection uncertainty."
+      ]
+    }
+  ]
+}

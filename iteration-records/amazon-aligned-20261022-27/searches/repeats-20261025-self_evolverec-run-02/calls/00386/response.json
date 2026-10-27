@@ -1,0 +1,82 @@
+{
+  "markdown_report": "The strongest early-stage direction is **candidate-conditioned recent-history attention added to SASRec**, tested as a small residual branch. Its benefits remain hypotheses; the supplied inspiration’s 0.5600 score lacks a matched comparison establishing improvement.\n\n**Insights from the starting point.** (1) SASRec already models temporal dependencies, so another recency mechanism needs an explicit control. (2) User feedback identifies two actionable failures: broad associations crowd out specific matches, and older incidental interactions outweigh recent repeated interests. Candidate-specific evidence selection could address both, without establishing compatibility. (3) Electronics has 14.95% negative-over-positive rankings and a −0.4812 lower-tail margin; modest embedding alignment does not justify prioritizing collapse remedies.\n\n**Insights from related work.** (1) MARS motivates candidate-specific matching of multiple preference signals, but its pretrained text setting exceeds this task’s resources. (2) DARE motivates separate attention and value embeddings; its long-history CTR evidence does not establish transfer here. (3) gSASRec motivates testing sampled-loss calibration before increasing capacity; training-margin improvements still require validation HR@10 confirmation.\n\nThe conceptual framework separates **evidence selection** (SASRec attention, candidate attention, interest states), **evidence representation** (ID embeddings or supplied text), and **ranking supervision** (BCE, gBCE, sampled softmax). The selected algorithm changes evidence selection while retaining baseline supervision, making the first experiment easier to interpret.\n\nScores below are hypotheses. O/P/U/M denote originality, future potential, user-diagnosis alignment, and model-diagnosis alignment; D measures implementation difficulty, with higher meaning harder. Each cell gives one advantage and one limitation.\n\n| Idea | O | P | U | M | D |\n|---|---|---|---|---|---|\n| Multi-negative gBCE [gSASRec] | 2: focused / established | 7: reusable / sampling-sensitive | 3: discriminates / no intent selection | 8: targets confusion / margins insufficient | 3: encoder unchanged / extra sampling |\n| Recent candidate attention [MARS, DARE] | 4: useful adaptation / familiar ingredients | 7: extensible / sparse evidence | 8: specificity and recency / no compatibility labels | 7: candidate discrimination / possible overfit | 5: small branch / scorer synchronization |\n| Three causal interest states [D2MFRec] | 4: persistent interests / established routing | 7: richer histories / state instability | 7: recurring interests / completion unobserved | 5: differentiated features / indirect margin link | 7: compact states / causal routing complexity |\n\nSelect recent candidate attention at 0% progress. Score each candidate using SASRec plus a bounded residual attending to the last ten valid interactions through independent key/query and value embeddings. Recency weights favor current evidence; candidate conditioning lets different candidates retrieve different supporting events. Neither mechanism guarantees semantic precision.\n\nCompare baseline, recency pooling, and candidate attention at matched residual capacity. Select exclusively by pinned four-category macro validation HR@10. Report existing margin diagnostics and descriptive simulator feedback; claim neither compatibility nor satisfaction gains without evidence.",
+  "idea": {
+    "description": "Add a bounded candidate-conditioned attention residual over the ten most recent valid prefix interactions to each dataset’s SASRec model. Use independent embedding tables for attention keys/queries and transition values/targets, retaining the baseline encoder and objective.",
+    "motivation": "The branch explicitly targets two observed user-facing failures: broad associations displacing specific matches, and old incidental interactions outweighing recent repeated evidence. Candidate-conditioned weights can select supporting history separately for each recommendation, while a fixed recent window and decay constrain old evidence. These are inductive biases, not observed intent or compatibility labels. The model-facing target is weak positive–negative discrimination, especially Electronics’ 14.95% wrong-ranking rate and negative tenth-percentile margin.",
+    "implementation_notes": "Preserve the four original datasets and routing, input splits, preprocessing seed 0, training seed 42, and DATA_DIR = os.environ['GAGC_DATA_DIR']. Save every artifact beneath the trial directory and execute on one GPU. Honor SASREC_EPOCHS, default 200. Use no external weights, hidden test data, unavailable metadata, or simulator traits.\n\nUse an ID-only first experiment to isolate evidence selection. Set recent window K=10, branch dimension d=16, decay=0.8, and fixed residual coefficient alpha=0.1 as prespecified engineering choices. Create independent key/query table A, source-value table V, and candidate-target table T, each with padding index zero. Normalize vectors before dot products. For candidate j, attend over valid recent prefix items using cosine(A[item], A[j])/0.2 + lag*log(0.8). The residual is the attention-weighted cosine(V[item], T[j]); its range is bounded. Return zero for empty histories. Mask padding after normalization and exclude padded targets from loss. Initialize all branch tables nonzero; retain baseline loss, optimizer, sampler, and regularization, with explicit reporting of any necessary new parameter groups.\n\nPrespecify three configurations: unchanged SASRec; the same residual with candidate-independent exponential pooling; and candidate attention. The latter two share V/T parameterization; register the same A table in the pooling control for parameter-count parity, noting that unused parameters do not match effective capacity. Preserve baseline initialization and random streams by constructing branches within a forked RNG context after baseline initialization. No additional tuning follows simulator feedback.\n\nAllocate at most 12,000 GPU-seconds per configuration across all four categories, reserving 7,200 seconds for diagnostics, debugging, and failures. Count all work against 43,200 seconds. Use charged baseline timing to freeze a common feasible epoch cap, no greater than the environment limit; compare only checkpoints available at the same completed epoch across every category and configuration. Select by unrounded host macro validation HR@10; prefer baseline on ties. The host retains 200 validation users/category, 99 unique negatives, and evaluation seed 42.\n\nCandidate dependence requires adapting the compatibility view: log2feats returns the encoder features plus sufficient causal recent-item context, while predict_score computes the complete candidate-dependent score. Support aligned B x L targets and B x C candidate lists explicitly. Retain view.model as the actual module, view.item_emb, user_train, meta_data, and review_data. Retain DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions; compute margins using the complete scorer. Label base-table cosine similarity as such, and mark unavailable item-category breakdowns unavailable. Do not interpret dataset names as item-level category metadata.\n\nUpdate the predictor writer to serialize architecture version, all branch settings and weights, and dataset routing. Reconstruct precisely the same scorer in working/predict.py. Chunk candidates for full-catalog recommendations to the twenty designated training users; normalize attention over history separately for each candidate so chunk size cannot change scores. Verify save/reload equality, causal masking, padding invariance, candidate-order equivariance, and chunked/full scoring agreement using public histories. These checks also consume the search budget. Report measured validation outcomes without claiming that lexical precision, equipment compatibility, or completed needs have been identified.",
+    "pseudocode": "class RecentCandidateSASRec(nn.Module):\n    def log2feats(sequence):\n        h = baseline.log2feats(sequence)\n        recent_ids, lags, mask = causal_recent_windows(sequence, K=10)\n        return Features(h, recent_ids, lags, mask)\n\n    def score_one_position(features, candidates):\n        # candidates: B,C; histories: B,K; all operations stay within user\n        base = batched_dot(features.h, item_emb(candidates))\n        keys = normalize(A(features.recent_ids))\n        queries = normalize(A(candidates))\n        logits = einsum('bkd,bcd->bck', keys, queries) / 0.2\n        logits += features.lags[:, None, :] * log(0.8)\n        weights = safe_masked_softmax(logits, features.mask[:, None, :])\n        values = normalize(V(features.recent_ids))\n        targets = normalize(T(candidates))\n        transition = einsum('bkd,bcd->bck', values, targets)\n        residual = sum(weights * transition, axis=-1)\n        return base + 0.1 * residual\n\n    def predict_score(features, items):\n        # Explicit adapters handle aligned B,L targets or B,C candidates.\n        return shape_checked_dispatch(score_one_position, features, items)\n\nfor configuration in [baseline, recency_pooling, candidate_attention]:\n    for dataset in ORIGINAL_FOUR_DATASETS:\n        seed_training(42)\n        model = construct_original_sasrec(dataset)\n        attach_branch_if_requested_preserving_rng(model, configuration)\n        train_with_unchanged_loss_at_common_epoch_cap(model)\n        save_configuration_and_state_under_trial_directory(model)\n    write_matching_predictor_with_original_dataset_routing()\n    record_host_validation_macro_HR10_and_GPU_seconds()\nselect_highest_host_macro_HR10_with_baseline_tie_preference()\nrun_compatible_diagnostics_without_additional_tuning()",
+    "originality": {
+      "score": 4,
+      "positive": "A constrained adaptation combines candidate-specific evidence selection, independent attention/value tables, and recent causal support around two concrete user failures.",
+      "negative": "Candidate attention, recency weighting, and additive sequential residuals are established techniques; this is an experimental combination rather than a new model family."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides a tractable foundation for testing whether candidate-specific support improves ranking, with later extensions using supplied titles and descriptions.",
+      "negative": "Sparse interactions can destabilize attention, and predictive transitions cannot identify compatibility, completed needs, or actual user intent."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "The SASRec encoder and training objective remain intact, and the branch uses small embedding tables with a fixed short window.",
+      "negative": "Candidate-dependent training, full-catalog chunking, causal feature packaging, and synchronized predictor and diagnostic implementations require careful handling."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Uses causal self-attention to model sequential interaction histories and score next-item candidates."
+      ],
+      "limitations": [
+        "Its capabilities already include temporal evidence selection; additional recency mechanisms need controlled comparisons.",
+        "Interaction prediction alone does not establish equipment compatibility or consumption completion."
+      ]
+    },
+    {
+      "title": "MARS",
+      "link": "https://arxiv.org/abs/2409.00702",
+      "contributions": [
+        "Motivates attribute-aware text representations and user–candidate matching across multiple preference signals."
+      ],
+      "limitations": [
+        "The supplied summary describes pretrained language representations, which cannot be imported into this task.",
+        "Does not establish effectiveness of the proposed ID-only residual."
+      ]
+    },
+    {
+      "title": "DARE",
+      "link": "https://ise.thss.tsinghua.edu.cn/~mlong/doc/Long-Sequence-Recommendation-ICLR25.pdf",
+      "contributions": [
+        "Separates embedding tables used for candidate–history attention and history representation.",
+        "Reports interference from sharing those functions in its studied setting."
+      ],
+      "limitations": [
+        "Evidence concerns long-history CTR prediction rather than this sparse next-item benchmark.",
+        "Separate tables increase parameters and can overfit sparse items."
+      ]
+    },
+    {
+      "title": "gSASRec: sampled-loss calibration for sequential recommendation",
+      "link": "https://www.ijcai.org/proceedings/2024/939",
+      "contributions": [
+        "Studies overconfidence from sampled BCE and proposes gBCE with increased negative sampling."
+      ],
+      "limitations": [
+        "Does not directly select recent candidate-specific evidence.",
+        "Its reported improvements do not establish gains under the pinned RecHarness evaluator."
+      ]
+    },
+    {
+      "title": "D2MFRec",
+      "link": "https://www.nature.com/articles/s41598-025-31190-z",
+      "contributions": [
+        "Combines soft-clustered interest representations with sequential representations using learned gates."
+      ],
+      "limitations": [
+        "Interest differentiation does not establish that inactive interests represent completed needs.",
+        "More elaborate interest modeling increases implementation and search costs."
+      ]
+    }
+  ]
+}

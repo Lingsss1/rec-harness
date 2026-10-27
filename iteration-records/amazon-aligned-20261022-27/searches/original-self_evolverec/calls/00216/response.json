@@ -1,0 +1,166 @@
+{
+  "markdown_report": "At 10% progress, prioritize a small, falsifiable architectural change: a weakly initialized causal history residual added to SASRec. No validation improvement has been established; retain the idea with stronger controls rather than expand the architecture.\n\n**Insights from the starting point.** (1) Training margins measure sampled separation, not validation ranking. Retain them as diagnostics. (2) Feedback motivates testing stale versus recent history. It does not establish preference drift, ownership, satisfied demand, or optimal recency. (3) Uniform-history, last-item, and disabled-residual controls isolate aggregation contributions. Shared initialization and training randomness are necessary for interpretable comparisons.\n\n**Insights from related work.** (1) [Measuring Recency Bias](https://arxiv.org/abs/2409.09722) cautions against excessive recency. Learn decay without assuming improvement. (2) [Demystifying Sequential Recommendations](https://arxiv.org/abs/2508.03606) motivates history interventions. Sensitivity establishes dependence, not intent. (3) [Stability-aware Preference Modeling](https://cis.temple.edu/~jiewu/research/publications/Publication_files/2025-TWeb-Stability-aware%20Preference%20Modeling%20for%20Sequential%20Recommendation.pdf) motivates history-length comparisons. However, [SASRec](https://arxiv.org/abs/1808.09781) already attends across history, and [Fossil](https://arxiv.org/abs/1609.09152) combines history similarity with sequential dynamics: this residual supplies a possible shortcut, not demonstrated interest disentanglement.\n\n**Framework and directions.** Organize research around representation, behavioral dependence, and evaluation reliability.\n\n| Component | Existing approach | Proposed addition | Remaining gap |\n|---|---|---|---|\n| Representation | SASRec sequence features | Causal weighted-history residual | Compatibility remains unmodeled |\n| Dependence | Training margins | Branch ablation and matched history edits | Sensitivity does not identify intent |\n| Selection | Pinned macro HR@10 | Paired user uncertainty estimates | Fixed candidates limit generalization |\n\n**Candidate ideas.** Scores are originality/potential/difficulty; higher difficulty means harder implementation.\n\n| Idea | Scores | Positive assessment | Negative assessment |\n|---|---|---|---|\n| Learned exponential-history residual | 3/6/4 | Minimal, falsifiable adaptation with reusable controls | Established pooling; matching and serialization add work |\n| History-length-conditioned residual gate | 4/6/5 | Adapts aggregation strength to available evidence | Length weakly represents stability; adds confounding capacity |\n| Title-neighbor auxiliary ranking loss | 4/6/5 | Tests discrimination among plausible alternatives | False negatives; [FineRec](https://arxiv.org/abs/2404.12975) requires unavailable opinion supervision |\n\n**Selected algorithm.** At valid positions, compute `s_t = λs_(t−1)+e_t`, `z_t = λz_(t−1)+1`, and `m_t=s_t/z_t`; padding preserves states and emits zero. Use `f_t=SASRec_t+α LN(m_t)`, with non-affine LayerNorm, unconstrained α initialized to 0.01, and scalar `λ=sigmoid(θ)` initialized to 0.9, separately per dataset. These initializations are experimental choices. Use masked item embeddings before positional additions/dropout, float32 accumulation under mixed precision, and the baseline scoring function and loss at every supervised position.\n\n[LayerNorm](https://arxiv.org/abs/1607.06450) largely removes normalization by `z_t`; decay changes direction, while pooled magnitude is discarded. Non-affine normalization removes the branch's explicit history-independent β offset. Small α attenuates decay gradients; log gradients, gates, effective horizons, branch scores, and popularity correlations.\n\nPrespecify baseline/uniform/last/learned variants; reserve fixed-decay, normalization, gate-initialization, and bias-only controls for a bounded follow-up. Copy backbone weights explicitly and match batches/negatives through independent random streams. Fix evaluation cadence, stopping, tie-breaking, and training allowance; select using unchanged four-category macro HR@10. Track all attempts within 43,200 GPU-seconds. Report category scores, paired bootstrap differences, and discordant hits; intervals exclude adaptive-selection and training uncertainty. Repeated validation can overfit ([Cawley–Talbot](https://www.jmlr.org/papers/v11/cawley10a.html)).\n\nVerify weighted-prefix equivalence, gradients, causality, padding, and predictor reload parity. Preserve routing, seeds, diagnostic interfaces, and predictor serialization. Matched history edits and twenty training-user cases remain exploratory; sampled-ranking gains need not transfer to full-catalog ranking ([Krichene–Rendle](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/)).",
+  "idea": {
+    "description": "Add a weakly initialized causal exponential-history residual to each dataset's SASRec feature path. Use a learned scalar retention and non-affine LayerNorm, comparing baseline, uniform-history, and last-item controls under matched initialization and training randomness.",
+    "motivation": "Test whether an explicit recency-weighted item-similarity signal improves SASRec's validation ranking. Qualitative feedback motivates examining historical dependence but cannot establish preference drift, ownership, satisfied needs, compatibility, or a benefit from stronger recency. Existing pooling and hybrid-history models limit originality; the value is a controlled, reproducible test.",
+    "implementation_notes": "Preserve DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, evaluator seed 42, all four category routes, original splits, and SASREC_EPOCHS default 200. Save artifacts beneath the trial directory. Use existing item embeddings scaled exactly as in the backbone, masked before positions and dropout; avoid changing baseline loss, optimizer, sequence length, or scoring. Add the branch after the backbone's final normalization and use that same feature path for training, log2feats, and inference. Initialize unconstrained alpha=0.01 and scalar sigmoid retention=0.9 per dataset; these are hypotheses, not established optima. Non-affine LayerNorm avoids an explicit learned beta item-offset term, although shared embeddings can still encode popularity. LayerNorm approximately cancels positive weight-sum normalization, so do not interpret the denominator as retained confidence. Accumulate in float32 under float16/bfloat16 execution and retain float64 for numerical tests. Start with a batched PyTorch loop; benchmark before adding compilation or an associative scan. The experimental associative-scan API is optional, not a dependency.\n\nPrespecify four primary variants: baseline and residual modes uniform/last/learned. Copy identical backbone initial states rather than relying on equal seeds; use separate reproducible streams for initialization, minibatches, dropout, and training negatives. Match branch normalization and alpha initialization across pooling controls. Retain the baseline's negative-sampling eligibility rules. Prespecify evaluation every 10 epochs, a maximum of SASREC_EPOCHS, and no validation-based early stopping; stop additional runs only to respect the shared budget. At each evaluation milestone, combine the four category checkpoints from that milestone into one routed system; select the milestone with highest macro validation HR@10, breaking ties toward the earlier milestone. Apply this rule identically across variants. Record all four HR@10 values and their equal-weight average using the host's pinned users and candidates. If the host exposes only aggregate validation results, omit paired intervals rather than reconstructing or changing its evaluator.\n\nReserve compute for completing the primary comparisons before optional controls. Count training, diagnostics, debugging, and failures across concurrent slots against 43,200 GPU-seconds; log every attempt. If affordable, follow up with a fixed decay of 0.9 to isolate learning decay, then baseline-plus-bias, pooling-only scoring, affine versus non-affine versus no normalization, and fixed versus learned alpha with zero/small/nonzero initialization. These are bounded follow-ups, not a mandatory combinatorial search. A zero alpha blocks initial decay gradients; sigmoid gates introduce additional saturation, so retain an unconstrained alpha for the primary test. Log alpha, retention, decay gradients, branch-to-backbone score ratios, and correlations with training popularity. For retention a<1, report the infinite-history horizon 1/(1-a) alongside actual valid-prefix lengths and finite-prefix weights; uniform pooling has a truncation-limited horizon.\n\nPreserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. view.model must remain the actual trained module; preserve view.item_emb, log2feats, predict_score, user_train, meta_data, review_data, and B×L×2 candidate scores. Existing training-margin and collapse probes remain descriptive. Optional branch-disable and equal-sized recent/older-history interventions should use fixed candidates and matched masking/compaction controls; report ranking changes rather than treating residual magnitude as contribution. No available field establishes simulator traits, ownership, ratings, reviews, or compatibility.\n\nTest against an explicit float64 weighted-prefix reference, including all-padding inputs and retentions at or near zero and one. Use gradcheck for embeddings and decay logits at nonsaturated settings; separately check finite gradients near endpoints. Verify suffix changes leave earlier branch outputs unchanged and full sequences match separately evaluated prefixes in evaluation mode. Test padding invariance for the branch directly; for the full model compare only under the same valid-token positional convention, without silently changing SASRec positions. Persist architecture mode, normalization, dimensions, state_dict, routing, and positional conventions through the predictor writer. Reload each category through generated working/predict.py and compare features, candidate scores, and rankings in evaluation mode.\n\nWhere per-user validation hits are available, bootstrap 200 users within each category with identical resampled indices for paired models, then equally average the four category differences; use 10,000 replicates with bootstrap seed 42 and report percentile 95% intervals plus discordant-hit counts. These intervals condition on checkpoints, one training seed, candidates, and observed categories; they omit training variability, candidate uncertainty, cross-category generalization, and adaptive-search bias. Freeze the selected procedure before host held-out evaluation. Twenty training-user full-catalog recommendation cases remain exploratory and never replace macro validation HR@10.",
+    "pseudocode": "import math\nimport torch\nfrom torch import nn\nimport torch.nn.functional as F\n\nclass CausalHistoryResidual(nn.Module):\n    def __init__(self, dim, mode='learned', initial_decay=0.9):\n        super().__init__()\n        if mode not in {'learned', 'uniform', 'last', 'fixed'}:\n            raise ValueError(mode)\n        self.mode = mode\n        self.alpha = nn.Parameter(torch.tensor(0.01))\n        self.norm = nn.LayerNorm(dim, elementwise_affine=False)\n        if mode == 'learned':\n            if not 0.0 < initial_decay < 1.0:\n                raise ValueError('Learned retention must initialize inside (0, 1)')\n            self.decay_logit = nn.Parameter(torch.tensor(\n                math.log(initial_decay / (1.0 - initial_decay))))\n        else:\n            decay = {'uniform': 1.0, 'last': 0.0, 'fixed': initial_decay}[mode]\n            if not 0.0 <= decay <= 1.0:\n                raise ValueError('Retention must lie in [0, 1]')\n            self.register_buffer('fixed_decay', torch.tensor(decay))\n\n    def forward(self, features, history_embeddings, sequence):\n        # B x L x D features/embeddings; B x L item IDs.\n        # history_embeddings are scaled backbone embeddings BEFORE positions/dropout.\n        if sequence.shape[1] == 0:\n            return features\n        use_double = (features.dtype == torch.float64 or\n                      history_embeddings.dtype == torch.float64)\n        work_dtype = torch.float64 if use_double else torch.float32\n        x = history_embeddings.to(work_dtype)\n        valid_positions = sequence.ne(0)\n        x = x.masked_fill(~valid_positions.unsqueeze(-1), 0.0)\n        if self.mode == 'learned':\n            decay = self.decay_logit.to(work_dtype).sigmoid()\n        else:\n            decay = self.fixed_decay.to(work_dtype)\n        total = x.new_zeros((x.shape[0], x.shape[2]))\n        mass = x.new_zeros((x.shape[0], 1))\n        summaries = []\n        for t in range(x.shape[1]):\n            valid = valid_positions[:, t:t+1]\n            total = torch.where(valid, decay * total + x[:, t], total)\n            mass = torch.where(valid, decay * mass + 1.0, mass)\n            pooled = total / mass.clamp_min(1.0)\n            summaries.append(torch.where(valid, pooled, torch.zeros_like(pooled)))\n        pooled = torch.stack(summaries, dim=1)\n        # Explicit floating-point computation preserves float64 numerical tests.\n        normalized = F.layer_norm(pooled, self.norm.normalized_shape,\n                                  weight=None, bias=None, eps=self.norm.eps)\n        result = features.to(work_dtype) + self.alpha.to(work_dtype) * normalized\n        result = result.masked_fill(~valid_positions.unsqueeze(-1), 0.0)\n        return result.to(features.dtype)\n\n# Integrate after the original SASRec encoder's final normalization:\n# return self.history_residual(features, scaled_item_embeddings, sequence)\n# Keep the baseline path unchanged when no branch is configured.\n# Supervise every baseline-valid position against its original next-item target.\n# Copy shared backbone weights across variants and reproduce data/negative streams.\n# Generated predictor must instantiate the saved mode/configuration and load all weights.\n# Run reference, gradient, causality, padding, and per-category reload-parity checks.\n# Select the routed four-category system by the unchanged pinned macro HR@10.",
+    "originality": {
+      "score": 3,
+      "positive": "The controlled adaptation combines causal pooling, weak residual initialization, and explicit mechanism checks in the pinned four-category setting.",
+      "negative": "Exponential pooling, item-similarity shortcuts, and combinations of history and sequential dynamics have substantial precedents; the architecture does not establish interest disentanglement."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "A reproducible improvement could support subsequent timestamp-based or evidence-conditioned aggregation, with established controls for branch contribution.",
+      "negative": "A scalar decay cannot represent compatibility, item-specific demand, or satisfied needs; apparent gains may reflect popularity or validation selection and may not transfer to full-catalog ranking."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "The model change is small and retains the baseline loss, embedding table, routing, and diagnostic feature interface.",
+      "negative": "Matched initialization and random streams, mixed-precision recurrence, numerical verification, compute accounting, and predictor parity require more work than the pooling module alone."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Measuring Recency Bias (2024)",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "Reports that excessive emphasis on recent interactions can harm recommendation accuracy, motivating explicit recency controls."
+      ],
+      "limitations": [
+        "Does not establish that this residual improves the pinned four-category benchmark."
+      ]
+    },
+    {
+      "title": "Demystifying Sequential Recommendations (2025)",
+      "link": "https://arxiv.org/abs/2508.03606",
+      "contributions": [
+        "Uses genetic algorithms to find minimal history edits that change recommendations, motivating perturbation diagnostics."
+      ],
+      "limitations": [
+        "Sensitivity to history edits does not establish causal preference drift or user intent."
+      ]
+    },
+    {
+      "title": "Stability-aware Preference Modeling for Sequential Recommendation (2025)",
+      "link": "https://cis.temple.edu/~jiewu/research/publications/Publication_files/2025-TWeb-Stability-aware%20Preference%20Modeling%20for%20Sequential%20Recommendation.pdf",
+      "contributions": [
+        "Separates long- and short-term interests and models interaction stability."
+      ],
+      "limitations": [
+        "Provides no direct evidence that one learned exponential decay improves these datasets or identifies distinct interests."
+      ]
+    },
+    {
+      "title": "FineRec (SIGIR 2024)",
+      "link": "https://arxiv.org/abs/2404.12975",
+      "contributions": [
+        "Models attribute-specific preferences using review-derived attribute–opinion pairs."
+      ],
+      "limitations": [
+        "Review-derived supervision is unavailable here; titles and descriptions provide attribute evidence without establishing opinions."
+      ]
+    },
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Provides the SASRec attention-based history encoder used as the baseline."
+      ],
+      "limitations": [
+        "An added pooling branch may duplicate information already represented by attention; improvement requires controlled evaluation."
+      ]
+    },
+    {
+      "title": "Fusing Similarity Models with Markov Chains for Sparse Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1609.09152",
+      "contributions": [
+        "Combines history-based similarity with sequential dynamics, providing a direct conceptual precedent for the residual."
+      ],
+      "limitations": [
+        "Its model and experiments do not establish the effectiveness of this particular SASRec integration."
+      ]
+    },
+    {
+      "title": "SLi-Rec: Adaptive User Modeling with Long and Short-Term Preferences for Personalized Recommendation",
+      "link": "https://www.ijcai.org/Proceedings/2019/0585.pdf",
+      "contributions": [
+        "Adaptively integrates long- and short-term preference representations."
+      ],
+      "limitations": [
+        "Adaptive integration alone does not justify interpreting this single pooling residual as separate interests."
+      ]
+    },
+    {
+      "title": "Disentangling Long and Short-Term Interests for Recommendation",
+      "link": "https://arxiv.org/abs/2202.13090",
+      "contributions": [
+        "Uses separate encoders and contrastive proxy supervision to address interest entanglement."
+      ],
+      "limitations": [
+        "Its additional learning structure is absent from the proposed minimal residual."
+      ]
+    },
+    {
+      "title": "Layer Normalization",
+      "link": "https://arxiv.org/abs/1607.06450",
+      "contributions": [
+        "Defines normalization across feature dimensions with optional learned affine parameters."
+      ],
+      "limitations": [
+        "The cancellation of positive pooling scale and the tied-embedding bias interpretation are algebraic implications for this proposal, not benchmark findings from the paper."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Analyzes limitations of sampled recommendation metrics and their relationship to full-catalog evaluation."
+      ],
+      "limitations": [
+        "Does not authorize changing the pinned evaluator; full-catalog comparisons remain separate diagnostics."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how optimizing model-selection criteria can introduce overfitting and biased performance estimates."
+      ],
+      "limitations": [
+        "Paired bootstrap intervals on selected validation checkpoints do not correct this selection bias."
+      ]
+    },
+    {
+      "title": "SciPy bootstrap documentation",
+      "link": "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.bootstrap.html",
+      "contributions": [
+        "Documents paired resampling for uncertainty estimation."
+      ],
+      "limitations": [
+        "The proposed stratified four-category bootstrap requires explicit category handling and excludes training and adaptive-search uncertainty."
+      ]
+    },
+    {
+      "title": "PyTorch gradcheck documentation",
+      "link": "https://docs.pytorch.org/docs/main/generated/torch.autograd.gradcheck.gradcheck.html",
+      "contributions": [
+        "Documents numerical verification of analytical gradients."
+      ],
+      "limitations": [
+        "Gradient agreement does not establish correct routing, causal semantics, or predictor serialization."
+      ]
+    },
+    {
+      "title": "PyTorch associative scan documentation",
+      "link": "https://docs.pytorch.org/docs/main/higher_order_ops/associative_scan.html",
+      "contributions": [
+        "Describes parallel associative scans that can represent affine recurrence composition."
+      ],
+      "limitations": [
+        "The API is experimental; installed-version support, gradients, compilation behavior, and practical speed require verification."
+      ]
+    }
+  ]
+}

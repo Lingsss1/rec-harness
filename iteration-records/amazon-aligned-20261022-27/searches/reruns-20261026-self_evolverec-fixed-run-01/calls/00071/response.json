@@ -1,0 +1,76 @@
+{
+  "markdown_report": "At 0% progress, prioritize a small SASRec extension: **gated recent-history pooling with uniform multi-negative training**. This is a proposal; no benchmark improvement has been measured.\n\n**Insights from the starting point.** (1) SASRec already models sequential context, making a small pooling branch feasible. Its attention need not consistently prioritize current interests. (2) Users report loosely related recommendations and excessive influence from older, occasional interests. Recent pooling directly targets both failures; repeated interactions contribute repeated evidence. (3) Electronics has 14.95% negative-outranking positions and a −0.4812 lower-decile margin. This motivates broader negative coverage, although sampled training margins cannot establish validation performance. (4) Collapse scores near the mapped zero-cosine baseline do not justify prioritizing embedding decorrelation. Compatibility and unmet need remain uncertain when specifications are unavailable.\n\n**Insights from related work.** (1) [gSASRec](https://www.ijcai.org/proceedings/2024/0939.pdf) motivates multiple negatives and calibrated BCE, without proving transfer here. (2) [TLSTSRec](https://doi.org/10.3233/IDA-240051) motivates separating recent and persistent preference; a lightweight gate offers a cheaper experiment. (3) [Hard-BPR](https://arxiv.org/abs/2403.19276) highlights false-negative risk, supporting uniform sampling before hardness mining. (4) [LightFM](https://arxiv.org/abs/1507.08439) motivates metadata features, but lexical similarity cannot establish equipment compatibility.\n\nThe framework has three directions: **context selection** changes history aggregation; **ranking supervision** changes candidate coverage; **content specificity** adds observed item text. Their intersection exposes a practical gap: improving current-interest representations while training against sufficiently varied alternatives.\n\nThree candidate ideas follow. Scores are prospective judgments; difficulty 10 means hardest. Each cell gives a positive and a limitation.\n\n| Idea | Originality | Potential | User alignment | Model alignment | Difficulty |\n|---|---|---|---|---|---|\n| 64-negative calibrated BCE | 2: established; little novelty | 7: reusable; transfer uncertain | 4: sharper ranking; no recency mechanism | 9: targets confusion; margins are proxies | 3: localized; sampler care |\n| Recent-pooling gate plus 64-negative BCE **(selected)** | 4: useful combination; familiar parts | 8: adaptable; extra tuning | 8: targets loose relevance and stale interests; cannot verify unmet need | 8: targets weak separation; attribution needs ablation | 5: small branch; predictor synchronization |\n| Recency-weighted TF-IDF score blend | 4: practical adaptation; established hybrid | 6: interpretable; lexical ceiling | 7: specific identifiers; missing specifications | 5: may separate lookalikes; unproven | 4: cheap features; artifact plumbing |\n\nFor the selected idea, pool the last five valid item embeddings at each causal position, normalize, and learn a scalar gate mixing this representation with SASRec features. Train with 64 uniform negatives and calibrated BCE; compare against the unchanged baseline, loss-only, and gate-only variants. Preserve four-category routing, seeds, splits, and the predictor writer. Select exclusively by pinned macro validation HR@10 within the shared GPU budget.",
+  "idea": {
+    "description": "Add a causal recent-history pooling branch to SASRec and train the fused representation with 64 uniform negatives using calibrated generalized BCE. The branch targets loosely related top-ranked choices and excessive influence from older, occasional interests; broader negative coverage targets weak positive–negative separation.",
+    "motivation": "The user diagnosis identifies current-interest specificity as a priority, while the quantitative diagnosis identifies lower-tail ranking errors, especially in Electronics. This modest extension addresses both without requiring unavailable attributes, pretrained weights, or inferred simulator traits. Its benefits remain hypotheses until measured.",
+    "implementation_notes": "Use a five-interaction causal window, excluding padding. Repeated interactions naturally contribute multiple times within that window; do not infer unobserved preferences or compatibility. Normalize recent and SASRec representations before mixing, then apply one shared learned score scale. Initialize the sigmoid gate toward SASRec, for example with bias −2. Sample 64 uniform negatives per position, excluding padding, the target and known training-history items; handle exhausted candidate pools explicitly. For calibrated generalized BCE, let alpha=K/(N−1), beta=1−0.75+0.75*alpha, and positive loss=−log(sigmoid(positive_logit)^beta); implement with beta*softplus(−positive_logit). Average negative softplus losses separately. This follows the calibration direction described by gSASRec; verify the exact convention against its reference implementation before claiming reproduction. Keep the existing DATA_DIR=os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, and SASREC_EPOCHS environment behavior, whose host default is 200. Save the gate, normalization, scale, window and architecture configuration beneath each trial directory and update the predictor writer to load them. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). Ensure view.log2feats returns fused features and view.predict_score uses the trained scoring rule. Report measured metrics and definitions; omit category breakdowns when categories are unavailable. Use the actual model through view.model. No claim is made that this proposal supplies a drop-in train.py without the baseline source.",
+    "pseudocode": "For each category, retain its original split and routing:\n    initialize SASRec and a scalar sigmoid gate with bias -2\n    for each training batch (None, sequence, positive, negative):\n        H = SASRec.log2feats(sequence)                    # B x L x D, causal\n        E = item_embedding(sequence)\n        R = masked_causal_window_mean(E, sequence != 0, window=5)\n        gate = sigmoid(linear(concat(layernorm(H), layernorm(R))))\n        Z = (1-gate)*layernorm(H) + gate*layernorm(R)\n        negatives = sample_uniform_valid_items(K=64, excluding=training_history_and_target)\n        pos_logits = shared_scale * dot(Z, item_embedding(positive))\n        neg_logits = shared_scale * batched_dot(Z, item_embedding(negatives))\n        alpha = 64 / (catalog_size - 1)\n        beta = 0.25 + 0.75 * alpha\n        loss = mean_valid(beta*softplus(-pos_logits) + mean_K(softplus(neg_logits)))\n        update_parameters(loss)\n    save model, configuration and matching predictor artifacts\nEvaluate baseline, loss-only, gate-only and combined variants using the pinned evaluator.\nSelect the variant with highest four-category macro validation HR@10.\nAt inference, compute the identical fused final-position feature and trained candidate scores.\nRun diagnostics through that same representation and scoring path.",
+    "originality": {
+      "score": 4,
+      "positive": "Combines an explicit recent-interest path with broader candidate supervision to address linked qualitative and quantitative failures.",
+      "negative": "Pooling, gating and calibrated multi-negative training are established components; novelty is primarily their task-specific combination."
+    },
+    "future_potential": {
+      "score": 8,
+      "positive": "Provides a small, interpretable foundation for later timestamp-aware gates or text-supported specificity if validation supports expansion.",
+      "negative": "A fixed recent window may overemphasize one-off purchases, and gains may differ across the four datasets."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "Requires one pooling branch, a small gate and vectorized negative scoring while retaining SASRec.",
+      "negative": "Correct causal masking, negative exclusions, diagnostic adaptation and matching predictor serialization require careful integration."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Introduces the causal self-attention sequential recommendation backbone used as the starting point."
+      ],
+      "limitations": [
+        "Does not establish that learned attention resolves the specific current-interest failures reported here."
+      ]
+    },
+    {
+      "title": "gSASRec — IJCAI 2024",
+      "link": "https://www.ijcai.org/proceedings/2024/0939.pdf",
+      "contributions": [
+        "Motivates multiple sampled negatives and generalized BCE calibration."
+      ],
+      "limitations": [
+        "Published findings do not establish gains under the pinned four-category Amazon evaluation."
+      ]
+    },
+    {
+      "title": "TLSTSRec",
+      "link": "https://doi.org/10.3233/IDA-240051",
+      "contributions": [
+        "Motivates separating and adaptively combining long-term and short-term sequential preferences."
+      ],
+      "limitations": [
+        "The proposed recent-window gate is a simpler adaptation, not a reproduction of its temporal modeling."
+      ]
+    },
+    {
+      "title": "Hard-BPR",
+      "link": "https://arxiv.org/abs/2403.19276",
+      "contributions": [
+        "Addresses false-negative influence during dynamic hard-negative sampling."
+      ],
+      "limitations": [
+        "Transfer from implicit collaborative filtering to this SASRec setting remains experimental."
+      ]
+    },
+    {
+      "title": "LightFM",
+      "link": "https://arxiv.org/abs/1507.08439",
+      "contributions": [
+        "Provides a foundation for jointly learning interaction and metadata feature representations."
+      ],
+      "limitations": [
+        "Is not a sequential model and cannot establish functional compatibility from incomplete item text."
+      ]
+    }
+  ]
+}

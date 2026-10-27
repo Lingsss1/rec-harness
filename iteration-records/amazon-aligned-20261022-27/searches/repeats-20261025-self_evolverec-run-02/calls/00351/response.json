@@ -1,0 +1,58 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting-point insights.** (1) Sampled training margins measure discrimination under the loader’s negatives. They cannot establish validation ranking quality. (2) The qualitative diagnosis suggests weak prioritization of recent, repeated interests. This motivates controlled history interventions, without assuming that recency always helps. (3) Available descriptions sometimes support precise compatibility checks. Missing specifications must remain unknown; interactions do not establish ownership or fulfilled demand.\n\n**Related-work insights.** (1) Oh and Cho [1] report harm from excessive recency emphasis in their experiments. Therefore, probe recent and broader-history dependence separately. (2) Scarcelli et al. [2] study history changes that alter recommendations. Their work motivates perturbation diagnostics, although recommendation sensitivity does not establish causal preference. (3) Sampled-evaluation research [3] identifies discrepancies between sampled and full-catalog evaluation. Preserve the pinned sampled objective while treating full-catalog behavior as supplementary evidence.\n\nThese insights define three directions: measuring history dependence, adapting temporal weighting, and auditing evidence behind semantic matches.\n\n### Framework\n\n| Direction | Observable evidence | Intervention | Interpretive limit |\n|---|---|---|---|\n| History dependence | Interaction prefixes | Mask/delete matched subsets | Sensitivity is model dependence |\n| Temporal weighting | Positions and timestamps | Learn a recency gate | Recent does not imply relevant |\n| Semantic precision | Titles/descriptions | Check explicit specifications | Missing evidence remains unknown |\n\n### Candidate ideas\n\nScores are originality/potential/difficulty, each 0–10; higher difficulty means harder implementation.\n\n1. **Controlled history-dependence probe [1,2]: 5/8/3.** Originality: useful controlled combination, but perturbation methods already exist. Potential: actionable diagnostics, but no guaranteed HR gain. Difficulty: uses existing scoring hooks, but alignment requires care.\n2. **Gated recent-history residual [1]: 4/7/5.** Add a learned mixture of SASRec features and recent-item pooling. Originality: simple adaptive combination, but established components. Potential: directly changes ranking, but may amplify incidental interests. Difficulty: compact architecture change, but requires retraining and predictor updates.\n3. **Specification-supported mismatch audit: 6/6/6.** Extract explicit model/interface tokens from descriptions. Originality: separates evidence from broad similarity, but extraction rules are familiar. Potential: interpretable failure cases, but sparse metadata limits coverage. Difficulty: lightweight matching is feasible, but reliable contradiction detection is harder.\n\n### Selected idea: controlled history-dependence probe\n\nAt 0% progress, first establish whether the suspected failure is measurable. For fixed training prefixes, compare removal of recent, recurrent-interest, and isolated interactions against multiple equal-size random removals. Define recurrent interests through repeated item IDs or a fixed title/description similarity rule; report coverage.\n\nScore identical eligible candidates and measure top-10 overlap, original-top-item rank displacement, and paired ranking changes. Repeat with position-preserving masking and order shuffling to expose positional confounds. Stratify by history length and dataset; report counts and uncertainty.\n\nPreserve `DiagnosisProbe(view, device)` and `run_full_diagnosis(train_loader)`. Access the trained model through `view.model`, restore its original mode, and return metrics plus definitions. Do not change ranking from these diagnostics alone. Select subsequent model changes exclusively using pinned macro validation HR@10.\n\nReferences: [1](https://arxiv.org/abs/2409.09722), [2](https://arxiv.org/abs/2508.03606), [3](https://doi.org/10.1145/3705328.3748086).",
+  "idea": {
+    "description": "Add controlled history perturbations to the existing diagnostic adapter to measure whether SASRec rankings depend more on recent or recurrent interests than on isolated interactions.",
+    "motivation": "Current probes measure embedding geometry and sampled training-pair separation. Controlled ranking interventions can investigate the qualitative complaint about broad relatedness and misplaced history emphasis, while distinguishing measured model dependence from inferred user intent.",
+    "implementation_notes": "Retain DiagnosisProbe(view, device) and run_full_diagnosis(train_loader), returning metrics and metric_definitions. Use view.model as the actual module and preserve its training mode. Build interventions only from observed training prefixes, excluding future positive targets from grouping decisions. Use observed prefixes from user_train for full-catalog unseen-item analysis; do not treat right-shifted loader targets as prefix evidence. Predeclare subset sizes, lexical similarity thresholds, prefix sampling, and random seeds. Keep candidate IDs, eligibility masks, and tie handling identical within every comparison. Deletion must repack sequences according to the baseline padding convention. Position-preserving masking requires an architecture-aware attention-mask hook; otherwise mark that control unavailable because internal padding may change attention behavior. Report empty or insufficient groups as unavailable, with coverage counts. Cache baseline scores and bound probe batches to conserve the shared GPU budget. Preserve all four dataset routes, seed settings, DATA_DIR=os.environ['GAGC_DATA_DIR'], and trial-local artifacts. No predictor changes are required for this diagnostic-only addition. Any later architecture experiment must update the predictor writer and working/predict.py together. The proposed probe does not itself claim an HR@10 improvement.",
+    "pseudocode": "class DiagnosisProbe:\n    def __init__(self, view, device):\n        self.view, self.device = view, device\n\n    def run_full_diagnosis(self, train_loader):\n        was_training = self.view.model.training\n        metrics, definitions = {}, {}\n        try:\n            self.view.model.eval()\n            with no_grad():\n                for prefix in fixed_observed_training_prefixes(self.view.user_train):\n                    candidates = fixed_eligible_candidates(prefix)\n                    baseline = score_with_view(prefix, candidates)\n                    groups = identify_recent_recurrent_isolated(prefix)\n                    for group in groups:\n                        k = predefined_feasible_subset_size(group, prefix)\n                        if k is insufficient:\n                            record_unavailable(group)\n                            continue\n                        controls = seeded_random_subsets(prefix, k)\n                        for operation in supported_operations:\n                            targeted = score_with_view(operation(prefix, group, k), candidates)\n                            random_results = [score_with_view(operation(prefix, subset, k), candidates)\n                                              for subset in controls]\n                            record_paired_rank_changes(baseline, targeted, random_results)\n                metrics = aggregate_with_counts_and_history_length_slices()\n                definitions = describe_metrics_controls_and_missingness()\n        finally:\n            self.view.model.train(was_training)\n        return {'metrics': metrics, 'metric_definitions': definitions}",
+    "originality": {
+      "score": 5,
+      "positive": "Combines recurrence-sensitive interventions, matched random controls, and architecture-aware positional checks within the required diagnostic interface.",
+      "negative": "History perturbations and counterfactual recommendation analysis are established; this is a practical protocol adaptation."
+    },
+    "future_potential": {
+      "score": 8,
+      "positive": "Can guide targeted temporal-weighting experiments and provide comparable diagnostics across replacement architectures.",
+      "negative": "Sensitivity cannot identify true preference or guarantee better validation HR@10; conclusions remain conditional on intervention design."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Most computations reuse existing sequence encoding and candidate-scoring hooks without retraining.",
+      "negative": "Correct padding, attention masks, candidate alignment, and uncertainty aggregation require careful implementation."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Measuring Recency Bias",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "Introduces a recency-bias metric and reports performance harm from excessive recency emphasis in evaluated settings."
+      ],
+      "limitations": [
+        "Does not establish the optimal temporal weighting for these four datasets or this pinned evaluation."
+      ]
+    },
+    {
+      "title": "Demystifying Sequential Recommendations",
+      "link": "https://arxiv.org/abs/2508.03606",
+      "contributions": [
+        "Searches for history changes that alter recommendations using targeted and untargeted counterfactuals."
+      ],
+      "limitations": [
+        "Recommendation changes demonstrate model sensitivity rather than causal user preference.",
+        "Genetic search would add computational cost relative to the proposed fixed interventions."
+      ]
+    },
+    {
+      "title": "RecSys 2025 study of sampled recommendation evaluation",
+      "link": "https://doi.org/10.1145/3705328.3748086",
+      "contributions": [
+        "Examines sampling through resolution, fidelity, robustness, and predictive power."
+      ],
+      "limitations": [
+        "Does not authorize changing the task's pinned sampled HR@10 evaluator.",
+        "Full-catalog evaluation still observes incomplete interaction-based relevance."
+      ]
+    }
+  ]
+}

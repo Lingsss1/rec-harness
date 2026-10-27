@@ -1,0 +1,125 @@
+{
+  "markdown_report": "At 0% progress, prioritize a small SASRec extension: **gated recent-history pooling with uniform multi-negative training**. No benchmark improvement has been measured; the earlier loss reduction requires correction.\n\n**Insights from the starting point.** (1) SASRec supplies causal sequential features, allowing a small pooling branch without replacing its backbone. (2) Users report loosely related choices and excessive influence from older, occasional interests. Recent pooling targets both; repeated recent interactions contribute repeated evidence, but may also amplify already-satisfied demand. (3) Electronics has 14.95% negative-outranking positions and a −0.4812 lower-decile margin, motivating broader negative coverage without identifying its cause. (4) Collapse scores near the mapped zero-cosine baseline do not justify decorrelation. Missing specifications prevent reliable compatibility or unmet-need judgments.\n\n**Insights from related work.** (1) [gSASRec](https://arxiv.org/abs/2308.07192) motivates multiple negatives and generalized BCE; its negative losses are summed before joint normalization. (2) [TLSTSRec](https://doi.org/10.3233/IDA-240051) motivates combining recent and persistent preferences. (3) [Hard-BPR](https://arxiv.org/abs/2403.19276) highlights false-negative risks; uniform sampling remains the initial control. (4) [LightFM](https://arxiv.org/abs/1507.08439) motivates metadata features, while lexical overlap cannot establish compatibility.\n\nThe framework retains three directions: **context selection** changes aggregation; **ranking supervision** changes candidate coverage; **content specificity** adds observed text. Their intersection motivates testing current-interest representations against varied alternatives, with separate controls for architectural and objective changes.\n\nThree candidate ideas follow. Scores are prospective; difficulty 10 means hardest. Each cell gives a positive and limitation.\n\n| Idea | Originality | Potential | User alignment | Model alignment | Difficulty |\n|---|---|---|---|---|---|\n| 64-negative generalized BCE | 2: established; little novelty | 7: reusable; transfer uncertain | 4: sharper ranking; no recency mechanism | 9: targets confusion; margins are proxies | 4: localized; sampling assumptions matter |\n| Recent-pooling gate plus 64-negative generalized BCE **(selected)** | 3: useful combination; established components | 7: extensible; fixed recency can mislead | 8: targets loose relevance and stale interests; unmet need remains unknown | 8: targets weak separation; attribution requires controls | 6: small branch; sampler and artifact integration |\n| Recency-weighted TF-IDF score blend | 4: practical adaptation; established hybrid | 6: interpretable; lexical ceiling | 7: specific identifiers; missing specifications | 5: may separate lookalikes; unproven | 4: cheap features; artifact plumbing |\n\nFor the selected idea, causally average the last five nonpadding positions’ item embeddings and mix with SASRec features through a sigmoid gate initialized near SASRec. Preserve baseline normalization and initially add neither extra normalization nor learned score scaling. Use the corrected loss `[beta*softplus(-positive)+sum(softplus(negative))]/65`, with `beta=0.25+0.75*64/(N−1)`. Full-history exclusions change sampling support, so calibration is heuristic here.\n\nCompare baseline, gate-only, loss-only and combined variants under identical checkpoint rules. Reserve one refinement for a fixed gate of the same initial value. Select exclusively by pinned four-category macro validation HR@10 within 43,200 aggregate GPU-seconds. Report category deltas and paired-user uncertainty descriptively; adaptive selection causes optimism ([Cawley–Talbot](https://www.jmlr.org/beta/papers/v11/cawley10a.html)). Preserve routing, seeds, splits, diagnostics and the matching predictor writer. Neither improved margins nor small validation gains establish held-out improvement.",
+  "idea": {
+    "description": "Add a causal five-position recent-history pooling branch to SASRec and train its gated fused representation with 64 uniform negatives and correctly reduced generalized BCE. Recent pooling explicitly targets loosely related top-ranked choices and excessive influence from older, occasional interests; broader negative coverage targets weak positive–negative separation. Treat the calibration coefficient as a heuristic under full-training-history exclusions.",
+    "motivation": "The user diagnosis prioritizes current-interest specificity, while the quantitative diagnosis identifies lower-tail ranking errors, especially in Electronics. The selected idea addresses two observed user-facing failures and one measured model-facing failure without unavailable attributes, pretrained weights or simulator traits. Its originality is modest because its components are established. Future potential is plausible but conditional on validation: recency can amplify one-off purchases, lexical or collaborative similarity cannot verify compatibility, and repeated interest does not establish an unmet need.",
+    "implementation_notes": "Preserve DATA_DIR=os.environ['GAGC_DATA_DIR'], all four categories and dataset routing, preprocessing seed 0, training seed 42, evaluation seed 42, unchanged splits and the pinned host evaluator. Preserve SASREC_EPOCHS environment behavior, whose host default is 200; do not silently raise the epoch cap. Write every artifact beneath the trial directory. No experiment or improvement is claimed here, and this specification is not a drop-in train.py without the baseline source.\n\nPooling: at causal position t, average raw item embeddings before positional encoding over indices max(0,t−4)…t, dividing by the number of nonpadding positions in that window. Use prefix-sum differences or left-padded unfold operations; do not use uncorrected average pooling. A window spans five sequence positions, with padding excluded from its denominator. Document the baseline's embedding scaling and apply the corresponding scale to pooled embeddings if SASRec scales its item inputs. Retain all original SASRec normalization, initially introduce no additional LayerNorm, fix score scaling at one, and re-mask padded fused outputs. Compute g_t=sigmoid(wᵀ[h_t;r_t]+b), initialize w=0 and b=−2, and use z_t=(1−g_t)h_t+g_t*r_t. The fixed-gate refinement uses exactly sigmoid(−2). A learned constant gate, windows 1/5, full-prefix pooling, extra LayerNorm and a positive learned score scale are deferred controls, not an unrestricted initial sweep. A positive global scale preserves inference ranks for fixed parameters but changes training gradients.\n\nSampling: the public train_loader still yields (None, sequence, positive, negative). Generate the additional negatives inside the sampler while user identity is available, before discarding identity; do not infer the complete history from the visible truncated sequence. Exclude padding, the current positive and that user's complete training history. Draw uniformly with replacement from the remaining catalog, allowing duplicate negatives to count. Use vectorized rejection with exact membership checks and sample the explicit complement for dense histories. If no eligible item exists, omit that position from the loss, count it and report the count. A conservative sequence/positive-signature-to-history mapping is only a fallback when sampler identity cannot be retained; ambiguous signatures must use the union of matching histories and be reported. Do not consult validation or test interactions for exclusions.\n\nLoss correction: with N real catalog items and K=64, alpha=K/(N−1), beta=1−t+t*alpha and t=0.75, use L=[beta*softplus(−s_pos)+sum_j softplus(s_neg_j)]/(K+1), averaged over valid positions. The earlier beta*softplus(−s_pos)+mean_j softplus(s_neg_j) weights positives K times more heavily relative to negatives and must not be called the paper objective. The paper gives t=0 as BCE and t=1 as its theoretical calibration setting under its assumptions. Its theorem assumes uniform sampling with replacement excluding the current positive; full-history exclusions alter support, so this implementation has no claimed exact calibration guarantee. The supplied search results also identify a collision-allowing official sampler; document that this experiment intentionally retains baseline-style full-history exclusion rather than claiming exact official reproduction. Use the algebraically stable softplus formulation; the reference logit transformation with float64/clamping can differ numerically. For N<=1 or no valid training positions, report the unsupported case rather than constructing an invalid alpha.\n\nControls: run the unchanged baseline, gate-only using the baseline objective and one negative, loss-only using K=64 generalized BCE, and the combined variant. Match backbone initialization, training steps, optimizer, batch order and checkpoint rules; use separate deterministic RNG streams so adding sampler draws does not perturb initialization or batch order. The loss-only arm deliberately bundles negative count and coefficient/reduction, so these four arms cannot identify their individual effects. Additional normalization or scale changes require separate trials and must not be attributed to pooling. All variants retain all four datasets. Do not infer a causal role for single-negative training from the original diagnostic margins.\n\nCheckpointing: evaluate at epochs 10,20,…,200, or the final configured epoch when the environment cap is smaller or not divisible by ten. Disable patience-based early stopping for the initial comparisons; stop at the configured cap or declared GPU allocation. Choose the epoch maximizing the equal-weight mean of the four category validation HR@10 values, using the same epoch across categories; break ties by earlier epoch. Compare variants using that same macro criterion, breaking exact ties in favor of baseline, gate-only, loss-only, then combined. Log every attempted configuration, inspected checkpoint, category HR and consumed GPU time. Incomplete runs must be identified; if budget truncates an arm, compare at common completed steps rather than attributing unequal training exposure to the method.\n\nBudget: allocate 3,600 GPU-seconds to baseline profiling and diagnostics, 28,800 to the four controlled comparisons initially at 7,200 each, 7,200 to one prespecified fixed-gate refinement, and 3,600 to failures and artifact verification. Reuse profiling work when initialization and training trajectory match. Charge every training, diagnosis, debugging and failed attempt to the shared 43,200-second budget, including any training needed for artifact verification. Adjust allocations using measured throughput before launching dependent trials; 200 epochs are not guaranteed. Four concurrent slots reduce elapsed time, not aggregate GPU usage. Each trial remains single-GPU.\n\nEvaluation: use only the pinned evaluator's fixed 200 validation users per category and 99 unique negatives, with seed 42. Where its existing output exposes per-user hits, compute paired variant-minus-baseline hit differences on identical candidates; bootstrap 200 paired users within each category with replacement for 10,000 replicates using an analysis RNG seed of 42, retaining equal category weights. Report descriptive percentile 95% intervals, category deltas and discordant hit counts. If per-user hits are unavailable, report aggregate metrics without modifying the evaluator or inventing uncertainty estimates. One additional hit changes a category HR by 0.5 percentage points and macro HR by 0.125 percentage points. These intervals condition on fixed candidates and training seed, and do not correct adaptive selection. Exact McNemar comparisons are optional; if testing the three prespecified baseline comparisons, apply Holm correction and disclose checkpoint selection. Freeze the final choice before the host's separate held-out evaluation; access no test labels or metrics during search.\n\nInference and diagnostics: save the backbone, gate, pooling window, embedding scaling, normalization/scoring configuration and item mapping, and update the predictor writer so working/predict.py reconstructs the exact trained architecture. Gather the greatest index with sequence!=0, not length−1 for left-padded inputs. For an empty history, use a deterministic training-only item-frequency ranking with item-ID tie-breaking, saved in the artifact. Use the same fused feature and dot-product scoring in training, inference and diagnostics. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis); return measured metrics and metric_definitions, with the interpreter prompt including both. view.model must be the actual trained nn.Module; preserve item_emb, log2feats, predict_score, user_train, meta_data and review_data compatibility. Diagnose the supplied single-negative loader with unchanged definitions for comparability; label any additional multi-negative diagnostic separately. Do not synthesize category breakdowns from unavailable metadata: mark them unavailable. Only histories, timestamps, titles and descriptions may supply features. Review text/ratings, item ratings/categories/prices/stores and simulator traits remain unavailable. Keep the twenty training-user, full-catalog unseen-item simulator protocol; qualitative feedback is exploratory and cannot replace macro validation selection.\n\nRisks: the gate may overfit 800 fixed validation users, recency can exaggerate satisfied demand, unseen sampled items can be false negatives, and score magnitudes can improve margin diagnostics without improving rankings. Recent pooling explicitly addresses stale interests and loose relevance but does not guarantee compatibility, diversity or unmet-need fulfillment. Fixed-gate and gate-only controls test whether the extra capacity is necessary. Content-based TF-IDF remains an alternative using only training-derived vocabulary and permitted text; missing text is unknown evidence, not a negative preference.",
+    "pseudocode": "Set preprocessing_seed=0, training_seed=42; preserve host evaluation and category routing.\nDefine variants = [baseline, gate_only, loss_only, combined].\nFor each variant, train all four category models on one GPU:\n    Initialize matching backbone weights and independent deterministic RNG streams.\n    For each training batch, retain user IDs internally in the sampler:\n        H = original_SASRec_log2feats(sequence)       # preserve baseline normalization\n        if pooling_enabled:\n            mask = (sequence != 0)\n            X = mask[..., None] * scaled_item_embedding_without_positions(sequence)\n            numerator = causal_window_sum(X, width=5)\n            denominator = causal_window_sum(mask, width=5).clamp_min(1)\n            R = numerator / denominator[..., None]\n            G = sigmoid(linear(concat(H, R)))         # weights=0, bias=-2 initially\n            Z = ((1-G)*H + G*R) * mask[..., None]\n        else:\n            Z = H\n        if multi_negative_enabled:\n            negatives, eligible = sample_uniform_with_replacement(\n                K=64, excluding=padding_plus_positive_plus_complete_training_history)\n            positive_logits = dot(Z, item_embedding(positive))\n            negative_logits = batched_dot(Z, item_embedding(negatives))\n            beta = 0.25 + 0.75*64/(N-1)\n            position_loss = (beta*softplus(-positive_logits)\n                             + softplus(negative_logits).sum(-1))/65\n            loss = mean_over_valid_eligible_positions(position_loss)\n        else:\n            loss = unchanged_baseline_loss(Z, positive, supplied_negative)\n        update_parameters(loss)\n    At declared checkpoints, evaluate all four categories with the pinned evaluator.\n    Save the checkpoint epoch maximizing macro validation HR@10; prefer earlier ties.\nCompare baseline, gate-only, loss-only and combined at matched completed training steps.\nIf budget permits, run the prespecified combined variant with fixed G=sigmoid(-2).\nReport category HR deltas, actual diagnostic metrics and available paired-hit uncertainty.\nSelect by macro validation HR@10; log all attempts and freeze before held-out evaluation.\nWrite predictor artifacts that reconstruct the identical pooling, gate and scoring path.\nAt inference, gather the greatest nonpadding position; use saved frequency fallback if empty.\nRun DiagnosisProbe through the actual trained model and the same representation/scoring path.",
+    "originality": {
+      "score": 3,
+      "positive": "Connects an explicit recent-interest path with broader candidate supervision to address linked qualitative and quantitative failures.",
+      "negative": "Pooling, gating and generalized multi-negative BCE are established; the contribution is a controlled task-specific combination."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides an interpretable foundation for later timestamp-aware gates or permitted-text specificity if the controlled comparisons support expansion.",
+      "negative": "A fixed recent window can amplify one-off or already-satisfied demand, and benefits may differ across categories or disappear under held-out evaluation."
+    },
+    "code_difficulty": {
+      "score": 6,
+      "positive": "The architecture requires only masked pooling and a small gate while retaining SASRec.",
+      "negative": "Full-history negative exclusion without exposed user IDs, correct loss reduction, controlled comparisons, diagnostic adaptation and synchronized predictor serialization require substantial integration care."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Provides the causal self-attention backbone used as the starting point.",
+        "Its original sampling implementation motivates retaining complete training-history exclusions."
+      ],
+      "limitations": [
+        "Does not establish that learned attention resolves the reported current-interest failures.",
+        "Baseline sampler behavior must be preserved explicitly when introducing additional negatives."
+      ]
+    },
+    {
+      "title": "gSASRec — IJCAI 2024",
+      "link": "https://www.ijcai.org/proceedings/2024/0939.pdf",
+      "contributions": [
+        "Motivates multiple sampled negatives and generalized BCE.",
+        "Defines joint normalization of the weighted positive term and summed negative terms by K+1."
+      ],
+      "limitations": [
+        "Its calibration theorem assumes a particular uniform-with-replacement sampling scheme; excluding full histories changes that scheme.",
+        "The supplied search results identify differences between theorem assumptions and official sampler behavior.",
+        "Published results do not establish improvement on the pinned Amazon benchmark."
+      ]
+    },
+    {
+      "title": "Official gSASRec PyTorch training implementation",
+      "link": "https://github.com/asash/gSASRec-pytorch/blob/main/train_gsasrec.py",
+      "contributions": [
+        "Provides reference positive-logit transformation and BCE reduction behavior.",
+        "Helps distinguish algebraically equivalent softplus expressions from objectives with different positive-to-negative weighting."
+      ],
+      "limitations": [
+        "Float64 computation and clamping can introduce numerical differences.",
+        "Reproducing the objective alone does not reproduce sampling, optimization or benchmark results."
+      ]
+    },
+    {
+      "title": "TLSTSRec",
+      "link": "https://doi.org/10.3233/IDA-240051",
+      "contributions": [
+        "Motivates separating and adaptively combining long-term and short-term sequential preferences."
+      ],
+      "limitations": [
+        "The proposed recent-window gate is a simpler adaptation rather than a reproduction of its temporal modeling."
+      ]
+    },
+    {
+      "title": "Hard-BPR",
+      "link": "https://arxiv.org/abs/2403.19276",
+      "contributions": [
+        "Addresses false-negative influence during dynamic hard-negative sampling."
+      ],
+      "limitations": [
+        "Transfer from implicit collaborative filtering to this SASRec task remains experimental.",
+        "Uniform sampling and full-history exclusions do not eliminate false negatives."
+      ]
+    },
+    {
+      "title": "LightFM",
+      "link": "https://arxiv.org/abs/1507.08439",
+      "contributions": [
+        "Provides a foundation for jointly learning interaction and metadata feature representations."
+      ],
+      "limitations": [
+        "Is not sequential and cannot establish functional compatibility from incomplete text.",
+        "The proposed TF-IDF alternative is an adaptation, not a reproduced finding."
+      ]
+    },
+    {
+      "title": "PyTorch AvgPool1d documentation",
+      "link": "https://docs.pytorch.org/docs/stable/generated/torch.nn.AvgPool1d.html",
+      "contributions": [
+        "Documents pooling behavior relevant to padding and denominator handling."
+      ],
+      "limitations": [
+        "Standard pooling defaults do not implement the required explicit nonpadding denominator and causal masking automatically."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/beta/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how optimizing model selection criteria can introduce evaluation optimism."
+      ],
+      "limitations": [
+        "Ordinary paired-user bootstrap intervals do not remove adaptive checkpoint or configuration selection bias."
+      ]
+    },
+    {
+      "title": "Recommender evaluation review",
+      "link": "https://doi.org/10.1007/s10791-020-09371-3",
+      "contributions": [
+        "Provides context for recommender evaluation and user-resampling uncertainty."
+      ],
+      "limitations": [
+        "Fixed-candidate user resampling does not measure candidate-sampling uncertainty, training-seed variability or adaptive search bias."
+      ]
+    }
+  ]
+}

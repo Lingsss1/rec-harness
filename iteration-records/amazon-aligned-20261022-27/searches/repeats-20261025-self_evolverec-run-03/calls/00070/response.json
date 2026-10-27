@@ -1,0 +1,66 @@
+{
+  "markdown_report": "**Proposal: support-gated directed transition residual for SASRec.** At 0% research progress, prioritize a small, testable extension. Improvements remain hypotheses until measured by pinned macro validation HR@10.\n\n**Insights from the starting point.** (1) SASRec already represents ordered preferences. A residual expert can add recent-transition evidence while preserving this baseline. (2) User feedback identifies broad relevance outranking current intent. Conditioning the residual on recent interactions directly targets that failure. (3) Electronics has 14.95% negative-over-positive rankings, versus 3.03% for Movies_and_TV. This motivates better discrimination, while the similar embedding-collapse scores provide little justification for a collapse-focused intervention.\n\n**Insights from related work.** (1) [TGCL4SR](https://ojs.aaai.org/index.php/AAAI/article/view/28789) motivates combining sequence representations with temporal transition evidence. Observed transitions nevertheless cannot certify equipment compatibility. (2) [FamouSRec](https://doi.org/10.1145/3696410.3714663) supports adaptive routing among recommendation experts. A support-dependent gate is a lightweight adaptation, not a reproduced result. (3) [gSASRec](https://www.ijcai.org/proceedings/2024/0939.pdf) motivates examining negative-sampling objectives. Better training margins alone do not establish improved held-out ranking.\n\nThree research directions follow: current-intent modeling, evidence-dependent fusion, and ranking supervision. The conceptual framework separates **personal sequence evidence** (SASRec), **population successor evidence** (directed transitions), and **candidate discrimination** (multi-negative objectives). The gap is deciding when population evidence supports an individual recommendation.\n\nConsider three atomic ideas. Scores below are originality/potential/user alignment/model alignment/difficulty; higher difficulty means harder implementation.\n\n| Idea | Scores | Positive assessment | Negative assessment |\n|---|---|---|---|\n| Support-gated transition residual | 5/8/8/7/4 | O: concrete support routing; P: extensible evidence fusion; U: recent intent and supported next tasks; M: confusing successors; D: small expert | O: established fusion pattern; P: sparse support; U: compatibility remains unknown; M: gains unproven; D: graph bookkeeping |\n| Recent/stable preference gate | 4/7/7/6/3 | O: task-specific adaptation; P: reusable intent modeling; U: current and sustained preferences; M: reduces history interference; D: simple pooling | O: familiar architecture; P: limited evidence; U: weak task grounding; M: interference unverified; D: causal masking needed |\n| Multi-negative gBCE | 3/7/4/8/2 | O: controlled adaptation; P: strong baseline; U: sharper ranking; M: targets weak margins; D: localized change | O: published objective; P: incremental; U: no explicit task reasoning; M: false negatives; D: additional scoring cost |\n\nSelect the transition residual: it explicitly addresses broad associations displacing recent intent and recommendations based on unsupported practical associations, while targeting weak positive–negative separation. Train directed source/target embeddings from training-only adjacent transitions; learn a bounded residual gate using SASRec state and observed transition support. Unsupported sources receive zero residual weight. Population transitions supply behavioral evidence, not proof of compatibility or unsatisfied need.\n\nAblate sequence-only, fixed fusion, and learned fusion. Preserve four-category routing, seeds, splits, diagnostic interfaces, predictor architecture parity, and the single-GPU budget. Select exclusively by pinned macro validation HR@10; report Electronics margins as secondary diagnostics.",
+  "idea": {
+    "description": "Add a lightweight, support-gated directed transition residual to per-dataset SASRec. Separate source and target embeddings represent asymmetric successor relationships. A gate controls how much recent transition evidence contributes to each sequence state.",
+    "motivation": "The user diagnosis identifies broad associations outranking recent intent and practical recommendations lacking behavioral support. Recent, directed successor evidence may improve both patterns. The quantitative target is weak positive–negative separation, especially Electronics' 14.95% wrong-ranking rate and negative lower-tail margin. Transitions cannot establish compatibility, ownership, or whether a need has already been satisfied.",
+    "implementation_notes": "Build adjacent transition counts exclusively from each category's training histories. Discard padding and smooth source support as n/(n+lambda). Use separate source and target embeddings with the baseline embedding dimension; initialize the bounded residual scale near zero. For each valid causal position, score the observed next item and the baseline's sampled negatives through both experts. Retain baseline loss and optimizer initially to isolate the architecture change. Weight an auxiliary transition loss by source support and normalize it over valid positions. Cap the residual gate to reduce domination by population trends. Gate inputs must be reproducible from a sequence at inference: sequence state, recent source support, and prefix length. Start with the last item as source; evaluate longer windows only as a separate ablation. Preserve DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, all four category routes, and SASREC_EPOCHS environment handling with default 200. Store graph support, expert parameters, gate parameters, and configuration beneath the trial directory. Update the predictor writer to instantiate this exact architecture. Expose item_emb and log2feats through the compatibility view; pack sequence state, source embedding, and gate into the features returned by log2feats so predict_score can reproduce the full score. DiagnosisProbe(view, device).run_full_diagnosis(train_loader) must use view.predict_score for margins and return metrics and metric_definitions. Embedding cosine diagnostics must identify which embedding table they measure. Omit unavailable category breakdowns and never infer review content or simulator traits. No benchmark gain has been measured.",
+    "pseudocode": "# Algorithmic pseudocode; integrate with the existing RecHarness trainer and predictor writer.\nfor category in FOUR_CATEGORIES:\n    counts = count_adjacent_pairs(training_histories[category])\n    support[i] = sum(counts[i, j] for j in successors(i))\n    model = SASRecWithDirectedResidual(\n        source_embedding=True, target_embedding=True,\n        gate_inputs=['sequence_state', 'source_support', 'prefix_length'])\n\n    def log2feats(sequence):\n        h = model.sasrec.log2feats(sequence)\n        source = model.source_embedding(sequence)\n        reliability = support[sequence] / (support[sequence] + smoothing)\n        gate = gate_cap * sigmoid(model.gate(h, log1p(support[sequence]), prefix_length(sequence)))\n        return pack(h, source, gate * reliability)\n\n    def predict_score(features, items):\n        h, source, weight = unpack(features)\n        sequential = dot(h, model.item_emb(items))\n        transition = dot(source, model.target_embedding(items)) / sqrt(hidden_dim)\n        return sequential + weight * transition\n\n    for batch in training_loader:\n        _, sequence, positive, negative = batch\n        features = log2feats(sequence)\n        loss = baseline_loss(predict_score(features, positive),\n                             predict_score(features, negative), valid=positive != 0)\n        loss += auxiliary_weight * support_weighted_transition_loss(\n            source=sequence, positive=positive, negative=negative)\n        optimize(loss)\n    save_model_configuration_and_support_under_trial_directory()\n    write_predictor_with_identical_feature_packing_and_scoring()\n\n# Compare sequence-only, fixed fusion, and learned fusion under the shared budget.\n# Select using the host's pinned four-category macro validation HR@10.",
+    "originality": {
+      "score": 5,
+      "positive": "Combines a directed residual with explicit source-support attenuation to address the supplied diagnosis.",
+      "negative": "Sequence–transition fusion and adaptive expert routing already have substantial precedent."
+    },
+    "future_potential": {
+      "score": 8,
+      "positive": "Creates a small framework for testing when population successor evidence helps individual current intent.",
+      "negative": "Sparse transitions and popularity effects may limit gains; behavioral evidence cannot resolve compatibility or purchase completion."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Requires embedding lookups, a small gate, training-only transition counts, and a shared scoring function.",
+      "negative": "Causal feature alignment, predictor serialization, and diagnosis compatibility require careful integration."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/html/1808.09781v1",
+      "contributions": [
+        "Provides the causal sequence encoder and candidate-scoring baseline."
+      ],
+      "limitations": [
+        "Does not explicitly distinguish individual preference evidence from population successor evidence."
+      ]
+    },
+    {
+      "title": "TGCL4SR",
+      "link": "https://ojs.aaai.org/index.php/AAAI/article/view/28789",
+      "contributions": [
+        "Combines temporal item-transition graph information with sequence modeling."
+      ],
+      "limitations": [
+        "Does not establish gains for this pinned benchmark or certify product compatibility."
+      ]
+    },
+    {
+      "title": "FamouSRec",
+      "link": "https://doi.org/10.1145/3696410.3714663",
+      "contributions": [
+        "Motivates adaptive routing among heterogeneous sequential recommendation experts."
+      ],
+      "limitations": [
+        "The proposed support-gated transition residual is an adaptation, not its reported architecture."
+      ]
+    },
+    {
+      "title": "gSASRec",
+      "link": "https://www.ijcai.org/proceedings/2024/0939.pdf",
+      "contributions": [
+        "Addresses negative-sampling overconfidence through generalized binary cross-entropy and additional negatives."
+      ],
+      "limitations": [
+        "Objective improvements do not directly establish current-intent alignment or gains under this evaluator."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,159 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting-point insights.** (1) Electronics and Industrial have training negative-outranking rates of 12.55% and 10.33%; these do not establish validation failures. (2) Electronics’ alignment score, 0.7816, motivates spectral diagnostics but does not establish collapse. (3) Qualitative feedback favors specific interests over broad associations; centering could emphasize recent departures but could also erase stable narrow preferences.\n\n**Related-work insights.** (1) [Klenitskiy et al.](https://arxiv.org/abs/2408.12008) motivate history-order controls. Such interventions measure model reliance, not intent. (2) [FOSSIL](https://cseweb.ucsd.edu/~jmcauley/pdfs/icdm16a.pdf), [CLSR](https://arxiv.org/abs/2202.13090), and [BSARec](https://arxiv.org/html/2312.10325v2) establish history aggregation, long/short-interest separation, and frequency-residual precedents; novelty is therefore modest. (3) [Sampled-metric analysis](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/) and [Cawley–Talbot](https://jmlr.csail.mit.edu/beta/papers/v11/cawley10a.html) constrain interpretation: sampled ranking gains and selected validation gains require conditional claims.\n\n### Framework\n\n| Direction | Existing mechanism | Gap addressed |\n|---|---|---|\n| History timescale | SASRec; FOSSIL; exponential residual | Separate recent deviations from persistent associations |\n| Representation geometry | Cosine; spectral diagnostics; BSARec | Distinguish alignment, dimensionality, and temporal filtering |\n| Behavioral evidence | Training-prefix interventions | Measure reliance without inferring intent |\n\n### Candidate ideas\n\nScores are originality/potential/difficulty, each 0–10; higher difficulty means harder implementation. Each cell gives a positive and negative assessment.\n\n| Idea | Originality | Potential | Difficulty |\n|---|---|---|---|\n| Controlled exponential residual | 3: focused comparison; established pooling | 6: feasible reference; broad-association shortcuts | 3: small branch; parity checks required |\n| **Centered exponential residual** | **3: explicit contrast; filtering precedents** | **6: interpretable hypothesis; stable interests may disappear** | **4: two pools; numerical and control requirements** |\n| Spectral embedding penalty | 3: direct hypothesis; established regularization | 5: geometry test; no demonstrated need | 5: standard algebra; costly tuning |\n\n### Selected idea: centered exponential residual\n\nAt 20% progress, retain the small architectural experiment. Subtract the causal uniform embedding mean from the normalized causal exponential mean, apply affine-free LayerNorm, and weakly gate the result into SASRec’s final features. This tests ranking utility, not ownership, necessity, compatibility, or current intent.\n\n```text\nS, Z, U, C = 0\nfor each valid input embedding x, in FP32:\n    S = rho*S + x; Z = rho*Z + 1\n    U = U + x; C = C + 1\n    delta = S/Z - U/C\n    output = SASRec_feature + sigmoid(g)*LayerNorm(delta)\nzero padded outputs; skip padding in accumulators\n```\n\nInitialize learned retention at 0.9 and gate logit at −4. Specify LayerNorm ε=10⁻⁵. Its normalization removes much of the difference’s amplitude dependence: the gate makes the branch initially small, while near-uniform retention need not. Compute subtraction before casting from FP32; monitor finite gradients.\n\nPredeclare baseline, uniform, last-item, exponential, centered-normalized, and centered-raw variants. The raw control removes LayerNorm only. Match baseline initialization, training randomness, and checkpoint opportunities; use host-supported four-category macro validation HR@10 exclusively. Reduce the declared schedule before training if necessary to respect 43,200 GPU-seconds; report every comparison and failure.\n\nPreserve seeds, splits, routing, environment paths, 200-epoch default, diagnostic contracts, and twenty-user exploratory exercise. Update predictor generation; verify causality, padding finiteness, and reload-logit parity. Where official paired hits exist, bootstrap users within datasets; intervals do not correct winner selection or measure candidate/seed variability. No gains are established.",
+  "idea": {
+    "description": "Add a weakly gated centered causal history residual to each dataset’s SASRec: subtract the causal uniform shared-item-embedding mean from a normalized, learned exponential mean, apply affine-free LayerNorm, and add the result after SASRec’s final feature normalization. Retain a centered raw-difference control to test whether normalization drives any benefit.",
+    "motivation": "Qualitative feedback suggests that broad historical associations sometimes dominate specific recent interests. Centering tests whether recent departures from an observed prefix improve ranking, while explicitly allowing that stable narrow preferences may be damaged. Electronics and Industrial_and_Scientific have weaker sampled training separation, but these observations do not establish validation failures or justify optimizing diagnostic margins. FOSSIL, CLSR, and BSARec substantially narrow the novelty claim: history aggregation, long/short preference separation, and temporal residual filtering already have precedents. The exact centered causal formulation is a controlled benchmark hypothesis whose novelty and effectiveness remain unverified.",
+    "implementation_notes": "Preserve DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, all four dataset routes, existing splits, and baseline loss, optimizer, sampler, history window, positional conventions, and environment handling. SASREC_EPOCHS defaults to 200. Write artifacts beneath the trial directory. Keep each execution single-GPU. Access only permitted interactions, timestamps, titles, and descriptions; unavailable review fields, ratings, item categories, prices, stores, and simulator traits must remain unavailable.\n\nUse shared unscaled item embeddings, including the current input item when predicting its successor. Compute the normalized exponential mean and uniform mean causally over the same valid prefix. Initialize rho = sigmoid(retention_logit) at 0.9 and sigmoid(gate_logit) with gate_logit = -4, approximately 0.018. Use LayerNorm(hidden_dim, eps=1e-5, elementwise_affine=False). Apply the residual after baseline final feature normalization; preserve baseline embedding scaling, attention, feed-forward paths, and item scoring. Explicitly zero padded outputs and exclude padded supervised targets from loss. Skip padding in both accumulator updates. A one-item prefix has zero centered residual. Preserve baseline positional indexing and right alignment; do not claim invariance to shifted absolute positions.\n\nCompute embeddings used by the branch, accumulator updates, division, subtraction, and LayerNorm in FP32, including under autocast; casting an already rounded difference to FP32 is insufficient. Cast the completed branch to the baseline feature dtype when adding it. Use zero-initialized differentiable recurrences, avoiding powers or division by 1-rho^t. Clamp denominators for empty prefixes and use explicit valid masks. Use functional updates that preserve autograd. Monitor nonfinite outputs and gradients and report failures; do not silently replace them with zeros. Do not detach recurrence states or change baseline attention masks. If masks require repair for fully masked rows, report that change and apply it consistently to controls.\n\nFor centered delta with feature variance v, LayerNorm residual RMS is sigmoid(g)*sqrt(v/(v+eps)). Thus near-uniform retention does not guarantee a proportionately small normalized residual when v exceeds eps. Weak initialization refers to the gate, not the raw difference or guaranteed logit perturbations. Near zero variance, the normalization Jacobian can approach 1/sqrt(eps) before gating; retention remains learnable through direction changes, but normalization can suppress amplitude information. The rho-to-one limit reaches zero for a finite prefix with fixed positive eps, although this limit can lie in a narrow numerical regime. Neither pool represents a disentangled latent interest, and subtracting the prefix mean is not catalog-wide embedding centering or a guarantee of reduced popularity dependence.\n\nPredeclare six configurations in this tie-break order: baseline; uniform residual; last-item residual; uncentered exponential residual; centered exponential with LayerNorm; centered exponential without LayerNorm. All residuals use the same gate initialization. The first four residual variants except centered-raw use identical affine-free LayerNorm; centered-raw removes only normalization. Learn retention in both exponential and centered variants from the same initialization. Uniform and last-item variants have no effective retention parameter. Shared learned scalar retention means one scalar per dataset model, not a user-conditioned value. The raw-versus-normalized contrast intentionally changes branch scale and conditioning, so it cannot isolate normalization independently of scale. A fixed-reference-scale variant is a possible later experiment, not an undeclared search option.\n\nMatch baseline parameter initialization and data randomness by constructing and initializing the baseline first and adding deterministic scalar parameters afterward without consuming its RNG stream. Preserve data-loader and sampler RNG states across configurations; record actual determinism settings. Identical seeds do not guarantee matched randomness if execution consumes RNG differently. Train all four categories for each configuration; do not select category-specific winners from separate runs. Predeclare the actual checkpoint schedule before observing results. If the host supports intermediate checkpoint evaluation, use matched opportunities; otherwise use one final checkpoint at the configured epoch, default 200. Never assume local evaluation replaces the pinned host evaluator. Select solely by four-category macro validation HR@10; break exact ties by earlier epoch, then configuration order. Record every attempted configuration, checkpoint, four category scores, macro score, and GPU time, including failures. Count training, diagnostics, debugging, and failures against 43,200 GPU-seconds. Use available prior timing to reduce the predeclared schedule before launching it; report any later budget-driven truncation and its reason without substituting undeclared variants.\n\nWhere the unchanged official evaluator exposes user-level hits and user identities, report paired category and macro differences against baseline. Use 10,000 CPU bootstrap replicates with a separate NumPy generator seeded 42: independently resample 200 user indices with replacement within each category, use identical indices for both models, and average the four category differences equally. Report 95% percentile intervals and observed differences. One additional hit changes category HR by 0.005 and macro HR by 0.00125. These intervals assume independent user sampling units within categories and condition on the fitted models, split, and fixed candidate sets; they do not correct adaptive winner selection or measure training-seed and candidate-sampling variability. If official paired hits are unavailable, omit intervals rather than reconstructing another evaluation protocol. Treat small selected gains as exploratory; freeze the final choice before independent held-out evaluation. Never access hidden test files during search.\n\nRetain DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. view.model must reference the actual trained nn.Module; view.item_emb, log2feats, predict_score, user_train, meta_data, and review_data must expose the compatibility contract. Determine the device from actual parameters and accept the required B x L loader tensors. Preserve bounded training-only margins, cosine alignment, observation counts, unavailable-category flags and empty category lists, nulls for absent observations, and restoration of prior module modes in a finally block. Report learned gate, retention, raw delta RMS, gated branch RMS, and finite counts as descriptive quantities. Retention horizon 1/(1-rho), when finite, describes infinite-history weighting rather than effective context under finite truncation. Mean cosine does not establish spectral collapse, and diagnostic margins depend on score scale. Any added spectral metric must define centering and spectral normalization and remain outside selection. Bound expanded diagnostics to baseline and the centered-normalized contender, one pass each, with measured runtime. Preserve the twenty real training-user full-catalog unseen-item recommendation exercise, five users per category; qualitative judgments remain exploratory and must abstain on unsupported intent, ownership, or compatibility claims.\n\nSerialize architecture configuration, pooling variant, normalization epsilon, retention, gate, complete parameters, and buffers. Update the predictor writer to reconstruct identical computation, load strictly, call eval(), retain category routing, and score the final position of right-aligned nonempty histories. Verify candidate-logit parity between training-side inference and generated predictor after reload with torch.testing.assert_close(rtol=1e-5, atol=1e-6) in FP32 on ordinary, one-item, and padded histories. Verify prefix causality by changing future inputs and comparing earlier features in eval mode; verify finite empty-prefix behavior without changing benchmark input policy. Check the centered branch is zero for one-item prefixes and approaches zero for rho approaching one with fixed eps. Record these checks and their actual cost. No improvement is established until measured by the pinned evaluator.",
+    "pseudocode": "Initialize baseline first using its unchanged seed-42 procedure.\nAdd gate_logit = Parameter(-4.0).\nFor exponential variants, add retention_logit = Parameter(logit(0.9)).\nSet pool_norm = LayerNorm(hidden_dim, eps=1e-5, elementwise_affine=False).\n\nlog2feats(sequence):\n    sequence = convert_to_long_on_actual_model_device(sequence)\n    h = baseline_log2feats(sequence)\n    if variant == baseline:\n        return h\n    with autocast_disabled:\n        e = item_emb(sequence).float()\n        rho = sigmoid(retention_logit.float()) if exponential_variant else unused\n        S, Z, U, C = FP32_zero_accumulators_on_model_device()\n        residuals = []\n        for t in range(sequence_length):\n            valid = sequence[:, t] != 0\n            x = where(valid[:, None], e[:, t], 0)\n            U_new = U + x\n            C_new = C + valid.float()\n            if exponential_variant:\n                S = where(valid[:, None], rho*S + x, S)\n                Z = where(valid, rho*Z + 1, Z)\n                recent = S / Z.clamp_min(1e-8)[:, None]\n            U, C = U_new, C_new\n            uniform = U / C.clamp_min(1)[:, None]\n            if variant == uniform_residual: p = uniform\n            elif variant == last_item_residual: p = x\n            elif variant == exponential_residual: p = recent\n            else: p = recent - uniform\n            if variant != centered_raw: p = pool_norm(p)\n            r = sigmoid(gate_logit.float()) * p\n            residuals.append(where(valid[:, None], r, 0))\n        branch = stack(residuals, dim=1)\n    return (h + branch.to(h.dtype)).masked_fill((sequence == 0)[..., None], 0)\n\nTrain each predeclared configuration across all four categories using unchanged targets, loss, optimizer, sampler, and permitted epoch settings.\nRun bounded compatibility diagnostics; generate the identical architecture in working/predict.py.\nVerify causality, finite padding behavior, and checkpoint/predictor logit parity.\nSelect only through host-supported pinned macro validation HR@10, using predeclared checkpoint and tie rules.\nReport all comparisons and actual GPU costs; compute paired bootstrap intervals only when official per-user hits are exposed.",
+    "originality": {
+      "score": 3,
+      "positive": "The explicit causal recent-minus-prefix contrast and matched controls define a focused, falsifiable experiment within SASRec.",
+      "negative": "FOSSIL, CLSR, BSARec, and FMLPRec establish closely related aggregation, timescale separation, and temporal filtering ideas; exact-formulation novelty remains unverified."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "A controlled result could clarify when recent deviations complement persistent preferences and motivate better evidence-based history fusion.",
+      "negative": "Centering may remove useful stable interests, normalization may dominate the mechanism, and selected gains may depend on the pinned candidates and training seed."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "The branch requires two causal pooling computations and scalar parameters while preserving the baseline objective and routing.",
+      "negative": "FP32 recurrence handling, matched randomness, six controlled configurations, budget accounting, diagnostic compatibility, and generated-predictor parity require careful integration."
+    }
+  },
+  "related_work": [
+    {
+      "title": "History-order analysis by Klenitskiy et al. (2024), supplied search reference",
+      "link": "https://arxiv.org/abs/2408.12008",
+      "contributions": [
+        "The supplied summary describes original-versus-shuffled-history comparisons across multiple datasets.",
+        "Motivates uniform-history and last-item controls when interpreting sequential improvements."
+      ],
+      "limitations": [
+        "Shuffle sensitivity measures model reliance under an intervention, not causal user intent.",
+        "Does not establish centered-residual effectiveness on the pinned Amazon benchmark."
+      ]
+    },
+    {
+      "title": "Recommendation representation dimensionality study by Guo et al., ICML 2024",
+      "link": "https://proceedings.mlr.press/v235/guo24e.html",
+      "contributions": [
+        "Studies low-dimensional embedding structure as a limitation in recommendation models.",
+        "Motivates spectral measurements alongside average embedding cosine."
+      ],
+      "limitations": [
+        "Mean directional alignment alone does not establish dimensional collapse.",
+        "Increasing effective rank is not guaranteed to improve validation HR@10."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Analyzes discrepancies between sampled and full-catalog recommendation metrics.",
+        "Supports retaining the exact pinned candidate protocol for model selection."
+      ],
+      "limitations": [
+        "Does not show that the proposed architecture improves this task.",
+        "Full-catalog training-user audits cannot substitute for official validation.",
+        "Fixed candidate comparisons do not measure candidate-sampling uncertainty."
+      ]
+    },
+    {
+      "title": "FOSSIL: Fusing Similarity Models with Markov Chains for Sparse Sequential Recommendation",
+      "link": "https://cseweb.ucsd.edu/~jmcauley/pdfs/icdm16a.pdf",
+      "contributions": [
+        "Combines history-length-normalized consumed-item embeddings with personalized recent-item components.",
+        "Provides a close additive-history precedent that narrows the proposed residual’s originality."
+      ],
+      "limitations": [
+        "Does not establish the exact normalized causal recent-minus-prefix formulation.",
+        "Its historical normalization controls magnitude rather than explicitly centering recent behavior."
+      ]
+    },
+    {
+      "title": "CLSR: Contrastive Learning for Sequential Recommendation",
+      "link": "https://arxiv.org/abs/2202.13090",
+      "contributions": [
+        "Uses full-history and recent-history embedding averages as supervision proxies for separate interest encoders.",
+        "Adaptively combines long-term and short-term representations."
+      ],
+      "limitations": [
+        "Separation and fusion differ from the proposed explicit difference branch.",
+        "History proxies do not establish observable current intent."
+      ]
+    },
+    {
+      "title": "BSARec",
+      "link": "https://arxiv.org/html/2312.10325v2",
+      "contributions": [
+        "Separates low-frequency signals from complementary high-frequency residuals and learns their contribution alongside self-attention.",
+        "Provides a close subtraction-based temporal filtering precedent."
+      ],
+      "limitations": [
+        "Does not establish the exact centered normalized causal EMA formulation.",
+        "Its results do not demonstrate benefits under the pinned RecHarness protocol."
+      ]
+    },
+    {
+      "title": "FMLPRec: A Filter-enhanced MLP is All You Need for Sequential Recommendation",
+      "link": "https://arxiv.org/abs/2202.13556",
+      "contributions": [
+        "Evaluates filtering approaches for sequential recommendation, including classical high-pass filtering.",
+        "Shows that temporal filtering is an established direction rather than a new general principle."
+      ],
+      "limitations": [
+        "The supplied summary reports findings favoring low-pass or band-stop filtering, cautioning against assuming centered differences will help.",
+        "Does not establish the proposed causal residual’s effectiveness."
+      ]
+    },
+    {
+      "title": "PyTorch LayerNorm documentation",
+      "link": "https://docs.pytorch.org/docs/main/generated/torch.nn.modules.normalization.LayerNorm.html",
+      "contributions": [
+        "Defines normalization using feature variance and epsilon.",
+        "Supports the stated residual RMS formula and the distinction between small raw differences and small normalized residuals."
+      ],
+      "limitations": [
+        "The formula provides numerical analysis, not empirical recommendation evidence.",
+        "Small residual feature RMS does not guarantee small ranking changes."
+      ]
+    },
+    {
+      "title": "Understanding and Improving Layer Normalization",
+      "link": "https://papers.neurips.cc/paper/8688-understanding-and-improving-layer-normalization.pdf",
+      "contributions": [
+        "Analyzes normalization and backward behavior.",
+        "Motivates explicit attention to gradient conditioning when normalizing small difference vectors."
+      ],
+      "limitations": [
+        "Does not validate this residual architecture or its retention learning.",
+        "The precise RMS and Jacobian statements here follow from the normalization formula."
+      ]
+    },
+    {
+      "title": "User-level recommender comparison principles discussed by Cañamares et al.",
+      "link": "https://doi.org/10.1007/s10791-020-09371-3",
+      "contributions": [
+        "Supports user-level statistical comparison principles.",
+        "Motivates preserving paired observations when estimating uncertainty in model differences."
+      ],
+      "limitations": [
+        "The specific stratified bootstrap is a proposed task-specific procedure.",
+        "Its intervals condition on fitted models and candidates and require appropriate user independence assumptions."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://jmlr.csail.mit.edu/beta/papers/v11/cawley10a.html",
+      "contributions": [
+        "Shows that model-selection overfitting can materially affect reported algorithm comparisons.",
+        "Motivates predeclared comparisons, complete search records, and independent evaluation of a frozen choice."
+      ],
+      "limitations": [
+        "Predeclaring a search does not eliminate optimistic winner selection.",
+        "A bootstrap interval computed after selecting the winner does not correct adaptive selection bias."
+      ]
+    }
+  ]
+}

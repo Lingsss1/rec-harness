@@ -1,0 +1,66 @@
+{
+  "markdown_report": "## Insights\n\n**Starting evidence.** (1) Training negatives lose at 92.85–97.87% of measured positions. This motivates testing stronger training comparisons, but does not establish overfitting. (2) Feedback favors repeated, specific evidence over broad associations. It supports examining history use without assuming recency always helps. (3) The residual probe reports unsupported architecture. Architecture verification and export parity therefore precede interpreting that intervention.\n\n**Related evidence.** (1) Oh–Cho [1] report excessive recency effects, while Spotify [2] finds strong pairwise baselines. Together these motivate separating recent-item dependence from accumulated historical evidence. (2) Krichene–Rendle [3] show sampled evaluation can reverse comparisons. The pinned HR@10 remains the selection objective, with no implied full-catalog gain. (3) ANAH [4] grounds claims in reference fragments. Its annotation principle supports evidence-linked feedback analysis without inferring ownership or compatibility.\n\n## Framework and directions\n\n| Direction | Observable evidence | Proposed intervention | Main uncertainty |\n|---|---|---|---|\n| Training discrimination | Sampled margins and ranks | Multiple-negative competition | Generalization |\n| History aggregation | Repetition, timestamps, perturbations | Recent/history residual | Excessive recency |\n| Evidence grounding | Exact title/description spans | Auditable diagnostic flags | Missing prerequisites |\n\n## Candidate ideas\n\nScores are originality/potential/difficulty; higher difficulty means harder implementation.\n\n| Idea | Scores | Positive assessment | Negative assessment |\n|---|---|---|---|\n| Multiple-negative softmax [3] | 2/6/3 | Established, scalable ranking objective; small training change | Little novelty; uncertain benchmark benefit; negative masking requires care |\n| Zero-initialized recent residual [1,2] | 3/6/3 | Controlled initialization; reusable history branch; compact code | Incremental; may duplicate SASRec; export integration matters |\n| Evidence-linked rejection audit [4] | 4/5/4 | Useful synthesis; transferable diagnostics; bounded scope | Mostly annotation design; indirect accuracy benefit; ambiguous text |\n\n## Selected idea: multiple-negative competition\n\nAt 0% progress, prioritize a minimal loss intervention over another architecture change. Keep SASRec and replace binary positive/negative training with softmax competition against 32 uniformly sampled training-valid negatives per position. This tests whether jointly competing alternatives improve validation ranking; existing margins alone cannot predict success.\n\n```text\nh = SASRec(sequence)\nfor each nonpadding target y:\n    N = 32 unique uniform items excluding y and user's training items\n    loss += -log_softmax([score(h,y), score(h,N)])[0]\noptimize mean(loss)\n```\n\nUse baseline scoring without introducing temperature tuning initially. Compare against unchanged BCE with matched checkpoint rules and the fixed four-category macro validation HR@10. Track ranks alongside margins, negative-sampling cost, and per-category results. Preserve seeds, splits, routing, DATA_DIR, epoch environment settings, and trial-local artifacts. Retain DiagnosisProbe and its compatibility hooks; verify exported predictor scores. Bound diagnostics and charge all trials against the shared budget. Claims about immediate usefulness require explicit feedback; unavailable attributes remain unknown.\n\nReferences: [1] https://arxiv.org/abs/2409.09722; [2] https://research.atspotify.com/2026/10/do-sequential-recommendation-benchmarks-require-higher-order-sequence-modelling; [3] https://research.google/pubs/on-sampled-metrics-for-item-recommendation/; [4] https://aclanthology.org/2024.acl-long.442/.",
+  "idea": {
+    "description": "Replace SASRec's binary training loss with a 32-negative softmax objective while preserving the model architecture, dataset routing, and inference scores.",
+    "motivation": "Existing diagnostics show strong separation against individual sampled training negatives, but provide no validation ranking evidence. Joint negative competition is a feasible early-stage intervention to test whether richer comparisons improve the pinned macro validation HR@10.",
+    "implementation_notes": "Start from sasrec_perdataset and retain all four datasets, preprocessing seed 0, training seed 42, DATA_DIR = os.environ['GAGC_DATA_DIR'], and SASREC_EPOCHS with environment default 200. Sample 32 distinct negatives per valid position using only catalog IDs and training histories; exclude padding, the target, and observed training items. If fewer than 32 eligible items exist, use the eligible set and mask unused logits. Avoid constructing a dense user-by-catalog mask; use bounded rejection sampling with an eligible-set fallback. Compute logits in position chunks to bound GPU memory. Average cross-entropy over positive != 0 positions. Keep the baseline optimizer, architecture, score scale, and checkpoint schedule initially. Uniform sampling is part of the chosen objective; do not describe it as an unbiased full-catalog softmax estimator. Compare one baseline and one intervention under matched settings, recording runtime and validation queries. Select solely through pinned four-category macro validation HR@10. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), the actual trained view.model, and all required compatibility fields. Unavailable categories remain empty and unavailable measurements return null. Diagnostics must restore module modes and isolate random generators. Produce required unseen-item recommendations for five training users per category without attributing unobserved traits. Keep artifacts beneath the trial directory and verify the predictor writer reloads the selected checkpoint with score and routing parity. Training, diagnostics, failures, and export checks share the 43,200 GPU-second budget. No improvement is established in advance.",
+    "pseudocode": "for each dataset in the four fixed dataset routes:\n    initialize baseline SASRec with training seed 42\n    for epoch in configured baseline schedule:\n        for _, sequence, positive, _ in train_loader:\n            features = model.log2feats(sequence)\n            valid = positive != 0\n            total_loss = 0\n            for chunk of valid positions:\n                negatives, mask = sample_unique_uniform_training_valid_items(chunk, count=32)\n                candidates = concatenate(positive[chunk, None], negatives)\n                logits = baseline_score_candidates(features[chunk], candidates)\n                logits[:, 1:] = logits[:, 1:].masked_fill(~mask, -inf)\n                total_loss += cross_entropy(logits.float(), zeros(len(chunk)), reduction='sum')\n            loss = total_loss / valid.sum()\n            optimizer.zero_grad()\n            loss.backward()\n            optimizer.step()\n    save eligible checkpoints beneath trial directory\nselect with unchanged pinned macro validation HR@10\nexport all four models through existing predictor writer\nreload exported predictor and verify score, top-10, and routing parity",
+    "originality": {
+      "score": 2,
+      "positive": "Applies a clearly isolated training-objective intervention to the observed diagnostic gap.",
+      "negative": "Multiple-negative softmax is established and provides little algorithmic novelty."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "Creates a simple foundation for studying negative competition and ranking behavior across four domains.",
+      "negative": "It may amplify popularity effects or false-negative pressure, and benchmark gains may not transfer to full-catalog usefulness."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "The encoder and exported inference architecture remain unchanged.",
+      "negative": "Efficient unique sampling, exclusion handling, and chunked loss computation require careful integration."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Oh and Cho (2024): excessive recency emphasis in sequential recommendation",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "The supplied search summary reports excessive recency emphasis and improvements after mitigation."
+      ],
+      "limitations": [
+        "Does not establish that adding recency pooling will improve this task."
+      ]
+    },
+    {
+      "title": "Do sequential recommendation benchmarks require higher-order sequence modelling?",
+      "link": "https://research.atspotify.com/2026/10/do-sequential-recommendation-benchmarks-require-higher-order-sequence-modelling",
+      "contributions": [
+        "The supplied summary reports strong pairwise transition baselines, motivating separate checks of last-item and accumulated-history effects."
+      ],
+      "limitations": [
+        "Reported benchmark findings do not establish outcomes for these four Amazon datasets."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled evaluation can change model comparisons, motivating narrow interpretation of the pinned benchmark."
+      ],
+      "limitations": [
+        "Does not directly establish the effectiveness of the proposed training loss."
+      ]
+    },
+    {
+      "title": "ANAH (2024)",
+      "link": "https://aclanthology.org/2024.acl-long.442/",
+      "contributions": [
+        "Provides reference-linked annotation principles useful for grounding diagnostic claims in observable text."
+      ],
+      "limitations": [
+        "Does not validate recommendation-specific labels or reveal latent preferences and ownership."
+      ]
+    }
+  ]
+}

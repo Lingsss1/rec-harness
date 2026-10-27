@@ -1,0 +1,66 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting point.** (1) SASRec compresses history into one final state. Candidate-specific evidence can consequently be obscured. (2) Electronics has 14.95% wrong sampled-pair rankings and a −0.4812 lower-decile margin. These motivate studying confusing cases, without establishing validation performance. (3) Embedding alignment remains near the diagnostic midpoint. Collapse regularization has weaker justification than improving relevance discrimination.\n\n**Related work.** (1) D2MFRec conditions interest aggregation on candidates. This motivates inexpensive candidate-specific history scoring. (2) gSASRec questions sampled-BCE calibration. Multiple negatives merit an objective ablation, but calibration alone does not establish HR@10 gains. (3) R2NS motivates gradual negative difficulty. Unobserved interactions remain uncertain negatives.\n\nThese insights suggest three directions: history representation, ranking objectives, and sampling curricula.\n\n### Framework and alternatives\n\n| Direction | Minimal idea | Mechanism and precedent |\n|---|---|---|\n| Representation | **Recent two-support residual** | Combine SASRec with candidate affinity to two distinct recent interactions; inspired by D2MFRec |\n| Objective | Multiple-negative generalized BCE | Replace single-negative BCE; gSASRec |\n| Sampling | Moderate-hard curriculum | Uniform warm-up, then mix uniform and moderately difficult negatives; R2NS |\n\nScores below are originality/potential/user alignment/model alignment/difficulty; difficulty increases with implementation burden.\n\n- **Two-support residual: 5/7/8/7/3.** Originality: simple support constraint; candidate conditioning already exists. Potential: reusable evidence aggregation; two supports can reject legitimate new interests. User: targets broad associations and isolated-purchase overweighting; cannot establish compatibility. Model: may separate confusing candidates; lower-tail gains remain untested. Difficulty: small scoring change; every inference path must match.\n- **Generalized BCE: 3/7/4/8/2.** Originality: established objective; benchmark adaptation adds little novelty. Potential: inexpensive improvement; sampling sensitivity persists. User: may sharpen relevance; sustained preferences are not explicit. Model: directly changes discrimination gradients; training margins may mislead. Difficulty: localized loss change; calibration parameters need validation.\n- **Curriculum: 4/7/5/8/4.** Originality: practical adaptation; established strategy. Potential: targets confusing alternatives; false negatives persist. User: challenges superficially plausible items; cannot distinguish useful complements. Model: targets weak margins; aggressive mining can destabilize learning. Difficulty: manageable pools; filtering and scheduling add overhead.\n\n### Selected algorithm\n\nAt 0% progress, select the **recent two-support residual**. It explicitly targets broad relevance without specific support and excessive influence from isolated purchases. Its model-facing hypothesis is improved lower-tail separation, particularly in Electronics.\n\nFor each causal prediction position, retain SASRec’s base score. Compute candidate cosine affinities to at most 16 recent valid contextual states representing distinct item IDs. Average the two largest affinities and add this bounded support score through a learned nonnegative scalar gate. With fewer than two distinct observations, use the base score. Recent-window restriction favors current evidence; requiring two supports reduces reliance on a single match.\n\nTrain initially with unchanged BCE. Compare against baseline using pinned four-category macro validation HR@10, retaining category results. Share the scorer between training, predictor generation, and diagnostics. Compatibility, satisfied needs, and semantic intent remain unobserved; no improvements are claimed before measurement.",
+  "idea": {
+    "description": "Add a recent two-support candidate-scoring residual to each dataset's SASRec. A candidate receives a learned bonus from its average cosine affinity to its two strongest distinct-item contextual states in the most recent 16 interactions. Retain the original final-state score and use it alone when fewer than two distinct interactions are available.",
+    "motivation": "The user diagnosis identifies broad associations and isolated purchases receiving excessive influence. Requiring two recent supports explicitly tests a remedy for both patterns. Electronics' 14.95% sampled-pair error rate and negative lower-decile margin motivate testing whether candidate-specific support improves confusing rankings. Neither the diagnostics nor related work establish a benchmark gain.",
+    "implementation_notes": "Keep the baseline architecture, splits, seeds, dataset routing, and initial BCE objective. Define one shared candidate scorer for training, validation, full-catalog recommendations, and the predictor writer. At training position t, only use contextual states at positions <=t; deduplicate item IDs within the recent window, retaining their latest occurrence. Normalize states and candidate embeddings only for the residual; preserve baseline dot-product scores. Use s=base+softplus(a)*support, initializing a=-3 so the residual starts small. Chunk candidate scoring for full-catalog recommendations. Preserve DATA_DIR=os.environ['GAGC_DATA_DIR'], trial-local artifacts, single-GPU execution, and SASREC_EPOCHS default 200. Preserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), metrics and metric_definitions. Adapt log2feats/predict_score together so features carry the contextual states and item-ID masks required by the actual scorer; view.model must remain the trained module. Recompute existing margin diagnostics using that scorer and retain embedding diagnostics. Do not produce unavailable category, review, compatibility, or simulator-trait measurements. Select using the pinned macro validation HR@10 only, within the shared search budget. Implement the baseline comparison before adding any objective or sampler changes.",
+    "pseudocode": "score(context, history_ids, candidates, t):\n    base = dot(context[t], item_emb[candidates])\n    indices = latest_distinct_item_positions(history_ids[max(0,t-15):t+1])\n    if len(indices) < 2: return base\n    affinities = normalize(context[indices]) @ normalize(item_emb[candidates]).T\n    support = mean(topk(affinities, k=2, dim=history), dim=history)\n    return base + softplus(a) * support\n\nfor each baseline training batch:\n    context = sasrec(sequence)\n    positive_scores = causal_score(context, sequence, positive)\n    negative_scores = causal_score(context, sequence, negative)\n    optimize baseline_masked_BCE(positive_scores, negative_scores)\n\nwrite predictor using identical model definition and scorer\nselect checkpoint with pinned macro validation HR@10",
+    "originality": {
+      "score": 5,
+      "positive": "Combines candidate-conditioned contextual scoring with a minimal requirement for two distinct recent supports.",
+      "negative": "Candidate-conditioned aggregation and recency modeling already have substantial precedent; the support rule is an incremental hypothesis."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides a small, testable mechanism for studying whether repeated recent evidence improves recommendation relevance.",
+      "negative": "Two supports may disadvantage legitimate preference changes, and contextual similarity cannot verify compatibility or whether a need is satisfied."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Requires a small scoring residual and one learned scalar while retaining the SASRec encoder and objective.",
+      "negative": "Causal distinct-item masking, catalog chunking, predictor serialization, and diagnostic feature compatibility require careful implementation."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/html/1808.09781",
+      "contributions": [
+        "Provides the causal self-attention sequential recommendation baseline."
+      ],
+      "limitations": [
+        "A single final-state candidate score does not explicitly require multiple recent supporting interactions."
+      ]
+    },
+    {
+      "title": "D2MFRec",
+      "link": "https://www.nature.com/articles/s41598-025-31190-z",
+      "contributions": [
+        "Uses candidate-dependent aggregation over interest vectors alongside recent-history modeling."
+      ],
+      "limitations": [
+        "The supplied summary does not establish gains on the pinned RecHarness benchmark or validate the proposed two-support rule."
+      ]
+    },
+    {
+      "title": "gSASRec extended abstract",
+      "link": "https://www.ijcai.org/proceedings/2024/0939.pdf",
+      "contributions": [
+        "Connects negative sampling with overconfidence and motivates generalized BCE with multiple negatives."
+      ],
+      "limitations": [
+        "Calibration improvements do not independently establish better HR@10 or address repeated-interest evidence."
+      ]
+    },
+    {
+      "title": "R2NS",
+      "link": "https://renzhaochun.github.io/assets/pdf/WWW_2026_Camera_Ready.pdf",
+      "contributions": [
+        "Motivates warm-start training and controlled introduction of harder negatives."
+      ],
+      "limitations": [
+        "Unobserved items can be false negatives, and sampler improvements require benchmark-specific validation."
+      ]
+    }
+  ]
+}

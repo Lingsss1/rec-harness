@@ -1,0 +1,660 @@
+from __future__ import annotations
+
+import json
+import math
+import os
+import pickle
+import random
+import time
+from collections import defaultdict
+
+import numpy as np
+import torch
+from torch import nn
+from torch.utils.data import Dataset, DataLoader
+
+DATA_DIR = os.environ["GAGC_DATA_DIR"]
+DATASETS = [
+    "Movies_and_TV",
+    "Industrial_and_Scientific",
+    "Electronics",
+    "CDs_and_Vinyl",
+]
+HERE = os.path.dirname(os.path.abspath(__file__))
+WORKING = os.path.join(HERE, "working")
+EPOCHS = int(os.environ.get("SASREC_EPOCHS", "200"))
+BATCH_SIZE = int(os.environ.get("SASREC_BATCH", "128"))
+MAXLEN = int(os.environ.get("SASREC_MAXLEN", "64"))
+HIDDEN = int(os.environ.get("SASREC_HIDDEN", "96"))
+BLOCKS = int(os.environ.get("SASREC_BLOCKS", "2"))
+HEADS = int(os.environ.get("SASREC_HEADS", "2"))
+DROPOUT = float(os.environ.get("SASREC_DROPOUT", "0.2"))
+LR = float(os.environ.get("SASREC_LR", "0.0006"))
+NEGATIVES = 1024
+PATIENCE = 25
+CATEGORY_SECONDS = 2400
+
+
+def seed_everything(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def read_split(path):
+    result = defaultdict(list)
+    with open(path) as f:
+        for line in f:
+            fields = line.split()
+            if len(fields) == 2:
+                result[int(fields[0])].append(int(fields[1]))
+    return dict(result)
+
+
+def load_dataset(name):
+    train = read_split(os.path.join(DATA_DIR, name + "_train.txt"))
+    valid = read_split(os.path.join(DATA_DIR, name + "_valid.txt"))
+    path = os.path.join(DATA_DIR, "dataset_stats.json")
+    itemnum = max(max(items) for items in train.values() if items)
+    if os.path.isfile(path):
+        with open(path) as f:
+            stats = json.load(f)
+        if name in stats:
+            itemnum = int(stats[name]["itemnum"])
+    return train, valid, itemnum
+
+
+def prediction_sequence(history, itemnum, maxlen):
+    # The final position is always the query mask, during training and inference.
+    context = list(history[-(maxlen - 1) :])
+    result = [0] * maxlen
+    result[-len(context) - 1 : -1] = context
+    result[-1] = itemnum + 1
+    return result
+
+
+class MaskedHistories(Dataset):
+    def __init__(self, train, itemnum, maxlen):
+        self.histories = [h for h in train.values() if len(h) >= 2]
+        self.itemnum = itemnum
+        self.maxlen = maxlen
+
+    def __len__(self):
+        return len(self.histories)
+
+    def __getitem__(self, index):
+        history = self.histories[index]
+        # Every training user is visited each epoch. Half the examples emphasize
+        # the latest observed transition; the rest cover earlier prefixes.
+        end = (
+            len(history) - 1
+            if random.random() < 0.5
+            else random.randrange(1, len(history))
+        )
+        original = history[max(0, end - self.maxlen + 1) : end + 1]
+        sequence = np.zeros(self.maxlen, dtype=np.int64)
+        labels = np.zeros(self.maxlen, dtype=np.int64)
+        offset = self.maxlen - len(original)
+        sequence[offset:] = original
+        # Preserve intact history for the prediction-aligned final query.
+        clean_sequence = sequence.copy()
+        clean_sequence[-1] = self.itemnum + 1
+        for position in range(offset, self.maxlen):
+            if position == self.maxlen - 1 or random.random() < 0.2:
+                labels[position] = sequence[position]
+                sequence[position] = self.itemnum + 1
+        return (
+            torch.from_numpy(sequence),
+            torch.from_numpy(labels),
+            torch.from_numpy(clean_sequence),
+        )
+
+
+def worker_init(worker_id):
+    seed = torch.initial_seed() % (2**32)
+    random.seed(seed)
+    np.random.seed(seed)
+
+
+class MaskedSASRec(nn.Module):
+    def __init__(
+        self,
+        itemnum,
+        hidden_units=96,
+        num_blocks=2,
+        num_heads=2,
+        dropout_rate=0.2,
+        maxlen=64,
+    ):
+        super().__init__()
+        self.itemnum = itemnum
+        self.maxlen = maxlen
+        self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+        self.pos_emb = nn.Embedding(maxlen, hidden_units)
+        self.input_norm = nn.LayerNorm(hidden_units)
+        self.dropout = nn.Dropout(dropout_rate)
+        layer = nn.TransformerEncoderLayer(
+            hidden_units,
+            num_heads,
+            dim_feedforward=hidden_units * 4,
+            dropout=dropout_rate,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(
+            layer, num_layers=num_blocks, enable_nested_tensor=False
+        )
+        self.output = nn.Sequential(
+            nn.Linear(hidden_units, hidden_units), nn.GELU(), nn.LayerNorm(hidden_units)
+        )
+        # This bias is fitted jointly with all other network parameters.
+        self.item_bias = nn.Embedding(itemnum + 2, 1, padding_idx=0)
+        self.apply(self._initialize)
+        with torch.no_grad():
+            self.item_emb.weight[0].zero_()
+            self.item_bias.weight.zero_()
+        # Register after the original initialization: zeros consume no RNG,
+        # and all existing parameters retain their names and initialization.
+        for layer in self.encoder.layers:
+            layer.register_parameter(
+                "relative_bias", nn.Parameter(torch.zeros(127, num_heads))
+            )
+        # Initialize only the new path, preserving existing parameter initialization.
+        self.recent_projection = nn.Linear(hidden_units, hidden_units)
+        self.recent_gate = nn.Linear(2 * hidden_units, hidden_units)
+        self.recent_projection.apply(self._initialize)
+        self.recent_gate.apply(self._initialize)
+
+    @staticmethod
+    def _initialize(module):
+        if isinstance(module, (nn.Linear, nn.Embedding)):
+            nn.init.normal_(module.weight, std=0.02)
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                nn.init.zeros_(module.bias)
+
+    @staticmethod
+    def _relative_position_indices(length, device):
+        positions = torch.arange(length, device=device)
+        return (positions[:, None] - positions[None, :]).clamp(-63, 63) + 63
+
+    @staticmethod
+    def _attention(layer, x, padding):
+        batch, length, _ = x.shape
+        heads = layer.self_attn.num_heads
+        indices = MaskedSASRec._relative_position_indices(length, x.device)
+        # Signed query-minus-key distances; every query can attend both ways.
+        bias = layer.relative_bias[indices].permute(2, 0, 1).to(dtype=x.dtype)
+        mask = bias.unsqueeze(0).expand(batch, heads, length, length)
+        mask = mask.masked_fill(padding[:, None, None, :], float("-inf"))
+        return layer.self_attn(
+            x,
+            x,
+            x,
+            attn_mask=mask.reshape(batch * heads, length, length),
+            need_weights=False,
+        )[0]
+
+    def _backbone(self, sequence):
+        positions = torch.arange(sequence.shape[1], device=sequence.device)
+        x = self.item_emb(sequence) + self.pos_emb(positions)[None]
+        x = self.dropout(self.input_norm(x))
+        padding = sequence.eq(0)
+        # Execute explicitly so TransformerEncoder's evaluation fast paths
+        # cannot bypass the relative biases. Preserve the original pre-norm
+        # attention, residuals, feedforward activation and dropout placements.
+        for layer in self.encoder.layers:
+            x = x + layer.dropout1(self._attention(layer, layer.norm1(x), padding))
+            normalized = layer.norm2(x)
+            x = x + layer.dropout2(
+                layer.linear2(layer.dropout(layer.activation(layer.linear1(normalized))))
+            )
+        if self.encoder.norm is not None:
+            x = self.encoder.norm(x)
+        return self.output(x)
+
+    def _recent_indices(self, sequence):
+        # Shift the cumulative maximum so each query excludes its own token.
+        positions = torch.arange(sequence.shape[1], device=sequence.device)
+        visible = sequence.ge(1) & sequence.le(self.itemnum)
+        indices = torch.where(visible, positions[None], -1).cummax(dim=1).values
+        return torch.cat((torch.full_like(indices[:, :1], -1), indices[:, :-1]), dim=1)
+
+    def forward(self, sequence):
+        h = self._backbone(sequence)
+        indices = self._recent_indices(sequence)
+        exists = indices.ge(0).unsqueeze(-1)
+        embeddings = self.item_emb(sequence)
+        recent_embedding = embeddings.gather(
+            1, indices.clamp_min(0).unsqueeze(-1).expand_as(embeddings)
+        )
+        recent_embedding = torch.where(
+            exists, recent_embedding, torch.zeros_like(recent_embedding)
+        )
+        r = torch.tanh(self.recent_projection(recent_embedding))
+        g = torch.sigmoid(self.recent_gate(torch.cat((h, recent_embedding), dim=-1)))
+        # All positions, including auxiliary masks, share this jointly trained path.
+        return torch.where(exists, (1 - g) * h + g * r, h)
+
+    def predict(self, sequence, candidates):
+        query = self(sequence)[:, -1]
+        return (self.item_emb(candidates) * query[:, None]).sum(-1) + self.item_bias(
+            candidates
+        ).squeeze(-1)
+
+
+def check_relative_attention():
+    import copy
+    import io
+
+    # Tiny CPU-only checks restore the RNG and never access dataset files.
+    # No check model or checkpoint participates in training or prediction.
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(1729)
+        model = MaskedSASRec(
+            12, hidden_units=8, num_blocks=2, num_heads=2,
+            dropout_rate=0.0, maxlen=8,
+        ).double().eval()
+        indices = model._relative_position_indices(130, torch.device("cpu"))
+        assert indices[0, 1].item() == 62
+        assert indices[1, 0].item() == 64
+        assert indices[0, 129].item() == 0
+        assert indices[129, 0].item() == 126
+        assert indices[63, 0].item() == 126
+        assert indices[0, 63].item() == 0
+        assert indices.diagonal().eq(63).all()
+
+        sequences = torch.tensor([
+            prediction_sequence([], 12, 8),
+            prediction_sequence([1, 2, 3], 12, 8),
+        ])
+        candidates = torch.tensor([[1, 2, 3, 4], [4, 5, 6, 7]])
+        baseline = copy.deepcopy(model)
+        # Run the unchanged encoder architecture with identical common weights.
+        # Its extra registered tables are unused by TransformerEncoder.
+        with torch.no_grad():
+            positions = torch.arange(sequences.shape[1])
+            x = baseline.item_emb(sequences) + baseline.pos_emb(positions)[None]
+            x = baseline.dropout(baseline.input_norm(x))
+            expected = baseline.output(
+                baseline.encoder(x, src_key_padding_mask=sequences.eq(0))
+            )
+            # Zero relative bias must reproduce the original backbone before fusion.
+            actual = model._backbone(sequences)
+            torch.testing.assert_close(actual, expected, rtol=1e-7, atol=1e-9)
+            assert torch.isfinite(model.predict(sequences, candidates)).all()
+
+            # Exercise learned, nonzero biases for the remaining checks.
+            for layer in model.encoder.layers:
+                layer.relative_bias.copy_(
+                    torch.linspace(-0.2, 0.2, 254).reshape(127, 2)
+                )
+            layer = model.encoder.layers[0]
+            x = torch.randn(1, 8, 8, dtype=torch.float64)
+            padding = torch.tensor([[True, True, False, False, False, False, False, False]])
+            original = model._attention(layer, x, padding)
+            changed = x.clone()
+            changed[:, :2] += 100.0
+            excluded = model._attention(layer, changed, padding)
+            torch.testing.assert_close(
+                original[:, 2:], excluded[:, 2:], rtol=1e-10, atol=1e-12
+            )
+            # A future valid key must affect an earlier valid query.
+            changed = x.clone()
+            changed[:, -1] += torch.arange(8, dtype=x.dtype) * 5
+            future = model._attention(layer, changed, padding)
+            assert (original[:, 2] - future[:, 2]).abs().max().item() > 1e-10
+
+        # Exact predecessor checks cover consecutive masks, intervening padding,
+        # the largest valid item ID, and rows without any visible predecessor.
+        corrupted = torch.tensor([
+            [0, 0, 1, 13, 13, 2, 0, 13],
+            [0, 13, 13, 0, 13, 0, 0, 13],
+            [12, 13, 0, 3, 13, 13, 4, 13],
+        ])
+        expected_indices = torch.tensor([
+            [-1, -1, -1, 2, 2, 2, 5, 5],
+            [-1, -1, -1, -1, -1, -1, -1, -1],
+            [-1, 0, 0, 0, 3, 3, 3, 6],
+        ])
+        assert torch.equal(model._recent_indices(corrupted), expected_indices)
+        with torch.no_grad():
+            fused = model(corrupted)
+            backbone = model._backbone(corrupted)
+            absent = expected_indices.lt(0)
+            torch.testing.assert_close(fused[absent], backbone[absent], rtol=0, atol=0)
+            embeddings = model.item_emb(corrupted)
+            recent = embeddings.gather(
+                1, expected_indices.clamp_min(0).unsqueeze(-1).expand_as(embeddings)
+            )
+            recent[absent] = 0
+            r = torch.tanh(model.recent_projection(recent))
+            g = torch.sigmoid(model.recent_gate(torch.cat((backbone, recent), dim=-1)))
+            expected_fused = torch.where(
+                absent.unsqueeze(-1), backbone, (1 - g) * backbone + g * r
+            )
+            torch.testing.assert_close(fused, expected_fused, rtol=0, atol=0)
+
+            # Alter hidden labels, then reconstruct identical corrupted inputs.
+            # Neither predecessor selection nor fusion may depend on those labels.
+            hidden = corrupted.eq(model.itemnum + 1)
+            original_a = corrupted.clone()
+            original_b = corrupted.clone()
+            original_a[hidden] = 5
+            original_b[hidden] = 9
+            input_a = original_a.masked_fill(hidden, model.itemnum + 1)
+            input_b = original_b.masked_fill(hidden, model.itemnum + 1)
+            assert torch.equal(input_a, input_b)
+            torch.testing.assert_close(model(input_a), model(input_b), rtol=0, atol=0)
+
+        from unittest.mock import patch
+
+        # Force both truncated and short prefixes, with and without auxiliary
+        # corruption. Mocking preserves the training sampler's Python RNG state.
+        dataset = MaskedHistories({1: list(range(1, 13))}, 12, 8)
+        for end in (1, 11):
+            for corrupt_history in (False, True):
+                draws = [0.9] + [0.0 if corrupt_history else 0.9] * 7
+                with patch.object(random, "random", side_effect=draws), patch.object(
+                    random, "randrange", return_value=end
+                ):
+                    sequence, labels, clean_sequence = dataset[0]
+                expected = torch.tensor(prediction_sequence(
+                    dataset.histories[0][:end], 12, 8
+                ))
+                assert torch.equal(clean_sequence, expected)
+                assert sequence[-1].item() == clean_sequence[-1].item() == 13
+                assert labels[-1].item() == dataset.histories[0][end]
+                active = labels.ne(0)
+                active[-1] = False
+                assert not active[-1].item()
+                assert active.any().item() == corrupt_history
+                assert sequence[active].eq(13).all()
+                assert torch.equal(labels[active], clean_sequence[active])
+
+                # Exercise the actual two-view scoring arrangement, including
+                # target collisions and the no-auxiliary fallback.
+                model.zero_grad(set_to_none=True)
+                query = model(clean_sequence[None])[:, -1]
+                targets = labels[-1:]
+                if active.any():
+                    features = model(sequence[None])[0]
+                    query = torch.cat((query, features[active]), dim=0)
+                    targets = torch.cat((targets, labels[active]), dim=0)
+                negatives = torch.arange(1, 13)
+                positive_logits = (query * model.item_emb(targets)).sum(-1)
+                positive_logits += model.item_bias(targets).squeeze(-1)
+                negative_logits = query @ model.item_emb(negatives).T
+                negative_logits += model.item_bias(negatives).view(1, -1)
+                negative_logits = negative_logits.masked_fill(
+                    targets[:, None].eq(negatives[None]), -1e4
+                )
+                logits = torch.cat((positive_logits[:, None], negative_logits), dim=1)
+                per_position = nn.functional.cross_entropy(
+                    logits, torch.zeros(len(query), dtype=torch.long), reduction="none"
+                )
+                final_loss = per_position[:1].mean()
+                loss = (
+                    0.5 * final_loss + 0.5 * per_position[1:].mean()
+                    if active.any() else final_loss
+                )
+                assert torch.isfinite(loss)
+                loss.backward()
+                for parameter in model.parameters():
+                    if parameter.grad is not None:
+                        assert torch.isfinite(parameter.grad).all()
+
+        model.zero_grad(set_to_none=True)
+        model.predict(sequences, candidates).square().sum().backward()
+        for module in (model.recent_projection, model.recent_gate):
+            for parameter in module.parameters():
+                gradient = parameter.grad
+                assert gradient is not None and torch.isfinite(gradient).all()
+                assert gradient.abs().sum().item() > 0
+        for layer in model.encoder.layers:
+            gradient = layer.relative_bias.grad
+            assert gradient is not None and torch.isfinite(gradient).all()
+            assert gradient.abs().sum().item() > 0
+        model.zero_grad(set_to_none=True)
+        with torch.no_grad():
+            expected_scores = model.predict(sequences, candidates)
+            assert torch.isfinite(expected_scores).all()
+        buffer = io.BytesIO()
+        torch.save(model.state_dict(), buffer)
+        buffer.seek(0)
+        restored = MaskedSASRec(
+            12, hidden_units=8, num_blocks=2, num_heads=2,
+            dropout_rate=0.0, maxlen=8,
+        ).double().eval()
+        restored.load_state_dict(
+            torch.load(buffer, map_location="cpu", weights_only=True), strict=True
+        )
+        with torch.no_grad():
+            torch.testing.assert_close(
+                restored.predict(sequences, candidates), expected_scores,
+                rtol=0, atol=0,
+            )
+
+
+def make_validation(train, valid, itemnum, maxlen):
+    rng = random.Random(42)
+    users = [u for u in valid if u in train]
+    if len(users) > 200:
+        users = rng.sample(users, 200)
+    sequences, candidates = [], []
+    for user in users:
+        if not valid[user]:
+            continue
+        excluded = set(train[user]) | set(valid[user])
+        if itemnum - len(excluded) < 99:
+            raise ValueError("Official validation requires 99 unique negatives")
+        negatives = set()
+        while len(negatives) < 99:
+            item = rng.randint(1, itemnum)
+            if item not in excluded:
+                negatives.add(item)
+        sequences.append(prediction_sequence(train[user], itemnum, maxlen))
+        candidates.append([valid[user][0]] + list(negatives))
+    if not sequences:
+        raise ValueError("No eligible validation users")
+    return torch.tensor(sequences), torch.tensor(candidates)
+
+
+@torch.no_grad()
+def evaluate(model, validation, device):
+    model.eval()
+    sequences, candidates = validation
+    hits, ndcg = 0.0, 0.0
+    for start in range(0, len(sequences), 64):
+        scores = model.predict(
+            sequences[start : start + 64].to(device),
+            candidates[start : start + 64].to(device),
+        )
+        # Stable descending ordering matches target-first candidate tie handling.
+        ordering = torch.argsort(scores, dim=1, descending=True, stable=True)
+        ranks = ordering.eq(0).long().argmax(dim=1)
+        hits += ranks.lt(10).float().sum().item()
+        ndcg += (ranks.lt(10).float() / torch.log2(ranks.float() + 2)).sum().item()
+    return hits / len(sequences), ndcg / len(sequences)
+
+
+def train_one(name, device):
+    seed_everything(42)
+    train, valid, itemnum = load_dataset(name)
+    meta = dict(
+        itemnum=itemnum,
+        hidden_units=HIDDEN,
+        num_blocks=BLOCKS,
+        num_heads=HEADS,
+        dropout_rate=DROPOUT,
+        maxlen=MAXLEN,
+    )
+    model = MaskedSASRec(**meta).to(device)
+    dataset = MaskedHistories(train, itemnum, MAXLEN)
+    if not len(dataset):
+        raise ValueError("No training histories with two or more items")
+    loader = DataLoader(
+        dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=2,
+        worker_init_fn=worker_init,
+        pin_memory=device.type == "cuda",
+        persistent_workers=True,
+        generator=torch.Generator().manual_seed(42),
+    )
+    validation = make_validation(train, valid, itemnum, MAXLEN)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=LR, betas=(0.9, 0.98), weight_decay=0.01
+    )
+    checkpoint = os.path.join(WORKING, name + "_model.pt")
+    best, best_epoch = (-1.0, -1.0), 0
+    start_time = time.monotonic()
+    for epoch in range(1, EPOCHS + 1):
+        model.train()
+        total_loss, steps = 0.0, 0
+        for sequence, labels, clean_sequence in loader:
+            sequence = sequence.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            clean_sequence = clean_sequence.to(device, non_blocking=True)
+            clean_features = model(clean_sequence)
+            active = labels.ne(0)
+            # The corrupted view supervises historical masks only; its final
+            # target remains hidden but never contributes auxiliary loss.
+            active[:, -1] = False
+            query = clean_features[:, -1]
+            targets = labels[:, -1]
+            if active.any():
+                features = model(sequence)
+                query = torch.cat((query, features[active]), dim=0)
+                targets = torch.cat((targets, labels[active]), dim=0)
+            # Uniform negatives match the benchmark's candidate distribution.
+            negatives = torch.randint(1, itemnum + 1, (NEGATIVES,), device=device)
+            positive_logits = (query * model.item_emb(targets)).sum(-1)
+            positive_logits = positive_logits + model.item_bias(targets).squeeze(-1)
+            negative_logits = query @ model.item_emb(negatives).T
+            negative_logits = negative_logits + model.item_bias(negatives).view(1, -1)
+            negative_logits = negative_logits.masked_fill(
+                targets[:, None].eq(negatives[None]), -1e4
+            )
+            logits = torch.cat((positive_logits[:, None], negative_logits), dim=1)
+            per_position = nn.functional.cross_entropy(
+                logits,
+                torch.zeros(len(query), device=device, dtype=torch.long),
+                reduction="none",
+            )
+            # Both views share the same negative draw and scoring parameters.
+            # Clean final queries precede corrupted auxiliary queries above.
+            final_loss = per_position[: len(sequence)].mean()
+            if active.any():
+                loss = 0.5 * final_loss + 0.5 * per_position[len(sequence) :].mean()
+            else:
+                loss = final_loss
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            total_loss += loss.detach().item()
+            steps += 1
+        hr, ndcg = evaluate(model, validation, device)
+        if (hr, ndcg) > best:
+            best, best_epoch = (hr, ndcg), epoch
+            torch.save(model.state_dict(), checkpoint)
+        print(
+            f"{name} epoch={epoch} loss={total_loss/max(steps,1):.4f} "
+            f"HR@10={hr:.4f} NDCG@10={ndcg:.4f}",
+            flush=True,
+        )
+        if (
+            epoch - best_epoch >= PATIENCE
+            or time.monotonic() - start_time >= CATEGORY_SECONDS
+        ):
+            break
+    with open(os.path.join(WORKING, name + "_meta.pkl"), "wb") as f:
+        pickle.dump(meta, f)
+    # Report the selected checkpoint's actual validation metric.
+    model.load_state_dict(
+        torch.load(checkpoint, map_location=device, weights_only=True), strict=True
+    )
+    score, _ = evaluate(model, validation, device)
+    del loader, model
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    return score
+
+
+def write_predict_script():
+    script = r"""from __future__ import annotations
+import importlib.util
+import os
+import pickle
+import torch
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_DATASETS = ['Movies_and_TV', 'Industrial_and_Scientific',
+             'Electronics', 'CDs_and_Vinyl']
+_models = {}
+_metas = {}
+_module = None
+_device = None
+
+
+def _load(dataset_name):
+    global _module, _device
+    if dataset_name in _models:
+        return
+    if _module is None:
+        spec = importlib.util.spec_from_file_location(
+            'masked_sasrec_architecture', os.path.join(_HERE, '..', 'train.py'))
+        _module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_module)
+        _device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    with open(os.path.join(_HERE, dataset_name + '_meta.pkl'), 'rb') as f:
+        meta = pickle.load(f)
+    model = _module.MaskedSASRec(**meta).to(_device)
+    state = torch.load(os.path.join(_HERE, dataset_name + '_model.pt'),
+                       map_location=_device, weights_only=True)
+    # Import the extended architecture and strictly restore its jointly trained
+    # recent_projection, recent_gate, relative biases and tied scoring parameters.
+    # Exactly one selected checkpoint is loaded for each routed category.
+    model.load_state_dict(state, strict=True)
+    model.eval()
+    _models[dataset_name] = model
+    _metas[dataset_name] = meta
+
+
+def predict(user_id, history, candidates, *, dataset_name=None):
+    name = dataset_name if dataset_name is not None else _DATASETS[0]
+    if name not in _DATASETS:
+        raise ValueError('Unknown dataset: ' + str(name))
+    _load(name)
+    meta = _metas[name]
+    sequence = _module.prediction_sequence(history, meta['itemnum'], meta['maxlen'])
+    sequence = torch.tensor([sequence], dtype=torch.long, device=_device)
+    items = torch.tensor([candidates], dtype=torch.long, device=_device)
+    with torch.inference_mode():
+        return _models[name].predict(sequence, items)[0].cpu().tolist()
+"""
+    with open(os.path.join(WORKING, "predict.py"), "w") as f:
+        f.write(script)
+
+
+def main():
+    torch.set_num_threads(4)
+    check_relative_attention()
+    seed_everything(42)
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    os.makedirs(WORKING, exist_ok=True)
+    scores = [train_one(name, device) for name in DATASETS]
+    write_predict_script()
+    score = float(np.mean(scores))
+    print(f"Final Validation Score: {score}")
+
+
+if __name__ == "__main__":
+    main()

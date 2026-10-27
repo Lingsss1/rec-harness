@@ -1,0 +1,66 @@
+{
+  "markdown_report": "**Synthesis.** Three starting insights guide the proposal. (1) SASRec already represents sequential context. A small recent-history residual can strengthen current interests without replacing this backbone. (2) Users report both loosely related recommendations and excessive influence from old, occasional interests. Recent, repeated interactions offer observable evidence for addressing both failures, although they cannot establish unmet need. (3) Electronics has 14.95% negative-over-positive rankings and a −0.4812 tenth-percentile margin. These training-position measurements motivate better discrimination but do not establish validation gains.\n\nThree literature insights inform implementation. (1) [MSMT-LSI](https://link.springer.com/article/10.1007/s44196-024-00460-5) separates short- and long-term preferences. This motivates a small recent branch at the current 0% research stage. (2) [gSASRec](https://www.ijcai.org/proceedings/2024/939) motivates investigating negative count and loss calibration. Such changes should remain separate ablations so architectural effects remain identifiable. (3) [Krichene and Rendle](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/) show limitations of sampled evaluation. Selection must therefore use the exact pinned macro validation HR@10.\n\n**Framework.** Three directions separate intent representation, discrimination, and collaborative evidence:\n\n| Direction | Minimal candidate | Diagnostic target |\n|---|---|---|\n| Temporal intent | Gated recent-history residual | Old interests outweigh current evidence |\n| Learning objective | Uniform multi-negative gBCE | Weak lower-tail separation |\n| Behavioral relations | Shrunk directed-transition residual | Broad affinity lacks specific behavioral support |\n\n**Candidate assessment.** Scores are originality/potential/user alignment/model alignment/implementation difficulty; higher difficulty means harder. Each entry gives a positive and negative assessment for every dimension.\n\n- **Recent residual: 4/7/8/6/3.** Originality: targeted adaptation, familiar fusion. Potential: extensible intent mechanism, uncertain incremental benefit. User: addresses loose relevance and stale interests, cannot verify compatibility. Model: can improve difficult contexts, does not directly optimize margins. Difficulty: small module, prefix masking needs care.\n- **Multi-negative gBCE: 3/7/4/9/4.** Originality: benchmark adaptation, established method. Potential: reusable objective, calibration needs tuning. User: improves discrimination, lacks explicit current-intent modeling. Model: directly targets separation, false negatives remain. Difficulty: compact loss change, sampling increases cost.\n- **Transition residual: 4/6/7/6/5.** Originality: support-aware fusion, familiar graph signals. Potential: useful sparse evidence, weak edges limit coverage. User: favors observed connections, transitions cannot prove usable fit. Model: supplies additional evidence, may reinforce popularity. Difficulty: sparse implementation, training/inference consistency needs work.\n\n**Selected idea: gated recent-history residual.** At 0% progress, prioritize one feasible architectural change. Fuse SASRec features with an exponentially weighted recent-item vector through a bounded scalar gate. Repeated recent items naturally accumulate weight. This explicitly targets loose historical affinity and old occasional interests; improved Electronics separation is a testable hypothesis.\n\n```python\nh = sasrec(prefix)\nr = normalized_recency_pool(item_embeddings(prefix[-k:]))\ng = g_max * sigmoid(gate(concat(h, r)))\nz = layer_norm(h + g * r)\nscores = z @ candidate_embeddings.T\n```\n\nUse causal prefixes during training and identical scoring in the predictor writer. Preserve baseline loss initially; compare baseline, fixed-gate, and learned-gate variants. Retain all four routes, seeds, splits, artifact paths, and evaluator. Track measured margins, routing behavior, and macro validation HR@10. Do not infer ownership, satisfaction, compatibility, or simulator traits.",
+  "idea": {
+    "description": "Add a bounded, learned recent-history residual to each category's SASRec model. At every causal position, combine the SASRec representation with a normalized exponentially weighted pool of the most recent item embeddings, then score candidates using the resulting representation.",
+    "motivation": "The user diagnosis identifies loosely related recommendations and excessive weight on old, occasional interests. A recent-history residual directly changes the representation toward supported current interests. Electronics' negative tenth-percentile margin motivates checking whether the added context improves difficult positive-negative comparisons; improvement remains unproven.",
+    "implementation_notes": "Implement this as an architectural ablation with the baseline loss, sampler, and optimizer initially unchanged. Try k=5 and a fixed recency decay of 0.7 as starting hypotheses, with a bounded scalar gate g_max=0.5 initialized near zero. Compute a separate trailing window for every training position; exclude padding and never include future interactions. Repeated item occurrences contribute repeatedly, without claiming they establish demand or satisfaction. Preserve DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, four-category routing, and SASREC_EPOCHS default 200. Save architecture configuration and weights beneath the trial directory and update the predictor writer to reconstruct the same module. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). Ensure view.log2feats returns the fused features and view.predict_score uses the deployed scoring function. Report existing measured margin definitions and add explicitly defined gate statistics; unavailable metadata breakdowns should be marked unavailable. Select exclusively by unchanged macro validation HR@10, recording all training and diagnostic GPU time against the shared budget. No validation gain or user-facing improvement is claimed before measurement.",
+    "pseudocode": "class RecentResidualSASRec(nn.Module):\n    def log2feats(self, sequence):\n        h = self.backbone.log2feats(sequence)\n        # For each position t, use only sequence[max(0,t-k+1):t+1].\n        windows = causal_trailing_windows(sequence, self.k)\n        mask = windows.ne(0)\n        weights = self.recency_weights * mask\n        weights = weights / weights.sum(-1, keepdim=True).clamp_min(1e-8)\n        r = (self.item_emb(windows) * weights.unsqueeze(-1)).sum(-2)\n        r = self.recent_norm(r)\n        g = self.g_max * torch.sigmoid(self.gate(torch.cat([h, r], dim=-1)))\n        z = self.output_norm(h + g * r)\n        return z * sequence.ne(0).unsqueeze(-1)\n\n    def predict_score(self, features, items):\n        return (features * self.item_emb(items)).sum(-1)\n\n# Train using unchanged baseline targets and loss.\n# Export this architecture through the predictor writer.\n# Compare baseline, fixed gate, and learned gate using pinned validation HR@10.",
+    "originality": {
+      "score": 4,
+      "positive": "A small, diagnosis-driven adaptation ties temporal fusion to two specific observed recommendation failures.",
+      "negative": "Short- and long-term fusion is established; this is an incremental architectural hypothesis."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides a simple foundation for later timestamp-aware or persistent-interest extensions if validation supports the branch.",
+      "negative": "SASRec may already encode the useful recent signal, leaving little incremental benefit."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Requires a small pooling and gating module with shared item embeddings.",
+      "negative": "Causal window construction, padding, checkpoint reconstruction, and diagnostic scoring must remain consistent."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Introduces causal self-attention for sequential recommendation and supplies the starting architecture."
+      ],
+      "limitations": [
+        "Does not establish whether an explicit recent-history residual improves the pinned four-category benchmark."
+      ]
+    },
+    {
+      "title": "MSMT-LSI (2024)",
+      "link": "https://link.springer.com/article/10.1007/s44196-024-00460-5",
+      "contributions": [
+        "Separates long- and short-term preference modeling with temporal representations and fusion."
+      ],
+      "limitations": [
+        "Motivates the proposed adaptation but provides no evidence of gains under this task's evaluator."
+      ]
+    },
+    {
+      "title": "gSASRec",
+      "link": "https://www.ijcai.org/proceedings/2024/939",
+      "contributions": [
+        "Combines increased negative sampling with generalized BCE to address sampled-loss overconfidence."
+      ],
+      "limitations": [
+        "An objective change alone does not explicitly distinguish current interests from old, occasional interests."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled evaluation can produce rankings inconsistent with full-catalog evaluation."
+      ],
+      "limitations": [
+        "Provides evaluation guidance rather than a recommendation architecture or evidence of improvement here."
+      ]
+    }
+  ]
+}

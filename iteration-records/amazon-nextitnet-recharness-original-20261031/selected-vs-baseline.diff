@@ -1,0 +1,147 @@
+--- baseline.py
++++ selected.py
+@@ -29,7 +29,7 @@
+     if part.strip()
+ ]
+ 
+-DATA_DIR = os.environ.get("GAGC_DATA_DIR", "./input/trainval")
++DATA_DIR = os.environ['GAGC_DATA_DIR']
+ 
+ SEED = int(os.environ.get("GAGC_SEED", "42"))
+ random.seed(SEED)
+@@ -152,11 +152,21 @@
+     return {"HR@10": hr10 / n, "HR@20": hr20 / n, "NDCG@10": ndcg10 / n, "NDCG@20": ndcg20 / n}
+ 
+ 
+-def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++def sampled_softmax_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
++    # Hypothesis: candidate-level cross-entropy improves validation ranking.
++    # Reuse the existing sampler's negatives across batch rows at each position.
++    features = model.encode_sequence(seq)
++    valid = seq.ne(0) & pos.ne(0)
++    if not valid.any():
++        return features.sum() * 0.0
++    pos_scores = (features * model.item_emb(pos)).sum(dim=-1)
++    neg_scores = torch.einsum('bld,kld->blk', features, model.item_emb(neg))
++    negative_ids = neg.transpose(0, 1).unsqueeze(0)
++    invalid_negatives = negative_ids.eq(0) | negative_ids.eq(pos.unsqueeze(-1))
++    neg_scores = neg_scores.masked_fill(invalid_negatives, float('-inf'))
++    logits = torch.cat((pos_scores.unsqueeze(-1), neg_scores), dim=-1)[valid]
++    labels = torch.zeros(logits.size(0), dtype=torch.long, device=logits.device)
++    return nn.functional.cross_entropy(logits, labels)
+ 
+ 
+ # Hyper-parameters
+@@ -167,7 +177,7 @@
+ DROPOUT_RATE  = float(os.environ.get("NEXTITNET_DROPOUT", "0.2"))
+ LR            = float(os.environ.get("NEXTITNET_LR", "1e-3"))
+ WEIGHT_DECAY  = float(os.environ.get("NEXTITNET_WD", "0.0"))
+-BATCH_SIZE    = int(os.environ.get("NEXTITNET_BATCH", "128"))
++BATCH_SIZE    = int(os.environ.get("NEXTITNET_BATCH", "112"))
+ NUM_BATCHES   = int(os.environ.get("NEXTITNET_BATCHES", "200"))
+ NUM_EPOCHS    = int(os.environ.get("NEXTITNET_EPOCHS", "200"))
+ EVAL_EVERY    = int(os.environ.get("NEXTITNET_EVAL_EVERY", "5"))
+@@ -206,13 +216,18 @@
+ 
+ class NextItNetModel(nn.Module):
+     def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 8,
+-                 kernel_size: int = 3, dropout_rate: float = 0.2, maxlen: int = 128):
++                 kernel_size: int = 3, dropout_rate: float = 0.2, maxlen: int = 128,
++                 recency_scale: float = 0.1):
+         super().__init__()
+         self.itemnum = itemnum
+         self.hidden_units = hidden_units
+         self.maxlen = maxlen
+         self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
++        self.recency_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
++        self.recency_scale = recency_scale
++        # Jointly learned age/content interaction; initially preserves the baseline.
++        self.recency_content_gate = nn.Parameter(torch.zeros(hidden_units))
+         dilations = [1, 2, 4, 8] * max(1, math.ceil(num_blocks / 4))
+         self.blocks = nn.ModuleList([
+             NextItNetBlock(hidden_units, dilations[i], kernel_size, dropout_rate)
+@@ -225,13 +240,25 @@
+             self.item_emb.weight[0].zero_()
+             nn.init.xavier_uniform_(self.pos_emb.weight)
+             self.pos_emb.weight[0].zero_()
++            nn.init.xavier_uniform_(self.recency_emb.weight)
++            self.recency_emb.weight[0].zero_()
+ 
+     def encode_sequence(self, seq: torch.Tensor) -> torch.Tensor:
+         batch, length = seq.shape
+         pos = torch.arange(length, device=seq.device).unsqueeze(0).expand(batch, -1) + 1
+         pos = pos * (seq != 0).long()
+-        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+-        x = self.dropout(x)
++        mask = seq.ne(0)
++        # Age among nonpadding interactions: newest=1, padding=0.
++        recency = mask.long().flip(1).cumsum(1).flip(1) * mask.long()
++        item_features = self.item_emb(seq) * (self.hidden_units ** 0.5)
++        log_age = torch.log(recency.clamp(min=1).to(item_features.dtype))
++        log_age = log_age / math.log(max(self.maxlen, 2))
++        content_gate = (0.1 * log_age.unsqueeze(-1)
++                        * torch.tanh(self.recency_content_gate))
++        x = (item_features * (1.0 + content_gate)
++             + self.pos_emb(pos)
++             + self.recency_scale * self.recency_emb(recency))
++        x = self.dropout(x) * mask.unsqueeze(-1).to(x.dtype)
+         for block in self.blocks:
+             x = block(x)
+             x = x * (seq != 0).unsqueeze(-1).float()
+@@ -268,6 +295,9 @@
+         maxlen=MAXLEN,
+     ).to(device)
+     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
++    # Hypothesis: gentle decay during early validation peaks stabilizes ranking.
++    # Preserve the initial LR; halve it approximately every 14 epochs.
++    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
+ 
+     working_dir = os.path.join(os.path.dirname(__file__), "working")
+     os.makedirs(working_dir, exist_ok=True)
+@@ -283,13 +313,14 @@
+             seq_t = torch.tensor(seq, dtype=torch.long, device=device)
+             pos_t = torch.tensor(pos, dtype=torch.long, device=device)
+             neg_t = torch.tensor(neg, dtype=torch.long, device=device)
+-            loss = bpr_sequence_loss(model, seq_t, pos_t, neg_t)
++            loss = sampled_softmax_sequence_loss(model, seq_t, pos_t, neg_t)
+             optimizer.zero_grad()
+             loss.backward()
+             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+             optimizer.step()
+             total_loss += float(loss.item())
+ 
++        scheduler.step()
+         avg_loss = total_loss / max(NUM_BATCHES, 1)
+         if epoch % EVAL_EVERY == 0 or epoch == NUM_EPOCHS:
+             val_m = evaluate_val(model, user_train, user_valid, itemnum, device, MAXLEN)
+@@ -322,6 +353,8 @@
+             "num_blocks": NUM_BLOCKS,
+             "kernel_size": KERNEL_SIZE,
+             "dropout_rate": DROPOUT_RATE,
++            "recency_scale": model.recency_scale,
++            "recency_content_gate_version": 1,
+         }, f)
+     print(f"  [{dataset_name}] Best val HR@10={max(best_hr10, 0.0):.4f}  ckpt={ckpt_path}", flush=True)
+     return max(best_hr10, 0.0)
+@@ -377,6 +410,8 @@
+             continue
+         with open(meta_path, "rb") as f:
+             meta = pickle.load(f)
++        if meta.get("recency_content_gate_version") != 1:
++            raise RuntimeError("Checkpoint metadata lacks the recency/content feature version")
+         model = ModelClass(
+             itemnum=meta["itemnum"],
+             hidden_units=meta["hidden_units"],
+@@ -384,6 +419,7 @@
+             kernel_size=meta["kernel_size"],
+             dropout_rate=0.0,
+             maxlen=meta["maxlen"],
++            recency_scale=meta["recency_scale"],
+         ).to(_device)
+         model.load_state_dict(torch.load(ckpt_path, map_location=_device, weights_only=True))
+         model.eval()

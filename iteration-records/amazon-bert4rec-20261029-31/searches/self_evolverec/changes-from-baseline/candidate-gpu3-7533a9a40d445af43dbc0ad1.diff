@@ -1,0 +1,668 @@
+--- corrected-baseline.py
++++ candidate-gpu3-7533a9a40d445af43dbc0ad1/train.py
+@@ -4,6 +4,7 @@
+ hyper-parameter profile across datasets. The generated predict.py routes by the
+ optional dataset_name keyword used by the RecHarness Amazon Reviews harness.
+ """
++
+ from __future__ import annotations
+ 
+ import json
+@@ -29,9 +30,11 @@
+     if part.strip()
+ ]
+ 
+-DATA_DIR = os.environ.get("GAGC_DATA_DIR", "./input/trainval")
+-
+-SEED = int(os.environ.get("GAGC_SEED", "42"))
++### >>> Self_EvolveRec-BLOCK-START: Preserve required data source and training seed
++DATA_DIR = os.environ["GAGC_DATA_DIR"]
++
++SEED = 42
++### <<< Self_EvolveRec-BLOCK-END
+ random.seed(SEED)
+ np.random.seed(SEED)
+ torch.manual_seed(SEED)
+@@ -78,54 +81,100 @@
+     return user_train, user_valid, itemnum
+ 
+ 
+-def sample_batch(user_train: dict[int, list[int]], itemnum: int, batch_size: int, maxlen: int):
+-    # Cloze training: masked targets are not exposed as unmasked shifted inputs.
++### >>> Self_EvolveRec-BLOCK-START: Preserve paired branch sampling with an isolated deterministic RNG
++def sample_batch(
++    user_train: dict[int, list[int]],
++    itemnum: int,
++    batch_size: int,
++    maxlen: int,
++    *,
++    return_branch_types: bool = False,
++    rng=None,
++):
++    import random as random_module
++
++    random = random_module if rng is None else rng
++    if batch_size < 2 or batch_size % 2:
++        raise ValueError("balanced branches require a positive even batch size")
++    if maxlen < 2:
++        raise ValueError("terminal training requires space for context and mask")
+     users = [u for u, items in user_train.items() if len(items) >= 2]
+     if not users:
+         raise RuntimeError("no users with at least two training interactions")
++
++    terminal_rows = [True] * (batch_size // 2) + [False] * (batch_size // 2)
++    random.shuffle(terminal_rows)
+     batch_seq, batch_pos, batch_neg = [], [], []
+-    for _ in range(batch_size):
++    for terminal in terminal_rows:
+         history = user_train[random.choice(users)]
+-        items = history[-maxlen:]
+         seq = np.zeros(maxlen, dtype=np.int64)
+         pos = np.zeros(maxlen, dtype=np.int64)
+         neg = np.zeros(maxlen, dtype=np.int64)
+-        seq[-len(items):] = items
+-        eligible = list(range(maxlen-len(items), maxlen))
+-        selected = [i for i in eligible if random.random() < 0.2]
+-        if not selected:
+-            selected = [random.choice(eligible)]
+-        if random.random() < 0.5 and maxlen-1 not in selected:
+-            selected.append(maxlen-1)
++        if terminal:
++            # Uniform user, then uniform endpoint 1..n-1, including the last item.
++            endpoint = random.randrange(1, len(history))
++            context = history[max(0, endpoint - maxlen + 1) : endpoint]
++            seq[-len(context) - 1 : -1] = context
++            seq[-1] = history[endpoint]
++            selected = [maxlen - 1]
++        else:
++            # Preserve final-L windows, Bernoulli masking, fallback and last-item boost.
++            items = history[-maxlen:]
++            seq[-len(items) :] = items
++            eligible = list(range(maxlen - len(items), maxlen))
++            selected = [i for i in eligible if random.random() < 0.2]
++            if not selected:
++                selected = [random.choice(eligible)]
++            if random.random() < 0.5 and maxlen - 1 not in selected:
++                selected.append(maxlen - 1)
+         interacted = set(history)
+         if len(interacted) >= itemnum:
+             raise RuntimeError("no unobserved negative item available")
+         for i in selected:
+             pos[i] = seq[i]
+-            seq[i] = itemnum + 1  # reserved mask token, never a recommendation
++            seq[i] = itemnum + 1
+             item = random.randint(1, itemnum)
+             while item in interacted:
+                 item = random.randint(1, itemnum)
+             neg[i] = item
++        if not np.any(pos != 0):
++            raise RuntimeError("every example must have a supervised target")
+         batch_seq.append(seq)
+         batch_pos.append(pos)
+         batch_neg.append(neg)
+-    return np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg)
+-
+-
+-def _history_to_tensor(history: list[int], maxlen: int, device: torch.device) -> torch.Tensor:
++    result = (np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg))
++    if return_branch_types:
++        return (*result, np.asarray(terminal_rows, dtype=np.bool_))
++    return result
++
++
++### <<< Self_EvolveRec-BLOCK-END
++
++
++def _history_to_tensor(
++    history: list[int], maxlen: int, device: torch.device
++) -> torch.Tensor:
+     seq_arr = np.zeros(maxlen, dtype=np.int64)
+     for i, item in enumerate(reversed(history[-maxlen:])):
+         seq_arr[maxlen - 1 - i] = item
+     return torch.tensor([seq_arr], dtype=torch.long, device=device)
+ 
+ 
+-def evaluate_val(model: nn.Module, user_train: dict[int, list[int]], user_valid: dict[int, list[int]],
+-                 itemnum: int, device: torch.device, maxlen: int, num_users: int = 200) -> dict[str, float]:
++def evaluate_val(
++    model: nn.Module,
++    user_train: dict[int, list[int]],
++    user_valid: dict[int, list[int]],
++    itemnum: int,
++    device: torch.device,
++    maxlen: int,
++    num_users: int = 200,
++) -> dict[str, float]:
++    ### >>> Self_EvolveRec-BLOCK-START: Freeze local validation sampling without consuming training randomness
++    rng = random.Random(SEED)
+     val_users = [u for u in user_valid if u in user_train and user_valid[u]]
+     if len(val_users) > num_users:
+-        rng = random.Random(SEED)
+         val_users = rng.sample(val_users, num_users)
++    ### <<< Self_EvolveRec-BLOCK-END
+     if not val_users:
+         return {"HR@10": 0.0, "HR@20": 0.0, "NDCG@10": 0.0, "NDCG@20": 0.0}
+ 
+@@ -136,12 +185,19 @@
+             target = user_valid[user][0]
+             history = user_train[user]
+             interacted = set(history) | {target, 0}
++            ### >>> Self_EvolveRec-BLOCK-START: Fixed unique validation negatives with explicit catalog eligibility checks
+             candidates = [target]
+-            while len(candidates) < 100 and itemnum > 0:
+-                neg_item = random.randint(1, itemnum)
++            excluded_real = sum(1 for item in interacted if 1 <= item <= itemnum)
++            if itemnum - excluded_real < 99:
++                raise RuntimeError(
++                    f"validation user {user} has fewer than 99 eligible negatives"
++                )
++            while len(candidates) < 100:
++                neg_item = rng.randint(1, itemnum)
+                 if neg_item not in interacted:
+                     interacted.add(neg_item)
+                     candidates.append(neg_item)
++            ### <<< Self_EvolveRec-BLOCK-END
+             seq_t = _history_to_tensor(history, maxlen, device)
+             cand_t = torch.tensor(candidates, dtype=torch.long, device=device)
+             scores = model.score_candidates(seq_t, cand_t).detach().cpu().tolist()
+@@ -152,34 +208,123 @@
+             ndcg20 += (1.0 / math.log2(rank + 2)) if rank < 20 else 0.0
+     n = float(len(val_users))
+     model.train()
+-    return {"HR@10": hr10 / n, "HR@20": hr20 / n, "NDCG@10": ndcg10 / n, "NDCG@20": ndcg20 / n}
+-
+-
+-def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
++    return {
++        "HR@10": hr10 / n,
++        "HR@20": hr20 / n,
++        "NDCG@10": ndcg10 / n,
++        "NDCG@20": ndcg20 / n,
++    }
++
++
++### >>> Self_EvolveRec-BLOCK-START: Consistent per-example normalization for training and diagnostic loss calls
++def bpr_sequence_loss(
++    model: nn.Module,
++    seq: torch.Tensor,
++    pos: torch.Tensor,
++    neg: torch.Tensor,
++    terminal_rows=None,
++    terminal_weight: float = 0.5,
++) -> torch.Tensor:
++    if not 0.0 <= terminal_weight <= 1.0:
++        raise ValueError("terminal_weight must lie in [0, 1]")
++    valid = pos.ne(0)
++    count = valid.sum(dim=1)
++    if torch.any(count == 0):
++        raise ValueError("every example must have a supervised target")
++    if torch.any(seq[valid] != model.mask_token):
++        raise ValueError("all supervised input positions must contain MASK")
+     pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++    target_loss = torch.nn.functional.softplus(neg_scores - pos_scores)
++    target_loss = target_loss.masked_fill(~valid, 0.0)
++    per_example = target_loss.sum(dim=1) / count
++    if terminal_rows is None:
++        # Branch identity cannot be inferred reliably from the number of masks.
++        # Without metadata, report an unweighted mean over examples.
++        return per_example.mean()
++    terminal_rows = torch.as_tensor(terminal_rows, device=pos.device, dtype=torch.bool)
++    if terminal_rows.shape != (pos.shape[0],):
++        raise ValueError("branch metadata must have shape B")
++    n_terminal = int(terminal_rows.sum().item())
++    if n_terminal == 0 or 2 * n_terminal != pos.shape[0]:
++        raise ValueError("require equal nonempty terminal and interior branches")
++    return (
++        terminal_weight * per_example[terminal_rows].mean()
++        + (1.0 - terminal_weight) * per_example[~terminal_rows].mean()
++    )
++
++
++### <<< Self_EvolveRec-BLOCK-END
+ 
+ 
+ # Hyper-parameters
+-MAXLEN        = int(os.environ.get("BERT4REC_MAXLEN", "128"))
+-HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+-NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+-NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+-DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
+-LR            = float(os.environ.get("BERT4REC_LR", "1e-3"))
+-WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
+-BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
+-NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+-NUM_EPOCHS    = int(os.environ.get("BERT4REC_EPOCHS", "200"))
+-EVAL_EVERY    = int(os.environ.get("BERT4REC_EVAL_EVERY", "5"))
+-PATIENCE      = int(os.environ.get("BERT4REC_PATIENCE", "20"))
++MAXLEN = int(os.environ.get("BERT4REC_MAXLEN", "128"))
++HIDDEN_UNITS = int(os.environ.get("BERT4REC_HIDDEN", "64"))
++NUM_BLOCKS = int(os.environ.get("BERT4REC_BLOCKS", "2"))
++NUM_HEADS = int(os.environ.get("BERT4REC_HEADS", "2"))
++DROPOUT_RATE = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
++LR = float(os.environ.get("BERT4REC_LR", "1e-3"))
++WEIGHT_DECAY = float(os.environ.get("BERT4REC_WD", "0.0"))
++BATCH_SIZE = int(os.environ.get("BERT4REC_BATCH", "128"))
++### >>> Self_EvolveRec-BLOCK-START: Fixed 100-epoch curriculum with independently generated exposure controls
++NUM_BATCHES = 200
++NUM_EPOCHS = max(
++    1,
++    min(
++        200,
++        int(os.environ.get("BERT4REC_EPOCHS", os.environ.get("SASREC_EPOCHS", "200"))),
++    ),
++)
++ALPHA_SCHEDULE = tuple(0.5 + 0.3 * min(e / 100.0, 1.0) for e in range(NUM_EPOCHS))
++ALPHA_BAR = math.fsum(ALPHA_SCHEDULE) / NUM_EPOCHS
++# This local generator consumes neither sampler nor model/dropout randomness.
++_ALPHA_PERMUTATION = np.random.default_rng(SEED).permutation(NUM_EPOCHS)
++OBJECTIVE_ARM = os.environ.get("BERT4REC_OBJECTIVE_ARM", "schedule")
++CONSTANT_WEIGHTS = {
++    "equal": 0.5,
++    "constant_0.5": 0.5,
++    "terminal_heavy": 0.8,
++    "constant_0.8": 0.8,
++    "matched_mean": ALPHA_BAR,
++    "exposure_matched_constant": ALPHA_BAR,
++    "terminal_only": 1.0,
++}
++SCHEDULE_WEIGHTS = {
++    "schedule": ALPHA_SCHEDULE,
++    "forward": ALPHA_SCHEDULE,
++    "reversed": ALPHA_SCHEDULE[::-1],
++    "shuffled_epochs": tuple(ALPHA_SCHEDULE[int(e)] for e in _ALPHA_PERMUTATION),
++}
++if OBJECTIVE_ARM not in {*SCHEDULE_WEIGHTS, *CONSTANT_WEIGHTS}:
++    raise ValueError(f"Unknown BERT4REC_OBJECTIVE_ARM: {OBJECTIVE_ARM!r}")
++
++
++def terminal_weight_for_epoch(epoch_index: int) -> float:
++    if not 0 <= epoch_index < NUM_EPOCHS:
++        raise ValueError("epoch_index outside configured training horizon")
++    if OBJECTIVE_ARM in SCHEDULE_WEIGHTS:
++        return SCHEDULE_WEIGHTS[OBJECTIVE_ARM][epoch_index]
++    return CONSTANT_WEIGHTS[OBJECTIVE_ARM]
++
++
++### <<< Self_EvolveRec-BLOCK-END
++### >>> Self_EvolveRec-BLOCK-START: Validate checkpoint cadence under fixed-horizon training
++EVAL_EVERY = int(os.environ.get("BERT4REC_EVAL_EVERY", "5"))
++if EVAL_EVERY < 1:
++    raise ValueError("BERT4REC_EVAL_EVERY must be positive")
++# Fixed-horizon experiments do not use patience-based stopping.
++### <<< Self_EvolveRec-BLOCK-END
+ 
+ 
+ class BERT4RecModel(nn.Module):
+-    def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 2,
+-                 num_heads: int = 2, dropout_rate: float = 0.2, maxlen: int = 128):
++    def __init__(
++        self,
++        itemnum: int,
++        hidden_units: int = 64,
++        num_blocks: int = 2,
++        num_heads: int = 2,
++        dropout_rate: float = 0.2,
++        maxlen: int = 128,
++    ):
+         super().__init__()
+         self.itemnum = itemnum
+         self.hidden_units = hidden_units
+@@ -209,7 +354,7 @@
+         batch, length = seq.shape
+         pos = torch.arange(length, device=seq.device).unsqueeze(0).expand(batch, -1) + 1
+         pos = pos * (seq != 0).long()
+-        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)
++        x = self.item_emb(seq) * (self.hidden_units**0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+         safe_padding = padding.clone()
+@@ -223,53 +368,135 @@
+         neg_scores = (out * self.item_emb(neg)).sum(dim=-1)
+         return pos_scores, neg_scores
+ 
+-    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:
++    ### >>> Self_EvolveRec-BLOCK-START: Preserve appended-mask inference while supporting batched candidate scoring
++    def score_candidates(
++        self, seq: torch.Tensor, candidates: torch.Tensor
++    ) -> torch.Tensor:
++        if seq.ndim != 2 or seq.shape[1] != self.maxlen:
++            raise ValueError("seq must have shape B x configured maxlen")
++        if candidates.ndim not in (1, 2):
++            raise ValueError("candidates must have shape C or B x C")
++        if candidates.ndim == 2 and candidates.shape[0] != seq.shape[0]:
++            raise ValueError("candidate and sequence batch sizes must match")
+         prediction_seq = torch.zeros_like(seq)
+         prediction_seq[:, :-1] = seq[:, 1:]
+         prediction_seq[:, -1] = self.mask_token
+-        out = self.encode_sequence(prediction_seq)
+-        user_emb = out[0, -1]
++        # The appended MASK is the final nonpadding position under left padding.
++        user_emb = self.encode_sequence(prediction_seq)[:, -1, :]
+         cand_emb = self.item_emb(candidates)
+-        return torch.matmul(cand_emb, user_emb)
+-
+-
+-
++        if candidates.ndim == 1:
++            scores = user_emb @ cand_emb.transpose(0, 1)
++        else:
++            scores = torch.einsum("bd,bcd->bc", user_emb, cand_emb)
++        # Preserve the existing singleton evaluator and predictor contract.
++        return scores[0] if seq.shape[0] == 1 else scores
++
++    ### <<< Self_EvolveRec-BLOCK-END
++
++
++### >>> Self_EvolveRec-BLOCK-START: Share one canonical architecture factory across training and serving
++def build_model(config: dict) -> BERT4RecModel:
++    return BERT4RecModel(
++        itemnum=int(config["itemnum"]),
++        hidden_units=int(config["hidden_units"]),
++        num_blocks=int(config["num_blocks"]),
++        num_heads=int(config["num_heads"]),
++        dropout_rate=float(config["dropout_rate"]),
++        maxlen=int(config["maxlen"]),
++    )
++
++
++### <<< Self_EvolveRec-BLOCK-END
++
++
++### >>> Self_EvolveRec-BLOCK-START: Initialize every independent category model with training seed 42
+ def train_one_dataset(dataset_name: str, device: torch.device, data_dir: str) -> float:
++    random.seed(SEED)
++    np.random.seed(SEED)
++    torch.manual_seed(SEED)
++    if torch.cuda.is_available():
++        torch.cuda.manual_seed_all(SEED)
+     user_train, user_valid, itemnum = load_dataset(dataset_name, data_dir)
++    ### <<< Self_EvolveRec-BLOCK-END
+     print(f"  [{dataset_name}] users={len(user_train)}  items={itemnum}", flush=True)
+     if itemnum <= 0 or not user_train:
+         raise RuntimeError(f"empty dataset or item vocabulary for {dataset_name}")
+ 
+-    model = BERT4RecModel(
+-        itemnum=itemnum,
+-        hidden_units=HIDDEN_UNITS,
+-        num_blocks=NUM_BLOCKS,
+-        num_heads=NUM_HEADS,
+-        dropout_rate=DROPOUT_RATE,
+-        maxlen=MAXLEN,
++    ### >>> Self_EvolveRec-BLOCK-START: Construct the trained model through the canonical factory
++    model = build_model(
++        {
++            "itemnum": itemnum,
++            "hidden_units": HIDDEN_UNITS,
++            "num_blocks": NUM_BLOCKS,
++            "num_heads": NUM_HEADS,
++            "dropout_rate": DROPOUT_RATE,
++            "maxlen": MAXLEN,
++        }
+     ).to(device)
++    ### <<< Self_EvolveRec-BLOCK-END
+     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+ 
+     working_dir = os.path.join(os.path.dirname(__file__), "working")
+     os.makedirs(working_dir, exist_ok=True)
+     ckpt_path = os.path.join(working_dir, f"{dataset_name}_model.pt")
+ 
++    ### >>> Self_EvolveRec-BLOCK-START: Record objective and sampling policy with independent sampler randomness
++    sampler_rng = random.Random(SEED)
++    eligible_lengths = [len(items) for items in user_train.values() if len(items) >= 2]
++    print(
++        f"  [{dataset_name}] arm={OBJECTIVE_ARM} alpha_bar={ALPHA_BAR:.8f}"
++        f" eligible_users={len(eligible_lengths)}"
++        f" eligible_endpoints={sum(n - 1 for n in eligible_lengths)}"
++        f" sampler=uniform_user_then_uniform_endpoint"
++        f" interior=final_L_bernoulli_0.2_fallback_final_boost_0.5",
++        flush=True,
++    )
+     best_hr10 = -1.0
+     best_epoch = 0
++    completed_updates = 0
++    cumulative_targets = [0, 0]
+     for epoch in range(1, NUM_EPOCHS + 1):
+         model.train()
+         total_loss = 0.0
++        alpha = terminal_weight_for_epoch(epoch - 1)
++        print(
++            f"  [{dataset_name}] epoch={epoch} terminal_weight={alpha:.8f}", flush=True
++        )
++        ### <<< Self_EvolveRec-BLOCK-END
+         for _ in range(NUM_BATCHES):
+-            seq, pos, neg = sample_batch(user_train, itemnum, BATCH_SIZE, MAXLEN)
++            ### >>> Self_EvolveRec-BLOCK-START: Apply the selected weight to identically sampled branches
++            seq, pos, neg, terminal_rows = sample_batch(
++                user_train,
++                itemnum,
++                BATCH_SIZE,
++                MAXLEN,
++                return_branch_types=True,
++                rng=sampler_rng,
++            )
++            cumulative_targets[0] += int(np.count_nonzero(pos[terminal_rows]))
++            cumulative_targets[1] += int(np.count_nonzero(pos[~terminal_rows]))
+             seq_t = torch.tensor(seq, dtype=torch.long, device=device)
+             pos_t = torch.tensor(pos, dtype=torch.long, device=device)
+             neg_t = torch.tensor(neg, dtype=torch.long, device=device)
+-            loss = bpr_sequence_loss(model, seq_t, pos_t, neg_t)
+-            optimizer.zero_grad()
++            loss = bpr_sequence_loss(
++                model, seq_t, pos_t, neg_t, terminal_rows, terminal_weight=alpha
++            )
++            completed_updates += 1
++            ### <<< Self_EvolveRec-BLOCK-END
++            ### >>> Self_EvolveRec-BLOCK-START: Fail explicitly on numerical divergence and reuse the measured scalar loss
++            loss_value = float(loss.detach().item())
++            if not math.isfinite(loss_value):
++                raise FloatingPointError(
++                    f"[{dataset_name}] nonfinite training loss at epoch {epoch}"
++                )
++            optimizer.zero_grad(set_to_none=True)
+             loss.backward()
+-            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
++            torch.nn.utils.clip_grad_norm_(
++                model.parameters(), 5.0, error_if_nonfinite=True
++            )
+             optimizer.step()
+-            total_loss += float(loss.item())
++            total_loss += loss_value
++            ### <<< Self_EvolveRec-BLOCK-END
+ 
+         avg_loss = total_loss / max(NUM_BATCHES, 1)
+         if epoch % EVAL_EVERY == 0 or epoch == NUM_EPOCHS:
+@@ -285,27 +512,94 @@
+                 best_hr10 = hr10
+                 best_epoch = epoch
+                 torch.save(model.state_dict(), ckpt_path)
+-            if epoch - best_epoch >= PATIENCE:
+-                print(f"  [{dataset_name}] Early stopping at epoch {epoch}", flush=True)
+-                break
++            ### >>> Self_EvolveRec-BLOCK-START: Complete the prespecified horizon for comparable curriculum exposure
++            # Keep strict-improvement checkpoint selection and validation cadence.
++            # Every arm executes the same configured number of optimizer updates.
++            ### <<< Self_EvolveRec-BLOCK-END
+         elif epoch % 10 == 0:
+-            print(f"  [{dataset_name}] epoch {epoch:3d}/{NUM_EPOCHS}  loss={avg_loss:.4f}", flush=True)
+-
++            print(
++                f"  [{dataset_name}] epoch {epoch:3d}/{NUM_EPOCHS}  loss={avg_loss:.4f}",
++                flush=True,
++            )
++
++    ### >>> Self_EvolveRec-BLOCK-START: Record completed coefficient exposure and separate final from selected validation
+     if not os.path.exists(ckpt_path):
+         torch.save(model.state_dict(), ckpt_path)
++    completed_weights = [terminal_weight_for_epoch(e) for e in range(epoch)]
++    terminal_exposure = NUM_BATCHES * math.fsum(completed_weights)
++    interior_exposure = NUM_BATCHES * math.fsum(1.0 - a for a in completed_weights)
++    # Adam uses the unchanged constant LR throughout this training loop.
++    experiment = {
++        "objective_arm": OBJECTIVE_ARM,
++        "configured_epochs": NUM_EPOCHS,
++        "completed_epochs": epoch,
++        "completed_updates": completed_updates,
++        "early_terminated": epoch < NUM_EPOCHS,
++        "alpha_bar_configured": ALPHA_BAR,
++        "actual_arm_alpha_bar": math.fsum(completed_weights) / len(completed_weights),
++        "terminal_weights_completed": completed_weights,
++        "schedule_resolution": "epoch; 200 identical coefficients per epoch",
++        "ramp_epochs": 100,
++        "coefficient_sums_terminal_interior": [terminal_exposure, interior_exposure],
++        "lr_weighted_coefficient_sums_terminal_interior": [
++            LR * terminal_exposure,
++            LR * interior_exposure,
++        ],
++        "coefficient_exposure_definition": (
++            "Sum of branch loss coefficients over completed optimizer updates; "
++            "LR-weighted sums use the unchanged constant learning rate. "
++            "These quantities do not imply equal gradients or Adam trajectories."
++        ),
++        "terminal_supervised_targets": cumulative_targets[0],
++        "interior_supervised_targets": cumulative_targets[1],
++        "branch_examples_per_update": BATCH_SIZE // 2,
++        "selected_epoch": best_epoch,
++        "selected_local_validation_hr10": best_hr10,
++        "last_completed_local_validation_hr10": val_m["HR@10"],
++        "final_epoch_local_validation_hr10": (
++            val_m["HR@10"] if epoch == NUM_EPOCHS else None
++        ),
++        "checkpoint_selection": "strict HR@10 improvement; earliest epoch wins ties",
++        "checkpoint_eligibility": "configured validation cadence and final epoch",
++        "seed": SEED,
++        "comparison_status": "single arm; no schedule advantage established",
++    }
++    with open(os.path.join(working_dir, f"{dataset_name}_experiment.json"), "w") as f:
++        json.dump(experiment, f, indent=2)
+ 
+     meta_path = os.path.join(working_dir, f"{dataset_name}_meta.pkl")
++    ### <<< Self_EvolveRec-BLOCK-END
+     with open(meta_path, "wb") as f:
+-        pickle.dump({
+-            "itemnum": itemnum,
+-            "maxlen": MAXLEN,
+-            "hidden_units": HIDDEN_UNITS,
+-            "num_blocks": NUM_BLOCKS,
+-            "num_heads": NUM_HEADS,
+-            "dropout_rate": DROPOUT_RATE,
+-        }, f)
+-    print(f"  [{dataset_name}] Best val HR@10={max(best_hr10, 0.0):.4f}  ckpt={ckpt_path}", flush=True)
+-    return max(best_hr10, 0.0)
++        pickle.dump(
++            {
++                "itemnum": itemnum,
++                "maxlen": MAXLEN,
++                "hidden_units": HIDDEN_UNITS,
++                "num_blocks": NUM_BLOCKS,
++                "num_heads": NUM_HEADS,
++                "dropout_rate": DROPOUT_RATE,
++            },
++            f,
++        )
++    ### >>> Self_EvolveRec-BLOCK-START: Restore the designated checkpoint so post-training inspection matches serving
++    if best_epoch == 0:
++        raise RuntimeError(f"[{dataset_name}] no validation checkpoint was selected")
++    selected_state = torch.load(ckpt_path, map_location=device, weights_only=True)
++    model.load_state_dict(selected_state, strict=True)
++    for name, tensor in model.state_dict().items():
++        if not torch.equal(tensor, selected_state[name]):
++            raise RuntimeError(
++                f"[{dataset_name}] selected checkpoint mismatch for {name}"
++            )
++    del selected_state
++    model.eval()
++    print(
++        f"  [{dataset_name}] Best val HR@10={best_hr10:.4f}"
++        f"  selected_epoch={best_epoch}  ckpt={ckpt_path}",
++        flush=True,
++    )
++    return best_hr10
++    ### <<< Self_EvolveRec-BLOCK-END
+ 
+ 
+ def write_predict_script(working_dir: str) -> None:
+@@ -339,9 +633,16 @@
+     spec = importlib.util.spec_from_file_location(
+         f"bert4rec_perdataset_train_{os.getpid()}", os.path.join(_HERE, "..", "train.py")
+     )
++    ### >>> Self_EvolveRec-BLOCK-START: Load the same canonical model factory used during training
++    import sys
++
++    if spec is None or spec.loader is None:
++        raise ImportError("Cannot load the canonical BERT4Rec training module")
+     mod = importlib.util.module_from_spec(spec)
++    sys.modules[spec.name] = mod
+     spec.loader.exec_module(mod)
+-    return mod.BERT4RecModel
++    return mod.build_model
++    ### <<< Self_EvolveRec-BLOCK-END
+ 
+ 
+ def _ensure_loaded():
+@@ -354,19 +655,21 @@
+         working_dir = _HERE if os.path.basename(_HERE) == "working" else os.path.join(_HERE, "working")
+         meta_path = os.path.join(working_dir, f"{ds}_meta.pkl")
+         ckpt_path = os.path.join(working_dir, f"{ds}_model.pt")
++        ### >>> Self_EvolveRec-BLOCK-START: Reject missing category artifacts explicitly
+         if not os.path.isfile(meta_path) or not os.path.isfile(ckpt_path):
+-            continue
++            raise FileNotFoundError(
++                f"Missing BERT4Rec artifacts for {ds}: {meta_path}, {ckpt_path}"
++            )
++        ### <<< Self_EvolveRec-BLOCK-END
+         with open(meta_path, "rb") as f:
+             meta = pickle.load(f)
+-        model = ModelClass(
+-            itemnum=meta["itemnum"],
+-            hidden_units=meta["hidden_units"],
+-            num_blocks=meta["num_blocks"],
+-            num_heads=meta["num_heads"],
+-            dropout_rate=0.0,
+-            maxlen=meta["maxlen"],
+-        ).to(_device)
+-        model.load_state_dict(torch.load(ckpt_path, map_location=_device, weights_only=True))
++        ### >>> Self_EvolveRec-BLOCK-START: Reconstruct the saved architecture and strictly load its single checkpoint
++        model = ModelClass(meta).to(_device)
++        model.load_state_dict(
++            torch.load(ckpt_path, map_location=_device, weights_only=True),
++            strict=True,
++        )
++        ### <<< Self_EvolveRec-BLOCK-END
+         model.eval()
+         _models[ds] = model
+         _metas[ds] = meta
+@@ -375,15 +678,16 @@
+ def predict(user_id: int, history: list[int], candidates: list[int],
+             *, dataset_name: str | None = None) -> list[float]:
+     _ensure_loaded()
+-    if dataset_name and dataset_name in _models:
+-        model = _models[dataset_name]
+-        meta = _metas[dataset_name]
+-    elif _models:
+-        ds = next(iter(_models))
+-        model = _models[ds]
+-        meta = _metas[ds]
+-    else:
+-        return [0.0] * len(candidates)
++    ### >>> Self_EvolveRec-BLOCK-START: Route explicitly to exactly one category checkpoint
++    if dataset_name is None:
++        if len(_models) != 1:
++            raise ValueError("dataset_name is required when multiple categories are loaded")
++        dataset_name = next(iter(_models))
++    if dataset_name not in _models:
++        raise ValueError(f"No trained BERT4Rec model for dataset {dataset_name!r}")
++    model = _models[dataset_name]
++    meta = _metas[dataset_name]
++    ### <<< Self_EvolveRec-BLOCK-END
+ 
+     maxlen = int(meta.get("maxlen", 128))
+     seq_arr = [0] * maxlen
+@@ -415,3 +719,5 @@
+ 
+ if __name__ == "__main__":
+     main()
++
++

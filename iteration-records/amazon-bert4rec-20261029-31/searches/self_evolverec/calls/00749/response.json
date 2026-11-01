@@ -1,0 +1,74 @@
+{
+  "markdown_report": "Choose a position-preserving, popularity-matched substitution probe before changing BERT4Rec training. At 10% research progress, this offers a feasible test of recent-history dependence without requiring unavailable activation hooks.\n\nStarting-point insights: (1) Electronics’ reported training wrong-rank rate reaches 21.97%, motivating category-specific investigation; it does not establish validation weakness. (2) Embedding similarity near 0.5 indicates approximately zero mean cosine, giving little justification for collapse-focused changes. (3) Existing compact deletion changes content and positions together, limiting interpretation of recent-versus-older effects.\n\nRelated-work insights: (1) Zhang and Nanda [1] show that corruption choices and metrics affect intervention conclusions, motivating matched controls. (2) Heimersheim and Nanda [2] distinguish disruption from restoration; substitution measures disruption and cannot identify a complete mechanism. (3) Krichene and Rendle [3] establish limitations of sampled ranking metrics, so diagnostic HR@10 must remain separate from host selection.\n\nThese insights suggest three directions: controlled behavioral interventions, internal mechanism localization, and supervision alignment. The framework below separates their questions and implementation costs. Scores are originality/potential/difficulty, each 0–10; higher difficulty means harder implementation.\n\n| Idea | Framework position | Scores and critical assessment |\n|---|---|---|\n| Matched substitutions [1,2] | Input disruption: does recent content affect ranking more? | **4/7/3**. Originality: useful control combination; established techniques. Potential: guides targeted revisions; training dependence may not transfer. Difficulty: existing scoring hooks suffice; matching needs careful accounting. |\n| Bidirectional activation patching [1,2] | Component localization: which representations transmit the effect? | **5/7/8**. Originality: BERT4Rec adaptation; familiar methodology. Potential: localizes candidates for revision; corruption-dependent conclusions. Difficulty: standard hooks may help; architecture details are absent. |\n| Endpoint-exposure ablation [4] | Learning alignment: does prefix sampling improve prediction? | **2/6/4**. Originality: explicit exposure control; terminal masking already exists. Potential: directly tests validation gains; baseline equivalence is possible. Difficulty: localized sampler change; retraining consumes budget. |\n\nSelected algorithm: freeze each category’s single checkpoint. From training-only prefixes, compare replacing equally sized recent and oldest blocks while retaining every position, padding slot, and final MASK. Match replacement items to removed items using training-frequency bins. Reuse identical candidate sets and report paired recent-minus-older changes in margins, rank, and diagnostic HR@10, with counts and user-bootstrap intervals.\n\nThis removes positional compaction as an explanation, but substitution still introduces artificial content. Missing matches are reported, and results describe fitted-model dependence rather than immediate usefulness. Preserve diagnostic interfaces, checkpoint/predictor consistency, all four routes, fixed seeds and host evaluation. No architecture change or validation improvement is claimed.\n\nReferences: [1](https://arxiv.org/abs/2309.16042), [2](https://arxiv.org/abs/2404.15255), [3](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/), [4](https://arxiv.org/abs/1904.06690).",
+  "idea": {
+    "description": "Add a position-preserving, training-popularity-matched recent-versus-older substitution probe to the corrected BERT4Rec diagnostic adapter. Analyze exactly one independently trained checkpoint per category.",
+    "motivation": "Existing compact deletion mixes content removal with positional changes. The proposed probe isolates a narrower question: whether disrupting recent item identities changes the fitted model’s rankings more than equally sized older-item disruptions under matched replacement-frequency controls. Supplied sensitivity results are incomplete, so no directional effect is assumed.",
+    "implementation_notes": "Retain DiagnosisProbe(view, device), run_full_diagnosis(train_loader), diagnosis_interpreter_prompt(raw_diagnosis), and all ModelView interfaces. Use view.model in evaluation mode without gradients, restoring module modes and captured RNG states in finally. Use dedicated diagnostic RNG streams rather than consuming training RNG. Select up to 200 training users/category with seed 42; withhold the final training event from each diagnostic input and retain only its strictly earlier prefix truncated to L-1. Earlier occurrences of the target item remain legitimate. Require at least two retained context events. Append the reserved MASK, left-pad, and read its absolute final nonpadding position. Never derive readout as count-1. Choose k=min(3,n//2), giving disjoint oldest and newest blocks. Compute item-frequency bins exclusively from supplied training interactions, recording boundaries and bin sizes. For each replaced token, sample a real catalog item from the same bin, excluding the original prefix and diagnostic target; exclude PAD and MASK. Use one documented binning policy fixed before inspecting effects. If either block cannot obtain valid replacements, omit that paired replicate and report the failure count rather than broadening bins silently. These exclusions preserve genuine changes but constrain donor support, especially for rare items. Average repeated substitution effects within user before category aggregation. Hold the target and up to 99 unique eligible negatives fixed across all interventions; identify these as auxiliary candidates, separate from pinned host candidates. Include identity-copy checks, sample counts, replacement counts, no-op counts, repeat-target strata, history-length strata, and training-popularity strata. Report null with reasons for unavailable measurements. Bootstrap paired users with seed 42; intervals are conditional on checkpoints, users and auxiliary candidates and exclude adaptive-search uncertainty. Preserve existing diagnostic loader tuples and masked-target margin probes. Do not infer ownership, compatibility, mood or immediate utility from substitutions. The probe requires no architecture change; keep predictor writer and checkpoint configuration consistent. Retain all four categories, DATA_DIR=os.environ['GAGC_DATA_DIR'], trial-local artifacts, preprocessing seed 0, training seed 42, maximum 200 epochs and 200 batches per completed epoch. All host execution counts toward the shared budget. Only host-supported macro validation HR@10 selects model revisions; no diagnostic ranking metric substitutes for it. Preserve full-catalog unseen-item recommendations for the twenty designated training users. Deploy one checkpoint per category without score fusion.",
+    "pseudocode": "class DiagnosisProbe:\n    def run_full_diagnosis(self, train_loader):\n        state = capture_module_modes_and_rng_states()\n        try:\n            self.view.model.eval()\n            with torch.inference_mode():\n                metrics, definitions = existing_family_safe_diagnostics(train_loader)\n                counts = training_only_item_counts(self.view.user_train)\n                bins = fixed_frequency_binning(counts)\n                users = seeded_eligible_training_users(limit=200, seed=42)\n                rows = []\n                for user in users:\n                    history = training_history(user)\n                    target = history[-1]\n                    prefix = history[:-1][-(L - 1):]\n                    if len(prefix) < 2:\n                        record_ineligible(user)\n                        continue\n                    candidates = fixed_auxiliary_candidates(user, target, seed=42)\n                    clean = left_pad(prefix + [MASK], L)\n                    readout = greatest_nonpadding_absolute_index(clean)\n                    baseline = score(self.view, clean, readout, candidates)\n                    verify_identity_copy(baseline, clean, candidates)\n                    k = min(3, len(prefix) // 2)\n                    blocks = {'older': range(k), 'recent': range(len(prefix)-k, len(prefix))}\n                    user_effects = []\n                    for replicate in range(10):\n                        edits = {}\n                        for name, block in blocks.items():\n                            edited_prefix = list(prefix)\n                            for position in block:\n                                donor = sample_same_frequency_bin(\n                                    prefix[position], bins,\n                                    exclude=set(prefix) | {target, PAD, MASK},\n                                    rng=diagnostic_rng)\n                                if donor is unavailable:\n                                    mark_unmatched_replicate()\n                                    break\n                                edited_prefix[position] = donor\n                            else:\n                                edits[name] = edited_prefix\n                        if len(edits) != 2:\n                            continue\n                        results = {}\n                        for name, edited_prefix in edits.items():\n                            tokens = left_pad(edited_prefix + [MASK], L)\n                            assert_same_positions_padding_and_final_mask(clean, tokens)\n                            results[name] = score(self.view, tokens, readout, candidates)\n                        user_effects.append(paired_recent_minus_older(results, baseline))\n                    rows.append(within_user_mean_or_null(user_effects))\n                metrics.update(aggregate_counts_strata_and_user_bootstrap(rows, seed=42))\n                definitions.update(exposure_matching_candidate_and_uncertainty_definitions())\n                return {'metrics': metrics, 'metric_definitions': definitions}\n        finally:\n            restore_module_modes_and_rng_states(state)\n\n\ndef diagnosis_interpreter_prompt(raw_diagnosis):\n    return grounded_prompt(\n        raw_diagnosis,\n        require=['measured evidence', 'definitions', 'counts', 'unavailable reasons'],\n        distinguish=['training-exposed dependence', 'host validation', 'qualitative hypotheses'],\n        prohibit=['invented preferences', 'causal utility claims', 'ensemble proposals'])",
+    "originality": {
+      "score": 4,
+      "positive": "Combines fixed-position interventions, popularity-matched donors and paired recent-versus-older comparisons in the existing BERT4Rec diagnostic contract.",
+      "negative": "Substitution interventions and matching are established techniques; this is a controlled diagnostic adaptation rather than a new learning principle."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Can distinguish positional compaction effects from content disruption and guide subsequent focused single-model experiments.",
+      "negative": "Training-exposed dependence may reflect memorization, and artificial substitutions may poorly approximate natural histories or held-out usefulness."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Uses existing sequence encoding and candidate scoring without changing architecture, training objectives or deployed inference.",
+      "negative": "Donor support, paired missingness, repeat targets, RNG isolation and correct within-user aggregation require careful implementation."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Towards Best Practices of Activation Patching in Language Models: Metrics and Methods",
+      "link": "https://arxiv.org/abs/2309.16042",
+      "contributions": [
+        "Examines how corruption procedures and evaluation metrics affect activation-patching conclusions.",
+        "Motivates explicit intervention controls and multiple ranking diagnostics."
+      ],
+      "limitations": [
+        "Studies language models rather than this BERT4Rec benchmark.",
+        "Does not establish that popularity-matched substitutions improve recommendation accuracy."
+      ]
+    },
+    {
+      "title": "How to Use and Interpret Activation Patching",
+      "link": "https://arxiv.org/abs/2404.15255",
+      "contributions": [
+        "Distinguishes restoration and disruption experiments and discusses interpretation limits.",
+        "Supports labeling substitution effects as disruption evidence."
+      ],
+      "limitations": [
+        "Does not supply a verified BERT4Rec intervention implementation.",
+        "Intervention sensitivity alone cannot establish user preferences or complete mechanism identification."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled recommendation metrics can disagree with full-catalog metrics.",
+        "Supports keeping auxiliary candidate diagnostics separate from benchmark selection."
+      ],
+      "limitations": [
+        "Does not justify changing the pinned host evaluator.",
+        "Does not quantify sampling distortion for the supplied checkpoints."
+      ]
+    },
+    {
+      "title": "BERT4Rec: Sequential Recommendation with Bidirectional Encoder Representations from Transformer",
+      "link": "https://arxiv.org/abs/1904.06690",
+      "contributions": [
+        "Introduces bidirectional masked-item sequence modeling.",
+        "Provides the masked-target and appended-mask formulation that the proposed probe preserves."
+      ],
+      "limitations": [
+        "Terminal masking is existing methodology and cannot support a novelty claim by itself.",
+        "Does not establish that this task’s qualitative failures arise from recent-history underuse."
+      ]
+    }
+  ]
+}

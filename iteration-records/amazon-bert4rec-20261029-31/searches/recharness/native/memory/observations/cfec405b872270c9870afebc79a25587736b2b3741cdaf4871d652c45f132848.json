@@ -1,0 +1,94 @@
+{
+  "schema_version": 2,
+  "protocol_id": "f08035801d41346837206fcb06602ae788921782d9cb4b30466bc6e659f659d9",
+  "record": {
+    "round_idx": 9,
+    "trial_group_id": "trialgrp_1793457673609_2921447",
+    "trial_id": 3,
+    "arm": "combination_jump",
+    "selected_categories": [
+      "learning_objective",
+      "feature_construction"
+    ],
+    "patch_summary": "Across all four datasets, combine checkpointed rarity-based input scaling with CE plus a 0.1-weighted pairwise ranking loss. Preserve masked training, appended-mask inference, backbone, hyperparameters and one checkpoint per category.",
+    "benchmark_score": 0.61,
+    "val_score": 0.61,
+    "is_winner": false,
+    "is_group_winner": false,
+    "valid": true,
+    "failure_type": null,
+    "delta_vs_prev_best": 0.0012,
+    "delta_vs_input": 0.0012,
+    "outcome": "improved",
+    "val_support": "improved",
+    "gpu_seconds": 400.6437903791666,
+    "trial_cap_seconds": 567.0,
+    "per_dataset_hr10": {
+      "Movies_and_TV": 0.67,
+      "Industrial_and_Scientific": 0.635,
+      "Electronics": 0.44,
+      "CDs_and_Vinyl": 0.695
+    },
+    "error": "",
+    "parameter_changes": [],
+    "changed_definitions": [
+      "BERT4RecModel",
+      "BERT4RecModel.__init__",
+      "BERT4RecModel.encode_sequence",
+      "bpr_sequence_loss",
+      "train_one_dataset"
+    ],
+    "summary": "Across all four datasets, combine checkpointed rarity-based input scaling with CE plus a 0.1-weighted pairwise ranking loss. Preserve masked training, appended-mask inference, backbone, hyperparameters and one checkpoint per category.",
+    "proposal_history": [
+      {
+        "attempt": 1,
+        "summary": "Across all four datasets, combine checkpointed rarity-based input scaling with CE plus a 0.1-weighted pairwise ranking loss. Preserve masked training, appended-mask inference, backbone, hyperparameters and one checkpoint per category."
+      }
+    ],
+    "hypothesis": "Across all four categories, add a visible-history rarity feature: scale input item vectors by 1+0.03*tanh((mean_log_count-log1p(count))/std_log_count), using checkpointed training-only item statistics with std clamped above zero; leave padding and mask unchanged. Add 0.1*mean(softplus(negative_score-positive_score)) at masked positions to the existing full-catalog CE, using existing sampled negatives. Rarity modestly strengthens uncommon context while the pairwise term directly separates observed targets from unobserved items. Preserve all hyperparameters, embedding parameterization and backbone. Keep one checkpoint/category, masked-target training, appended-mask inference and matching predictor features.",
+    "input_source_sha256": "d45776a263080fb5ef5e81bdefadefff5b6115803b6fded49e8152fdc0bd5644",
+    "candidate_source_sha256": "f6a1339401f7e98460d352477aea168de6e80dab43e3d8075b567fcfbc2786de",
+    "input_normalized_sha256": "4beb453eeab4894d607d75e62e6b178e6337295dab969e5ea969257fe5c50a32",
+    "candidate_normalized_sha256": "a2b3d77ee314801154e10e7e2e8ea4cbfddbf26cdb19762f663705e323ab07c1",
+    "patch_sha256": "2f340eaf334b3d1241050d787f6ebc8343923b0ffbabaa0206d90c72c0a94ac4",
+    "diff_excerpt": "--- \n+++ \n@@ -165,5 +165,10 @@\n         masked_states, model.effective_item_weight()[1:model.itemnum + 1]\n     )\n-    return torch.nn.functional.cross_entropy(logits, targets, reduction=\"mean\")\n+    ce_loss = torch.nn.functional.cross_entropy(logits, targets, reduction=\"mean\")\n+    positive_scores = logits.gather(1, targets.unsqueeze(1)).squeeze(1)\n+    negative_targets = neg[mask] - 1\n+    negative_scores = logits.gather(1, negative_targets.unsqueeze(1)).squeeze(1)\n+    ranking_loss = torch.nn.functional.softplus(negative_scores - positive_scores).mean()\n+    return ce_loss + 0.1 * ranking_loss\n \n \n@@ -191,4 +196,5 @@\n         self.maxlen = maxlen\n         self.mask_token = itemnum + 1\n+        self.register_buffer(\"item_input_scale\", torch.ones(itemnum + 2))\n         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)\n         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)\n@@ -225,4 +231,5 @@\n             seq, self.effective_item_weight(), padding_idx=0\n         )\n+        item_vectors = item_vectors * self.item_input_scale[seq].unsqueeze(-1)\n         x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)\n         x = self.dropout(x)\n@@ -267,4 +274,22 @@\n         maxlen=MAXLEN,\n     ).to(device)\n+    training_counts = np.bincount(\n+        np.fromiter(\n+            (item for history in user_train.values() for item in history),\n+            dtype=np.int64,\n+        ),\n+        minlength=itemnum + 2,\n+    )\n+    with torch.no_grad():\n+        log_counts = torch.as_tensor(\n+            np.log1p(training_counts[1:itemnum + 1]),\n+            dtype=model.item_input_scale.dtype,\n+            device=device,\n+        )\n+        count_mean = log_counts.mean()\n+        count_std = log_counts.std(unbiased=False).clamp_min(1e-6)\n+        model.item_input_scale[1:itemnum + 1].copy_(\n+            1.0 + 0.03 * torch.tanh((count_mean - log_counts) / count_std)\n+        )\n     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)\n \n",
+    "category_rationales": [
+      {
+        "category": "learning_objective",
+        "rationale": "Add a masked-position pairwise ranking term using the existing unobserved negatives, alongside full-catalog cross-entropy in each category’s single BERT4Rec model."
+      },
+      {
+        "category": "feature_construction",
+        "rationale": "Mildly emphasize rare visible context items using training-only frequency statistics. Store input scales in each checkpoint; the generated predictor imports this model class and restores the same buffer. Padding and mask vectors remain unchanged."
+      }
+    ],
+    "baseline_validation": 0.6088,
+    "basin_id": "default",
+    "execution_status": "success",
+    "attempt_count": 1,
+    "training_attempt_count": 1,
+    "training_attempts": [
+      {
+        "id": "round-0008-slot-3-attempt-1",
+        "status": "success",
+        "source_sha256": "f6a1339401f7e98460d352477aea168de6e80dab43e3d8075b567fcfbc2786de",
+        "allocated_gpu_seconds": 400.6437903791666,
+        "error": "",
+        "score": 0.61
+      }
+    ],
+    "checkpoint_fingerprints": {
+      "Movies_and_TV_model.pt": "dd9f8175d1ac68bc9be29533f5e35f55bc1481925406d0c68f99dcfe1382796f",
+      "Industrial_and_Scientific_model.pt": "cf34de6c6db1b4909b907653f4331613c26ae42bd68b3b8690fe189a0e8e1284",
+      "Electronics_model.pt": "0574ac15d5f5fdbb4f4b1714534218f6195e5506f12414a047386b10f72657ba",
+      "CDs_and_Vinyl_model.pt": "6953a3c5214ff52763e5f5371ac98430dc2dc35045826dcc143a502f0d9dd83b"
+    },
+    "repair_errors": [],
+    "phase": "jump",
+    "promoted": false,
+    "provisional": false,
+    "protocol_id": "f08035801d41346837206fcb06602ae788921782d9cb4b30466bc6e659f659d9",
+    "evidence_id": "cfec405b872270c9870afebc79a25587736b2b3741cdaf4871d652c45f132848"
+  },
+  "record_sha256": "99db425301d279d8755a05f0aa4f17a2cd281c67e6680ae45f39a477daae6be2"
+}

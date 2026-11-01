@@ -1,0 +1,50 @@
+--- corrected-baseline.py
++++ refine-2-0-t1/train.py
+@@ -156,10 +156,43 @@
+ 
+ 
+ def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++    # Encode once; supervise only reserved-mask positions.
++    features = model.encode_sequence(seq)
++    active = pos != 0
++    hidden = features[active]
++    targets = pos[active]
++    paired_negatives = neg[active]
++    if targets.numel() == 0:
++        return features.sum() * 0.0
++
++    positive_scores = (hidden * model.item_emb(targets)).sum(dim=-1)
++    negative_scores = (hidden * model.item_emb(paired_negatives)).sum(dim=-1)
++    pairwise_loss = torch.nn.functional.softplus(negative_scores - positive_scores)
++
++    # Shared negatives remain part of this model's masked-item objective.
++    pool = torch.unique(paired_negatives)
++    if pool.numel() > 128:
++        pool = pool[torch.randperm(pool.numel(), device=pool.device)[:128]]
++    pooled_scores = hidden @ model.item_emb(pool).transpose(0, 1)
++
++    # Restore masked items solely for excluding known positives from negatives.
++    known = torch.where(active, pos, seq)
++    observed = (known.unsqueeze(-1) == pool.view(1, 1, -1)).any(dim=1)
++    row_indices, column_indices = active.nonzero(as_tuple=True)
++    invalid = observed[row_indices] | (targets.unsqueeze(1) == pool.unsqueeze(0))
++    invalid = invalid | (paired_negatives.unsqueeze(1) == pool.unsqueeze(0))
++    pooled_scores = pooled_scores.masked_fill(invalid, float("-inf"))
++    logits = torch.cat((positive_scores.unsqueeze(1), negative_scores.unsqueeze(1), pooled_scores), dim=1)
++    sampled_softmax_loss = torch.logsumexp(logits, dim=1) - positive_scores
++    target_loss = 0.25 * pairwise_loss + 0.75 * sampled_softmax_loss
++
++    # LEFT padding places the final nonpadding item at the rightmost position.
++    # Normalize within each history so longer histories do not dominate training.
++    weights = 1.0 + (column_indices == seq.shape[1] - 1).to(target_loss.dtype)
++    row_loss = target_loss.new_zeros(seq.shape[0]).scatter_add_(0, row_indices, weights * target_loss)
++    row_weight = target_loss.new_zeros(seq.shape[0]).scatter_add_(0, row_indices, weights)
++    valid_rows = row_weight > 0
++    return (row_loss[valid_rows] / row_weight[valid_rows]).mean()
+ 
+ 
+ # Hyper-parameters

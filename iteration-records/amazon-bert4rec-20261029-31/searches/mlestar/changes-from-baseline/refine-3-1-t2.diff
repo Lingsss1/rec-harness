@@ -1,0 +1,51 @@
+--- corrected-baseline.py
++++ refine-3-1-t2/train.py
+@@ -156,10 +156,44 @@
+ 
+ 
+ def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++    # Reuse the same masked encoder output for both ranking objectives.
++    out = model.encode_sequence(seq)
++    selected = pos != 0
++    features = out[selected]
++    if features.shape[0] == 0:
++        return out.sum() * 0.0
++    targets = pos[selected]
++    negative_ids = neg[selected]
++    positive_scores = (features * model.item_emb(targets)).sum(dim=-1)
++    negative_scores = (features * model.item_emb(negative_ids)).sum(dim=-1)
++    pairwise = torch.nn.functional.softplus(negative_scores - positive_scores)
++
++    # Preserve the existing deterministic shared-negative pool and loss weights.
++    count = min(128, negative_ids.numel())
++    indices = torch.linspace(
++        0, negative_ids.numel() - 1, steps=count, device=seq.device
++    ).long()
++    candidate_ids = torch.unique(negative_ids[indices])
++    candidate_scores = features @ model.item_emb(candidate_ids).transpose(0, 1)
++
++    # A negative drawn for another user can be a known positive in this row.
++    # Restore masked targets only for constructing the exclusion mask; the
++    # bidirectional encoder above sees exclusively the original masked inputs.
++    observed_items = torch.where(selected, pos, seq)
++    observed_candidates = (
++        observed_items.unsqueeze(-1) == candidate_ids.view(1, 1, -1)
++    ).any(dim=1)
++    row_ids = selected.nonzero(as_tuple=True)[0]
++    invalid_candidates = observed_candidates[row_ids]
++    invalid_candidates = invalid_candidates | (
++        targets.unsqueeze(1) == candidate_ids.unsqueeze(0)
++    )
++    candidate_scores = candidate_scores.masked_fill(
++        invalid_candidates, float("-inf")
++    )
++    logits = torch.cat((positive_scores.unsqueeze(1), candidate_scores), dim=1)
++    sampled_softmax = torch.logsumexp(logits, dim=1) - positive_scores
++    return (0.75 * sampled_softmax + 0.25 * pairwise).mean()
+ 
+ 
+ # Hyper-parameters

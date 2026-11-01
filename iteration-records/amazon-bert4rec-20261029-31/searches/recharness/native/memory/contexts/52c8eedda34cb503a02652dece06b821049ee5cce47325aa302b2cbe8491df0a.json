@@ -1,0 +1,361 @@
+{
+  "key": "code-round-0003-slot-0-attempt-1",
+  "input_source_sha256": "e13a5810a89dd20abd19b8b3bb58c028fcacfa5189315c3e0f3af580468d3d55",
+  "context": {
+    "schema_version": 2,
+    "observations": [
+      {
+        "round_idx": 3,
+        "trial_group_id": "trialgrp_1793454476814_2921447",
+        "trial_id": 3,
+        "arm": "embedding_representation",
+        "selected_categories": [
+          "embedding_representation"
+        ],
+        "patch_summary": "Normalize the tied BERT4Rec item table to a fixed Xavier-scale row norm across context lookup, training logits and candidate scoring. Preserve zero padding, the exclusive mask ID and existing checkpoint shapes; the embedded predictor automatically imports the updated implementation.",
+        "hypothesis": "Across all four datasets, normalize every nonpadding item embedding to a fixed L2 norm sqrt(2*64/(itemnum+2+64)), matching the expected initial Xavier row norm. Use this effective tied table consistently for context lookup, masked-item cross-entropy and candidate scoring; keep padding zero and the exclusive mask as a separate ID. Removing item-norm variation may improve angular discrimination with",
+        "input_source_sha256": "5c15d91c518e4da19710a6b20bd6ce19665a9211fb7b9ad38320367f3a658ba8",
+        "candidate_source_sha256": "e13a5810a89dd20abd19b8b3bb58c028fcacfa5189315c3e0f3af580468d3d55",
+        "patch_sha256": "ea951bdd2e70ae2bb7cf53cbc7edd9f8887099ac6e81201351f75c970ed4798b",
+        "baseline_validation": 0.5537,
+        "basin_id": "default",
+        "val_score": 0.5912,
+        "delta_vs_input": 0.0375,
+        "delta_vs_prev_best": 0.0375,
+        "gpu_seconds": 418.45758989453316,
+        "trial_cap_seconds": 6568.110118985176,
+        "per_dataset_hr10": {
+          "Movies_and_TV": 0.635,
+          "Industrial_and_Scientific": 0.6,
+          "Electronics": 0.435,
+          "CDs_and_Vinyl": 0.695
+        },
+        "outcome": "improved",
+        "valid": true,
+        "failure_type": null,
+        "error": "",
+        "execution_status": "success",
+        "promoted": true,
+        "provisional": false,
+        "is_group_winner": true,
+        "attempt_count": 1,
+        "training_attempt_count": 1,
+        "protocol_id": "f08035801d41346837206fcb06602ae788921782d9cb4b30466bc6e659f659d9",
+        "evidence_id": "6c6450853de1843039102aa83561a3d36b1c624f4c1367c747aa5949dd820385",
+        "phase": "regular",
+        "parameter_changes": [],
+        "changed_definitions": [
+          "BERT4RecModel",
+          "BERT4RecModel.effective_item_weight",
+          "BERT4RecModel.encode_sequence",
+          "BERT4RecModel.forward",
+          "BERT4RecModel.score_candidates",
+          "bpr_sequence_loss"
+        ],
+        "same_input_program": false,
+        "same_basin": true,
+        "retrieval_reason": "same_program",
+        "earlier_training_failures": 0,
+        "training_attempts": [
+          {
+            "id": "round-0002-slot-3-attempt-1",
+            "status": "success",
+            "source_sha256": "e13a5810a89dd20abd19b8b3bb58c028fcacfa5189315c3e0f3af580468d3d55",
+            "allocated_gpu_seconds": 418.45758989453316,
+            "error": "",
+            "score": 0.5912
+          }
+        ],
+        "repair_errors": [],
+        "proposal_history": [
+          {
+            "attempt": 1,
+            "summary": "Normalize the tied BERT4Rec item table to a fixed Xavier-scale row norm across context lookup, training logits and candidate scoring. Preserve zero padding, the exclusive mask ID and existing checkpoint shapes; the embedded predictor automatically imports the updated implementation."
+          }
+        ],
+        "diff_excerpt": "--- \n+++ \n@@ -163,5 +163,5 @@\n     # Only real item IDs 1..itemnum are prediction classes.\n     logits = torch.nn.functional.linear(\n-        masked_states, model.item_emb.weight[1:model.itemnum + 1]\n+        masked_states, model.effective_item_weight()[1:model.itemnum + 1]\n     )\n     return torch.nn.functional.cross_entropy(logits, targets, reduction=\"mean\")\n@@ -211,9 +211,19 @@\n             self.pos_emb.weight[0].zero_()\n \n+    def effective_item_weight(self) -> torch.Tensor:\n+        row_norm = math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))\n+        nonpadding = torch.nn.functional.normalize(\n+            self.item_emb.weight[1:], p=2, dim=-1, eps=1e-12\n+        ) * row_norm\n+        return torch.cat((torch.zeros_like(self.item_emb.weight[:1]), nonpadding), dim=0)\n+\n     def encode_sequence(self, seq: torch.Tensor) -> torch.Tensor:\n         batch, length = seq.shape\n         pos = torch.arange(length, device=seq.device).unsqueeze(0).expand(batch, -1) + 1\n         pos = pos * (seq != 0).long()\n-        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)\n+        item_vectors = torch.nn.functional.embedding(\n+            seq, self.effective_item_weight(), padding_idx=0\n+        )\n+        x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)\n         x = self.dropout(x)\n         padding = seq == 0\n@@ -225,6 +235,7 @@\n     def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n         out = self.encode_sequence(seq)\n-        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n-        neg_sc"
+      },
+      {
+        "round_idx": 2,
+        "trial_group_id": "trialgrp_1793453951956_2921447",
+        "trial_id": 0,
+        "arm": "feature_construction",
+        "selected_categories": [
+          "feature_construction"
+        ],
+        "patch_summary": "Add checkpointed training-frequency input scales consistently across all four category models, with automatic restoration by the existing predictor writer.",
+        "hypothesis": "For all four datasets, add a fixed frequency-derived input scale computed solely from training item counts: normalize log1p(count)^(-0.25) to mean one and clip to [0.75, 1.25]. Multiply observed-item input embeddings by this scale; leave padding, mask tokens and candidate embeddings unchanged. This may reduce domination by frequent context items while preserving embedding parameters, BERT topology",
+        "input_source_sha256": "d51d266361556daac7a1c7e3dfbbc1aa6e46bcb7117f6cdbc71954385530c4ca",
+        "candidate_source_sha256": "632c9044c1658b4c4cf8c5f74f868197b32725f8952de0271eb3bce3baf0c3aa",
+        "patch_sha256": "3cac2e24d41e1899e8d06aa524ed225a09811b7526b092b283a881dd321aa2be",
+        "baseline_validation": 0.5425,
+        "basin_id": "default",
+        "val_score": 0.5475,
+        "delta_vs_input": 0.005,
+        "delta_vs_prev_best": 0.005,
+        "gpu_seconds": 346.66466400027275,
+        "trial_cap_seconds": 6930.7469259649515,
+        "per_dataset_hr10": {
+          "Movies_and_TV": 0.59,
+          "Industrial_and_Scientific": 0.62,
+          "Electronics": 0.375,
+          "CDs_and_Vinyl": 0.605
+        },
+        "outcome": "improved",
+        "valid": true,
+        "failure_type": null,
+        "error": "",
+        "execution_status": "success",
+        "promoted": false,
+        "provisional": false,
+        "is_group_winner": false,
+        "attempt_count": 1,
+        "training_attempt_count": 1,
+        "protocol_id": "f08035801d41346837206fcb06602ae788921782d9cb4b30466bc6e659f659d9",
+        "evidence_id": "4ea669d86db76d510d6add97603b3f2fb60eb460da82e0c7696c0e641a1f03e4",
+        "phase": "regular",
+        "parameter_changes": [],
+        "changed_definitions": [
+          "BERT4RecModel",
+          "BERT4RecModel.__init__",
+          "BERT4RecModel.encode_sequence",
+          "train_one_dataset"
+        ],
+        "same_input_program": false,
+        "same_basin": true,
+        "retrieval_reason": "relevant_arm",
+        "earlier_training_failures": 0,
+        "training_attempts": [
+          {
+            "id": "round-0001-slot-0-attempt-1",
+            "status": "success",
+            "source_sha256": "632c9044c1658b4c4cf8c5f74f868197b32725f8952de0271eb3bce3baf0c3aa",
+            "allocated_gpu_seconds": 346.66466400027275,
+            "error": "",
+            "score": 0.5475
+          }
+        ],
+        "repair_errors": [],
+        "proposal_history": [
+          {
+            "attempt": 1,
+            "summary": "Add checkpointed training-frequency input scales consistently across all four category models, with automatic restoration by the existing predictor writer."
+          }
+        ],
+        "diff_excerpt": "--- \n+++ \n@@ -186,4 +186,5 @@\n         self.maxlen = maxlen\n         self.mask_token = itemnum + 1\n+        self.register_buffer(\"input_scale\", torch.ones(itemnum + 2))\n         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)\n         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)\n@@ -210,5 +211,5 @@\n         pos = torch.arange(length, device=seq.device).unsqueeze(0).expand(batch, -1) + 1\n         pos = pos * (seq != 0).long()\n-        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)\n+        x = self.item_emb(seq) * self.input_scale[seq].unsqueeze(-1) * (self.hidden_units ** 0.5) + self.pos_emb(pos)\n         x = self.dropout(x)\n         padding = seq == 0\n@@ -249,4 +250,16 @@\n         maxlen=MAXLEN,\n     ).to(device)\n+    item_counts = np.zeros(itemnum + 2, dtype=np.int64)\n+    for history in user_train.values():\n+        np.add.at(item_counts, np.asarray(history, dtype=np.int64), 1)\n+    observed = item_counts[1:itemnum + 1] > 0\n+    input_scale = np.ones(itemnum + 2, dtype=np.float32)\n+    if observed.any():\n+        observed_ids = np.flatnonzero(observed) + 1\n+        frequency_scale = np.log1p(item_counts[observed_ids].astype(np.float64)) ** (-0.25)\n+        frequency_scale /= frequency_scale.mean()\n+        input_scale[observed_ids] = np.clip(frequency_scale, 0.75, 1.25).astype(np.float32)\n+    with torch.no_grad():\n+        model.input_scale.copy_(torch.as_tensor(input_scale, device=device))\n     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)\n \n"
+      },
+      {
+        "round_idx": 3,
+        "trial_group_id": "trialgrp_1793454476814_2921447",
+        "trial_id": 2,
+        "arm": "hyperparameter_tuning",
+        "selected_categories": [
+          "hyperparameter_tuning"
+        ],
+        "patch_summary": "Jointly tune all four BERT4Rec category models: learning rate 5e-4, dropout 0.3 and weight decay 1e-5. Retain one checkpoint per category and all other behavior.",
+        "hypothesis": "Across all four datasets, jointly reduce learning rate from 1e-3 to 5e-4, increase dropout from 0.2 to 0.3 and set weight decay to 1e-5. Smaller updates coupled with stronger regularization may reduce overfitting of tied embeddings under full-catalog cross-entropy. Retain width 64, two blocks, two heads, history length 128, batch size 128, existing Adam optimizer type, loss and readout. Keep seed ",
+        "input_source_sha256": "5c15d91c518e4da19710a6b20bd6ce19665a9211fb7b9ad38320367f3a658ba8",
+        "candidate_source_sha256": "2ee796ba10603f963bfd022533b1df9a79c931088232ef33cffd02092b4e4435",
+        "patch_sha256": "56fd16fefda9cc8eca64cbc117cce22e3e592159c9e5564a4cbdec402de807b1",
+        "baseline_validation": 0.5537,
+        "basin_id": "default",
+        "val_score": 0.5575,
+        "delta_vs_input": 0.0038,
+        "delta_vs_prev_best": 0.0038,
+        "gpu_seconds": 368.2223100066185,
+        "trial_cap_seconds": 6568.110118985176,
+        "per_dataset_hr10": {
+          "Movies_and_TV": 0.58,
+          "Industrial_and_Scientific": 0.585,
+          "Electronics": 0.415,
+          "CDs_and_Vinyl": 0.65
+        },
+        "outcome": "improved",
+        "valid": true,
+        "failure_type": null,
+        "error": "",
+        "execution_status": "success",
+        "promoted": false,
+        "provisional": false,
+        "is_group_winner": false,
+        "attempt_count": 1,
+        "training_attempt_count": 1,
+        "protocol_id": "f08035801d41346837206fcb06602ae788921782d9cb4b30466bc6e659f659d9",
+        "evidence_id": "3a71f3cd04b9f976b1ce72c69fa43e511e4ae391862b9e1e64a74eec9abb9229",
+        "phase": "regular",
+        "parameter_changes": [
+          {
+            "name": "DROPOUT_RATE",
+            "before_expression": "float(os.environ.get('BERT4REC_DROPOUT', '0.2'))",
+            "after_expression": "float(os.environ.get('BERT4REC_DROPOUT', '0.3'))"
+          },
+          {
+            "name": "LR",
+            "before_expression": "float(os.environ.get('BERT4REC_LR', '1e-3'))",
+            "after_expression": "float(os.environ.get('BERT4REC_LR', '5e-4'))"
+          },
+          {
+            "name": "WEIGHT_DECAY",
+            "before_expression": "float(os.environ.get('BERT4REC_WD', '0.0'))",
+            "after_expression": "float(os.environ.get('BERT4REC_WD', '1e-5'))"
+          }
+        ],
+        "changed_definitions": [],
+        "same_input_program": false,
+        "same_basin": true,
+        "retrieval_reason": "best_validation",
+        "earlier_training_failures": 0,
+        "training_attempts": [
+          {
+            "id": "round-0002-slot-2-attempt-1",
+            "status": "success",
+            "source_sha256": "2ee796ba10603f963bfd022533b1df9a79c931088232ef33cffd02092b4e4435",
+            "allocated_gpu_seconds": 368.2223100066185,
+            "error": "",
+            "score": 0.5575
+          }
+        ],
+        "repair_errors": [],
+        "proposal_history": [
+          {
+            "attempt": 1,
+            "summary": "Jointly tune all four BERT4Rec category models: learning rate 5e-4, dropout 0.3 and weight decay 1e-5. Retain one checkpoint per category and all other behavior."
+          }
+        ],
+        "diff_excerpt": "--- \n+++ \n@@ -173,7 +173,7 @@\n NUM_BLOCKS    = int(os.environ.get(\"BERT4REC_BLOCKS\", \"2\"))\n NUM_HEADS     = int(os.environ.get(\"BERT4REC_HEADS\", \"2\"))\n-DROPOUT_RATE  = float(os.environ.get(\"BERT4REC_DROPOUT\", \"0.2\"))\n-LR            = float(os.environ.get(\"BERT4REC_LR\", \"1e-3\"))\n-WEIGHT_DECAY  = float(os.environ.get(\"BERT4REC_WD\", \"0.0\"))\n+DROPOUT_RATE  = float(os.environ.get(\"BERT4REC_DROPOUT\", \"0.3\"))\n+LR            = float(os.environ.get(\"BERT4REC_LR\", \"5e-4\"))\n+WEIGHT_DECAY  = float(os.environ.get(\"BERT4REC_WD\", \"1e-5\"))\n BATCH_SIZE    = int(os.environ.get(\"BERT4REC_BATCH\", \"128\"))\n NUM_BATCHES   = int(os.environ.get(\"BERT4REC_BATCHES\", \"200\"))\n"
+      },
+      {
+        "round_idx": 3,
+        "trial_group_id": "trialgrp_1793454476814_2921447",
+        "trial_id": 1,
+        "arm": "learning_objective",
+        "selected_categories": [
+          "learning_objective"
+        ],
+        "patch_summary": "Apply final-position-weighted masked-item cross-entropy to all four category models. Checkpoint shapes and the embedded predictor remain compatible.",
+        "hypothesis": "Across all four datasets, retain full-catalog masked-item cross-entropy but weight targets at the final sequence position by 2 and all other masked targets by 1; divide the summed weighted losses by the summed weights. This emphasizes the position used during appended-mask inference while retaining bidirectional cloze supervision elsewhere. Preserve masking and negative sampling, architecture, emb",
+        "input_source_sha256": "5c15d91c518e4da19710a6b20bd6ce19665a9211fb7b9ad38320367f3a658ba8",
+        "candidate_source_sha256": "0a07b4c03e253f98b1e450f5b0732bd9e6b501feb2a1f19803445a136b2ca9ab",
+        "patch_sha256": "740409a8cfabc1d443de15e481a6e223f9aea873e143bc6adc9300fa7bbc4a29",
+        "baseline_validation": 0.5537,
+        "basin_id": "default",
+        "val_score": 0.5187,
+        "delta_vs_input": -0.035,
+        "delta_vs_prev_best": -0.035,
+        "gpu_seconds": 239.76856115460396,
+        "trial_cap_seconds": 6568.110118985176,
+        "per_dataset_hr10": {
+          "Movies_and_TV": 0.565,
+          "Industrial_and_Scientific": 0.545,
+          "Electronics": 0.38,
+          "CDs_and_Vinyl": 0.585
+        },
+        "outcome": "regressed",
+        "valid": true,
+        "failure_type": null,
+        "error": "",
+        "execution_status": "success",
+        "promoted": false,
+        "provisional": false,
+        "is_group_winner": false,
+        "attempt_count": 1,
+        "training_attempt_count": 1,
+        "protocol_id": "f08035801d41346837206fcb06602ae788921782d9cb4b30466bc6e659f659d9",
+        "evidence_id": "67f79675c5796fc8429960f4398ccf563f8a940d7196d51e91a54decdfb97b1f",
+        "phase": "regular",
+        "parameter_changes": [],
+        "changed_definitions": [
+          "bpr_sequence_loss"
+        ],
+        "same_input_program": false,
+        "same_basin": true,
+        "retrieval_reason": "recent",
+        "earlier_training_failures": 0,
+        "training_attempts": [
+          {
+            "id": "round-0002-slot-1-attempt-1",
+            "status": "success",
+            "source_sha256": "0a07b4c03e253f98b1e450f5b0732bd9e6b501feb2a1f19803445a136b2ca9ab",
+            "allocated_gpu_seconds": 239.76856115460396,
+            "error": "",
+            "score": 0.5187
+          }
+        ],
+        "repair_errors": [],
+        "proposal_history": [
+          {
+            "attempt": 1,
+            "summary": "Apply final-position-weighted masked-item cross-entropy to all four category models. Checkpoint shapes and the embedded predictor remain compatible."
+          }
+        ]
+      },
+      {
+        "round_idx": 3,
+        "trial_group_id": "trialgrp_1793454476814_2921447",
+        "trial_id": 0,
+        "arm": "architecture_interaction",
+        "selected_categories": [
+          "architecture_interaction"
+        ],
+        "patch_summary": "Use post-norm bidirectional Transformer blocks across all four BERT4Rec models, preserving masked-target training and appended-mask inference.",
+        "hypothesis": "Across all four datasets, switch the existing two bidirectional Transformer blocks from pre-norm to post-norm by setting norm_first=False, retaining the final LayerNorm. Conventional BERT-style residual normalization may improve masked-item representations under full-catalog cross-entropy. Keep embeddings, widths, heads, features, sampling, readout, loss and optimizer fixed. Preserve exclusive-mas",
+        "input_source_sha256": "5c15d91c518e4da19710a6b20bd6ce19665a9211fb7b9ad38320367f3a658ba8",
+        "candidate_source_sha256": "ee69ee8e6ab7348b6b44f3619c595b8dff9a4b670125ca77d56413587288c823",
+        "patch_sha256": "3a83f92b4890f97903d0e49c5c05b2f1be8903b8e40b6609c40f3e09753a17d6",
+        "baseline_validation": 0.5537,
+        "basin_id": "default",
+        "val_score": 0.525,
+        "delta_vs_input": -0.0287,
+        "delta_vs_prev_best": -0.0287,
+        "gpu_seconds": 273.69040666520596,
+        "trial_cap_seconds": 6568.110118985176,
+        "per_dataset_hr10": {
+          "Movies_and_TV": 0.585,
+          "Industrial_and_Scientific": 0.55,
+          "Electronics": 0.37,
+          "CDs_and_Vinyl": 0.595
+        },
+        "outcome": "regressed",
+        "valid": true,
+        "failure_type": null,
+        "error": "",
+        "execution_status": "success",
+        "promoted": false,
+        "provisional": false,
+        "is_group_winner": false,
+        "attempt_count": 1,
+        "training_attempt_count": 1,
+        "protocol_id": "f08035801d41346837206fcb06602ae788921782d9cb4b30466bc6e659f659d9",
+        "evidence_id": "b7c0a018aed2abd48358f6ae9f4cebccdf942c334fe147aa247b6210ff73b927",
+        "phase": "regular",
+        "parameter_changes": [],
+        "changed_definitions": [
+          "BERT4RecModel",
+          "BERT4RecModel.__init__"
+        ],
+        "same_input_program": false,
+        "same_basin": true,
+        "retrieval_reason": "recent",
+        "earlier_training_failures": 0,
+        "training_attempts": [
+          {
+            "id": "round-0002-slot-0-attempt-1",
+            "status": "success",
+            "source_sha256": "ee69ee8e6ab7348b6b44f3619c595b8dff9a4b670125ca77d56413587288c823",
+            "allocated_gpu_seconds": 273.69040666520596,
+            "error": "",
+            "score": 0.525
+          }
+        ],
+        "repair_errors": [],
+        "proposal_history": [
+          {
+            "attempt": 1,
+            "summary": "Use post-norm bidirectional Transformer blocks across all four BERT4Rec models, preserving masked-target training and appended-mask inference."
+          }
+        ]
+      }
+    ],
+    "guidance": "Compare deltas within their input program and protocol. Group winner is not promotion. A single validation observation is configuration-specific evidence, not a general causal rule. Timeout is incomplete evidence at its recorded cap; repaired attempts do not erase earlier failures. Jump acceptance includes four retune rounds and gives no isolated component attribution. Rolled-back basin records remain historical observations, not the current incumbent. AST identity detects source duplicates, not functional equivalence. Identical checkpoints alone do not prove identical predictions. Training facts must support proposed features: zero repeated items means repeat-count features have no variation on the observed histories."
+  }
+}

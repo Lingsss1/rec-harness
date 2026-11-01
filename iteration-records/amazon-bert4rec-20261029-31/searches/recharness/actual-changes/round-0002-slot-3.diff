@@ -1,0 +1,57 @@
+--- 5c15d91c518e4da19710a6b20bd6ce19665a9211fb7b9ad38320367f3a658ba8.py
++++ e13a5810a89dd20abd19b8b3bb58c028fcacfa5189315c3e0f3af580468d3d55.py
+@@ -162,7 +162,7 @@
+     targets = pos[mask] - 1
+     # Only real item IDs 1..itemnum are prediction classes.
+     logits = torch.nn.functional.linear(
+-        masked_states, model.item_emb.weight[1:model.itemnum + 1]
++        masked_states, model.effective_item_weight()[1:model.itemnum + 1]
+     )
+     return torch.nn.functional.cross_entropy(logits, targets, reduction="mean")
+ 
+@@ -210,11 +210,21 @@
+             nn.init.xavier_uniform_(self.pos_emb.weight)
+             self.pos_emb.weight[0].zero_()
+ 
++    def effective_item_weight(self) -> torch.Tensor:
++        row_norm = math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
++        nonpadding = torch.nn.functional.normalize(
++            self.item_emb.weight[1:], p=2, dim=-1, eps=1e-12
++        ) * row_norm
++        return torch.cat((torch.zeros_like(self.item_emb.weight[:1]), nonpadding), dim=0)
++
+     def encode_sequence(self, seq: torch.Tensor) -> torch.Tensor:
+         batch, length = seq.shape
+         pos = torch.arange(length, device=seq.device).unsqueeze(0).expand(batch, -1) + 1
+         pos = pos * (seq != 0).long()
+-        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)
++        item_vectors = torch.nn.functional.embedding(
++            seq, self.effective_item_weight(), padding_idx=0
++        )
++        x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+         safe_padding = padding.clone()
+@@ -224,8 +234,9 @@
+ 
+     def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):
+         out = self.encode_sequence(seq)
+-        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)
+-        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)
++        item_weight = self.effective_item_weight()
++        pos_scores = (out * torch.nn.functional.embedding(pos, item_weight, padding_idx=0)).sum(dim=-1)
++        neg_scores = (out * torch.nn.functional.embedding(neg, item_weight, padding_idx=0)).sum(dim=-1)
+         return pos_scores, neg_scores
+ 
+     def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:
+@@ -234,7 +245,9 @@
+         prediction_seq[:, -1] = self.mask_token
+         out = self.encode_sequence(prediction_seq)
+         user_emb = out[0, -1]
+-        cand_emb = self.item_emb(candidates)
++        cand_emb = torch.nn.functional.embedding(
++            candidates, self.effective_item_weight(), padding_idx=0
++        )
+         return torch.matmul(cand_emb, user_emb)
+ 
+ 

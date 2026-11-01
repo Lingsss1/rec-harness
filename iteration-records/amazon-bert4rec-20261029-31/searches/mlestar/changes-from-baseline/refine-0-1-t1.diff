@@ -1,0 +1,46 @@
+--- corrected-baseline.py
++++ refine-0-1-t1/train.py
+@@ -156,10 +156,39 @@
+ 
+ 
+ def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++    mask = pos != 0
++    encoded = model.encode_sequence(seq)
++    features = encoded[mask]
++    targets = pos[mask]
++    negatives = neg[mask]
++    if targets.numel() == 0:
++        return encoded.sum() * 0.0
++
++    positive_scores = (features * model.item_emb(targets)).sum(dim=-1)
++    negative_scores = (features * model.item_emb(negatives)).sum(dim=-1)
++    pair_loss = torch.nn.functional.softplus(negative_scores - positive_scores)
++
++    # Reuse training-only sampled negatives; no additional fitted scoring component.
++    pool_indices = torch.randint(negatives.numel(), (16,), device=seq.device)
++    pool = negatives[pool_indices]
++    pooled_scores = features @ model.item_emb(pool).transpose(0, 1)
++    # Exclude all known items in each truncated training example, including
++    # masked targets, when reusing another example's sampled negative.
++    known = ((seq.unsqueeze(-1) == pool.view(1, 1, -1)) |
++             (pos.unsqueeze(-1) == pool.view(1, 1, -1))).any(dim=1)
++    rows = mask.nonzero(as_tuple=True)[0]
++    allowed = (~known[rows]).to(features.dtype)
++    pooled_losses = torch.nn.functional.softplus(pooled_scores - positive_scores.unsqueeze(1))
++    auxiliary = (pooled_losses * allowed).sum(dim=1) / allowed.sum(dim=1).clamp(min=1.0)
++    has_negative = allowed.sum(dim=1) > 0
++    auxiliary = torch.where(has_negative, auxiliary, pair_loss)
++
++    # The last position is the inference readout for left-padded histories.
++    weights = torch.ones_like(pos, dtype=features.dtype)
++    weights[:, -1] = 2.0
++    weights = weights[mask]
++    losses = 0.75 * pair_loss + 0.25 * auxiliary
++    return (losses * weights).sum() / weights.sum().clamp(min=1.0)
+ 
+ 
+ # Hyper-parameters

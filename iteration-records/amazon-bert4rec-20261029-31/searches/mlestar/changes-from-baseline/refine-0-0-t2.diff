@@ -1,0 +1,39 @@
+--- corrected-baseline.py
++++ refine-0-0-t2/train.py
+@@ -156,10 +156,32 @@
+ 
+ 
+ def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++    # Reuse the same masked encoder output for both ranking objectives.
++    out = model.encode_sequence(seq)
++    selected = pos != 0
++    features = out[selected]
++    if features.shape[0] == 0:
++        return out.sum() * 0.0
++    targets = pos[selected]
++    negative_ids = neg[selected]
++    positive_scores = (features * model.item_emb(targets)).sum(dim=-1)
++    negative_scores = (features * model.item_emb(negative_ids)).sum(dim=-1)
++    pairwise = torch.nn.functional.softplus(negative_scores - positive_scores)
++
++    # Evenly subsample the existing batch negatives without changing sampler RNG.
++    count = min(128, negative_ids.numel())
++    indices = torch.linspace(
++        0, negative_ids.numel() - 1, steps=count, device=seq.device
++    ).long()
++    candidate_ids = torch.unique(negative_ids[indices])
++    candidate_scores = features @ model.item_emb(candidate_ids).transpose(0, 1)
++    # The target can occur among negatives sampled for other users.
++    candidate_scores = candidate_scores.masked_fill(
++        targets.unsqueeze(1) == candidate_ids.unsqueeze(0), float("-inf")
++    )
++    logits = torch.cat((positive_scores.unsqueeze(1), candidate_scores), dim=1)
++    sampled_softmax = torch.logsumexp(logits, dim=1) - positive_scores
++    return (0.75 * sampled_softmax + 0.25 * pairwise).mean()
+ 
+ 
+ # Hyper-parameters

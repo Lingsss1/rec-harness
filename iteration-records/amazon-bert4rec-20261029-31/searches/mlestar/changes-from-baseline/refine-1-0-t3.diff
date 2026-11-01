@@ -1,0 +1,43 @@
+--- corrected-baseline.py
++++ refine-1-0-t3/train.py
+@@ -156,10 +156,36 @@
+ 
+ 
+ def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++    active = pos != 0
++    out = model.encode_sequence(seq)
++    features = out[active]
++    targets = pos[active]
++    own_negatives = neg[active]
++    if targets.numel() == 0:
++        return out.sum() * 0.0
++
++    positive_scores = (features * model.item_emb(targets)).sum(dim=-1)
++    negative_scores = (features * model.item_emb(own_negatives)).sum(dim=-1)
++    pairwise = torch.nn.functional.softplus(negative_scores - positive_scores)
++
++    # Reuse sampled training negatives for a larger candidate-ranking task.
++    pool = torch.unique(own_negatives)
++    if pool.numel() > 256:
++        pool = pool[torch.randperm(pool.numel(), device=pool.device)[:256]]
++    shared_scores = features @ model.item_emb(pool).transpose(0, 1)
++    rows, columns = active.nonzero(as_tuple=True)
++    # Reconstruct known items only for exclusion, never as encoder inputs.
++    known = torch.where(active, pos, seq)
++    known_in_pool = (known.unsqueeze(-1) == pool.view(1, 1, -1)).any(dim=1)
++    excluded = known_in_pool[rows] | (targets.unsqueeze(1) == pool.unsqueeze(0))
++    shared_scores = shared_scores.masked_fill(excluded, float("-inf"))
++    logits = torch.cat((positive_scores.unsqueeze(1), shared_scores), dim=1)
++    sampled_softmax = torch.logsumexp(logits, dim=1) - positive_scores
++
++    # LEFT padding puts the appended-mask inference position at the final index.
++    weights = 1.0 + (columns == seq.shape[1] - 1).to(features.dtype)
++    losses = 0.75 * sampled_softmax + 0.25 * pairwise
++    return (losses * weights).sum() / weights.sum().clamp(min=1.0)
+ 
+ 
+ # Hyper-parameters

@@ -1,0 +1,129 @@
+--- corrected-baseline.py
++++ ab-2-0-t3/train.py
+@@ -1,9 +1,4 @@
+-"""Per-dataset BERT4Rec baseline for Amazon Reviews.
+-
+-Trains one independent BERT4Rec checkpoint per dataset while sharing one default
+-hyper-parameter profile across datasets. The generated predict.py routes by the
+-optional dataset_name keyword used by the RecHarness Amazon Reviews harness.
+-"""
++"""Per-dataset BERT4Rec baseline with gradient clipping disabled."""
+ from __future__ import annotations
+ 
+ import json
+@@ -28,8 +23,7 @@
+     for part in os.environ.get("GAGC_DATASETS", ",".join(DEFAULT_DATASETS)).split(",")
+     if part.strip()
+ ]
+-
+-DATA_DIR = os.environ.get("GAGC_DATA_DIR", "./input/trainval")
++DATA_DIR = os.environ['GAGC_DATA_DIR']
+ 
+ SEED = int(os.environ.get("GAGC_SEED", "42"))
+ random.seed(SEED)
+@@ -102,7 +96,7 @@
+             raise RuntimeError("no unobserved negative item available")
+         for i in selected:
+             pos[i] = seq[i]
+-            seq[i] = itemnum + 1  # reserved mask token, never a recommendation
++            seq[i] = itemnum + 1
+             item = random.randint(1, itemnum)
+             while item in interacted:
+                 item = random.randint(1, itemnum)
+@@ -128,7 +122,6 @@
+         val_users = rng.sample(val_users, num_users)
+     if not val_users:
+         return {"HR@10": 0.0, "HR@20": 0.0, "NDCG@10": 0.0, "NDCG@20": 0.0}
+-
+     hr10 = hr20 = ndcg10 = ndcg20 = 0.0
+     model.eval()
+     with torch.no_grad():
+@@ -162,19 +155,18 @@
+     return (loss * mask).sum() / mask.sum().clamp(min=1.0)
+ 
+ 
+-# Hyper-parameters
+-MAXLEN        = int(os.environ.get("BERT4REC_MAXLEN", "128"))
+-HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+-NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+-NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+-DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
+-LR            = float(os.environ.get("BERT4REC_LR", "1e-3"))
+-WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
+-BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
+-NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+-NUM_EPOCHS    = int(os.environ.get("BERT4REC_EPOCHS", "200"))
+-EVAL_EVERY    = int(os.environ.get("BERT4REC_EVAL_EVERY", "5"))
+-PATIENCE      = int(os.environ.get("BERT4REC_PATIENCE", "20"))
++MAXLEN = int(os.environ.get("BERT4REC_MAXLEN", "128"))
++HIDDEN_UNITS = int(os.environ.get("BERT4REC_HIDDEN", "64"))
++NUM_BLOCKS = int(os.environ.get("BERT4REC_BLOCKS", "2"))
++NUM_HEADS = int(os.environ.get("BERT4REC_HEADS", "2"))
++DROPOUT_RATE = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
++LR = float(os.environ.get("BERT4REC_LR", "1e-3"))
++WEIGHT_DECAY = float(os.environ.get("BERT4REC_WD", "0.0"))
++BATCH_SIZE = int(os.environ.get("BERT4REC_BATCH", "128"))
++NUM_BATCHES = int(os.environ.get("BERT4REC_BATCHES", "200"))
++NUM_EPOCHS = int(os.environ.get("BERT4REC_EPOCHS", "200"))
++EVAL_EVERY = int(os.environ.get("BERT4REC_EVAL_EVERY", "5"))
++PATIENCE = int(os.environ.get("BERT4REC_PATIENCE", "20"))
+ 
+ 
+ class BERT4RecModel(nn.Module):
+@@ -233,13 +225,11 @@
+         return torch.matmul(cand_emb, user_emb)
+ 
+ 
+-
+ def train_one_dataset(dataset_name: str, device: torch.device, data_dir: str) -> float:
+     user_train, user_valid, itemnum = load_dataset(dataset_name, data_dir)
+     print(f"  [{dataset_name}] users={len(user_train)}  items={itemnum}", flush=True)
+     if itemnum <= 0 or not user_train:
+         raise RuntimeError(f"empty dataset or item vocabulary for {dataset_name}")
+-
+     model = BERT4RecModel(
+         itemnum=itemnum,
+         hidden_units=HIDDEN_UNITS,
+@@ -249,11 +239,9 @@
+         maxlen=MAXLEN,
+     ).to(device)
+     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+-
+     working_dir = os.path.join(os.path.dirname(__file__), "working")
+     os.makedirs(working_dir, exist_ok=True)
+     ckpt_path = os.path.join(working_dir, f"{dataset_name}_model.pt")
+-
+     best_hr10 = -1.0
+     best_epoch = 0
+     for epoch in range(1, NUM_EPOCHS + 1):
+@@ -267,10 +255,9 @@
+             loss = bpr_sequence_loss(model, seq_t, pos_t, neg_t)
+             optimizer.zero_grad()
+             loss.backward()
+-            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
++            # Ablation: gradient norm clipping is disabled.
+             optimizer.step()
+             total_loss += float(loss.item())
+-
+         avg_loss = total_loss / max(NUM_BATCHES, 1)
+         if epoch % EVAL_EVERY == 0 or epoch == NUM_EPOCHS:
+             val_m = evaluate_val(model, user_train, user_valid, itemnum, device, MAXLEN)
+@@ -290,10 +277,8 @@
+                 break
+         elif epoch % 10 == 0:
+             print(f"  [{dataset_name}] epoch {epoch:3d}/{NUM_EPOCHS}  loss={avg_loss:.4f}", flush=True)
+-
+     if not os.path.exists(ckpt_path):
+         torch.save(model.state_dict(), ckpt_path)
+-
+     meta_path = os.path.join(working_dir, f"{dataset_name}_meta.pkl")
+     with open(meta_path, "wb") as f:
+         pickle.dump({
+@@ -384,7 +369,6 @@
+         meta = _metas[ds]
+     else:
+         return [0.0] * len(candidates)
+-
+     maxlen = int(meta.get("maxlen", 128))
+     seq_arr = [0] * maxlen
+     for i, item in enumerate(reversed(history[-maxlen:])):

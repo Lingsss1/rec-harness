@@ -1,0 +1,42 @@
+--- d45776a263080fb5ef5e81bdefadefff5b6115803b6fded49e8152fdc0bd5644.py
++++ 4d5a41c16a71b9a7957d0edaf26360d40827118d98f46686cd6a748097b64407.py
+@@ -190,6 +190,9 @@
+         self.hidden_units = hidden_units
+         self.maxlen = maxlen
+         self.mask_token = itemnum + 1
++        self.register_buffer("input_log_count", torch.zeros(itemnum + 2))
++        self.register_buffer("input_mean_log_count", torch.zeros(()))
++        self.register_buffer("input_std_log_count", torch.ones(()))
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+         encoder_layer = nn.TransformerEncoderLayer(
+@@ -224,6 +227,13 @@
+         item_vectors = torch.nn.functional.embedding(
+             seq, self.effective_item_weight(), padding_idx=0
+         )
++        visible_real = (seq > 0) & (seq <= self.itemnum)
++        rarity = (self.input_mean_log_count - self.input_log_count[seq]) / self.input_std_log_count.clamp_min(1e-6)
++        input_scale = torch.where(
++            visible_real, 1.0 + 0.05 * torch.tanh(rarity), torch.ones_like(rarity)
++        )
++        input_scale = input_scale.masked_fill(seq == 0, 0.0)
++        item_vectors = item_vectors * input_scale.unsqueeze(-1)
+         x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+@@ -266,6 +276,15 @@
+         dropout_rate=DROPOUT_RATE,
+         maxlen=MAXLEN,
+     ).to(device)
++    training_counts = np.zeros(itemnum + 2, dtype=np.float64)
++    for history in user_train.values():
++        np.add.at(training_counts, np.asarray(history, dtype=np.int64), 1.0)
++    with torch.no_grad():
++        log_counts = torch.as_tensor(np.log1p(training_counts), dtype=torch.float32, device=device)
++        real_log_counts = log_counts[1:itemnum + 1]
++        model.input_log_count.copy_(log_counts)
++        model.input_mean_log_count.copy_(real_log_counts.mean())
++        model.input_std_log_count.copy_(real_log_counts.std(unbiased=False).clamp_min(1e-6))
+     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+ 
+     working_dir = os.path.join(os.path.dirname(__file__), "working")

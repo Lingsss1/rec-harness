@@ -1,0 +1,38 @@
+--- corrected-baseline.py
++++ round-0001-slot-0-attempt-1/train.py
+@@ -185,6 +185,7 @@
+         self.hidden_units = hidden_units
+         self.maxlen = maxlen
+         self.mask_token = itemnum + 1
++        self.register_buffer("input_scale", torch.ones(itemnum + 2))
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+         encoder_layer = nn.TransformerEncoderLayer(
+@@ -209,7 +210,7 @@
+         batch, length = seq.shape
+         pos = torch.arange(length, device=seq.device).unsqueeze(0).expand(batch, -1) + 1
+         pos = pos * (seq != 0).long()
+-        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)
++        x = self.item_emb(seq) * self.input_scale[seq].unsqueeze(-1) * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+         safe_padding = padding.clone()
+@@ -248,6 +249,18 @@
+         dropout_rate=DROPOUT_RATE,
+         maxlen=MAXLEN,
+     ).to(device)
++    item_counts = np.zeros(itemnum + 2, dtype=np.int64)
++    for history in user_train.values():
++        np.add.at(item_counts, np.asarray(history, dtype=np.int64), 1)
++    observed = item_counts[1:itemnum + 1] > 0
++    input_scale = np.ones(itemnum + 2, dtype=np.float32)
++    if observed.any():
++        observed_ids = np.flatnonzero(observed) + 1
++        frequency_scale = np.log1p(item_counts[observed_ids].astype(np.float64)) ** (-0.25)
++        frequency_scale /= frequency_scale.mean()
++        input_scale[observed_ids] = np.clip(frequency_scale, 0.75, 1.25).astype(np.float32)
++    with torch.no_grad():
++        model.input_scale.copy_(torch.as_tensor(input_scale, device=device))
+     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+ 
+     working_dir = os.path.join(os.path.dirname(__file__), "working")

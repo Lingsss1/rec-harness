@@ -1,0 +1,39 @@
+--- d45776a263080fb5ef5e81bdefadefff5b6115803b6fded49e8152fdc0bd5644.py
++++ 2f63edce5fa8fd96c836feacb66e4b000c1a700c9725979b0d4105bb72676c1a.py
+@@ -190,6 +190,7 @@
+         self.hidden_units = hidden_units
+         self.maxlen = maxlen
+         self.mask_token = itemnum + 1
++        self.register_buffer("training_item_counts", torch.zeros(itemnum + 2))
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+         encoder_layer = nn.TransformerEncoderLayer(
+@@ -224,6 +225,16 @@
+         item_vectors = torch.nn.functional.embedding(
+             seq, self.effective_item_weight(), padding_idx=0
+         )
++        visible = (seq > 0) & (seq <= self.itemnum)
++        log_frequency = torch.log1p(self.training_item_counts[seq])
++        visible_count = visible.sum(dim=1, keepdim=True).clamp_min(1)
++        visible_frequency = torch.where(visible, log_frequency, torch.zeros_like(log_frequency))
++        mean_frequency = visible_frequency.sum(dim=1, keepdim=True) / visible_count
++        centered = torch.where(visible, log_frequency - mean_frequency, torch.zeros_like(log_frequency))
++        variance = centered.square().sum(dim=1, keepdim=True) / visible_count
++        z = centered / (variance.sqrt() + 1e-6)
++        frequency_scale = torch.where(visible, 1.0 + 0.05 * torch.tanh(z), torch.ones_like(z))
++        item_vectors = item_vectors * frequency_scale.unsqueeze(-1)
+         x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+@@ -266,6 +277,11 @@
+         dropout_rate=DROPOUT_RATE,
+         maxlen=MAXLEN,
+     ).to(device)
++    training_counts = np.zeros(itemnum + 2, dtype=np.float32)
++    for history in user_train.values():
++        np.add.at(training_counts, np.asarray(history, dtype=np.int64), 1.0)
++    with torch.no_grad():
++        model.training_item_counts.copy_(torch.from_numpy(training_counts).to(device))
+     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+ 
+     working_dir = os.path.join(os.path.dirname(__file__), "working")

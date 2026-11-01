@@ -1,0 +1,58 @@
+--- corrected-baseline.py
++++ ab-3-0-t2/train.py
+@@ -29,7 +29,7 @@
+     if part.strip()
+ ]
+ 
+-DATA_DIR = os.environ.get("GAGC_DATA_DIR", "./input/trainval")
++DATA_DIR = os.environ['GAGC_DATA_DIR']
+ 
+ SEED = int(os.environ.get("GAGC_SEED", "42"))
+ random.seed(SEED)
+@@ -156,10 +156,32 @@
+ 
+ 
+ def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++    # Reuse the same masked encoder output for both ranking objectives.
++    out = model.encode_sequence(seq)
++    selected = pos != 0
++    features = out[selected]
++    if features.shape[0] == 0:
++        return out.sum() * 0.0
++    targets = pos[selected]
++    negative_ids = neg[selected]
++    positive_scores = (features * model.item_emb(targets)).sum(dim=-1)
++    negative_scores = (features * model.item_emb(negative_ids)).sum(dim=-1)
++    pairwise = torch.nn.functional.softplus(negative_scores - positive_scores)
++
++    # Evenly subsample the existing batch negatives without changing sampler RNG.
++    count = min(128, negative_ids.numel())
++    indices = torch.linspace(
++        0, negative_ids.numel() - 1, steps=count, device=seq.device
++    ).long()
++    candidate_ids = torch.unique(negative_ids[indices])
++    candidate_scores = features @ model.item_emb(candidate_ids).transpose(0, 1)
++    # The target can occur among negatives sampled for other users.
++    candidate_scores = candidate_scores.masked_fill(
++        targets.unsqueeze(1) == candidate_ids.unsqueeze(0), float("-inf")
++    )
++    logits = torch.cat((positive_scores.unsqueeze(1), candidate_scores), dim=1)
++    sampled_softmax = torch.logsumexp(logits, dim=1) - positive_scores
++    return (0.75 * sampled_softmax + 0.25 * pairwise).mean()
+ 
+ 
+ # Hyper-parameters
+@@ -197,7 +219,8 @@
+             norm_first=True,
+         )
+         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_blocks)
+-        self.dropout = nn.Dropout(dropout_rate)
++        # Ablation: disable only the dropout on encoder input embeddings.
++        self.dropout = nn.Identity()
+         self.norm = nn.LayerNorm(hidden_units)
+         with torch.no_grad():
+             nn.init.xavier_uniform_(self.item_emb.weight)

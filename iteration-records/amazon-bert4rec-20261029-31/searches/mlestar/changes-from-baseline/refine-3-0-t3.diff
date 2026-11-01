@@ -1,0 +1,42 @@
+--- corrected-baseline.py
++++ refine-3-0-t3/train.py
+@@ -156,10 +156,35 @@
+ 
+ 
+ def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++    # One encoder pass and one shared item embedding table for both objectives.
++    selected = pos != 0
++    features = model.encode_sequence(seq)
++    if not selected.any():
++        return features.sum() * 0.0
++    rows, columns = selected.nonzero(as_tuple=True)
++    features = features[selected]
++    targets = pos[selected]
++    positive_scores = (features * model.item_emb(targets)).sum(dim=-1)
++    negative_scores = (features * model.item_emb(neg[selected])).sum(dim=-1)
++    pairwise = torch.nn.functional.softplus(negative_scores - positive_scores)
++
++    # Sample only real item IDs. Remove false negatives visible in this training
++    # example, including the cloze targets removed from its input sequence.
++    sampled = torch.randint(1, model.itemnum + 1,
++                            (seq.shape[0], 31), device=seq.device)
++    known = torch.where(pos != 0, pos, seq)
++    invalid = (sampled.unsqueeze(-1) == known.unsqueeze(1)).any(dim=-1)
++    sampled_embeddings = model.item_emb(sampled)
++    extra_scores = torch.einsum('md,mkd->mk', features, sampled_embeddings[rows])
++    extra_scores = extra_scores.masked_fill(invalid[rows], float('-inf'))
++    logits = torch.cat((positive_scores.unsqueeze(1),
++                        negative_scores.unsqueeze(1), extra_scores), dim=1)
++    listwise = torch.logsumexp(logits, dim=1) - positive_scores
++
++    # LEFT padding places the terminal masked target at the final column.
++    weights = 1.0 + (columns == seq.shape[1] - 1).to(features.dtype)
++    losses = 0.5 * pairwise + 0.5 * listwise
++    return (losses * weights).sum() / weights.sum().clamp(min=1.0)
+ 
+ 
+ # Hyper-parameters

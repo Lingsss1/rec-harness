@@ -1,0 +1,42 @@
+--- corrected-baseline.py
++++ refine-2-1-t1/train.py
+@@ -156,10 +156,35 @@
+ 
+ 
+ def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++    # Preserve masked-target training and encode the sequence only once.
++    features = model.encode_sequence(seq)
++    active = pos != 0
++    hidden = features[active]
++    targets = pos[active]
++    paired_negatives = neg[active]
++    if targets.numel() == 0:
++        return features.sum() * 0.0
++
++    positive_scores = (hidden * model.item_emb(targets)).sum(dim=-1)
++    negative_scores = (hidden * model.item_emb(paired_negatives)).sum(dim=-1)
++    pairwise_loss = torch.nn.functional.softplus(negative_scores - positive_scores).mean()
++
++    # Keep multi-negative supervision as a modest auxiliary ranking objective.
++    pool = torch.unique(paired_negatives)
++    if pool.numel() > 32:
++        pool = pool[torch.randperm(pool.numel(), device=pool.device)[:32]]
++    pooled_scores = hidden @ model.item_emb(pool).transpose(0, 1)
++
++    # Filter visible items and all masked targets belonging to the same history.
++    known = torch.where(active, pos, seq)
++    observed = (known.unsqueeze(-1) == pool.view(1, 1, -1)).any(dim=1)
++    row_indices = active.nonzero(as_tuple=True)[0]
++    invalid = observed[row_indices] | (targets.unsqueeze(1) == pool.unsqueeze(0))
++    invalid = invalid | (paired_negatives.unsqueeze(1) == pool.unsqueeze(0))
++    pooled_scores = pooled_scores.masked_fill(invalid, float("-inf"))
++    logits = torch.cat((positive_scores.unsqueeze(1), negative_scores.unsqueeze(1), pooled_scores), dim=1)
++    sampled_softmax_loss = (torch.logsumexp(logits, dim=1) - positive_scores).mean()
++    return 0.75 * pairwise_loss + 0.25 * sampled_softmax_loss
+ 
+ 
+ # Hyper-parameters

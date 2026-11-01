@@ -1,0 +1,529 @@
+--- corrected-baseline.py
++++ initial-1-t3/train.py
+@@ -1,11 +1,7 @@
+-"""Per-dataset BERT4Rec baseline for Amazon Reviews.
+-
+-Trains one independent BERT4Rec checkpoint per dataset while sharing one default
+-hyper-parameter profile across datasets. The generated predict.py routes by the
+-optional dataset_name keyword used by the RecHarness Amazon Reviews harness.
+-"""
++"""Independent per-category BERT4Rec with AdamW, warmup and linear decay."""
+ from __future__ import annotations
+ 
++import inspect
+ import json
+ import math
+ import os
+@@ -17,30 +13,34 @@
+ import torch
+ import torch.nn as nn
+ 
+-DEFAULT_DATASETS = [
+-    "Movies_and_TV",
+-    "Industrial_and_Scientific",
+-    "Electronics",
+-    "CDs_and_Vinyl",
+-]
+-DATASETS = [
+-    part.strip()
+-    for part in os.environ.get("GAGC_DATASETS", ",".join(DEFAULT_DATASETS)).split(",")
+-    if part.strip()
+-]
+-
+-DATA_DIR = os.environ.get("GAGC_DATA_DIR", "./input/trainval")
+-
+-SEED = int(os.environ.get("GAGC_SEED", "42"))
++DEFAULT_DATASETS = ["Movies_and_TV", "Industrial_and_Scientific", "Electronics", "CDs_and_Vinyl"]
++DATASETS = [x.strip() for x in os.environ.get("GAGC_DATASETS", ",".join(DEFAULT_DATASETS)).split(",") if x.strip()]
++if len(DATASETS) != 4 or set(DATASETS) != set(DEFAULT_DATASETS):
++    raise ValueError("All four Amazon categories must be retained")
++DATA_DIR = os.environ['GAGC_DATA_DIR']
++SEED = 42
+ random.seed(SEED)
+ np.random.seed(SEED)
+ torch.manual_seed(SEED)
+ if torch.cuda.is_available():
+     torch.cuda.manual_seed_all(SEED)
+ 
+-
+-def _read_split(path: str) -> dict[int, list[int]]:
+-    data: dict[int, list[int]] = defaultdict(list)
++MAXLEN = int(os.environ.get("BERT4REC_MAXLEN", "128"))
++HIDDEN_UNITS = int(os.environ.get("BERT4REC_HIDDEN", "64"))
++NUM_BLOCKS = int(os.environ.get("BERT4REC_BLOCKS", "2"))
++NUM_HEADS = int(os.environ.get("BERT4REC_HEADS", "2"))
++DROPOUT_RATE = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
++LR = 5e-4
++WEIGHT_DECAY = 0.01
++BATCH_SIZE = int(os.environ.get("BERT4REC_BATCH", "128"))
++NUM_BATCHES = 200
++NUM_EPOCHS = min(200, max(1, int(os.environ.get("BERT4REC_EPOCHS", os.environ.get("SASREC_EPOCHS", "200")))))
++EVAL_EVERY = 5
++PATIENCE = 20
++
++
++def _read_split(path):
++    data = defaultdict(list)
+     if not os.path.isfile(path):
+         return {}
+     with open(path) as f:
+@@ -51,7 +51,7 @@
+     return dict(data)
+ 
+ 
+-def _load_itemnum(data_dir: str, dataset_name: str) -> int:
++def _load_itemnum(data_dir, dataset_name):
+     stats_path = os.path.join(data_dir, "dataset_stats.json")
+     if os.path.isfile(stats_path):
+         with open(stats_path) as f:
+@@ -61,25 +61,25 @@
+     itemnum = 0
+     for split in ("train", "valid"):
+         path = os.path.join(data_dir, f"{dataset_name}_{split}.txt")
+-        if not os.path.isfile(path):
+-            continue
+-        with open(path) as f:
+-            for line in f:
+-                parts = line.strip().split()
+-                if len(parts) == 2:
+-                    itemnum = max(itemnum, int(parts[1]))
++        if os.path.isfile(path):
++            with open(path) as f:
++                for line in f:
++                    parts = line.strip().split()
++                    if len(parts) == 2:
++                        itemnum = max(itemnum, int(parts[1]))
+     return itemnum
+ 
+ 
+-def load_dataset(dataset_name: str, data_dir: str):
+-    user_train = _read_split(os.path.join(data_dir, f"{dataset_name}_train.txt"))
+-    user_valid = _read_split(os.path.join(data_dir, f"{dataset_name}_valid.txt"))
+-    itemnum = _load_itemnum(data_dir, dataset_name)
+-    return user_train, user_valid, itemnum
+-
+-
+-def sample_batch(user_train: dict[int, list[int]], itemnum: int, batch_size: int, maxlen: int):
+-    # Cloze training: masked targets are not exposed as unmasked shifted inputs.
++def load_dataset(dataset_name, data_dir):
++    return (
++        _read_split(os.path.join(data_dir, f"{dataset_name}_train.txt")),
++        _read_split(os.path.join(data_dir, f"{dataset_name}_valid.txt")),
++        _load_itemnum(data_dir, dataset_name),
++    )
++
++
++def sample_batch(user_train, itemnum, batch_size, maxlen):
++    # Only masked positions are targets. No shifted targets are visible.
+     users = [u for u, items in user_train.items() if len(items) >= 2]
+     if not users:
+         raise RuntimeError("no users with at least two training interactions")
+@@ -91,18 +91,18 @@
+         pos = np.zeros(maxlen, dtype=np.int64)
+         neg = np.zeros(maxlen, dtype=np.int64)
+         seq[-len(items):] = items
+-        eligible = list(range(maxlen-len(items), maxlen))
++        eligible = list(range(maxlen - len(items), maxlen))
+         selected = [i for i in eligible if random.random() < 0.2]
+         if not selected:
+             selected = [random.choice(eligible)]
+-        if random.random() < 0.5 and maxlen-1 not in selected:
+-            selected.append(maxlen-1)
++        if random.random() < 0.5 and maxlen - 1 not in selected:
++            selected.append(maxlen - 1)
+         interacted = set(history)
+         if len(interacted) >= itemnum:
+             raise RuntimeError("no unobserved negative item available")
+         for i in selected:
+             pos[i] = seq[i]
+-            seq[i] = itemnum + 1  # reserved mask token, never a recommendation
++            seq[i] = itemnum + 1
+             item = random.randint(1, itemnum)
+             while item in interacted:
+                 item = random.randint(1, itemnum)
+@@ -113,22 +113,21 @@
+     return np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg)
+ 
+ 
+-def _history_to_tensor(history: list[int], maxlen: int, device: torch.device) -> torch.Tensor:
++def _history_to_tensor(history, maxlen, device):
+     seq_arr = np.zeros(maxlen, dtype=np.int64)
+-    for i, item in enumerate(reversed(history[-maxlen:])):
+-        seq_arr[maxlen - 1 - i] = item
+-    return torch.tensor([seq_arr], dtype=torch.long, device=device)
+-
+-
+-def evaluate_val(model: nn.Module, user_train: dict[int, list[int]], user_valid: dict[int, list[int]],
+-                 itemnum: int, device: torch.device, maxlen: int, num_users: int = 200) -> dict[str, float]:
++    items = history[-maxlen:]
++    if items:
++        seq_arr[-len(items):] = items
++    return torch.tensor(seq_arr[None, :], dtype=torch.long, device=device)
++
++
++def evaluate_val(model, user_train, user_valid, itemnum, device, maxlen, num_users=200):
+     val_users = [u for u in user_valid if u in user_train and user_valid[u]]
+     if len(val_users) > num_users:
+         rng = random.Random(SEED)
+         val_users = rng.sample(val_users, num_users)
+     if not val_users:
+         return {"HR@10": 0.0, "HR@20": 0.0, "NDCG@10": 0.0, "NDCG@20": 0.0}
+-
+     hr10 = hr20 = ndcg10 = ndcg20 = 0.0
+     model.eval()
+     with torch.no_grad():
+@@ -146,35 +145,13 @@
+             cand_t = torch.tensor(candidates, dtype=torch.long, device=device)
+             scores = model.score_candidates(seq_t, cand_t).detach().cpu().tolist()
+             rank = sorted(range(len(scores)), key=lambda i: -scores[i]).index(0)
+-            hr10 += 1.0 if rank < 10 else 0.0
+-            hr20 += 1.0 if rank < 20 else 0.0
+-            ndcg10 += (1.0 / math.log2(rank + 2)) if rank < 10 else 0.0
+-            ndcg20 += (1.0 / math.log2(rank + 2)) if rank < 20 else 0.0
++            hr10 += float(rank < 10)
++            hr20 += float(rank < 20)
++            ndcg10 += 1.0 / math.log2(rank + 2) if rank < 10 else 0.0
++            ndcg20 += 1.0 / math.log2(rank + 2) if rank < 20 else 0.0
+     n = float(len(val_users))
+     model.train()
+     return {"HR@10": hr10 / n, "HR@20": hr20 / n, "NDCG@10": ndcg10 / n, "NDCG@20": ndcg20 / n}
+-
+-
+-def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
+-
+-
+-# Hyper-parameters
+-MAXLEN        = int(os.environ.get("BERT4REC_MAXLEN", "128"))
+-HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+-NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+-NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+-DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
+-LR            = float(os.environ.get("BERT4REC_LR", "1e-3"))
+-WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
+-BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
+-NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+-NUM_EPOCHS    = int(os.environ.get("BERT4REC_EPOCHS", "200"))
+-EVAL_EVERY    = int(os.environ.get("BERT4REC_EVAL_EVERY", "5"))
+-PATIENCE      = int(os.environ.get("BERT4REC_PATIENCE", "20"))
+ 
+ 
+ class BERT4RecModel(nn.Module):
+@@ -188,13 +165,9 @@
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+         encoder_layer = nn.TransformerEncoderLayer(
+-            d_model=hidden_units,
+-            nhead=num_heads,
+-            dim_feedforward=hidden_units * 4,
+-            dropout=dropout_rate,
+-            activation="gelu",
+-            batch_first=True,
+-            norm_first=True,
++            d_model=hidden_units, nhead=num_heads,
++            dim_feedforward=hidden_units * 4, dropout=dropout_rate,
++            activation="gelu", batch_first=True, norm_first=True,
+         )
+         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_blocks)
+         self.dropout = nn.Dropout(dropout_rate)
+@@ -217,43 +190,68 @@
+         x = self.encoder(x, src_key_padding_mask=safe_padding)
+         return self.norm(x)
+ 
++    def log2feats(self, sequence):
++        if not torch.is_tensor(sequence):
++            sequence = torch.as_tensor(sequence, dtype=torch.long, device=self.item_emb.weight.device)
++        else:
++            sequence = sequence.to(device=self.item_emb.weight.device, dtype=torch.long)
++        if sequence.ndim == 1:
++            sequence = sequence.unsqueeze(0)
++        return self.encode_sequence(sequence)
++
++    def predict_score(self, features, items):
++        if not torch.is_tensor(items):
++            items = torch.as_tensor(items, dtype=torch.long, device=self.item_emb.weight.device)
++        else:
++            items = items.to(device=self.item_emb.weight.device, dtype=torch.long)
++        return (features * self.item_emb(items)).sum(dim=-1)
++
+     def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):
+         out = self.encode_sequence(seq)
+-        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)
+-        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)
+-        return pos_scores, neg_scores
++        return self.predict_score(out, pos), self.predict_score(out, neg)
+ 
+     def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:
+         prediction_seq = torch.zeros_like(seq)
+         prediction_seq[:, :-1] = seq[:, 1:]
+         prediction_seq[:, -1] = self.mask_token
+         out = self.encode_sequence(prediction_seq)
++        # Histories are left padded; the appended mask is the final nonpadding token.
+         user_emb = out[0, -1]
+-        cand_emb = self.item_emb(candidates)
+-        return torch.matmul(cand_emb, user_emb)
+-
+-
+-
+-def train_one_dataset(dataset_name: str, device: torch.device, data_dir: str) -> float:
++        return torch.matmul(self.item_emb(candidates), user_emb)
++
++
++def bpr_sequence_loss(model, seq, pos, neg):
++    pos_scores, neg_scores = model(seq, pos, neg)
++    mask = (pos != 0).float()
++    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
++    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++
++
++def train_one_dataset(dataset_name, device, data_dir):
+     user_train, user_valid, itemnum = load_dataset(dataset_name, data_dir)
+-    print(f"  [{dataset_name}] users={len(user_train)}  items={itemnum}", flush=True)
++    print(f"  [{dataset_name}] users={len(user_train)} items={itemnum}", flush=True)
+     if itemnum <= 0 or not user_train:
+         raise RuntimeError(f"empty dataset or item vocabulary for {dataset_name}")
+-
+-    model = BERT4RecModel(
+-        itemnum=itemnum,
+-        hidden_units=HIDDEN_UNITS,
+-        num_blocks=NUM_BLOCKS,
+-        num_heads=NUM_HEADS,
+-        dropout_rate=DROPOUT_RATE,
+-        maxlen=MAXLEN,
+-    ).to(device)
+-    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+-
+-    working_dir = os.path.join(os.path.dirname(__file__), "working")
++    model = BERT4RecModel(itemnum, HIDDEN_UNITS, NUM_BLOCKS, NUM_HEADS, DROPOUT_RATE, MAXLEN).to(device)
++    decay_parameters, no_decay_parameters = [], []
++    for name, parameter in model.named_parameters():
++        if not parameter.requires_grad:
++            continue
++        destination = no_decay_parameters if parameter.ndim <= 1 else decay_parameters
++        destination.append(parameter)
++    optimizer = torch.optim.AdamW(
++        [
++            {"params": decay_parameters, "weight_decay": WEIGHT_DECAY},
++            {"params": no_decay_parameters, "weight_decay": 0.0},
++        ],
++        lr=LR, betas=(0.9, 0.999), eps=1e-6,
++    )
++    total_updates = NUM_EPOCHS * NUM_BATCHES
++    warmup_updates = min(1000, max(1, total_updates // 10))
++    update_index = 0
++    working_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "working")
+     os.makedirs(working_dir, exist_ok=True)
+     ckpt_path = os.path.join(working_dir, f"{dataset_name}_model.pt")
+-
+     best_hr10 = -1.0
+     best_epoch = 0
+     for epoch in range(1, NUM_EPOCHS + 1):
+@@ -268,17 +266,23 @@
+             optimizer.zero_grad()
+             loss.backward()
+             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
++            update_index += 1
++            if update_index <= warmup_updates:
++                learning_rate_factor = update_index / warmup_updates
++            else:
++                learning_rate_factor = max(0.0, (total_updates - update_index) / max(1, total_updates - warmup_updates))
++            for group in optimizer.param_groups:
++                group['lr'] = LR * learning_rate_factor
+             optimizer.step()
+             total_loss += float(loss.item())
+-
+-        avg_loss = total_loss / max(NUM_BATCHES, 1)
++        avg_loss = total_loss / NUM_BATCHES
+         if epoch % EVAL_EVERY == 0 or epoch == NUM_EPOCHS:
+             val_m = evaluate_val(model, user_train, user_valid, itemnum, device, MAXLEN)
+-            hr10 = val_m["HR@10"]
++            hr10 = val_m['HR@10']
+             print(
+-                f"  [{dataset_name}] epoch {epoch:3d}/{NUM_EPOCHS}"
+-                f"  loss={avg_loss:.4f}  val_score: {hr10:.4f}"
+-                f"  HR@20={val_m['HR@20']:.4f}  NDCG@10={val_m['NDCG@10']:.4f}",
++                f"  [{dataset_name}] epoch {epoch:3d}/{NUM_EPOCHS} loss={avg_loss:.4f}"
++                f" val_score: {hr10:.4f} HR@20={val_m['HR@20']:.4f}"
++                f" NDCG@10={val_m['NDCG@10']:.4f} lr={optimizer.param_groups[0]['lr']:.7f}",
+                 flush=True,
+             )
+             if hr10 > best_hr10:
+@@ -289,59 +293,30 @@
+                 print(f"  [{dataset_name}] Early stopping at epoch {epoch}", flush=True)
+                 break
+         elif epoch % 10 == 0:
+-            print(f"  [{dataset_name}] epoch {epoch:3d}/{NUM_EPOCHS}  loss={avg_loss:.4f}", flush=True)
+-
+-    if not os.path.exists(ckpt_path):
+-        torch.save(model.state_dict(), ckpt_path)
+-
+-    meta_path = os.path.join(working_dir, f"{dataset_name}_meta.pkl")
+-    with open(meta_path, "wb") as f:
++            print(f"  [{dataset_name}] epoch {epoch:3d}/{NUM_EPOCHS} loss={avg_loss:.4f}", flush=True)
++    with open(os.path.join(working_dir, f"{dataset_name}_meta.pkl"), "wb") as f:
+         pickle.dump({
+-            "itemnum": itemnum,
+-            "maxlen": MAXLEN,
+-            "hidden_units": HIDDEN_UNITS,
+-            "num_blocks": NUM_BLOCKS,
+-            "num_heads": NUM_HEADS,
+-            "dropout_rate": DROPOUT_RATE,
++            "itemnum": itemnum, "maxlen": MAXLEN, "hidden_units": HIDDEN_UNITS,
++            "num_blocks": NUM_BLOCKS, "num_heads": NUM_HEADS, "dropout_rate": DROPOUT_RATE,
+         }, f)
+-    print(f"  [{dataset_name}] Best val HR@10={max(best_hr10, 0.0):.4f}  ckpt={ckpt_path}", flush=True)
+-    return max(best_hr10, 0.0)
+-
+-
+-def write_predict_script(working_dir: str) -> None:
+-    script = r'''"""Per-dataset BERT4Rec predict function."""
+-from __future__ import annotations
+-
+-import importlib.util
+-import os
+-import pickle
+-
+-import torch
+-
++    print(f"  [{dataset_name}] Best val HR@10={best_hr10:.4f} ckpt={ckpt_path}", flush=True)
++    del model, optimizer
++    if device.type == 'cuda':
++        torch.cuda.empty_cache()
++    return best_hr10
++
++
++def write_predict_script(working_dir):
++    # Embed the exact trained architecture so inference needs no import of train.py.
++    header = 'from __future__ import annotations\nimport os\nimport pickle\nimport torch\nimport torch.nn as nn\n\n'
++    model_source = inspect.getsource(BERT4RecModel)
++    runtime = r'''
+ _HERE = os.path.dirname(os.path.abspath(__file__))
+-DEFAULT_DATASETS = [
+-    "Movies_and_TV",
+-    "Industrial_and_Scientific",
+-    "Electronics",
+-    "CDs_and_Vinyl",
+-]
+-DATASETS = [
+-    part.strip()
+-    for part in os.environ.get("GAGC_DATASETS", ",".join(DEFAULT_DATASETS)).split(",")
+-    if part.strip()
+-]
++DEFAULT_DATASETS = ["Movies_and_TV", "Industrial_and_Scientific", "Electronics", "CDs_and_Vinyl"]
++DATASETS = [x.strip() for x in os.environ.get("GAGC_DATASETS", ",".join(DEFAULT_DATASETS)).split(",") if x.strip()]
+ _models = {}
+ _metas = {}
+ _device = None
+-
+-
+-def _load_model_class():
+-    spec = importlib.util.spec_from_file_location(
+-        f"bert4rec_perdataset_train_{os.getpid()}", os.path.join(_HERE, "..", "train.py")
+-    )
+-    mod = importlib.util.module_from_spec(spec)
+-    spec.loader.exec_module(mod)
+-    return mod.BERT4RecModel
+ 
+ 
+ def _ensure_loaded():
+@@ -349,43 +324,31 @@
+     if _models:
+         return
+     _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+-    ModelClass = _load_model_class()
+     for ds in DATASETS:
+-        working_dir = _HERE if os.path.basename(_HERE) == "working" else os.path.join(_HERE, "working")
+-        meta_path = os.path.join(working_dir, f"{ds}_meta.pkl")
+-        ckpt_path = os.path.join(working_dir, f"{ds}_model.pt")
+-        if not os.path.isfile(meta_path) or not os.path.isfile(ckpt_path):
+-            continue
+-        with open(meta_path, "rb") as f:
++        with open(os.path.join(_HERE, f"{ds}_meta.pkl"), "rb") as f:
+             meta = pickle.load(f)
+-        model = ModelClass(
+-            itemnum=meta["itemnum"],
+-            hidden_units=meta["hidden_units"],
+-            num_blocks=meta["num_blocks"],
+-            num_heads=meta["num_heads"],
+-            dropout_rate=0.0,
+-            maxlen=meta["maxlen"],
++        model = BERT4RecModel(
++            itemnum=meta["itemnum"], hidden_units=meta["hidden_units"],
++            num_blocks=meta["num_blocks"], num_heads=meta["num_heads"],
++            dropout_rate=0.0, maxlen=meta["maxlen"],
+         ).to(_device)
+-        model.load_state_dict(torch.load(ckpt_path, map_location=_device, weights_only=True))
++        state = torch.load(os.path.join(_HERE, f"{ds}_model.pt"), map_location=_device, weights_only=True)
++        model.load_state_dict(state)
+         model.eval()
+         _models[ds] = model
+         _metas[ds] = meta
+ 
+ 
+-def predict(user_id: int, history: list[int], candidates: list[int],
+-            *, dataset_name: str | None = None) -> list[float]:
++def predict(user_id: int, history: list[int], candidates: list[int], *, dataset_name: str | None = None) -> list[float]:
+     _ensure_loaded()
+-    if dataset_name and dataset_name in _models:
+-        model = _models[dataset_name]
+-        meta = _metas[dataset_name]
+-    elif _models:
++    if dataset_name is not None:
++        if dataset_name not in _models:
++            raise ValueError(f"Unknown dataset_name: {dataset_name}")
++        ds = dataset_name
++    else:
+         ds = next(iter(_models))
+-        model = _models[ds]
+-        meta = _metas[ds]
+-    else:
+-        return [0.0] * len(candidates)
+-
+-    maxlen = int(meta.get("maxlen", 128))
++    model, meta = _models[ds], _metas[ds]
++    maxlen = int(meta["maxlen"])
+     seq_arr = [0] * maxlen
+     for i, item in enumerate(reversed(history[-maxlen:])):
+         seq_arr[maxlen - 1 - i] = item
+@@ -395,23 +358,24 @@
+         scores = model.score_candidates(seq_t, cand_t).detach().cpu().tolist()
+     return [float(s) for s in scores]
+ '''
+-    predict_path = os.path.join(working_dir, "predict.py")
+-    with open(predict_path, "w") as f:
+-        f.write(script)
+-    print(f"predict.py written -> {predict_path}", flush=True)
+-
+-
+-def main() -> None:
++    os.makedirs(working_dir, exist_ok=True)
++    path = os.path.join(working_dir, "predict.py")
++    with open(path, "w") as f:
++        f.write(header + model_source + '\n' + runtime)
++    print(f"predict.py written -> {path}", flush=True)
++
++
++def main():
++    torch.set_num_threads(min(8, os.cpu_count() or 1))
+     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+-    print(f"Per-dataset BERT4Rec training on {device}", flush=True)
++    print(f"Per-dataset BERT4Rec AdamW training on {device}", flush=True)
+     scores = []
+     for dataset_name in DATASETS:
+         scores.append(train_one_dataset(dataset_name, device, DATA_DIR))
+-    working_dir = os.path.join(os.path.dirname(__file__), "working")
++    working_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "working")
+     write_predict_script(working_dir)
+-    avg = sum(scores) / max(len(scores), 1)
+-    print(f"\nAll datasets done. Average val HR@10 = {avg:.4f}", flush=True)
+-
+-
+-if __name__ == "__main__":
++    print(f"\nAll datasets done. Average val HR@10 = {sum(scores) / len(scores):.4f}", flush=True)
++
++
++if __name__ == '__main__':
+     main()

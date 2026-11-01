@@ -1,0 +1,46 @@
+--- corrected-baseline.py
++++ refine-2-0-t3/train.py
+@@ -156,10 +156,39 @@
+ 
+ 
+ def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++    # Encode the bidirectional masked input once; only masked targets contribute.
++    out = model.encode_sequence(seq)
++    active = pos != 0
++    features = out[active]
++    targets = pos[active]
++    negative_ids = neg[active]
++    if targets.numel() == 0:
++        return out.sum() * 0.0
++
++    positive_scores = (features * model.item_emb(targets)).sum(dim=-1)
++    negative_scores = (features * model.item_emb(negative_ids)).sum(dim=-1)
++    pairwise = torch.nn.functional.softplus(negative_scores - positive_scores)
++
++    # Share a small set of sampled negatives across masked targets. Exclude
++    # every item visible or masked in the corresponding training sequence.
++    pool = torch.unique(negative_ids)
++    if pool.numel() > 32:
++        pool = pool[torch.randperm(pool.numel(), device=pool.device)[:32]]
++    shared_scores = features @ model.item_emb(pool).transpose(0, 1)
++    known_items = torch.where(active, pos, seq)
++    collisions = (known_items.unsqueeze(-1) == pool.view(1, 1, -1)).any(dim=1)
++    row_ids = active.nonzero(as_tuple=True)[0]
++    invalid = collisions[row_ids] | (negative_ids.unsqueeze(1) == pool.unsqueeze(0))
++    shared_scores = shared_scores.masked_fill(invalid, float("-inf"))
++    logits = torch.cat((positive_scores.unsqueeze(1), negative_scores.unsqueeze(1), shared_scores), dim=1)
++    sampled_softmax = torch.logsumexp(logits, dim=1) - positive_scores
++
++    # The rightmost position matches the appended-mask inference readout.
++    weights = torch.ones_like(pos, dtype=out.dtype)
++    weights[:, -1] = 2.0
++    weights = weights[active]
++    losses = 0.7 * pairwise + 0.3 * sampled_softmax
++    return (losses * weights).sum() / weights.sum().clamp(min=1.0)
+ 
+ 
+ # Hyper-parameters

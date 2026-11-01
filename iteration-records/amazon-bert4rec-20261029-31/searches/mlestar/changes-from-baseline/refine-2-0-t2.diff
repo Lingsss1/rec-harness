@@ -1,0 +1,52 @@
+--- corrected-baseline.py
++++ refine-2-0-t2/train.py
+@@ -156,10 +156,45 @@
+ 
+ 
+ def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++    # Share one masked encoder pass between the cloze and endpoint objectives.
++    out = model.encode_sequence(seq)
++    selected = pos != 0
++    features = out[selected]
++    if features.shape[0] == 0:
++        return out.sum() * 0.0
++    targets = pos[selected]
++    negative_ids = neg[selected]
++    positive_scores = (features * model.item_emb(targets)).sum(dim=-1)
++    negative_scores = (features * model.item_emb(negative_ids)).sum(dim=-1)
++    pairwise = torch.nn.functional.softplus(negative_scores - positive_scores)
++
++    # Keep the existing candidate pool and sampler RNG unchanged.
++    count = min(128, negative_ids.numel())
++    indices = torch.linspace(
++        0, negative_ids.numel() - 1, steps=count, device=seq.device
++    ).long()
++    candidate_ids = torch.unique(negative_ids[indices])
++    candidate_scores = features @ model.item_emb(candidate_ids).transpose(0, 1)
++    candidate_scores = candidate_scores.masked_fill(
++        targets.unsqueeze(1) == candidate_ids.unsqueeze(0), float("-inf")
++    )
++    logits = torch.cat((positive_scores.unsqueeze(1), candidate_scores), dim=1)
++    sampled_softmax = torch.logsumexp(logits, dim=1) - positive_scores
++    token_loss = 0.75 * sampled_softmax + 0.25 * pairwise
++
++    # LEFT padding places the final nonpadding target in the last column.
++    # Only already-masked targets contribute, so no target is exposed to the encoder.
++    endpoint_mask = torch.zeros_like(selected)
++    endpoint_mask[:, -1] = selected[:, -1]
++    endpoint_weights = endpoint_mask[selected].to(token_loss.dtype)
++    endpoint_count = endpoint_weights.sum()
++    endpoint_loss = (token_loss * endpoint_weights).sum() / endpoint_count.clamp_min(1.0)
++    cloze_loss = token_loss.mean()
++    return torch.where(
++        endpoint_count > 0,
++        0.75 * cloze_loss + 0.25 * endpoint_loss,
++        cloze_loss,
++    )
+ 
+ 
+ # Hyper-parameters

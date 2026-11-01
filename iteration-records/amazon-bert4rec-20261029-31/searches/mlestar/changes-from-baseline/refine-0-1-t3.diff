@@ -1,0 +1,42 @@
+--- corrected-baseline.py
++++ refine-0-1-t3/train.py
+@@ -156,10 +156,35 @@
+ 
+ 
+ def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++    # One encoder pass and one jointly trained embedding table for both terms.
++    active = pos != 0
++    out = model.encode_sequence(seq)
++    features = out[active]
++    targets = pos[active]
++    if targets.numel() == 0:
++        return out.sum() * 0.0
++    positive_scores = (features * model.item_emb(targets)).sum(dim=-1)
++    negative_scores = (features * model.item_emb(neg[active])).sum(dim=-1)
++    base_loss = torch.nn.functional.softplus(negative_scores - positive_scores)
++
++    # Shared target candidates provide additional negatives at modest cost.
++    pool = torch.unique(targets)
++    if pool.numel() > 32:
++        pool = pool[torch.randperm(pool.numel(), device=pool.device)[:32]]
++    shared_scores = features @ model.item_emb(pool).transpose(0, 1)
++    with torch.no_grad():
++        # Recover all observed items in each cropped history, including masks'
++        # original targets, and exclude them from its negative candidate pool.
++        observed = torch.where(active, pos, seq)
++        allowed_by_row = ~(observed.unsqueeze(-1) == pool.view(1, 1, -1)).any(dim=1)
++        rows = active.nonzero(as_tuple=True)[0]
++        allowed = allowed_by_row[rows] & (targets.unsqueeze(1) != pool.unsqueeze(0))
++        counts = allowed.sum(dim=1)
++    extra_pairs = torch.nn.functional.softplus(shared_scores - positive_scores.unsqueeze(1))
++    extra_loss = (extra_pairs * allowed.to(extra_pairs.dtype)).sum(dim=1) / counts.clamp(min=1)
++    # Rows without an eligible shared negative retain the original objective.
++    extra_loss = torch.where(counts > 0, extra_loss, base_loss)
++    return (0.8 * base_loss + 0.2 * extra_loss).mean()
+ 
+ 
+ # Hyper-parameters

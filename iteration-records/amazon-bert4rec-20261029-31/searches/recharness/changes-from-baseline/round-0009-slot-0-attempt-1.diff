@@ -1,0 +1,122 @@
+--- corrected-baseline.py
++++ round-0009-slot-0-attempt-1/train.py
+@@ -29,7 +29,7 @@
+     if part.strip()
+ ]
+ 
+-DATA_DIR = os.environ.get("GAGC_DATA_DIR", "./input/trainval")
++DATA_DIR = os.environ['GAGC_DATA_DIR']
+ 
+ SEED = int(os.environ.get("GAGC_SEED", "42"))
+ random.seed(SEED)
+@@ -156,10 +156,15 @@
+ 
+ 
+ def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++    out = model.encode_sequence(seq)
++    mask = pos != 0
++    masked_states = out[mask]
++    targets = pos[mask] - 1
++    # Only real item IDs 1..itemnum are prediction classes.
++    logits = torch.nn.functional.linear(
++        masked_states, model.effective_item_weight()[1:model.itemnum + 1]
++    )
++    return torch.nn.functional.cross_entropy(logits / 0.8, targets, reduction="mean")
+ 
+ 
+ # Hyper-parameters
+@@ -167,8 +172,8 @@
+ HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+ NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+ NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+-DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
+-LR            = float(os.environ.get("BERT4REC_LR", "1e-3"))
++DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.1"))
++LR            = float(os.environ.get("BERT4REC_LR", "7e-4"))
+ WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
+ BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
+ NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+@@ -186,11 +191,12 @@
+         self.maxlen = maxlen
+         self.mask_token = itemnum + 1
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
++        self.register_buffer("item_input_scale", torch.ones(itemnum + 2))
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+         encoder_layer = nn.TransformerEncoderLayer(
+             d_model=hidden_units,
+             nhead=num_heads,
+-            dim_feedforward=hidden_units * 4,
++            dim_feedforward=hidden_units * 2,
+             dropout=dropout_rate,
+             activation="gelu",
+             batch_first=True,
+@@ -205,11 +211,22 @@
+             nn.init.xavier_uniform_(self.pos_emb.weight)
+             self.pos_emb.weight[0].zero_()
+ 
++    def effective_item_weight(self) -> torch.Tensor:
++        row_norm = 0.8 * math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
++        nonpadding = torch.nn.functional.normalize(
++            self.item_emb.weight[1:], p=2, dim=-1, eps=1e-12
++        ) * row_norm
++        return torch.cat((torch.zeros_like(self.item_emb.weight[:1]), nonpadding), dim=0)
++
+     def encode_sequence(self, seq: torch.Tensor) -> torch.Tensor:
+         batch, length = seq.shape
+-        pos = torch.arange(length, device=seq.device).unsqueeze(0).expand(batch, -1) + 1
+-        pos = pos * (seq != 0).long()
+-        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)
++        nonpadding = (seq != 0).long()
++        pos = nonpadding.cumsum(dim=1) * nonpadding
++        item_vectors = torch.nn.functional.embedding(
++            seq, self.effective_item_weight(), padding_idx=0
++        )
++        item_vectors = item_vectors * self.item_input_scale[seq].unsqueeze(-1)
++        x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+         safe_padding = padding.clone()
+@@ -219,8 +236,9 @@
+ 
+     def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):
+         out = self.encode_sequence(seq)
+-        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)
+-        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)
++        item_weight = self.effective_item_weight()
++        pos_scores = (out * torch.nn.functional.embedding(pos, item_weight, padding_idx=0)).sum(dim=-1)
++        neg_scores = (out * torch.nn.functional.embedding(neg, item_weight, padding_idx=0)).sum(dim=-1)
+         return pos_scores, neg_scores
+ 
+     def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:
+@@ -229,7 +247,9 @@
+         prediction_seq[:, -1] = self.mask_token
+         out = self.encode_sequence(prediction_seq)
+         user_emb = out[0, -1]
+-        cand_emb = self.item_emb(candidates)
++        cand_emb = torch.nn.functional.embedding(
++            candidates, self.effective_item_weight(), padding_idx=0
++        )
+         return torch.matmul(cand_emb, user_emb)
+ 
+ 
+@@ -248,6 +268,16 @@
+         dropout_rate=DROPOUT_RATE,
+         maxlen=MAXLEN,
+     ).to(device)
++    training_counts = np.zeros(itemnum + 2, dtype=np.float64)
++    for training_history in user_train.values():
++        np.add.at(training_counts, np.asarray(training_history, dtype=np.int64), 1.0)
++    log_counts = np.log1p(training_counts[1:itemnum + 1])
++    standardized_counts = (log_counts - log_counts.mean()) / max(float(log_counts.std()), 1e-6)
++    input_scales = 1.0 + 0.08 * np.tanh(standardized_counts)
++    with torch.no_grad():
++        model.item_input_scale[1:itemnum + 1].copy_(
++            torch.as_tensor(input_scales, dtype=model.item_input_scale.dtype, device=device)
++        )
+     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+ 
+     working_dir = os.path.join(os.path.dirname(__file__), "working")

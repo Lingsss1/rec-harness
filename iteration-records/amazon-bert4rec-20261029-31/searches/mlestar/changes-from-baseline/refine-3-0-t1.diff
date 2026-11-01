@@ -1,0 +1,50 @@
+--- corrected-baseline.py
++++ refine-3-0-t1/train.py
+@@ -156,10 +156,43 @@
+ 
+ 
+ def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++    # Encode once; only masked positions contribute supervision.
++    features = model.encode_sequence(seq)
++    active = pos != 0
++    hidden = features[active]
++    targets = pos[active]
++    paired_negatives = neg[active]
++    if targets.numel() == 0:
++        return features.sum() * 0.0
++
++    # Left-padded histories end at the final column. Emphasize terminal cloze
++    # targets to better match appended-mask inference, retaining interior cloze.
++    row_indices, column_indices = active.nonzero(as_tuple=True)
++    weights = 1.0 + (column_indices == seq.size(1) - 1).to(hidden.dtype)
++    weight_sum = weights.sum()
++
++    positive_scores = (hidden * model.item_emb(targets)).sum(dim=-1)
++    negative_scores = (hidden * model.item_emb(paired_negatives)).sum(dim=-1)
++    pairwise_losses = torch.nn.functional.softplus(negative_scores - positive_scores)
++    pairwise_loss = (weights * pairwise_losses).sum() / weight_sum
++
++    # Reuse sampled negatives without fitting any additional scoring model.
++    pool = torch.unique(paired_negatives)
++    if pool.numel() > 64:
++        pool = pool[torch.randperm(pool.numel(), device=pool.device)[:64]]
++    pooled_scores = hidden @ model.item_emb(pool).transpose(0, 1)
++
++    # Exclude observed items, including the other masked targets in each row.
++    known = torch.where(active, pos, seq)
++    observed = (known.unsqueeze(-1) == pool.view(1, 1, -1)).any(dim=1)
++    invalid = observed[row_indices] | (targets.unsqueeze(1) == pool.unsqueeze(0))
++    # The paired negative already appears explicitly in the softmax denominator.
++    invalid = invalid | (paired_negatives.unsqueeze(1) == pool.unsqueeze(0))
++    pooled_scores = pooled_scores.masked_fill(invalid, float("-inf"))
++    logits = torch.cat((positive_scores.unsqueeze(1), negative_scores.unsqueeze(1), pooled_scores), dim=1)
++    sampled_softmax_losses = torch.logsumexp(logits, dim=1) - positive_scores
++    sampled_softmax_loss = (weights * sampled_softmax_losses).sum() / weight_sum
++    return 0.5 * pairwise_loss + 0.5 * sampled_softmax_loss
+ 
+ 
+ # Hyper-parameters

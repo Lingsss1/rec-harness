@@ -1,0 +1,437 @@
+--- corrected-baseline.py
++++ candidate-gpu1-894631ceef4db9f93e288bfe/train.py
+@@ -4,6 +4,7 @@
+ hyper-parameter profile across datasets. The generated predict.py routes by the
+ optional dataset_name keyword used by the RecHarness Amazon Reviews harness.
+ """
++
+ from __future__ import annotations
+ 
+ import json
+@@ -29,9 +30,11 @@
+     if part.strip()
+ ]
+ 
+-DATA_DIR = os.environ.get("GAGC_DATA_DIR", "./input/trainval")
+-
+-SEED = int(os.environ.get("GAGC_SEED", "42"))
++### >>> Self_EvolveRec-BLOCK-START: Fixed benchmark data boundary and training seed
++DATA_DIR = os.environ["GAGC_DATA_DIR"]
++DATASETS = list(DEFAULT_DATASETS)
++SEED = 42
++### <<< Self_EvolveRec-BLOCK-END
+ random.seed(SEED)
+ np.random.seed(SEED)
+ torch.manual_seed(SEED)
+@@ -78,50 +81,101 @@
+     return user_train, user_valid, itemnum
+ 
+ 
+-def sample_batch(user_train: dict[int, list[int]], itemnum: int, batch_size: int, maxlen: int):
+-    # Cloze training: masked targets are not exposed as unmasked shifted inputs.
+-    users = [u for u, items in user_train.items() if len(items) >= 2]
+-    if not users:
+-        raise RuntimeError("no users with at least two training interactions")
+-    batch_seq, batch_pos, batch_neg = [], [], []
+-    for _ in range(batch_size):
+-        history = user_train[random.choice(users)]
+-        items = history[-maxlen:]
+-        seq = np.zeros(maxlen, dtype=np.int64)
+-        pos = np.zeros(maxlen, dtype=np.int64)
+-        neg = np.zeros(maxlen, dtype=np.int64)
+-        seq[-len(items):] = items
+-        eligible = list(range(maxlen-len(items), maxlen))
+-        selected = [i for i in eligible if random.random() < 0.2]
+-        if not selected:
+-            selected = [random.choice(eligible)]
+-        if random.random() < 0.5 and maxlen-1 not in selected:
+-            selected.append(maxlen-1)
+-        interacted = set(history)
+-        if len(interacted) >= itemnum:
+-            raise RuntimeError("no unobserved negative item available")
+-        for i in selected:
+-            pos[i] = seq[i]
+-            seq[i] = itemnum + 1  # reserved mask token, never a recommendation
+-            item = random.randint(1, itemnum)
+-            while item in interacted:
+-                item = random.randint(1, itemnum)
+-            neg[i] = item
+-        batch_seq.append(seq)
+-        batch_pos.append(pos)
+-        batch_neg.append(neg)
+-    return np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg)
+-
+-
+-def _history_to_tensor(history: list[int], maxlen: int, device: torch.device) -> torch.Tensor:
++### >>> Self_EvolveRec-BLOCK-START: Restore family-specific masked sampling
++# DEBUG: sample_batch was undefined. Preserve its three-array default return
++# contract and expose training histories only when explicitly requested.
++def sample_batch(user_train, itemnum, batch_size, maxlen, return_histories=False):
++    if maxlen < 2:
++        raise ValueError("Terminal-prefix training requires maxlen >= 2")
++    eligible = [u for u, history in user_train.items() if len(history) >= 2]
++    if not eligible:
++        raise ValueError("No training histories contain two or more interactions")
++    sequence = np.zeros((batch_size, maxlen), dtype=np.int64)
++    positive = np.zeros_like(sequence)
++    negative = np.zeros_like(sequence)
++    branch = np.zeros_like(sequence, dtype=np.int8)
++    histories = []
++    for row in range(batch_size):
++        history = user_train[random.choice(eligible)]
++        histories.append(history)
++        window = np.asarray(history[-maxlen:], dtype=np.int64)
++        offset = maxlen - len(window)
++        sequence[row, offset:] = window
++        selected = np.flatnonzero(np.random.random(len(window)) < 0.15)
++        if not len(selected):
++            selected = np.asarray([random.randrange(len(window))])
++        forbidden = set(history)
++        # DEBUG: Diagnostic negatives exclude all observed training positives.
++        # Zero marks unavailable negatives for saturated item vocabularies.
++        available = None
++        for index in selected:
++            position = offset + int(index)
++            positive[row, position] = int(window[index])
++            sequence[row, position] = itemnum + 1
++            branch[row, position] = 1
++            if len(forbidden) < itemnum:
++                candidate = 0
++                for _ in range(64):
++                    candidate = random.randint(1, itemnum)
++                    if candidate not in forbidden:
++                        break
++                else:
++                    if available is None:
++                        available = [
++                            i for i in range(1, itemnum + 1) if i not in forbidden
++                        ]
++                    candidate = random.choice(available)
++                negative[row, position] = candidate
++    # DEBUG: The supplied source contains no recoverable corruption policy.
++    # Explicitly use 15% selection (at least one target), MASK-only replacement;
++    # unchanged target identities are never supervised in bidirectional inputs.
++    sample_batch.last_bookkeeping = {
++        "sequence": sequence.copy(),
++        "positive": positive.copy(),
++        "negative": negative.copy(),
++        "corruption_branch": branch.copy(),
++    }
++    result = (sequence, positive, negative)
++    return result + (histories,) if return_histories else result
++
++
++def terminal_batch(histories, itemnum, maxlen):
++    sequence = np.zeros((len(histories), maxlen), dtype=np.int64)
++    positive = np.zeros_like(sequence)
++    for row, history in enumerate(histories):
++        count = len(history) - 1
++        recent_count = (count + 3) // 4
++        # DEBUG: Equal-probability uniform/recent branches intentionally overlap.
++        lower = 1 if random.random() < 0.5 else len(history) - recent_count
++        target_index = random.randrange(lower, len(history))
++        context = history[max(0, target_index - (maxlen - 1)) : target_index]
++        values = context + [itemnum + 1]
++        sequence[row, -len(values) :] = values
++        positive[row, -1] = history[target_index]
++    return sequence, positive
++
++
++### <<< Self_EvolveRec-BLOCK-END
++
++
++def _history_to_tensor(
++    history: list[int], maxlen: int, device: torch.device
++) -> torch.Tensor:
+     seq_arr = np.zeros(maxlen, dtype=np.int64)
+     for i, item in enumerate(reversed(history[-maxlen:])):
+         seq_arr[maxlen - 1 - i] = item
+     return torch.tensor([seq_arr], dtype=torch.long, device=device)
+ 
+ 
+-def evaluate_val(model: nn.Module, user_train: dict[int, list[int]], user_valid: dict[int, list[int]],
+-                 itemnum: int, device: torch.device, maxlen: int, num_users: int = 200) -> dict[str, float]:
++def evaluate_val(
++    model: nn.Module,
++    user_train: dict[int, list[int]],
++    user_valid: dict[int, list[int]],
++    itemnum: int,
++    device: torch.device,
++    maxlen: int,
++    num_users: int = 200,
++) -> dict[str, float]:
+     val_users = [u for u in user_valid if u in user_train and user_valid[u]]
+     if len(val_users) > num_users:
+         rng = random.Random(SEED)
+@@ -152,34 +206,75 @@
+             ndcg20 += (1.0 / math.log2(rank + 2)) if rank < 20 else 0.0
+     n = float(len(val_users))
+     model.train()
+-    return {"HR@10": hr10 / n, "HR@20": hr20 / n, "NDCG@10": ndcg10 / n, "NDCG@20": ndcg20 / n}
+-
+-
+-def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++    return {
++        "HR@10": hr10 / n,
++        "HR@20": hr20 / n,
++        "NDCG@10": ndcg10 / n,
++        "NDCG@20": ndcg20 / n,
++    }
++
++
++# DEBUG: Both objectives use exact real-item full-softmax CE. Gather supervised
++# states first; checkpoint projection chunks to avoid retaining catalog logits.
++def masked_catalog_loss(model, seq, positive, target_quota=None):
++    from torch.utils.checkpoint import checkpoint
++    import torch.nn.functional as F
++
++    selected = torch.nonzero(positive.reshape(-1) != 0, as_tuple=False).flatten()
++    if selected.numel() == 0:
++        raise ValueError("Masked training batch has no supervised targets")
++    if target_quota is not None:
++        if selected.numel() < target_quota:
++            raise ValueError("Insufficient targets for the configured target quota")
++        order = torch.randperm(selected.numel(), device=selected.device)
++        selected = selected[order[:target_quota]]
++    features = model.encode_sequence(seq).reshape(-1, model.hidden_units)[selected]
++    labels = positive.reshape(-1)[selected] - 1
++    weights = model.item_emb.weight[1 : model.itemnum + 1]
++
++    def chunk_loss(states, targets, catalog):
++        return F.cross_entropy(states @ catalog.t(), targets, reduction="sum")
++
++    loss = features.new_zeros(())
++    for start in range(0, selected.numel(), 64):
++        loss = loss + checkpoint(
++            chunk_loss,
++            features[start : start + 64],
++            labels[start : start + 64],
++            weights,
++            use_reentrant=False,
++        )
++    return loss / selected.numel(), int(selected.numel())
+ 
+ 
+ # Hyper-parameters
+-MAXLEN        = int(os.environ.get("BERT4REC_MAXLEN", "128"))
+-HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+-NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+-NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+-DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
+-LR            = float(os.environ.get("BERT4REC_LR", "1e-3"))
+-WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
+-BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
+-NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+-NUM_EPOCHS    = int(os.environ.get("BERT4REC_EPOCHS", "200"))
+-EVAL_EVERY    = int(os.environ.get("BERT4REC_EVAL_EVERY", "5"))
+-PATIENCE      = int(os.environ.get("BERT4REC_PATIENCE", "20"))
++MAXLEN = int(os.environ.get("BERT4REC_MAXLEN", "128"))
++HIDDEN_UNITS = int(os.environ.get("BERT4REC_HIDDEN", "64"))
++NUM_BLOCKS = int(os.environ.get("BERT4REC_BLOCKS", "2"))
++NUM_HEADS = int(os.environ.get("BERT4REC_HEADS", "2"))
++DROPOUT_RATE = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
++LR = float(os.environ.get("BERT4REC_LR", "1e-3"))
++WEIGHT_DECAY = float(os.environ.get("BERT4REC_WD", "0.0"))
++BATCH_SIZE = int(os.environ.get("BERT4REC_BATCH", "128"))
++# DEBUG: Keep the prescribed update ceiling and batches per epoch fixed.
++NUM_BATCHES = 200
++NUM_EPOCHS = min(200, int(os.environ.get("BERT4REC_EPOCHS", "200")))
++if NUM_EPOCHS < 1:
++    raise ValueError("BERT4REC_EPOCHS must be positive")
++EVAL_EVERY = int(os.environ.get("BERT4REC_EVAL_EVERY", "5"))
++PATIENCE = int(os.environ.get("BERT4REC_PATIENCE", "20"))
+ 
+ 
+ class BERT4RecModel(nn.Module):
+-    def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 2,
+-                 num_heads: int = 2, dropout_rate: float = 0.2, maxlen: int = 128):
++    def __init__(
++        self,
++        itemnum: int,
++        hidden_units: int = 64,
++        num_blocks: int = 2,
++        num_heads: int = 2,
++        dropout_rate: float = 0.2,
++        maxlen: int = 128,
++    ):
+         super().__init__()
+         self.itemnum = itemnum
+         self.hidden_units = hidden_units
+@@ -209,7 +304,7 @@
+         batch, length = seq.shape
+         pos = torch.arange(length, device=seq.device).unsqueeze(0).expand(batch, -1) + 1
+         pos = pos * (seq != 0).long()
+-        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)
++        x = self.item_emb(seq) * (self.hidden_units**0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+         safe_padding = padding.clone()
+@@ -223,7 +318,9 @@
+         neg_scores = (out * self.item_emb(neg)).sum(dim=-1)
+         return pos_scores, neg_scores
+ 
+-    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:
++    def score_candidates(
++        self, seq: torch.Tensor, candidates: torch.Tensor
++    ) -> torch.Tensor:
+         prediction_seq = torch.zeros_like(seq)
+         prediction_seq[:, :-1] = seq[:, 1:]
+         prediction_seq[:, -1] = self.mask_token
+@@ -231,7 +328,6 @@
+         user_emb = out[0, -1]
+         cand_emb = self.item_emb(candidates)
+         return torch.matmul(cand_emb, user_emb)
+-
+ 
+ 
+ def train_one_dataset(dataset_name: str, device: torch.device, data_dir: str) -> float:
+@@ -254,22 +350,89 @@
+     os.makedirs(working_dir, exist_ok=True)
+     ckpt_path = os.path.join(working_dir, f"{dataset_name}_model.pt")
+ 
++    # DEBUG: Execute the proposed two-view constant-mixture experiment rather
++    # than leaving terminal-prefix construction unreachable. This is an explicit
++    # full-softmax variant; baseline equivalence or validation gains are unmeasured.
++    import time
++
++    target_quota = BATCH_SIZE
++    updates = reconstruction_targets = terminal_examples = 0
++    started = time.perf_counter()
++    gpu_start = gpu_end = None
++    if device.type == "cuda":
++        gpu_start = torch.cuda.Event(enable_timing=True)
++        gpu_end = torch.cuda.Event(enable_timing=True)
++        gpu_start.record()
++    print(
++        f"  [{dataset_name}] objective=full_softmax_constant_mixture "
++        f"terminal_weight=0.5 endpoint_policy=equal_uniform_recent "
++        f"reconstruction_selection=0.15 replacement=MASK_only "
++        f"minimum_targets_per_window=1 eligible_history_length>=2 "
++        f"targets_per_objective_per_update={target_quota} "
++        f"projection_chunk=64 epochs={NUM_EPOCHS} "
++        f"batches_per_epoch={NUM_BATCHES} eval_every={EVAL_EVERY} "
++        f"patience={PATIENCE} seed={SEED}",
++        flush=True,
++    )
+     best_hr10 = -1.0
+     best_epoch = 0
+     for epoch in range(1, NUM_EPOCHS + 1):
+         model.train()
+         total_loss = 0.0
+         for _ in range(NUM_BATCHES):
+-            seq, pos, neg = sample_batch(user_train, itemnum, BATCH_SIZE, MAXLEN)
+-            seq_t = torch.tensor(seq, dtype=torch.long, device=device)
+-            pos_t = torch.tensor(pos, dtype=torch.long, device=device)
+-            neg_t = torch.tensor(neg, dtype=torch.long, device=device)
+-            loss = bpr_sequence_loss(model, seq_t, pos_t, neg_t)
+-            optimizer.zero_grad()
+-            loss.backward()
++            seq, pos, neg, histories = sample_batch(
++                user_train, itemnum, BATCH_SIZE, MAXLEN, return_histories=True
++            )
++            terminal_seq, terminal_pos = terminal_batch(histories, itemnum, MAXLEN)
++            seq_t = torch.as_tensor(seq, dtype=torch.long, device=device)
++            pos_t = torch.as_tensor(pos, dtype=torch.long, device=device)
++            terminal_seq_t = torch.as_tensor(
++                terminal_seq, dtype=torch.long, device=device
++            )
++            terminal_pos_t = torch.as_tensor(
++                terminal_pos, dtype=torch.long, device=device
++            )
++            optimizer.zero_grad(set_to_none=True)
++            reconstruction_loss, count = masked_catalog_loss(
++                model, seq_t, pos_t, target_quota
++            )
++            # DEBUG: Backpropagate the two views separately to free each graph;
++            # their gradients implement the same jointly trained 0.5/0.5 loss.
++            reconstruction_value = float(reconstruction_loss.detach())
++            (0.5 * reconstruction_loss).backward()
++            terminal_loss, terminal_count = masked_catalog_loss(
++                model, terminal_seq_t, terminal_pos_t, target_quota
++            )
++            terminal_value = float(terminal_loss.detach())
++            (0.5 * terminal_loss).backward()
+             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+             optimizer.step()
+-            total_loss += float(loss.item())
++            total_loss += 0.5 * (reconstruction_value + terminal_value)
++            updates += 1
++            reconstruction_targets += count
++            terminal_examples += terminal_count
++        if gpu_end is not None:
++            gpu_end.record()
++            gpu_end.synchronize()
++            gpu_seconds = gpu_start.elapsed_time(gpu_end) / 1000.0
++        else:
++            gpu_seconds = None
++        print(
++            json.dumps(
++                {
++                    "dataset": dataset_name,
++                    "epoch": epoch,
++                    "optimizer_updates": updates,
++                    "reconstruction_targets": reconstruction_targets,
++                    "terminal_examples": terminal_examples,
++                    "sequence_presentations": updates * BATCH_SIZE * 2,
++                    "encoder_token_slots": updates * BATCH_SIZE * MAXLEN * 2,
++                    "wall_seconds": time.perf_counter() - started,
++                    "cuda_event_elapsed_seconds": gpu_seconds,
++                }
++            ),
++            flush=True,
++        )
+ 
+         avg_loss = total_loss / max(NUM_BATCHES, 1)
+         if epoch % EVAL_EVERY == 0 or epoch == NUM_EPOCHS:
+@@ -289,22 +452,31 @@
+                 print(f"  [{dataset_name}] Early stopping at epoch {epoch}", flush=True)
+                 break
+         elif epoch % 10 == 0:
+-            print(f"  [{dataset_name}] epoch {epoch:3d}/{NUM_EPOCHS}  loss={avg_loss:.4f}", flush=True)
++            print(
++                f"  [{dataset_name}] epoch {epoch:3d}/{NUM_EPOCHS}  loss={avg_loss:.4f}",
++                flush=True,
++            )
+ 
+     if not os.path.exists(ckpt_path):
+         torch.save(model.state_dict(), ckpt_path)
+ 
+     meta_path = os.path.join(working_dir, f"{dataset_name}_meta.pkl")
+     with open(meta_path, "wb") as f:
+-        pickle.dump({
+-            "itemnum": itemnum,
+-            "maxlen": MAXLEN,
+-            "hidden_units": HIDDEN_UNITS,
+-            "num_blocks": NUM_BLOCKS,
+-            "num_heads": NUM_HEADS,
+-            "dropout_rate": DROPOUT_RATE,
+-        }, f)
+-    print(f"  [{dataset_name}] Best val HR@10={max(best_hr10, 0.0):.4f}  ckpt={ckpt_path}", flush=True)
++        pickle.dump(
++            {
++                "itemnum": itemnum,
++                "maxlen": MAXLEN,
++                "hidden_units": HIDDEN_UNITS,
++                "num_blocks": NUM_BLOCKS,
++                "num_heads": NUM_HEADS,
++                "dropout_rate": DROPOUT_RATE,
++            },
++            f,
++        )
++    print(
++        f"  [{dataset_name}] Best val HR@10={max(best_hr10, 0.0):.4f}  ckpt={ckpt_path}",
++        flush=True,
++    )
+     return max(best_hr10, 0.0)
+ 
+ 
+@@ -415,3 +587,5 @@
+ 
+ if __name__ == "__main__":
+     main()
++
++

@@ -1,0 +1,45 @@
+--- e13a5810a89dd20abd19b8b3bb58c028fcacfa5189315c3e0f3af580468d3d55.py
++++ 3c937e38547bd2a49b628addb9eff178729b5be6ba96e38c516021a1702197f6.py
+@@ -190,6 +190,8 @@
+         self.hidden_units = hidden_units
+         self.maxlen = maxlen
+         self.mask_token = itemnum + 1
++        self.register_buffer("input_scale", torch.ones(itemnum + 2))
++        self.input_scale[0] = 0.0
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+         encoder_layer = nn.TransformerEncoderLayer(
+@@ -224,7 +226,7 @@
+         item_vectors = torch.nn.functional.embedding(
+             seq, self.effective_item_weight(), padding_idx=0
+         )
+-        x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)
++        x = item_vectors * self.input_scale[seq].unsqueeze(-1) * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+         safe_padding = padding.clone()
+@@ -266,6 +268,24 @@
+         dropout_rate=DROPOUT_RATE,
+         maxlen=MAXLEN,
+     ).to(device)
++    item_counts = np.zeros(itemnum + 2, dtype=np.int64)
++    for history in user_train.values():
++        np.add.at(item_counts, np.asarray(history, dtype=np.int64), 1)
++    log_frequency = np.log1p(item_counts[1:itemnum + 1].astype(np.float64))
++    _, inverse, tie_counts = np.unique(
++        log_frequency, return_inverse=True, return_counts=True
++    )
++    first_rank = np.cumsum(tie_counts) - tie_counts
++    midpoint_rank = first_rank + (tie_counts - 1) / 2.0
++    if itemnum > 1:
++        percentile = midpoint_rank[inverse] / float(itemnum - 1)
++    else:
++        percentile = np.full(itemnum, 0.5, dtype=np.float64)
++    input_scale = np.ones(itemnum + 2, dtype=np.float32)
++    input_scale[0] = 0.0
++    input_scale[1:itemnum + 1] = (0.75 + 0.5 * percentile).astype(np.float32)
++    with torch.no_grad():
++        model.input_scale.copy_(torch.as_tensor(input_scale, device=device))
+     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+ 
+     working_dir = os.path.join(os.path.dirname(__file__), "working")

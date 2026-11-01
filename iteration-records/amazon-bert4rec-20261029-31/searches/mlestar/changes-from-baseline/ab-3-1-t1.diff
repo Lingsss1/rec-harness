@@ -1,0 +1,89 @@
+--- corrected-baseline.py
++++ ab-3-1-t1/train.py
+@@ -1,8 +1,6 @@
+ """Per-dataset BERT4Rec baseline for Amazon Reviews.
+ 
+-Trains one independent BERT4Rec checkpoint per dataset while sharing one default
+-hyper-parameter profile across datasets. The generated predict.py routes by the
+-optional dataset_name keyword used by the RecHarness Amazon Reviews harness.
++Ablation: remove gradient clipping from training.
+ """
+ from __future__ import annotations
+ 
+@@ -29,7 +27,7 @@
+     if part.strip()
+ ]
+ 
+-DATA_DIR = os.environ.get("GAGC_DATA_DIR", "./input/trainval")
++DATA_DIR = os.environ['GAGC_DATA_DIR']
+ 
+ SEED = int(os.environ.get("GAGC_SEED", "42"))
+ random.seed(SEED)
+@@ -102,7 +100,7 @@
+             raise RuntimeError("no unobserved negative item available")
+         for i in selected:
+             pos[i] = seq[i]
+-            seq[i] = itemnum + 1  # reserved mask token, never a recommendation
++            seq[i] = itemnum + 1
+             item = random.randint(1, itemnum)
+             while item in interacted:
+                 item = random.randint(1, itemnum)
+@@ -156,13 +154,34 @@
+ 
+ 
+ def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
+-
+-
+-# Hyper-parameters
++    features = model.encode_sequence(seq)
++    active = pos != 0
++    hidden = features[active]
++    targets = pos[active]
++    paired_negatives = neg[active]
++    if targets.numel() == 0:
++        return features.sum() * 0.0
++
++    positive_scores = (hidden * model.item_emb(targets)).sum(dim=-1)
++    negative_scores = (hidden * model.item_emb(paired_negatives)).sum(dim=-1)
++    pairwise_loss = torch.nn.functional.softplus(negative_scores - positive_scores).mean()
++
++    pool = torch.unique(paired_negatives)
++    if pool.numel() > 64:
++        pool = pool[torch.randperm(pool.numel(), device=pool.device)[:64]]
++    pooled_scores = hidden @ model.item_emb(pool).transpose(0, 1)
++
++    known = torch.where(active, pos, seq)
++    observed = (known.unsqueeze(-1) == pool.view(1, 1, -1)).any(dim=1)
++    row_indices = active.nonzero(as_tuple=True)[0]
++    invalid = observed[row_indices] | (targets.unsqueeze(1) == pool.unsqueeze(0))
++    invalid = invalid | (paired_negatives.unsqueeze(1) == pool.unsqueeze(0))
++    pooled_scores = pooled_scores.masked_fill(invalid, float("-inf"))
++    logits = torch.cat((positive_scores.unsqueeze(1), negative_scores.unsqueeze(1), pooled_scores), dim=1)
++    sampled_softmax_loss = (torch.logsumexp(logits, dim=1) - positive_scores).mean()
++    return 0.5 * pairwise_loss + 0.5 * sampled_softmax_loss
++
++
+ MAXLEN        = int(os.environ.get("BERT4REC_MAXLEN", "128"))
+ HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+ NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+@@ -233,7 +252,6 @@
+         return torch.matmul(cand_emb, user_emb)
+ 
+ 
+-
+ def train_one_dataset(dataset_name: str, device: torch.device, data_dir: str) -> float:
+     user_train, user_valid, itemnum = load_dataset(dataset_name, data_dir)
+     print(f"  [{dataset_name}] users={len(user_train)}  items={itemnum}", flush=True)
+@@ -267,7 +285,7 @@
+             loss = bpr_sequence_loss(model, seq_t, pos_t, neg_t)
+             optimizer.zero_grad()
+             loss.backward()
+-            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
++            # Ablation: no gradient clipping before the optimizer step.
+             optimizer.step()
+             total_loss += float(loss.item())
+ 

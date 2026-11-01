@@ -1,0 +1,52 @@
+--- corrected-baseline.py
++++ ab-3-0-t1/train.py
+@@ -29,7 +29,7 @@
+     if part.strip()
+ ]
+ 
+-DATA_DIR = os.environ.get("GAGC_DATA_DIR", "./input/trainval")
++DATA_DIR = os.environ['GAGC_DATA_DIR']
+ 
+ SEED = int(os.environ.get("GAGC_SEED", "42"))
+ random.seed(SEED)
+@@ -156,10 +156,36 @@
+ 
+ 
+ def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++    # Encode once; only masked positions contribute supervision.
++    features = model.encode_sequence(seq)
++    active = pos != 0
++    hidden = features[active]
++    targets = pos[active]
++    paired_negatives = neg[active]
++    if targets.numel() == 0:
++        return features.sum() * 0.0
++
++    positive_scores = (hidden * model.item_emb(targets)).sum(dim=-1)
++    negative_scores = (hidden * model.item_emb(paired_negatives)).sum(dim=-1)
++
++    # Reuse sampled negatives without fitting any additional scoring model.
++    pool = torch.unique(paired_negatives)
++    if pool.numel() > 64:
++        pool = pool[torch.randperm(pool.numel(), device=pool.device)[:64]]
++    pooled_scores = hidden @ model.item_emb(pool).transpose(0, 1)
++
++    # Exclude observed items, including the other masked targets in each row.
++    known = torch.where(active, pos, seq)
++    observed = (known.unsqueeze(-1) == pool.view(1, 1, -1)).any(dim=1)
++    row_indices = active.nonzero(as_tuple=True)[0]
++    invalid = observed[row_indices] | (targets.unsqueeze(1) == pool.unsqueeze(0))
++    # The paired negative already appears explicitly in the softmax denominator.
++    invalid = invalid | (paired_negatives.unsqueeze(1) == pool.unsqueeze(0))
++    pooled_scores = pooled_scores.masked_fill(invalid, float("-inf"))
++    logits = torch.cat((positive_scores.unsqueeze(1), negative_scores.unsqueeze(1), pooled_scores), dim=1)
++    sampled_softmax_loss = (torch.logsumexp(logits, dim=1) - positive_scores).mean()
++    # Ablation: remove only the pairwise BPR term; preserve the remaining weight.
++    return 0.5 * sampled_softmax_loss
+ 
+ 
+ # Hyper-parameters

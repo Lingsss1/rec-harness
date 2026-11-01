@@ -1,0 +1,57 @@
+--- d45776a263080fb5ef5e81bdefadefff5b6115803b6fded49e8152fdc0bd5644.py
++++ f6a1339401f7e98460d352477aea168de6e80dab43e3d8075b567fcfbc2786de.py
+@@ -164,7 +164,12 @@
+     logits = torch.nn.functional.linear(
+         masked_states, model.effective_item_weight()[1:model.itemnum + 1]
+     )
+-    return torch.nn.functional.cross_entropy(logits, targets, reduction="mean")
++    ce_loss = torch.nn.functional.cross_entropy(logits, targets, reduction="mean")
++    positive_scores = logits.gather(1, targets.unsqueeze(1)).squeeze(1)
++    negative_targets = neg[mask] - 1
++    negative_scores = logits.gather(1, negative_targets.unsqueeze(1)).squeeze(1)
++    ranking_loss = torch.nn.functional.softplus(negative_scores - positive_scores).mean()
++    return ce_loss + 0.1 * ranking_loss
+ 
+ 
+ # Hyper-parameters
+@@ -190,6 +195,7 @@
+         self.hidden_units = hidden_units
+         self.maxlen = maxlen
+         self.mask_token = itemnum + 1
++        self.register_buffer("item_input_scale", torch.ones(itemnum + 2))
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+         encoder_layer = nn.TransformerEncoderLayer(
+@@ -224,6 +230,7 @@
+         item_vectors = torch.nn.functional.embedding(
+             seq, self.effective_item_weight(), padding_idx=0
+         )
++        item_vectors = item_vectors * self.item_input_scale[seq].unsqueeze(-1)
+         x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+@@ -266,6 +273,24 @@
+         dropout_rate=DROPOUT_RATE,
+         maxlen=MAXLEN,
+     ).to(device)
++    training_counts = np.bincount(
++        np.fromiter(
++            (item for history in user_train.values() for item in history),
++            dtype=np.int64,
++        ),
++        minlength=itemnum + 2,
++    )
++    with torch.no_grad():
++        log_counts = torch.as_tensor(
++            np.log1p(training_counts[1:itemnum + 1]),
++            dtype=model.item_input_scale.dtype,
++            device=device,
++        )
++        count_mean = log_counts.mean()
++        count_std = log_counts.std(unbiased=False).clamp_min(1e-6)
++        model.item_input_scale[1:itemnum + 1].copy_(
++            1.0 + 0.03 * torch.tanh((count_mean - log_counts) / count_std)
++        )
+     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+ 
+     working_dir = os.path.join(os.path.dirname(__file__), "working")

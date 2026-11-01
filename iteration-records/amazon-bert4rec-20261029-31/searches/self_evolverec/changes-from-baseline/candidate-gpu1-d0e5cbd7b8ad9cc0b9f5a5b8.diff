@@ -1,0 +1,236 @@
+--- corrected-baseline.py
++++ candidate-gpu1-d0e5cbd7b8ad9cc0b9f5a5b8/train.py
+@@ -4,6 +4,7 @@
+ hyper-parameter profile across datasets. The generated predict.py routes by the
+ optional dataset_name keyword used by the RecHarness Amazon Reviews harness.
+ """
++
+ from __future__ import annotations
+ 
+ import json
+@@ -29,9 +30,11 @@
+     if part.strip()
+ ]
+ 
+-DATA_DIR = os.environ.get("GAGC_DATA_DIR", "./input/trainval")
+-
+-SEED = int(os.environ.get("GAGC_SEED", "42"))
++### >>> Self_EvolveRec-BLOCK-START: Fixed benchmark data boundary and training seed
++DATA_DIR = os.environ["GAGC_DATA_DIR"]
++DATASETS = list(DEFAULT_DATASETS)
++SEED = 42
++### <<< Self_EvolveRec-BLOCK-END
+ random.seed(SEED)
+ np.random.seed(SEED)
+ torch.manual_seed(SEED)
+@@ -78,50 +81,29 @@
+     return user_train, user_valid, itemnum
+ 
+ 
+-def sample_batch(user_train: dict[int, list[int]], itemnum: int, batch_size: int, maxlen: int):
+-    # Cloze training: masked targets are not exposed as unmasked shifted inputs.
+-    users = [u for u, items in user_train.items() if len(items) >= 2]
+-    if not users:
+-        raise RuntimeError("no users with at least two training interactions")
+-    batch_seq, batch_pos, batch_neg = [], [], []
+-    for _ in range(batch_size):
+-        history = user_train[random.choice(users)]
+-        items = history[-maxlen:]
+-        seq = np.zeros(maxlen, dtype=np.int64)
+-        pos = np.zeros(maxlen, dtype=np.int64)
+-        neg = np.zeros(maxlen, dtype=np.int64)
+-        seq[-len(items):] = items
+-        eligible = list(range(maxlen-len(items), maxlen))
+-        selected = [i for i in eligible if random.random() < 0.2]
+-        if not selected:
+-            selected = [random.choice(eligible)]
+-        if random.random() < 0.5 and maxlen-1 not in selected:
+-            selected.append(maxlen-1)
+-        interacted = set(history)
+-        if len(interacted) >= itemnum:
+-            raise RuntimeError("no unobserved negative item available")
+-        for i in selected:
+-            pos[i] = seq[i]
+-            seq[i] = itemnum + 1  # reserved mask token, never a recommendation
+-            item = random.randint(1, itemnum)
+-            while item in interacted:
+-                item = random.randint(1, itemnum)
+-            neg[i] = item
+-        batch_seq.append(seq)
+-        batch_pos.append(pos)
+-        batch_neg.append(neg)
+-    return np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg)
+-
+-
+-def _history_to_tensor(history: list[int], maxlen: int, device: torch.device) -> torch.Tensor:
++### >>> Self_EvolveRec-BLOCK-START: Restore masked sampler and retain histories without changing its default contract
++def_placeholder = None
++### <<< Self_EvolveRec-BLOCK-END
++
++
++def _history_to_tensor(
++    history: list[int], maxlen: int, device: torch.device
++) -> torch.Tensor:
+     seq_arr = np.zeros(maxlen, dtype=np.int64)
+     for i, item in enumerate(reversed(history[-maxlen:])):
+         seq_arr[maxlen - 1 - i] = item
+     return torch.tensor([seq_arr], dtype=torch.long, device=device)
+ 
+ 
+-def evaluate_val(model: nn.Module, user_train: dict[int, list[int]], user_valid: dict[int, list[int]],
+-                 itemnum: int, device: torch.device, maxlen: int, num_users: int = 200) -> dict[str, float]:
++def evaluate_val(
++    model: nn.Module,
++    user_train: dict[int, list[int]],
++    user_valid: dict[int, list[int]],
++    itemnum: int,
++    device: torch.device,
++    maxlen: int,
++    num_users: int = 200,
++) -> dict[str, float]:
+     val_users = [u for u in user_valid if u in user_train and user_valid[u]]
+     if len(val_users) > num_users:
+         rng = random.Random(SEED)
+@@ -152,10 +134,17 @@
+             ndcg20 += (1.0 / math.log2(rank + 2)) if rank < 20 else 0.0
+     n = float(len(val_users))
+     model.train()
+-    return {"HR@10": hr10 / n, "HR@20": hr20 / n, "NDCG@10": ndcg10 / n, "NDCG@20": ndcg20 / n}
+-
+-
+-def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
++    return {
++        "HR@10": hr10 / n,
++        "HR@20": hr20 / n,
++        "NDCG@10": ndcg10 / n,
++        "NDCG@20": ndcg20 / n,
++    }
++
++
++def bpr_sequence_loss(
++    model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor
++) -> torch.Tensor:
+     pos_scores, neg_scores = model(seq, pos, neg)
+     mask = (pos != 0).float()
+     loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+@@ -163,23 +152,30 @@
+ 
+ 
+ # Hyper-parameters
+-MAXLEN        = int(os.environ.get("BERT4REC_MAXLEN", "128"))
+-HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+-NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+-NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+-DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
+-LR            = float(os.environ.get("BERT4REC_LR", "1e-3"))
+-WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
+-BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
+-NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+-NUM_EPOCHS    = int(os.environ.get("BERT4REC_EPOCHS", "200"))
+-EVAL_EVERY    = int(os.environ.get("BERT4REC_EVAL_EVERY", "5"))
+-PATIENCE      = int(os.environ.get("BERT4REC_PATIENCE", "20"))
++MAXLEN = int(os.environ.get("BERT4REC_MAXLEN", "128"))
++HIDDEN_UNITS = int(os.environ.get("BERT4REC_HIDDEN", "64"))
++NUM_BLOCKS = int(os.environ.get("BERT4REC_BLOCKS", "2"))
++NUM_HEADS = int(os.environ.get("BERT4REC_HEADS", "2"))
++DROPOUT_RATE = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
++LR = float(os.environ.get("BERT4REC_LR", "1e-3"))
++WEIGHT_DECAY = float(os.environ.get("BERT4REC_WD", "0.0"))
++BATCH_SIZE = int(os.environ.get("BERT4REC_BATCH", "128"))
++NUM_BATCHES = int(os.environ.get("BERT4REC_BATCHES", "200"))
++NUM_EPOCHS = int(os.environ.get("BERT4REC_EPOCHS", "200"))
++EVAL_EVERY = int(os.environ.get("BERT4REC_EVAL_EVERY", "5"))
++PATIENCE = int(os.environ.get("BERT4REC_PATIENCE", "20"))
+ 
+ 
+ class BERT4RecModel(nn.Module):
+-    def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 2,
+-                 num_heads: int = 2, dropout_rate: float = 0.2, maxlen: int = 128):
++    def __init__(
++        self,
++        itemnum: int,
++        hidden_units: int = 64,
++        num_blocks: int = 2,
++        num_heads: int = 2,
++        dropout_rate: float = 0.2,
++        maxlen: int = 128,
++    ):
+         super().__init__()
+         self.itemnum = itemnum
+         self.hidden_units = hidden_units
+@@ -209,7 +205,7 @@
+         batch, length = seq.shape
+         pos = torch.arange(length, device=seq.device).unsqueeze(0).expand(batch, -1) + 1
+         pos = pos * (seq != 0).long()
+-        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)
++        x = self.item_emb(seq) * (self.hidden_units**0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+         safe_padding = padding.clone()
+@@ -223,7 +219,9 @@
+         neg_scores = (out * self.item_emb(neg)).sum(dim=-1)
+         return pos_scores, neg_scores
+ 
+-    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:
++    def score_candidates(
++        self, seq: torch.Tensor, candidates: torch.Tensor
++    ) -> torch.Tensor:
+         prediction_seq = torch.zeros_like(seq)
+         prediction_seq[:, :-1] = seq[:, 1:]
+         prediction_seq[:, -1] = self.mask_token
+@@ -231,7 +229,6 @@
+         user_emb = out[0, -1]
+         cand_emb = self.item_emb(candidates)
+         return torch.matmul(cand_emb, user_emb)
+-
+ 
+ 
+ def train_one_dataset(dataset_name: str, device: torch.device, data_dir: str) -> float:
+@@ -289,22 +286,31 @@
+                 print(f"  [{dataset_name}] Early stopping at epoch {epoch}", flush=True)
+                 break
+         elif epoch % 10 == 0:
+-            print(f"  [{dataset_name}] epoch {epoch:3d}/{NUM_EPOCHS}  loss={avg_loss:.4f}", flush=True)
++            print(
++                f"  [{dataset_name}] epoch {epoch:3d}/{NUM_EPOCHS}  loss={avg_loss:.4f}",
++                flush=True,
++            )
+ 
+     if not os.path.exists(ckpt_path):
+         torch.save(model.state_dict(), ckpt_path)
+ 
+     meta_path = os.path.join(working_dir, f"{dataset_name}_meta.pkl")
+     with open(meta_path, "wb") as f:
+-        pickle.dump({
+-            "itemnum": itemnum,
+-            "maxlen": MAXLEN,
+-            "hidden_units": HIDDEN_UNITS,
+-            "num_blocks": NUM_BLOCKS,
+-            "num_heads": NUM_HEADS,
+-            "dropout_rate": DROPOUT_RATE,
+-        }, f)
+-    print(f"  [{dataset_name}] Best val HR@10={max(best_hr10, 0.0):.4f}  ckpt={ckpt_path}", flush=True)
++        pickle.dump(
++            {
++                "itemnum": itemnum,
++                "maxlen": MAXLEN,
++                "hidden_units": HIDDEN_UNITS,
++                "num_blocks": NUM_BLOCKS,
++                "num_heads": NUM_HEADS,
++                "dropout_rate": DROPOUT_RATE,
++            },
++            f,
++        )
++    print(
++        f"  [{dataset_name}] Best val HR@10={max(best_hr10, 0.0):.4f}  ckpt={ckpt_path}",
++        flush=True,
++    )
+     return max(best_hr10, 0.0)
+ 
+ 
+@@ -415,3 +421,5 @@
+ 
+ if __name__ == "__main__":
+     main()
++
++

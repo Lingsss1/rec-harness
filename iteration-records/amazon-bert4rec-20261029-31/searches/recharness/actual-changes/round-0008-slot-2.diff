@@ -1,0 +1,73 @@
+--- d45776a263080fb5ef5e81bdefadefff5b6115803b6fded49e8152fdc0bd5644.py
++++ 6a574fdc38d42ce122abf5b892ea005f368f073cee59537f01934e60c231c721.py
+@@ -29,7 +29,7 @@
+     if part.strip()
+ ]
+ 
+-DATA_DIR = os.environ.get("GAGC_DATA_DIR", "./input/trainval")
++DATA_DIR = os.environ['GAGC_DATA_DIR']
+ 
+ SEED = int(os.environ.get("GAGC_SEED", "42"))
+ random.seed(SEED)
+@@ -164,7 +164,7 @@
+     logits = torch.nn.functional.linear(
+         masked_states, model.effective_item_weight()[1:model.itemnum + 1]
+     )
+-    return torch.nn.functional.cross_entropy(logits, targets, reduction="mean")
++    return torch.nn.functional.cross_entropy(logits / 0.8, targets, reduction="mean")
+ 
+ 
+ # Hyper-parameters
+@@ -172,8 +172,8 @@
+ HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+ NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+ NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+-DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
+-LR            = float(os.environ.get("BERT4REC_LR", "1e-3"))
++DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.1"))
++LR            = float(os.environ.get("BERT4REC_LR", "7e-4"))
+ WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
+ BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
+ NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+@@ -191,6 +191,7 @@
+         self.maxlen = maxlen
+         self.mask_token = itemnum + 1
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
++        self.register_buffer("item_input_scale", torch.ones(itemnum + 2))
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+         encoder_layer = nn.TransformerEncoderLayer(
+             d_model=hidden_units,
+@@ -211,7 +212,7 @@
+             self.pos_emb.weight[0].zero_()
+ 
+     def effective_item_weight(self) -> torch.Tensor:
+-        row_norm = math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
++        row_norm = 0.8 * math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
+         nonpadding = torch.nn.functional.normalize(
+             self.item_emb.weight[1:], p=2, dim=-1, eps=1e-12
+         ) * row_norm
+@@ -224,6 +225,7 @@
+         item_vectors = torch.nn.functional.embedding(
+             seq, self.effective_item_weight(), padding_idx=0
+         )
++        item_vectors = item_vectors * self.item_input_scale[seq].unsqueeze(-1)
+         x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+@@ -266,6 +268,16 @@
+         dropout_rate=DROPOUT_RATE,
+         maxlen=MAXLEN,
+     ).to(device)
++    training_counts = np.zeros(itemnum + 2, dtype=np.float64)
++    for training_history in user_train.values():
++        np.add.at(training_counts, np.asarray(training_history, dtype=np.int64), 1.0)
++    log_counts = np.log1p(training_counts[1:itemnum + 1])
++    standardized_counts = (log_counts - log_counts.mean()) / max(float(log_counts.std()), 1e-6)
++    input_scales = 1.0 + 0.04 * np.tanh(standardized_counts)
++    with torch.no_grad():
++        model.item_input_scale[1:itemnum + 1].copy_(
++            torch.as_tensor(input_scales, dtype=model.item_input_scale.dtype, device=device)
++        )
+     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+ 
+     working_dir = os.path.join(os.path.dirname(__file__), "working")

@@ -1,0 +1,147 @@
+--- g0-r0031-adapter_context_only/model.py
++++ g0-r0037-context_full_bridge/model.py
+@@ -1,12 +1,13 @@
+-"""Auxiliary context gradients through tower versus history adapter.
+-
+-Four cells retain identical learned modules, inputs, loss, forward arithmetic,
+-initialization and normalization populations. Independent stop-gradients gate
+-auxiliary context at the task adapter and direct prediction-tower inputs.
+-Click paths, auxiliary scorer/item ownership and running states are inherited.
+-The all-enabled/all-blocked cells bridge round 30; two partial gates isolate
+-where auxiliary supervision shapes shared context. Dense global clipping can
+-still couple task heads indirectly. No full-isolation or novelty claim.
+-Only static source checks are possible here; host tensor checks are required.
++"""Radial versus tangent auxiliary adapter context transfer.
++
++Complete the missing radial-only contrast after round36 tangent and matched
++attenuation failed to exceed full transfer. All variants retain the incumbent
++forward model, modules, initialization, Dice populations, loss and eval path.
++Only the summed auxiliary adapter context cotangent is replaced per example
++and field. Radial-norm matching controls local attenuation, not optimizer
++step magnitude after sparse accumulation and Adagrad. Signed radial projection
++need not increase norms. No scale invariance or novelty claim is made.
++Projection prior art: AdamP, arXiv:2006.08217v3 section3.1; this is no optimizer
++reproduction. Static checks only; host analytic VJP/tensor checks are required.
+ """
+ import torch
+@@ -17,5 +18,62 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'aux_adapter_context_gradient': 'full'}
++
++
++class _AuxiliaryContextCotangent(torch.autograd.Function):
++    """Identity forward with a declared first-order backward replacement.
++
++    This custom VJP intentionally differs from the derivative of an identity
++    map. Validate its analytic VJP, not an identity finite-difference test.
++    One shared invocation collects the sum of all three auxiliary task
++    cotangents before the replacement. No other model path uses its output.
++    """
++
++    @staticmethod
++    def forward(ctx, context, field_width, mode):
++        ctx.save_for_backward(context)
++        ctx.field_width = field_width
++        ctx.mode = mode
++        return context
++
++    @staticmethod
++    @torch.autograd.function.once_differentiable
++    def backward(ctx, grad_output):
++        context, = ctx.saved_tensors
++        # No optimizer state, parameter gradients, labels or host state are
++        # inspected. Every reduction is local to one example and one field.
++        with torch.autocast(device_type=context.device.type, enabled=False):
++            reference = context.detach().float().reshape(
++                context.shape[0], -1, ctx.field_width)
++            gradient = grad_output.float().reshape_as(reference)
++            reference_norm2 = reference.square().sum(dim=-1, keepdim=True)
++            unit = reference * reference_norm2.clamp_min(1e-12).rsqrt()
++            unit = torch.where(reference_norm2 > 1e-12, unit,
++                               torch.zeros_like(unit))
++            radial = unit * (gradient * unit).sum(dim=-1, keepdim=True)
++            tangent = gradient - radial
++            gradient_norm2 = gradient.square().sum(dim=-1, keepdim=True)
++            # Preserve the prior tangent guard. The complementary radial
++            # is zero for negligible cotangents, so t+r=g still holds.
++            reliable = gradient_norm2 > 1e-30
++            tangent = torch.where(reliable, tangent, gradient)
++            radial = torch.where(reliable, radial, torch.zeros_like(radial))
++            radial_norm2 = radial.square().sum(dim=-1, keepdim=True)
++            gain = (radial_norm2 / gradient_norm2.clamp_min(1e-30)).sqrt()
++            radial_norm_matched = gradient * gain
++            radial_norm_matched = torch.where(
++                reliable, radial_norm_matched, torch.zeros_like(gradient))
++            # All partial modes execute the same arithmetic. Norm matching
++            # retains the full direction; projection retains signed radial
++            # direction. At zero reference radial and its matched VJP vanish.
++            if ctx.mode == 'radial':
++                result = radial
++            elif ctx.mode == 'radial_norm_matched':
++                result = radial_norm_matched
++            elif ctx.mode == 'tangent':
++                result = tangent
++            else:
++                raise ValueError('Unknown partial auxiliary context VJP')
++        return result.reshape_as(grad_output).to(context.dtype), None, None
+ 
+ 
+@@ -36,4 +94,5 @@
+                  block_aux_tower_context_grad=True,
+                  block_aux_adapter_context_grad=False,
++                 aux_adapter_context_gradient='full',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -62,4 +121,11 @@
+         self.block_aux_tower_context_grad = block_aux_tower_context_grad
+         self.block_aux_adapter_context_grad = block_aux_adapter_context_grad
++        if (block_aux_tower_context_grad is not True
++                or block_aux_adapter_context_grad is not False):
++            raise ValueError('This study freezes auxiliary tower context off and adapter context on')
++        if aux_adapter_context_gradient not in ('radial', 'radial_norm_matched', 'tangent', 'full', 'blocked'):
++            raise ValueError('Unknown auxiliary context cotangent replacement')
++        self.aux_adapter_context_gradient = aux_adapter_context_gradient
++        self._aux_context_field_width = embedding_dim
+         if residual_input != 'match_detail':
+             raise ValueError('The original match-detail channel must be retained')
+@@ -651,4 +717,22 @@
+         return weighted.sum(dim=1)
+ 
++    def _project_auxiliary_adapter_context(self, context):
++        """Preserve values; replace only this context backward edge.
++
++        The reference vector is the supplied context embedding before any
++        adapter operation. All partial variants compute all VJPs, with no
++        learned state or RNG. Full/blocked avoid the custom VJP entirely.
++        """
++        mode = self.aux_adapter_context_gradient
++        if mode == 'full':
++            return context
++        if mode == 'blocked':
++            return context.detach()
++        if (context.ndim != 2
++                or context.shape[-1] != len(self.user_fields) * self._aux_context_field_width):
++            raise ValueError('Context field-width mismatch')
++        return _AuxiliaryContextCotangent.apply(
++            context, self._aux_context_field_width, mode)
++
+     def forward(self, inputs):
+         context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._represent(inputs)
+@@ -748,4 +832,8 @@
+             else:
+                 aux_strata = primary_strata
++        # Share one identity-forward node across all auxiliary adapters so
++        # its backward receives their summed context cotangent exactly once.
++        aux_adapter_context = (self._project_auxiliary_adapter_context(aux_context)
++                               if self.training else aux_context)
+         feedback = aux_strata[:, 1, :] + aux_strata[:, 2, :]
+         grouped_counts = counts.reshape(counts.shape[0], 10, 3)
+@@ -776,4 +864,6 @@
+                 if self.block_aux_adapter_context_grad:
+                     adapter_context = adapter_context.detach()
++                else:
++                    adapter_context = aux_adapter_context
+                 if self.block_aux_tower_context_grad:
+                     tower_context = tower_context.detach()

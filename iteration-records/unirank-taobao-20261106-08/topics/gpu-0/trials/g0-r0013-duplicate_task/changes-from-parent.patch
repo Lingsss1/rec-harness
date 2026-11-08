@@ -1,0 +1,179 @@
+--- g0-r0012-position_task/model.py
++++ g0-r0013-duplicate_task/model.py
+@@ -1,11 +1,8 @@
+-"""Prospective within-block ordinal detail x adapter-sharing factorial.
+-
+-Keep the inherited target-match/value covariance and replace its duplicate
+-channel with a centered ordinal/value moment. The replacement control uses
+-a fixed scrambled-position moment of equal coefficient norm. Positions are
+-input ordinals, not elapsed time. All coefficient builders and adapters
+-execute in every cell.
+-The source scorer, compression, initialization and gradient ownership stay
+-fixed. Masked positions contribute zero and empty histories get no correction.
++"""Prospective between-block information x adapter-sharing factorial.
++
++Retain the inherited target-match and within-block ordinal moments. A third
++channel contains a centered block-rank/value moment or a norm-matched copy of
++the within-block moment. Both execute the same builders and contractions.
++Only authorized input ordinals are used; these are not elapsed times.
+ No measured benefit or original-method priority is asserted.
+ """
+@@ -17,9 +14,9 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'duplicate'}
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='OrdinalDetail', gpu=-1,
++    def __init__(self, feature_map, model_id='BetweenBlockDetail', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+@@ -27,5 +24,5 @@
+                  block_aux_context_grad=False, block_aux_item_grad=True, num_tasks=None,
+                  residual_input='match_detail', residual_routing='task', residual_hidden=16,
+-                 temporal_detail='position',
++                 temporal_detail='position', block_detail='duplicate',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -51,6 +48,8 @@
+         if residual_input != 'match_detail':
+             raise ValueError('The original match-detail channel must be retained')
+-        if temporal_detail not in ('position', 'scrambled'):
+-            raise ValueError('Unknown temporal information control')
++        if temporal_detail != 'position':
++            raise ValueError('The incumbent within-block ordinal moment is frozen')
++        if block_detail not in ('ordinal', 'duplicate'):
++            raise ValueError('Unknown between-block information control')
+         if residual_routing not in ('task', 'shared'):
+             raise ValueError('Unknown residual parameter-sharing control')
+@@ -60,4 +59,5 @@
+         self.residual_routing = residual_routing
+         self.temporal_detail = temporal_detail
++        self.block_detail = block_detail
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -112,5 +112,5 @@
+         with torch.random.fork_rng(devices=[]):
+             self.residual_bank = nn.ModuleList([
+-                nn.Sequential(nn.Linear(input_width + len(self.match_fields) + 2 * self.value_width,
++                nn.Sequential(nn.Linear(input_width + len(self.match_fields) + 3 * self.value_width,
+                                         residual_hidden), nn.ReLU(),
+                               nn.Linear(residual_hidden, self.value_width))
+@@ -152,18 +152,20 @@
+         values = torch.cat([keys, item_emb[self.action_field][:, :-1]], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
+-        detail, position_detail, match_counts = self._target_match_summary(
++        detail, position_detail, block_detail, match_counts = self._target_match_summary(
+             item, values, mask)
+-        return context, target, values, mask, auxiliary, detail, position_detail, match_counts
++        return context, target, values, mask, auxiliary, detail, position_detail, block_detail, match_counts
+ 
+     def _target_match_summary(self, item, values, mask):
+-        """Two masked block-centered value moments, each width value_width.
+-
+-        First: inherited mean field-match affinity/value covariance.
+-        Second: covariance with ordinal j/9, j=0..9, within each block,
+-        or with a fixed permutation rescaled to its masked coefficient norm.
+-        Subtract each block's valid-position mean, then contract with values.
+-        This restores one order-sensitive statistic without event-level MLPs.
+-        Empty and singleton blocks have zero coefficients. A constant shift
+-        to all valid values in a block cancels in both summaries.
++        """Match covariance, local ordinal moment, and a coarse-order moment.
++
++        The block rank b/9 is centered over all valid events. Its coefficient
++        norm is matched to the retained within-block ordinal coefficients.
++        The replacement control copies those local coefficients, gated off
++        when the coarse coefficient norm is zero. All cells calculate both
++        systems and contract three channels. No extra event scorer is added.
++        Empty histories, singleton histories and histories confined to one
++        block have a zero third channel. A global value shift cancels; a
++        different value shift per block can affect only the ordinal third
++        channel. Norm matching is in FP32 before the inherited dtype cast.
+         """
+         matches = []
+@@ -187,31 +189,30 @@
+         centered = affinity - valid * (affinity.sum(dim=-1, keepdim=True)
+                                       / counts.clamp_min(1))
+-        # Use supplied slot order only. No timestamp or current action enters.
++        # Retain the incumbent within-block ordinal moment without changes.
+         position = torch.arange(10, device=values.device, dtype=torch.float32).view(1, 1, 10) / 9.0
+         position_sum = (position * valid).sum(dim=-1, keepdim=True)
+         centered_position = valid * (position - position_sum / counts.clamp_min(1))
+-        # Fixed before evaluation: a nonmonotone permutation of the same
+-        # ten ranks. Center on valid positions and match coefficient L2 norm
+-        # even for partially padded blocks. No random draws or learned state.
+-        scrambled = values.new_tensor([5, 0, 8, 3, 6, 1, 9, 4, 7, 2],
+-                                      dtype=torch.float32).view(1, 1, 10) / 9.0
+-        scrambled_sum = (scrambled * valid).sum(dim=-1, keepdim=True)
+-        centered_scrambled = valid * (scrambled - scrambled_sum / counts.clamp_min(1))
+-        position_norm2 = centered_position.square().sum(dim=-1, keepdim=True)
+-        scrambled_norm2 = centered_scrambled.square().sum(dim=-1, keepdim=True)
+-        centered_scrambled = centered_scrambled * (
+-            position_norm2 / scrambled_norm2.clamp_min(1e-12)).sqrt()
+-        # All cells build both coefficient systems, then contract the selected
+-        # one with the exact same shape. The first detail channel is retained.
+-        temporal_coefficients = (centered_position if self.temporal_detail == 'position'
+-                                 else centered_scrambled)
+-        coefficients = torch.stack((centered, temporal_coefficients), dim=-2)
++        # Coarse ordinals add only information missing under whole-block
++        # permutations. Center using event counts, including partial blocks.
++        total = counts.sum(dim=1).clamp_min(1)
++        block_rank = torch.arange(10, device=values.device, dtype=torch.float32).view(1, 10, 1) / 9.0
++        block_mean = (block_rank * valid).sum(dim=(1, 2), keepdim=True) / total.unsqueeze(-1)
++        centered_block = valid * (block_rank - block_mean)
++        local_norm2 = centered_position.square().sum(dim=(1, 2), keepdim=True)
++        block_norm2 = centered_block.square().sum(dim=(1, 2), keepdim=True)
++        centered_block = (centered_block * (local_norm2 / block_norm2.clamp_min(1e-12)).sqrt()
++                          * (block_norm2 > 1e-12).to(valid.dtype))
++        # A duplicate-information control has identical width, coefficient
++        # energy and empty/one-block behavior. It adds no block-varying moment.
++        duplicated_position = centered_position * (block_norm2 > 1e-12).to(valid.dtype)
++        block_coefficients = (centered_block if self.block_detail == 'ordinal'
++                              else duplicated_position)
++        coefficients = torch.stack((centered, centered_position, block_coefficients), dim=-2)
+         summaries = torch.bmm(
+-            coefficients.to(values.dtype).reshape(batch * 10, 2, 10),
++            coefficients.to(values.dtype).reshape(batch * 10, 3, 10),
+             values.reshape(batch * 10, 10, width))
+-        summaries = summaries.reshape(batch, 10, 2, width).sum(dim=1)
+-        total = counts.sum(dim=1).clamp_min(1)
++        summaries = summaries.reshape(batch, 10, 3, width).sum(dim=1)
+         summaries = summaries / total.sqrt().unsqueeze(-1).to(summaries.dtype)
+-        return summaries[:, 0, :], summaries[:, 1, :], match_counts
++        return summaries[:, 0, :], summaries[:, 1, :], summaries[:, 2, :], match_counts
+ 
+     def _compress_both(self, values, mask, auxiliary):
+@@ -262,5 +263,5 @@
+ 
+     def forward(self, inputs):
+-        context, target, values, mask, auxiliary, detail, position_detail, match_counts = self._represent(inputs)
++        context, target, values, mask, auxiliary, detail, position_detail, block_detail, match_counts = self._represent(inputs)
+         values, counts = self._compress_both(values, mask, auxiliary)
+         # Both calls include all 30 slots: each BatchNorm sees the identical
+@@ -280,4 +281,5 @@
+             aux_detail = detail.detach() if self.block_aux_item_grad else detail
+             aux_position_detail = position_detail.detach() if self.block_aux_item_grad else position_detail
++            aux_block_detail = block_detail.detach() if self.block_aux_item_grad else block_detail
+             aux_weights = self._auxiliary_activation(self._interactions(aux_target, aux_values))
+             aux_strata = self._pool(aux_weights, aux_values, counts)
+@@ -288,4 +290,5 @@
+             aux_detail = detail
+             aux_position_detail = position_detail
++            aux_block_detail = block_detail
+             aux_strata = primary_strata
+         feedback = aux_strata[:, 1, :] + aux_strata[:, 2, :]
+@@ -299,9 +302,11 @@
+                 task_detail = detail
+                 task_position_detail = position_detail
++                task_block_detail = block_detail
+             else:
+                 task_context, task_target, base = aux_context, aux_target, feedback
+                 task_detail = aux_detail
+                 task_position_detail = aux_position_detail
+-            signal = torch.cat([task_detail, task_position_detail], dim=-1)
++                task_block_detail = aux_block_detail
++            signal = torch.cat([task_detail, task_position_detail, task_block_detail], dim=-1)
+             residual_features = torch.cat([task_context, task_target, base,
+                                            match_counts.to(base.dtype), signal], dim=-1)

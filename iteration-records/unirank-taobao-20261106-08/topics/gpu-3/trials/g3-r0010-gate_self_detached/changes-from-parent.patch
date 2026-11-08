@@ -1,0 +1,120 @@
+--- g3-r0009-event_feedback_gate/model.py
++++ g3-r0010-gate_self_detached/model.py
+@@ -1,17 +1,16 @@
+-"""Task-specific match/feedback gating before inherited DIN pooling.
+-
+-The parent supplies feedback-resolved count/fraction corrections only at the
+-prediction logits. Here event-local exposure/feedback x target-match indicators
+-also modulate the inherited task-specific pooling scores. The nonnegative bounded
+-gain is 1+tanh(W_t phi_event); W starts at zero without consuming RNG. A mean
+-gain replacement preserves uniform history rescaling but removes event-specific
+-routing. A second factor erases feedback identity only inside the new gate.
+-The inherited additive evidence, action embeddings and selector stay resolved.
+-
+-All variants allocate the same 80 extra dense parameters and start at the
+-parent's function. Private auxiliary item tables and primary-only gradients to
+-the selector trunk remain unchanged. Only the frozen prefix and host masks are
+-used. DIN primary text and pinned benchmark INFNet source were inspected;
+-original INFNet detailed text is unavailable. No novelty claim is made.
++"""Cross-task transfer through deterministic event-relevance gates.
++
++Inherits the round9 event-match gate, private auxiliary item tables, additive
++match evidence and primary-owned selector. Only click's gate preactivation is
++changed: z_click + 0.5 * donor, where donor is the mean of the three auxiliary
++preactivations or click's own preactivation. Donor gradients are detached or
++live in a 2x2 contrast; auxiliary forward gates are unchanged. All gate features
++are deterministic functions of frozen history masks and category/brand matches.
++
++No new parameters, initialization draws, losses, information or host settings.
++All four variants exactly start at the incumbent function because gate weights
++start at zero. Self transfer controls forward gate scaling; live self transfer
++also changes its effective gradient scale. A win over the incumbent alone does
++not establish cross-task complementarity. Detailed originality is unverified.
+ """
+ import copy
+@@ -23,9 +22,9 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'detached'}
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='TaskEventEvidenceGate', gpu=-1,
++    def __init__(self, feature_map, model_id='TaskGateTransfer', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(128, 32),
+                  tower_hidden_units=(128, 64), routing='task',
+@@ -34,5 +33,6 @@
+                  auxiliary_item_mode='private', target_matches=True,
+                  feedback_identity=True, gate_scope='event',
+-                 gate_feedback_identity=True, num_tasks=None,
++                 gate_feedback_identity=True, gate_transfer_source='self',
++                 gate_transfer_gradient='detached', num_tasks=None,
+                  task='binary_classification', **kwargs):
+         labels = list(feature_map.labels)
+@@ -75,4 +75,12 @@
+         if not isinstance(gate_feedback_identity, bool):
+             raise ValueError('Gate feedback identity switch must be boolean')
++        if gate_scope != 'event' or not gate_feedback_identity:
++            raise ValueError('This transfer contrast fixes the resolved event gate')
++        if gate_transfer_source not in ('auxiliary', 'self'):
++            raise ValueError('Gate donor must be auxiliary or self')
++        if gate_transfer_gradient not in ('detached', 'live'):
++            raise ValueError('Gate donor gradient must be detached or live')
++        self.gate_transfer_source = gate_transfer_source
++        self.gate_transfer_gradient = gate_transfer_gradient
+         self.gate_scope = gate_scope
+         self.gate_feedback_identity = gate_feedback_identity
+@@ -204,10 +212,9 @@
+ 
+     def _event_route_gain(self, channels, matches, mask):
+-        """Nonnegative [B,L,T] gain; empty/padded positions have neutral gain.
+-
+-        The mean replacement averages the bounded event modulation over valid
+-        events, then broadcasts it. It can rescale a user's pooled history but
+-        cannot choose individual events. Both replacements calculate event and
+-        mean gains; only the applied gain changes.
++        """Bounded [B,L,T] gains with a donor added only to click logits.
++
++        Masked positions have neutral gain and zero pooling scores. Empty
++        histories still have zero additive evidence and zero pooled vectors.
++        No current action or current label participates in donor computation.
+         """
+         with torch.autocast(device_type=mask.device.type, enabled=False):
+@@ -217,6 +224,22 @@
+                                       collapsed.expand(-1, -1, len(self.towers))], dim=-1)
+             event_features = (channels.unsqueeze(-1) * matches.unsqueeze(-2)).flatten(2)
+-            modulation = torch.tanh(torch.nn.functional.linear(
+-                event_features, self.event_gate_weight))
++            gate_logits = torch.nn.functional.linear(
++                event_features, self.event_gate_weight)
++            # Both donor alternatives are calculated in every variant. The
++            # contracted four labels may be ordered arbitrarily by FeatureMap.
++            primary_logits = (gate_logits * self._primary_channel).sum(
++                dim=-1, keepdim=True)
++            auxiliary_logits = (gate_logits * (~self._primary_channel)).sum(
++                dim=-1, keepdim=True) / (len(self.towers) - 1)
++            donor = (auxiliary_logits if self.gate_transfer_source == 'auxiliary'
++                     else primary_logits)
++            if self.gate_transfer_gradient == 'detached':
++                donor = donor.detach()
++            # Detachment changes only backward flow. In auxiliary/detached,
++            # click cannot rewrite donor gate rows through this transfer path.
++            # Shared context and host clipping remain indirect coupling paths.
++            mixed_logits = torch.where(
++                self._primary_channel, gate_logits + 0.5 * donor, gate_logits)
++            modulation = torch.tanh(mixed_logits)
+             valid = mask.to(dtype=torch.bool).unsqueeze(-1)
+             modulation = modulation.masked_fill(~valid, 0)
+@@ -317,7 +340,8 @@
+             gain = self._event_route_gain(channels, matches, mask)
+             # Compute the product in FP32, then restore the score dtype for
+-            # inherited BF16 bmm. Each gate row is trained only by its own task.
+-            # Deterministic gate inputs add no auxiliary path into primary item
+-            # tables or the primary-owned selector trunk.
++            # inherited BF16 bmm. Gate-transfer donor gradients follow the
++            # declared contrast; they touch only the small gate matrix through
++            # this path. Private item tables and primary selector ownership
++            # are unchanged. Shared context still couples the four losses.
+             scores = (scores.float() * gain).to(dtype=scores.dtype)
+             pooled = torch.bmm(scores.transpose(1, 2), values)

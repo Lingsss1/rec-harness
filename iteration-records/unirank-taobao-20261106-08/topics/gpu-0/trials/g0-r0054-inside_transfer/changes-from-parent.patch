@@ -1,0 +1,102 @@
+--- g0-r0052-block_nonlinear_transfer/model.py
++++ g0-r0054-inside_transfer/model.py
+@@ -1,11 +1,9 @@
+-"""Prospective blockwise nonlinear summary study; validation results unmeasured.
+-
+-Reuse ten frozen compressed blocks and every learned parameter of the incumbent.
+-Compare mean_j tanh(W [M*b_j, global_details]) with tanh(W [sum_j b_j,
+-global_details]), crossed with the existing auxiliary adapter-context gate.
+-Both summary paths execute in every cell for a measured work-matched contrast.
+-The original signed pooled base and five detail paths remain intact. This tests
+-projection/aggregation order, not a new attention mechanism or verified novelty.
+-Native tensor, BF16, autograd and resource checks belong to the host.
++"""Prospective context-conditioned block saturation; no new measured result.
++
++Cross gate placement (inside versus outside tanh) with auxiliary adapter-context
++transfer. Reuse all incumbent parameters, masked blocks, summaries and training
++boundaries. Both placement paths execute in every cell for measured work matching.
++This tests a local nonlinear ordering hypothesis, without a novelty claim.
++Native tensor/autograd/BF16/data and runtime checks remain host responsibilities.
+ """
+ import torch
+@@ -16,5 +14,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'context_conditioning': 'before_tanh'}
+ 
+ 
+@@ -36,4 +34,5 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16, summary_placement='block',
++                 context_conditioning='before_tanh',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -72,4 +71,9 @@
+             raise ValueError('Unknown history projection placement')
+         self.summary_placement = summary_placement
++        if summary_placement != 'block':
++            raise ValueError('This study freezes blockwise history encoding')
++        if context_conditioning not in ('before_tanh', 'after_tanh'):
++            raise ValueError('Unknown context conditioning placement')
++        self.context_conditioning = context_conditioning
+         if context_fusion != 'product':
+             raise ValueError('This placement study fixes product fusion')
+@@ -682,13 +686,12 @@
+ 
+     def _context_history_correction(self, index, context, history, block_base, block_counts):
+-        """Test tied nonlinear projection before versus after block aggregation.
+-
+-        b_j is the existing signed target-scored contribution of block j;
+-        r contains the original global counts and five detail summaries.
+-        For M occupied blocks, the mean of [M*b_j, r] is [sum(b_j), r].
+-        Only the location of tanh relative to this averaging is changed.
+-        No softmax, new learned matrix, target label or unmasked event enters.
+-        Both paths execute in every cell, including backward via an algebraic
+-        zero. This is a work-matched diagnostic, with actual costs host-measured.
++        """Compare mean tanh(q*z_j) with q*mean tanh(z_j).
++
++        q=tanh(Q_t context); z_j=P_t[M*b_j, global_details].
++        Both use the same task matrices, occupied blocks and final RMS norm.
++        The inside gate changes coordinate saturation and its gradient, not
++        block weights or the signed pooled base. Both paths stay attached.
++        A zero edge executes the unused path for a work-matched diagnostic;
++        actual GPU/wall/latency/memory cost must still be measured by host.
+         """
+         query = torch.tanh(self.context_queries[index](context).float())
+@@ -697,6 +700,4 @@
+         support = occupied.to(torch.float32)
+         number = support.sum(dim=1, keepdim=True)
+-        # Mask before projection as well as after it: invalid block values
+-        # cannot affect the local input, even in a noncontiguous support case.
+         safe_blocks = torch.where(occupied.unsqueeze(-1), block_base,
+                                   torch.zeros_like(block_base))
+@@ -705,18 +706,18 @@
+             -1, block_base.shape[1], -1)
+         local_inputs = torch.cat([local_base, shared_detail], dim=-1)
+-        local_hidden = torch.tanh(self.history_projections[index](local_inputs).float())
++        local_logits = self.history_projections[index](local_inputs).float()
++        local_hidden = torch.tanh(local_logits)
+         local_hidden = torch.where(occupied.unsqueeze(-1), local_hidden,
+                                    torch.zeros_like(local_hidden))
+         local = local_hidden.sum(dim=1) / number.clamp_min(1.0)
+-        if self.summary_placement == 'block':
+-            summary = local + 0.0 * aggregate
++        outside = query * local
++        inside_hidden = torch.tanh(query.unsqueeze(1) * local_logits)
++        inside_hidden = torch.where(occupied.unsqueeze(-1), inside_hidden,
++                                    torch.zeros_like(inside_hidden))
++        inside = inside_hidden.sum(dim=1) / number.clamp_min(1.0)
++        if self.context_conditioning == 'before_tanh':
++            fused = inside + 0.0 * outside + 0.0 * aggregate
+         else:
+-            summary = aggregate + 0.0 * local
+-        # Same product and RMS normalization as the incumbent. Global base,
+-        # residual adapter and all five moment paths outside this branch stay.
+-        if self.context_fusion == 'product':
+-            fused = query * summary
+-        else:
+-            fused = (query + summary) * (2.0 ** -0.5)
++            fused = outside + 0.0 * inside + 0.0 * aggregate
+         fused = fused * torch.rsqrt(fused.square().mean(dim=-1, keepdim=True) + 1e-4)
+         return self.interaction_outputs[index](fused.to(history.dtype))

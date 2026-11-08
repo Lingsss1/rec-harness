@@ -1,0 +1,113 @@
+--- g0-r0052-block_nonlinear_transfer/model.py
++++ g1-r0070-both_signed/model.py
+@@ -1,11 +1,10 @@
+-"""Prospective blockwise nonlinear summary study; validation results unmeasured.
+-
+-Reuse ten frozen compressed blocks and every learned parameter of the incumbent.
+-Compare mean_j tanh(W [M*b_j, global_details]) with tanh(W [sum_j b_j,
+-global_details]), crossed with the existing auxiliary adapter-context gate.
+-Both summary paths execute in every cell for a measured work-matched contrast.
+-The original signed pooled base and five detail paths remain intact. This tests
+-projection/aggregation order, not a new attention mechanism or verified novelty.
+-Native tensor, BF16, autograd and resource checks belong to the host.
++"""Prospective consumer-specific coarse-sign factorial; results unmeasured.
++
++Preserve the incumbent's five summaries and all learned modules. Independently
++supply the original signed coarse moment or its max-absolute-pivot axis to the
++task adapter and context/history projection. Construct both signals in every
++cell. The both-signed endpoint bridges the incumbent; both-axis bridges the
++prior coarse-axis replacement. No event permutation, extra feature, parameter,
++loss change, or whole-history order-invariance claim. Native checks are host work.
+ """
+ import torch
+@@ -16,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'adapter_coarse_signed': True, 'interaction_coarse_signed': True}
+ 
+ 
+@@ -36,4 +35,5 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16, summary_placement='block',
++                 adapter_coarse_signed=True, interaction_coarse_signed=True,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -48,4 +48,9 @@
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         self.compression_routes = compression_routes
++        if (not isinstance(adapter_coarse_signed, bool)
++                or not isinstance(interaction_coarse_signed, bool)):
++            raise ValueError('Consumer sign-availability switches must be booleans')
++        self.adapter_coarse_signed = adapter_coarse_signed
++        self.interaction_coarse_signed = interaction_coarse_signed
+         if block_aux_scorer_grad is not True:
+             raise ValueError('Auxiliary scorer parameter gradients must stay blocked')
+@@ -242,5 +247,8 @@
+         else:
+             raise ValueError('Released historical task masks are required')
+-        user, item, mask, task_masks = self.get_inputs(inputs, return_multi_masks=True)
++        # The framework may replace item entries with device copies.
++        # Keep all caller-owned event fields and masks aligned and untouched.
++        copied = (inputs[0], dict(inputs[1]), inputs[2], supplied)
++        user, item, mask, task_masks = self.get_inputs(copied, return_multi_masks=True)
+         if mask.ndim != 2 or mask.shape[1] != 100:
+             raise ValueError('Frozen protocol requires 100 history positions')
+@@ -722,4 +730,37 @@
+         return self.interaction_outputs[index](fused.to(history.dtype))
+ 
++    @staticmethod
++    def _coarse_axis(moment):
++        """Canonicalize only global sign, with the inherited pivot convention.
++
++        The lowest-index maximal absolute FP32 coordinate sets a detached
++        sign. Zero uses +1; gradients are the selected sign times identity
++        away from pivot boundaries. No supplied event or mask is changed.
++        This quotients one learned vector, not the whole history order.
++        """
++        if moment.ndim != 2 or moment.shape[1] < 1:
++            raise ValueError('Expected a nonempty-width moment matrix [B,D]')
++        detached = moment.detach().float()
++        index = detached.abs().argmax(dim=-1, keepdim=True)
++        pivot = detached.gather(-1, index)
++        orientation = torch.where(pivot < 0, -torch.ones_like(pivot),
++                                  torch.ones_like(pivot)).to(moment.dtype)
++        return moment * orientation
++
++    def _consumer_signals(self, detail, position, coarse, curvature, joint):
++        """Work-matched forward construction; select each consumer separately.
++
++        This is called AFTER original per-task source-gradient gating.
++        Only the third of five summary vectors can differ. Native signed
++        inputs are used directly, avoiding a learned sign-bit decoder.
++        No module, buffer, RNG or cross-task mutable state is introduced.
++        """
++        axis = self._coarse_axis(coarse)
++        signed_signal = torch.cat([detail, position, coarse, curvature, joint], dim=-1)
++        axis_signal = torch.cat([detail, position, axis, curvature, joint], dim=-1)
++        adapter_signal = signed_signal if self.adapter_coarse_signed else axis_signal
++        interaction_signal = signed_signal if self.interaction_coarse_signed else axis_signal
++        return adapter_signal, interaction_signal
++
+     def forward(self, inputs):
+         context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._represent(inputs)
+@@ -869,8 +910,9 @@
+                 if self.block_aux_tower_context_grad:
+                     tower_context = tower_context.detach()
+-            signal = torch.cat([task_detail, task_position_detail, task_block_detail,
+-                                task_curvature_detail, task_joint_detail], dim=-1)
++            adapter_signal, interaction_signal = self._consumer_signals(
++                task_detail, task_position_detail, task_block_detail,
++                task_curvature_detail, task_joint_detail)
+             residual_features = torch.cat([adapter_context, task_target, base,
+-                                           match_counts.to(base.dtype), signal], dim=-1)
++                                           match_counts.to(base.dtype), adapter_signal], dim=-1)
+             # Task routing is required by __init__. Each adapter still
+             # receives its own task's features once; every parameter remains
+@@ -883,5 +925,5 @@
+                                     for adapter in self.residual_bank], dim=1)
+                 correction = bank[:, index, :] if self.residual_routing == 'task' else bank.mean(dim=1)
+-            history_features = torch.cat([base, match_counts.to(base.dtype), signal], dim=-1)
++            history_features = torch.cat([base, match_counts.to(base.dtype), interaction_signal], dim=-1)
+             correction = correction + self._context_history_correction(
+                 index, adapter_context, history_features, task_blocks, block_counts)

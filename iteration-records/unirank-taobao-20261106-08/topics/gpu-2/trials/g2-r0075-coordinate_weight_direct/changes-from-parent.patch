@@ -1,0 +1,186 @@
+--- g2-r0074-quotient_orthogonal/model.py
++++ g2-r0075-coordinate_weight_direct/model.py
+@@ -13,5 +13,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'budgeted_factor', 'owner_context_rank': 96, 'owner_context_scale': 'inherited', 'owner_context_balance': 'balanced', 'owner_context_evaluation': 'native', 'evaluation_summary_contraction': 'global', 'evaluation_coefficient_work': 'all', 'scorer_hidden_units': [64, 32], 'scorer_coordinates': 'orthogonal'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'budgeted_factor', 'owner_context_rank': 96, 'owner_context_scale': 'inherited', 'owner_context_balance': 'balanced', 'owner_context_evaluation': 'native', 'evaluation_summary_contraction': 'global', 'evaluation_coefficient_work': 'all', 'scorer_hidden_units': [64, 32], 'scorer_coordinates': 'orthogonal', 'scorer_coordinate_execution': 'weight', 'scorer_evaluation_execution': 'direct'}
+ 
+ 
+@@ -318,4 +318,37 @@
+ 
+ 
++class _WeightCoordinateAffine(nn.Module):
++    """Keep orthogonal trainable coordinates; transform the small weight.
++
++    Inputs use [q,k,q*k,action]. The stored weight and its optimizer state
++    retain the inherited orthogonal coordinates. The transformation remains
++    inside forward so auxiliary functional_call detaches every scorer path.
++    No derived weights persist, and no fresh parameters or RNG draws occur.
++    FP32 algebra and input/weight derivatives match the explicit coordinates;
++    different BF16 rounding can change the subsequent training trajectory.
++    """
++    def __init__(self, source, key_width):
++        super().__init__()
++        if not isinstance(source, nn.Linear):
++            raise ValueError('Expected the reduced native scorer affine')
++        if source.in_features <= 3 * key_width or source.bias is None:
++            raise ValueError('Expected q,k,product and historical action')
++        self.in_features = source.in_features
++        self.out_features = source.out_features
++        self.key_width = key_width
++        # Preserve Parameter identity, names, dtype and requires_grad. The
++        # caller removes the old affine; no redundant weight is registered.
++        self.weight = source.weight
++        self.bias = source.bias
++
++    def forward(self, features):
++        dimension = self.key_width
++        shared = self.weight[:, :dimension] / (2.0 ** 0.5)
++        difference = self.weight[:, dimension:2 * dimension] * ((3.0 / 2.0) ** 0.5)
++        effective = torch.cat((shared + difference, shared - difference,
++                               self.weight[:, 2 * dimension:]), dim=-1)
++        return torch.nn.functional.linear(features, effective, self.bias)
++
++
+ class Model(MultiTaskModel):
+     def __init__(self, feature_map, model_id='TargetMatchOrderMoment', gpu=-1,
+@@ -352,5 +385,7 @@
+                  evaluation_summary_contraction='block',
+                  evaluation_coefficient_work='all',
+-                 scorer_coordinates='redundant',
++                 scorer_coordinates='orthogonal',
++                 scorer_coordinate_execution='weight',
++                 scorer_evaluation_execution='hoisted',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -372,4 +407,12 @@
+                 or evaluation_projection != 'merged_hoist'):
+             raise ValueError('Coordinate reduction retains64/32 and merged evaluation')
++        if scorer_coordinate_execution not in ('explicit', 'weight'):
++            raise ValueError('Unknown scorer coordinate execution')
++        if scorer_evaluation_execution not in ('hoisted', 'direct'):
++            raise ValueError('Unknown scorer evaluation execution')
++        if scorer_coordinate_execution != 'weight' or scorer_coordinates != 'orthogonal':
++            raise ValueError('This candidate requires orthogonal weight coordinates')
++        self.scorer_coordinate_execution = scorer_coordinate_execution
++        self.scorer_evaluation_execution = scorer_evaluation_execution
+         self.scorer_coordinates = scorer_coordinates
+         # Keep the complete inherited construction/RNG stream, then slice
+@@ -773,4 +816,7 @@
+                     requires_grad=first.weight.requires_grad)
+                 first.in_features = 3 * dimension + embedding_dim
++        # Install only after all inherited initialization/reductions. No RNG.
++        self.local_activation[0] = _WeightCoordinateAffine(
++            self.local_activation[0], self.key_width)
+         self.model_to_device()
+ 
+@@ -1173,12 +1219,7 @@
+         batch, slots, _ = keys.shape
+         query = target[:, None, :].expand(-1, slots, -1)
+-        if self.scorer_coordinates == 'plain':
+-            features = [query, keys, query * keys, action]
+-        elif self.scorer_coordinates == 'orthogonal':
+-            features = [(query + keys) / (2.0 ** 0.5),
+-                        (query - keys) * ((3.0 / 2.0) ** 0.5),
+-                        query * keys, action]
+-        else:
+-            features = [query, keys, query - keys, query * keys, action]
++        # The first module maps its stored orthogonal weight to these
++        # ordinary input coordinates in both primary and auxiliary calls.
++        features = [query, keys, query * keys, action]
+         return torch.cat(features, dim=-1).reshape(batch * slots, -1)
+ 
+@@ -1249,46 +1290,52 @@
+         first = self.local_activation[0]
+         weight = first.weight
+-        if self.scorer_coordinates == 'plain':
+-            # These already ARE the effective q and [k,q*k,a] weights.
+-            # No redundant weight additions or history-weight cat is needed.
+-            query_weight = weight[:, :key_width]
+-            history_weight = weight[:, key_width:]
+-            query_projection = torch.nn.functional.linear(target, query_weight)[:, None, :]
+-            history_features = torch.cat([keys, query * keys, action], dim=-1)
+-        elif self.scorer_coordinates == 'orthogonal':
+-            # Undo only the two coordinate scalings algebraically for the
+-            # inherited target-hoisted evaluator. Local tensors, no cache.
+-            shared = weight[:, :key_width] / (2.0 ** 0.5)
+-            difference = weight[:, key_width:2 * key_width] * ((3.0 / 2.0) ** 0.5)
+-            query_weight = shared + difference
+-            history_weight = torch.cat((shared - difference,
+-                                        weight[:, 2 * key_width:]), dim=-1)
+-            query_projection = torch.nn.functional.linear(target, query_weight)[:, None, :]
+-            history_features = torch.cat([keys, query * keys, action], dim=-1)
+-        elif self.evaluation_projection == 'merged_hoist':
+-            # Preserve all original Parameter objects and initialization.
+-            # These sums are differentiable expressions, not new Parameters.
+-            query_weight = weight[:, :key_width] + weight[:, 2 * key_width:3 * key_width]
+-            history_weight = torch.cat([
+-                weight[:, key_width:2 * key_width] - weight[:, 2 * key_width:3 * key_width],
+-                weight[:, 3 * key_width:]], dim=-1)
+-            query_projection = torch.nn.functional.linear(target, query_weight)[:, None, :]
+-            history_features = torch.cat([keys, query * keys, action], dim=-1)
++        if self.scorer_evaluation_execution == 'direct':
++            # One full reduced GEMM instead of query/history GEMMs plus
++            # their output addition. This trades more multiply-adds for
++            # fewer launches; measured latency decides its usefulness.
++            hidden = first(self._interactions(target, values))
+         else:
+-            # Both split cells have the same decomposition and history GEMM.
+-            # Only the query GEMM row count differs: B*slots versus B.
+-            query_weight = weight[:, :key_width]
+-            history_weight = weight[:, key_width:]
+-            if self.evaluation_projection == 'split_repeat':
+-                query_projection = torch.nn.functional.linear(
+-                    query.reshape(batch * slots, key_width), query_weight).reshape(
+-                        batch, slots, first.out_features)
++            if self.scorer_coordinates == 'plain':
++                # These already ARE the effective q and [k,q*k,a] weights.
++                # No redundant weight additions or history-weight cat is needed.
++                query_weight = weight[:, :key_width]
++                history_weight = weight[:, key_width:]
++                query_projection = torch.nn.functional.linear(target, query_weight)[:, None, :]
++                history_features = torch.cat([keys, query * keys, action], dim=-1)
++            elif self.scorer_coordinates == 'orthogonal':
++                # Undo only the two coordinate scalings algebraically for the
++                # inherited target-hoisted evaluator. Local tensors, no cache.
++                shared = weight[:, :key_width] / (2.0 ** 0.5)
++                difference = weight[:, key_width:2 * key_width] * ((3.0 / 2.0) ** 0.5)
++                query_weight = shared + difference
++                history_weight = torch.cat((shared - difference,
++                                            weight[:, 2 * key_width:]), dim=-1)
++                query_projection = torch.nn.functional.linear(target, query_weight)[:, None, :]
++                history_features = torch.cat([keys, query * keys, action], dim=-1)
++            elif self.evaluation_projection == 'merged_hoist':
++                # Preserve all original Parameter objects and initialization.
++                # These sums are differentiable expressions, not new Parameters.
++                query_weight = weight[:, :key_width] + weight[:, 2 * key_width:3 * key_width]
++                history_weight = torch.cat([
++                    weight[:, key_width:2 * key_width] - weight[:, 2 * key_width:3 * key_width],
++                    weight[:, 3 * key_width:]], dim=-1)
++                query_projection = torch.nn.functional.linear(target, query_weight)[:, None, :]
++                history_features = torch.cat([keys, query * keys, action], dim=-1)
+             else:
+-                query_projection = torch.nn.functional.linear(target, query_weight)[:, None, :]
+-            history_features = torch.cat([keys, query - keys, query * keys, action], dim=-1)
+-        history_projection = torch.nn.functional.linear(
+-            history_features.reshape(batch * slots, -1), history_weight, first.bias).reshape(
+-                batch, slots, first.out_features)
+-        hidden = (query_projection + history_projection).reshape(batch * slots, first.out_features)
++                # Both split cells have the same decomposition and history GEMM.
++                # Only the query GEMM row count differs: B*slots versus B.
++                query_weight = weight[:, :key_width]
++                history_weight = weight[:, key_width:]
++                if self.evaluation_projection == 'split_repeat':
++                    query_projection = torch.nn.functional.linear(
++                        query.reshape(batch * slots, key_width), query_weight).reshape(
++                            batch, slots, first.out_features)
++                else:
++                    query_projection = torch.nn.functional.linear(target, query_weight)[:, None, :]
++                history_features = torch.cat([keys, query - keys, query * keys, action], dim=-1)
++            history_projection = torch.nn.functional.linear(
++                history_features.reshape(batch * slots, -1), history_weight, first.bias).reshape(
++                    batch, slots, first.out_features)
++            hidden = (query_projection + history_projection).reshape(batch * slots, first.out_features)
+         # Retain each Dice and later affine in the same order, with the same
+         # buffers, masks and 30-row evaluation population as the reference.

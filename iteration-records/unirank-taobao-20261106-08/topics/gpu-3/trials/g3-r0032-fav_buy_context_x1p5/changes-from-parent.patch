@@ -1,0 +1,95 @@
+--- g3-r0030-joint_replay/model.py
++++ g3-r0032-fav_buy_context_x1p5/model.py
+@@ -1,10 +1,14 @@
+-"""Prospective auxiliary-supervision controls on the frozen joint model.
+-
+-All representation operators, learned modules, initialization, normalization
+-populations and forward outputs are inherited. Only the training objective
+-and the existing auxiliary adapter context-gradient gate vary. A within-batch
+-cyclic label replacement is a negative control, not a valid-label task model.
+-No predictive or mechanism result is claimed; host execution is required.
++"""Prospective auxiliary composition and context-transfer strength study.
++
++Inherited four-task forward architecture and true-label sum BCE stay fixed.
++The declared task subset controls transfer into shared context embeddings through
++BOTH residual_bank and context_queries. A nonunit scalar changes only that
++context edge's backward derivative, never private-task derivatives at fixed state.
++The autograd identity is an intentional surrogate backward rule; it is not
++loss reweighting, gradient-norm matching, gradient-conflict measurement or a
++novel architecture. Scale1 bypasses the identity and unselected tasks detach.
++No task labels enter forward. Host tensor/preflight checks are required.
+ """
++import math
+ import torch
+ from torch import nn
+@@ -14,8 +18,25 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'auxiliary_context_tasks': ['fav', 'buy'], 'auxiliary_context_scale': 1.5}
+ 
+ # Prospective module-local loss intervention, not a host recipe override.
+ AUXILIARY_OBJECTIVE = 'joint'
++
++
++class _ContextGradientScale(torch.autograd.Function):
++    """Exact forward identity with a declared context-only backward multiplier.
++
++    No state_dict entries, RNG, saved tensor copies or private-module changes.
++    Check backward against the intended scaled derivative, not finite differences
++    of the identity forward (which deliberately has a different derivative).
++    """
++    @staticmethod
++    def forward(ctx, context, scale):
++        ctx.scale = scale
++        return context.view_as(context)
++
++    @staticmethod
++    def backward(ctx, grad_output):
++        return grad_output * ctx.scale, None
+ 
+ 
+@@ -37,4 +58,6 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16,
++                 auxiliary_context_tasks=('fav', 'buy'),
++                 auxiliary_context_scale=1.5,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -63,4 +86,18 @@
+         self.block_aux_tower_context_grad = block_aux_tower_context_grad
+         self.block_aux_adapter_context_grad = block_aux_adapter_context_grad
++        if (not isinstance(auxiliary_context_tasks, (list, tuple))
++                or any(not isinstance(label, str) for label in auxiliary_context_tasks)
++                or len(set(auxiliary_context_tasks)) != len(auxiliary_context_tasks)
++                or not set(auxiliary_context_tasks).issubset({'cart', 'fav', 'buy'})):
++            raise ValueError('Auxiliary context tasks must be distinct cart/fav/buy labels')
++        # Plain immutable metadata: no parameters, buffers or RNG consumption.
++        # Empty/all subsets reproduce the inherited blocked/open pathway.
++        self.auxiliary_context_tasks = tuple(auxiliary_context_tasks)
++        if (isinstance(auxiliary_context_scale, bool)
++                or not isinstance(auxiliary_context_scale, (int, float))
++                or not math.isfinite(auxiliary_context_scale)
++                or auxiliary_context_scale < 0.0):
++            raise ValueError('Context transfer scalar must be finite and nonnegative')
++        self.auxiliary_context_scale = float(auxiliary_context_scale)
+         if context_fusion not in ('product', 'sum'):
+             raise ValueError('Unknown context/history fusion operator')
+@@ -814,6 +851,16 @@
+             tower_context = task_context
+             if self.training and label != 'is_click':
+-                if self.block_aux_adapter_context_grad:
++                if (self.block_aux_adapter_context_grad
++                        or label not in self.auxiliary_context_tasks
++                        or self.auxiliary_context_scale == 0.0):
++                    # This one edge feeds both residual_bank and context_queries.
++                    # Private task parameters still learn from all true labels.
+                     adapter_context = adapter_context.detach()
++                elif self.auxiliary_context_scale != 1.0:
++                    # Identity values leave both adapters' parameter derivatives
++                    # unchanged at fixed state; scale only their input derivative.
++                    # Apply once BEFORE the branch into the two existing adapters.
++                    adapter_context = _ContextGradientScale.apply(
++                        adapter_context, self.auxiliary_context_scale)
+                 if self.block_aux_tower_context_grad:
+                     tower_context = tower_context.detach()

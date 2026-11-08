@@ -1,0 +1,139 @@
+--- g3-r0064-fixed_angle_native_source_bit_negative_bridge/model.py
++++ g3-r0065-fixed_angle_native_source_bit_negative_bridge/model.py
+@@ -1,11 +1,10 @@
+-"""Auxiliary bit-source correspondence at fixed forward architecture.
+-
+-Cross the native full-task Q pivot bit versus an occupied half-batch
+-permutation of auxiliary cotangent triples used ONLY to build that bit,
+-with external +/- sign. Retain native full-task radius, canonical fixed-
+-angle line, all support gates, four true-label BCEs and private gradients.
+-Every helper executes in every cell. Only shared-context surrogate VJP
+-selection changes; this is not the ordinary derivative of the joint BCE.
+-No novelty or new performance claim is made.
++"""Occupied-cycle auxiliary bit source at fixed forward architecture.
++
++Cross a cyclic permutation of occupied auxiliary cotangent triples with
++native-source bridges and both external signs. Only the Q orientation bit
++uses donors; native full-task radius, canonical fixed-angle line, support,
++true-label joint BCE and all private learning are inherited. Every helper
++runs in every arm. This is a first-order row-space surrogate VJP, not the
++ordinary gradient of the reported scalar BCE. No novelty claim is made.
+ """
+ import torch
+@@ -642,13 +641,71 @@
+ 
+ 
++def _occupied_cycle_donor_rows(occupied):
++    """Rotate the ascending occupied-row list by max(1, floor(n/4)).
++
++    Empty rows map to themselves. Occupied rows form one ordered list;
++    rotation preserves its multiset exactly, including when occupancy is
++    noncontiguous. For n>=3 this shift is neither identity nor involution.
++    n=2 necessarily exchanges two rows, n<=1 is identity. No data-dependent
++    host scalar, RNG, model state, sample ID or label enters this mapping.
++    The inherited half-batch reassignment inside Q remains unchanged.
++    """
++    if occupied.ndim != 2 or occupied.shape[1] != 1 or occupied.dtype != torch.bool:
++        raise ValueError('Expected history occupancy bool[B,1]')
++    rows = torch.arange(occupied.shape[0], device=occupied.device, dtype=torch.int64)
++    active = occupied[:, 0]
++    count = active.to(dtype=torch.int64).sum()
++    # Unique sort keys put occupied indices first, in their original order.
++    order = torch.argsort(torch.where(active, rows, rows + occupied.shape[0]))
++    rank = active.to(dtype=torch.int64).cumsum(dim=0) - 1
++    shift = torch.div(count, 4, rounding_mode='floor').clamp_min(1)
++    donor_rank = (rank + shift).remainder(count.clamp_min(1))
++    donors = torch.gather(order, dim=0, index=donor_rank)
++    return torch.where(active, donors, rows)
++
++
++def _occupied_cycle_source_orientation_bit(click_gradient, gradients, occupied):
++    """Change only the auxiliary row source used to calculate the Q bit.
++
++    Apply one common occupied-cycle permutation to all three cotangents.
++    Keep click K, occupancy, the native Q's half-batch operator and all
++    FP64 projection/centering/pivot conventions fixed. Exact-zero Q maps
++    to +1 and adds no gate to the actual transfer. The native full-task
++    line, radius and support are computed independently outside this helper.
++
++    This deterministic donor control is not an independent-label sample:
++    each cotangent retains donor features/probabilities, batch dependencies
++    and private-task learning. A changed source need not change its one-bit
++    summary. Host must measure fixed-state bit disagreement before making
++    an inference from a null result. n<=2 is not a noninvolution contrast.
++    All arms compute this helper; no parameters, state or RNG are added.
++    """
++    if len(gradients) != 3:
++        raise ValueError('Expected ordered cart/fav/buy cotangents')
++    donor_rows = _occupied_cycle_donor_rows(occupied)
++    with torch.autocast(device_type=click_gradient.device.type, enabled=False):
++        donors = tuple(g.to(dtype=torch.float64).index_select(0, donor_rows)
++                       for g in gradients)
++    _, _, orthogonal = _click_relative_components(
++        click_gradient, donors, occupied)
++    replacement = _reassign_orthogonal(click_gradient, orthogonal, occupied)
++    tangent = _tangent_orthogonal(
++        click_gradient, orthogonal, occupied, replacement)
++    with torch.autocast(device_type=click_gradient.device.type, enabled=False):
++        flat = tangent.reshape(-1)
++        index = flat.abs().argmax().reshape(1)
++        pivot = torch.gather(flat, dim=0, index=index).squeeze(0)
++        return torch.where(pivot < 0, -torch.ones_like(pivot),
++                           torch.ones_like(pivot))
++
++
+ def _reduce_context_transfer(click_gradient, gradients, occupied,
+                              parallel_orientation, orthogonal_orientation,
+                              click_relative_transfer, orthogonal_assignment):
+-    """Cross native versus donor-source Q bit with external +/- sign.
+-
+-    All helpers execute in every cell. Native bridge cells select the
+-    inherited expression exactly; donor cells change only the transported
+-    bit. Full-task radius/line/support remain at the original source.
+-    Geometry is defined before the inherited single cast and ID scatter.
++    """Cross native versus occupied-cycle source bit with external sign.
++
++    All helpers execute in every cell, including the prior paired-source
++    construction. Native bridges retain the exact inherited selection.
++    Only the transported bit changes; radius/line/support stay native.
+     """
+     if parallel_orientation != 'aligned' or click_relative_transfer != 'orthogonal_native':
+@@ -656,5 +713,5 @@
+     if orthogonal_orientation not in ('aligned', 'reversed'):
+         raise ValueError('Unknown orthogonal orientation')
+-    if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit'):
++    if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit', 'nuisance_line_fixed_angle_occupied_cycle_source_bit'):
+         raise ValueError('Unknown orthogonal assignment')
+     centered, parallel, orthogonal = _click_relative_components(
+@@ -683,5 +740,9 @@
+     paired_source_bit = _paired_source_orientation_bit(
+         click_gradient, gradients, occupied)
++    cycle_source_bit = _occupied_cycle_source_orientation_bit(
++        click_gradient, gradients, occupied)
+     with torch.autocast(device_type=click_gradient.device.type, enabled=False):
++        cycle_source_oriented = fixed_angle_canonical * cycle_source_bit
++        cycle_source_negative = -cycle_source_oriented
+         paired_source_oriented = fixed_angle_canonical * paired_source_bit
+         paired_source_negative = -paired_source_oriented
+@@ -733,4 +794,7 @@
+             transfer = (fixed_angle_click_oriented if orthogonal_orientation == 'aligned'
+                         else fixed_angle_click_negative)
++        elif orthogonal_assignment == 'nuisance_line_fixed_angle_occupied_cycle_source_bit':
++            transfer = (cycle_source_oriented if orthogonal_orientation == 'aligned'
++                        else cycle_source_negative)
+         elif orthogonal_assignment == 'nuisance_line_fixed_angle_paired_source_bit':
+             transfer = (paired_source_oriented if orthogonal_orientation == 'aligned'
+@@ -773,5 +837,5 @@
+         if click_relative_transfer != 'orthogonal_native':
+             raise ValueError('Assignment study requires orthogonal-only transfer')
+-        if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit'):
++        if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit', 'nuisance_line_fixed_angle_occupied_cycle_source_bit'):
+             raise ValueError('Unknown orthogonal assignment')
+         ctx.orthogonal_assignment = orthogonal_assignment
+@@ -882,5 +946,5 @@
+         if click_relative_transfer != 'orthogonal_native':
+             raise ValueError('Assignment study requires orthogonal-only transfer')
+-        if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit'):
++        if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit', 'nuisance_line_fixed_angle_occupied_cycle_source_bit'):
+             raise ValueError('Unknown orthogonal assignment')
+         self.orthogonal_assignment = orthogonal_assignment

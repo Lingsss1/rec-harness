@@ -1,0 +1,125 @@
+--- g1-r0076-reflect_fold_prediction/model.py
++++ g1-r0077-duplicate_mixture/model.py
+@@ -1,13 +1,12 @@
+-"""Prospective coarse-sign treatment x averaging-location factorial.
+-
+-Only the click adapter coarse moment is reflected; all supplied histories,
+-event fields, masks, summaries and other consumers remain inherited.
+-Every cell builds adapter-mean and separate-view prediction features, then
+-runs one shared click tower on their common 4B normalization population.
+-The reflection cells select early adapter or late probability averaging;
+-duplicate cells test the same contrast with identical signed views.
+-All learned modules, width16, initialization and auxiliary forward paths are
+-inherited from r0074 signed_bridge. Native execution and costs are unmeasured.
+-This tests a local sign quotient, not complete history-order invariance.
++"""Prospective coarse-sign treatment x click-view training objective.
++
++Reuse r0076's coalesced affine execution and native four-view Dice support.
++At prediction time, reflected cells average probabilities of the two signs;
++duplicate cells share one representative. The only new scientific factor is
++BCE of the average versus average BCE of the click views. Auxiliary losses
++remain the unweighted task BCEs. Cached views are transient training graph
++references, consumed once by the authorized training_loss hook.
++This is a local coarse-moment sign test, not whole-order invariance, an
++established rescue, or a novelty claim. Native execution belongs to the host.
+ """
+ import torch
+@@ -18,5 +17,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'interaction_coarse_signed': False, 'primary_adapter_coarse_signed': True, 'auxiliary_adapter_coarse_signed': False, 'block_primary_adapter_coarse_grad': False, 'primary_adapter_readout': 'signed', 'primary_residual_hidden': 16, 'coarse_view_treatment': 'reflect', 'averaging_location': 'prediction', 'tower_execution': 'coalesced_native_dice'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'interaction_coarse_signed': False, 'primary_adapter_coarse_signed': True, 'auxiliary_adapter_coarse_signed': False, 'block_primary_adapter_coarse_grad': False, 'primary_adapter_readout': 'signed', 'primary_residual_hidden': 16, 'coarse_view_treatment': 'duplicate', 'averaging_location': 'prediction', 'tower_execution': 'coalesced_native_dice', 'click_view_objective': 'mixture'}
+ 
+ 
+@@ -43,6 +42,6 @@
+                  primary_adapter_readout='signed',
+                  primary_residual_hidden=16,
+-                 coarse_view_treatment='reflect', averaging_location='prediction',
+-                 tower_execution='coalesced_native_dice',
++                 coarse_view_treatment='duplicate', averaging_location='prediction',
++                 tower_execution='coalesced_native_dice', click_view_objective='mixture',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -88,4 +87,11 @@
+             raise ValueError('This diagnostic requires coalesced affine rows and native Dice')
+         self.tower_execution = tower_execution
++        if click_view_objective not in ('mixture', 'per_view'):
++            raise ValueError('Unknown click-view training objective')
++        if averaging_location != 'prediction':
++            raise ValueError('This objective study freezes probability averaging')
++        self.click_view_objective = click_view_objective
++        # Nonpersistent graph references, never parameters or running state.
++        self._click_objective_views = None
+         if (not isinstance(primary_residual_hidden, int)
+                 or isinstance(primary_residual_hidden, bool)
+@@ -917,6 +923,10 @@
+             tower, features, batch, reflected)).float()
+         if not reflected:
++            if self.training:
++                self._click_objective_views = (probabilities, probabilities)
+             return probabilities
+         adapter_prediction, first_prediction, second_prediction = probabilities.chunk(3, dim=0)
++        if self.training:
++            self._click_objective_views = (first_prediction, second_prediction)
+         view_prediction = (first_prediction + second_prediction) * 0.5
+         if self.averaging_location == 'prediction':
+@@ -925,4 +935,7 @@
+ 
+     def forward(self, inputs):
++        # A fresh forward invalidates unconsumed views from any older batch.
++        # Eval stores no graph and cannot leave training views available.
++        self._click_objective_views = None
+         context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._represent(inputs)
+         batch = values.shape[0]
+@@ -1100,2 +1113,51 @@
+             predictions[label + '_pred'] = torch.sigmoid(tower(features))
+         return predictions
++
++
++    def training_loss(self, inputs, probabilities, train_labels):
++        """Unweighted four-task BCE, replacing only the click objective.
++
++        Every cell computes the same two loss candidates. Reflection/per_view
++        selects mean BCE(p+, y), BCE(p-, y); all others select BCE(mean p, y).
++        The duplicate objectives deliberately share exactly one expression,
++        avoiding a false null contrast caused by different reduction graphs.
++        No label is used by forward or retained after this hook. Labels follow
++        feature_map.labels, with no assumption that click is the first column.
++        """
++        if not self.training:
++            raise ValueError('training_loss is available only in training mode')
++        views = self._click_objective_views
++        self._click_objective_views = None
++        if views is None:
++            raise ValueError('training_loss requires one fresh forward per batch')
++        if (probabilities.ndim != 2 or probabilities.shape[1] != self.num_tasks
++                or train_labels.shape != probabilities.shape):
++            raise ValueError('Expected aligned probabilities and labels [B,4]')
++        first, second = views
++        if (first.shape != (probabilities.shape[0], 1)
++                or second.shape != first.shape
++                or first.device != probabilities.device
++                or second.device != probabilities.device):
++            raise ValueError('Cached click views do not match the current batch')
++        labels = train_labels.to(device=probabilities.device, dtype=torch.float32)
++        click = list(self.feature_map.labels).index('is_click')
++        click_labels = labels[:, click:click + 1]
++        # Probabilities are already FP32 in the inherited view readout.
++        # BCE runs in FP32, outside the host's autocast context if necessary:
++        # binary_cross_entropy is disallowed inside CUDA autocast by PyTorch.
++        with torch.autocast(device_type=probabilities.device.type, enabled=False):
++            task_losses = nn.functional.binary_cross_entropy(
++                probabilities.float(), labels, reduction='none').mean(dim=0)
++            first_loss = nn.functional.binary_cross_entropy(
++                first.float(), click_labels, reduction='mean')
++            second_loss = nn.functional.binary_cross_entropy(
++                second.float(), click_labels, reduction='mean')
++            per_view = (first_loss + second_loss) * 0.5
++            selected = list(task_losses.unbind())
++            if (self.coarse_view_treatment == 'reflect'
++                    and self.click_view_objective == 'per_view'):
++                selected[click] = per_view
++            # Both candidate loss graphs remain present in all cells.
++            # For duplicate treatment both objectives select identical code.
++            return (torch.stack(selected).sum() + 0.0 * per_view
++                    + 0.0 * task_losses.sum())

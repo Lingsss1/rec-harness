@@ -1,0 +1,102 @@
+--- g3-r0018-rank_event_route/model.py
++++ g3-r0019-rank_collapsed_duplicate/model.py
+@@ -1,17 +1,19 @@
+-"""Prospective task-private feedback/rank evidence placement study.
+-
+-Inherit g3-r0015-position_task_primary; retain its protected positional gate.
+-Append one zero-initialized [task, channel*match, kernel] tensor after reset.
+-Factorial: event-linked or history-marginal kernels; final-logit readout or
+-additional gate logits. All cells calculate the same projected alternatives.
+-New features resolve exposure/four overlapping feedback channels, crossed
+-with exposure/category/brand/joint matches. Event rank counts valid events
+-on the right, not elapsed time. Readout averages over valid events; routing
+-uses the inherited self donor, tanh and click coefficient-mass preservation.
+-Only new task-private rows learn from their own task; indirect coupling via
+-shared context and host clipping persists. No current action/label is read.
+-Initial predictions equal the parent because every new coefficient is zero.
+-No measured improvement, verified novelty, or original-method reproduction
+-is asserted. Host tensor/autograd, precision, cost and scoring are required.
++"""Prospective feedback identity x overlapping positional route replacement.
++
++Parent: g3-r0018-rank_event_route. No new parameters or RNG draws. The two
++switches resolve/collapse feedback ONLY in its task-private rank branch, and
++retain/zero ONLY the inherited primary-owned collapsed positional correction.
++Both corrections are computed in every cell. All other input representations,
++losses, ownership boundaries, gates and prediction paths remain inherited.
++The replacement keeps event-linked kernels; existing marginal/readout trials
++are contextual evidence, not extra cells. Resolved/retained reproduces the
++parent algebra. At the inherited zero initialization, all four cells coincide.
++
++The old correction is in the new branch's linear function space. Removing it
++tests overlapping parameterization, not loss of primary functional capacity.
++Collapsing feedback preserves exposure and total overlapping feedback counts,
++but reduces the rank of this branch's input features. Allocated capacity is
++equal; effective feature rank is not. No novelty, gain, or mechanism support
++is asserted before host execution. No current action or label is read.
+ """
+ import copy
+@@ -23,5 +25,5 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary', 'rank_evidence_scope': 'event', 'rank_evidence_location': 'route'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary', 'rank_evidence_scope': 'event', 'rank_evidence_location': 'route', 'rank_feedback_identity': False, 'retain_position_route': True}
+ 
+ 
+@@ -40,4 +42,5 @@
+                  position_sharing='task', position_aux_gradient='primary',
+                  rank_evidence_scope='event', rank_evidence_location='route',
++                 rank_feedback_identity=False, retain_position_route=True,
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+@@ -121,4 +124,10 @@
+         if rank_evidence_location not in ('readout', 'route'):
+             raise ValueError('Rank evidence location must be readout or route')
++        if rank_evidence_scope != 'event' or rank_evidence_location != 'route':
++            raise ValueError('Replacement study fixes event-linked rank routing')
++        if not isinstance(rank_feedback_identity, bool) or not isinstance(retain_position_route, bool):
++            raise ValueError('Identity and route-retention switches must be boolean')
++        self.rank_feedback_identity = rank_feedback_identity
++        self.retain_position_route = retain_position_route
+         self.rank_evidence_scope = rank_evidence_scope
+         self.rank_evidence_location = rank_evidence_location
+@@ -345,15 +354,21 @@
+         """Return task-private route [B,L,T] and readout [B,T] logits.
+ 
+-        Both event/marginal projections and both placement alternatives run
+-        in all cells. Only the selected output has a prediction path. These
+-        features are input-only and have no gradient to an embedding table.
+-        Marginal kernels retain the within-history rank profile but remove
+-        its alignment with the event channels/matches in this new branch.
+-        Existing inherited position routing remains event linked in all cells.
++        The new identity switch acts only here. Both resolved/collapsed input
++        tensors and event/marginal kernel projections are computed in every
++        cell. These features have no gradient to an embedding table. The old
++        primary-owned position route is independently retained/replaced by the
++        caller. All four cells select event alignment and routing placement.
+         """
+         with torch.autocast(device_type=mask.device.type, enabled=False):
+             valid = mask.bool()
+             valid_float = valid.float()
+-            features = (channels.float().unsqueeze(-1) *
++            rank_channels = channels.float()
++            common_feedback = rank_channels[:, :, 1:].mean(dim=-1, keepdim=True)
++            collapsed_channels = torch.cat([
++                rank_channels[:, :, :1],
++                common_feedback.expand(-1, -1, len(self.towers))], dim=-1)
++            if not self.rank_feedback_identity:
++                rank_channels = collapsed_channels
++            features = (rank_channels.unsqueeze(-1) *
+                         matches.float().unsqueeze(-2)).flatten(2)
+             features = features.masked_fill(~valid.unsqueeze(-1), 0)
+@@ -402,6 +417,9 @@
+             gate_logits = gate_logits + self._composition_gate_logits(
+                 channels, matches, mask)
+-            gate_logits = gate_logits + self._position_gate_logits(
+-                channels, matches, mask)
++            inherited_position = self._position_gate_logits(channels, matches, mask)
++            # Both cells execute this path. A zero factor retains a zero
++            # gradient tensor, without mutating optimizer state or ownership.
++            position_factor = 1.0 if self.retain_position_route else 0.0
++            gate_logits = gate_logits + position_factor * inherited_position
+             # Each new row is task-private. The fixed self donor below cannot
+             # make another task's loss update this row directly.

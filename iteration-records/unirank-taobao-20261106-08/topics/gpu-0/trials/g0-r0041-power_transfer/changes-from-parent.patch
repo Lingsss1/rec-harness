@@ -1,0 +1,45 @@
+--- g0-r0039-context_product/model.py
++++ g0-r0041-power_transfer/model.py
+@@ -16,5 +16,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'signed_power_product', 'interaction_rank': 16}
+ 
+ 
+@@ -35,5 +35,5 @@
+                  block_aux_tower_context_grad=True,
+                  block_aux_adapter_context_grad=False,
+-                 context_fusion='product', interaction_rank=16,
++                 context_fusion='signed_power_product', interaction_rank=16,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -62,5 +62,5 @@
+         self.block_aux_tower_context_grad = block_aux_tower_context_grad
+         self.block_aux_adapter_context_grad = block_aux_adapter_context_grad
+-        if context_fusion not in ('product', 'sum'):
++        if context_fusion not in ('product', 'sum', 'signed_power_product'):
+             raise ValueError('Unknown context/history fusion operator')
+         if (not isinstance(interaction_rank, int) or isinstance(interaction_rank, bool)
+@@ -678,11 +678,17 @@
+     def _context_history_correction(self, index, context, history):
+         # Only supplied context and already-masked compressed history enter.
+-        # FP32 bounded projections and a shared RMS denominator reduce gross
+-        # scale confounding between product and sum. Their geometry and
+-        # optimization still differ; equal norms do not imply equal capacity.
++        # FP32 bounded projections and the inherited RMS denominator.
++        # Signed power preserves polarity while compressing magnitude ratios;
++        # its changed ordinary gradients remain an optimization confound.
+         query = torch.tanh(self.context_queries[index](context).float())
+         summary = torch.tanh(self.history_projections[index](history).float())
+-        if self.context_fusion == 'product':
++        if self.context_fusion in ('product', 'signed_power_product'):
+             fused = query * summary
++            if self.context_fusion == 'signed_power_product':
++                # Smooth signed square-root approximation, in FP32. The
++                # fixed epsilon keeps the ordinary derivative finite at zero.
++                # Preserve polarity while reducing unequal magnitude ratios.
++                # This changes forward salience AND backward conditioning.
++                fused = fused * (fused.square() + 1e-4).pow(-0.25)
+         else:
+             fused = (query + summary) * (2.0 ** -0.5)

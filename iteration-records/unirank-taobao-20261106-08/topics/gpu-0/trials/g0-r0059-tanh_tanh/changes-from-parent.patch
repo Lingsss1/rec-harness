@@ -1,0 +1,79 @@
+--- g0-r0052-block_nonlinear_transfer/model.py
++++ g0-r0059-tanh_tanh/model.py
+@@ -16,5 +16,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'block_forward_activation': 'tanh', 'block_backward_activation': 'tanh'}
+ 
+ 
+@@ -36,4 +36,5 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16, summary_placement='block',
++                 block_forward_activation='tanh', block_backward_activation='tanh',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -72,4 +73,12 @@
+             raise ValueError('Unknown history projection placement')
+         self.summary_placement = summary_placement
++        if summary_placement != 'block':
++            raise ValueError('Activation factorial requires the frozen block summary')
++        if block_forward_activation not in ('tanh', 'softsign'):
++            raise ValueError('Unknown block forward activation')
++        if block_backward_activation not in ('tanh', 'softsign'):
++            raise ValueError('Unknown block backward activation')
++        self.block_forward_activation = block_forward_activation
++        self.block_backward_activation = block_backward_activation
+         if context_fusion != 'product':
+             raise ValueError('This placement study fixes product fusion')
+@@ -681,14 +690,34 @@
+         return weighted if return_blocks else weighted.sum(dim=1)
+ 
++    def _block_activation(self, preactivation):
++        """Exact selected forward value; explicitly selected local derivative.
++
++        f.detach() + (g - g.detach()) has value f and local derivative g'.
++        The parentheses preserve exact forward values for finite tensors.
++        Both g paths execute backward in all cells through a zero edge.
++        Off-diagonal cells are declared surrogate-gradient interventions.
++        They must be checked against the selected analytic derivative,
++        not finite differences of their forward map. No custom autograd,
++        hooks, parameter/state mutation or label-dependent rule is used.
++        """
++        z = preactivation.float()
++        tanh_value = torch.tanh(z)
++        softsign_value = z / (1.0 + z.abs())
++        forward_value = (tanh_value if self.block_forward_activation == 'tanh'
++                         else softsign_value)
++        if self.block_backward_activation == 'tanh':
++            backward_value = tanh_value + 0.0 * softsign_value
++        else:
++            backward_value = softsign_value + 0.0 * tanh_value
++        return forward_value.detach() + (backward_value - backward_value.detach())
++
+     def _context_history_correction(self, index, context, history, block_base, block_counts):
+-        """Test tied nonlinear projection before versus after block aggregation.
+-
+-        b_j is the existing signed target-scored contribution of block j;
+-        r contains the original global counts and five detail summaries.
+-        For M occupied blocks, the mean of [M*b_j, r] is [sum(b_j), r].
+-        Only the location of tanh relative to this averaging is changed.
+-        No softmax, new learned matrix, target label or unmasked event enters.
+-        Both paths execute in every cell, including backward via an algebraic
+-        zero. This is a work-matched diagnostic, with actual costs host-measured.
++        """Keep block inputs/pooling fixed; vary only local f and g'.
++
++        The global aggregate tanh path remains the inherited zero-edge work.
++        Only the local projected-block activation uses the factorial helper.
++        Context-query tanh, product/RMS normalization and readout stay fixed.
++        No new learned matrix, target label or unmasked event enters.
++        Actual cost matching and finite unused-edge backward require host checks.
+         """
+         query = torch.tanh(self.context_queries[index](context).float())
+@@ -705,5 +734,5 @@
+             -1, block_base.shape[1], -1)
+         local_inputs = torch.cat([local_base, shared_detail], dim=-1)
+-        local_hidden = torch.tanh(self.history_projections[index](local_inputs).float())
++        local_hidden = self._block_activation(self.history_projections[index](local_inputs).float())
+         local_hidden = torch.where(occupied.unsqueeze(-1), local_hidden,
+                                    torch.zeros_like(local_hidden))

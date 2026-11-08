@@ -1,0 +1,132 @@
+--- g3-r0022-selector_disabled/model.py
++++ g3-r0023-context_shared_live/model.py
+@@ -1,17 +1,16 @@
+-"""Prospective selector-score transfer, initialized to the inherited function.
+-
+-Parent: g3-r0021-aux_private_detached. The auxiliary selector uses detached
+-private embeddings; its trunk and readout rows still learn from auxiliary BCE.
+-Transfer only centered, bounded per-event selector scores into the click
+-pooling coefficients. Donor values and predicted task probabilities are never
+-transferred. Three zero-initialized coefficients add no random draws. The
+-positive modulation preserves click coefficient signs and absolute mass.
+-
+-Matched controls select auxiliary/self/disabled donors, with detached/live
+-auxiliary-score derivatives. All cells allocate the same modules and calculate
+-the same score statistics. Live transfer lets click update the auxiliary trunk
+-and readout rows, while private selector-input detachment remains inherited.
+-Self donor columns coincide: allocated capacity matches, effective rank does
+-not. No claim of improvement or novelty precedes host validation.
++"""Prospective context-ownership factorial; no empirical benefit is assumed.
++
++Parent: g3-r0022-selector_disabled. Auxiliary item values and selector inputs,
++all routing and four BCE objectives remain inherited. Only auxiliary tower
++user/context inputs change: shared/independently copied tables, crossed with
++live/stopped derivatives. The click tower always reads the original context.
++
++Every cell allocates and evaluates the same copied context modules, initialized
++by deepcopy after all inherited initialization. No new random initialization,
++reset or loss weighting. All auxiliary tasks share ONE context copy, not one
++per task. The private/stopped cell is a frozen-copy control; shared/stopped
++still sees the click-updated original context. Allocated state matches but
++trainable effective capacity, sparse update work and clipping can differ.
++Host validation is required; this is not a new-architecture priority claim.
+ """
+ import copy
+@@ -23,5 +22,5 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary', 'rank_evidence_scope': 'event', 'rank_evidence_location': 'route', 'rank_feedback_identity': False, 'retain_position_route': False, 'rank_primary_gain': 2.0, 'rank_aux_gradient': 'primary', 'selector_input_space': 'private', 'selector_input_gradient': 'detached', 'selector_transfer_source': 'none', 'selector_transfer_gradient': 'detached'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary', 'rank_evidence_scope': 'event', 'rank_evidence_location': 'route', 'rank_feedback_identity': False, 'retain_position_route': False, 'rank_primary_gain': 2.0, 'rank_aux_gradient': 'primary', 'selector_input_space': 'private', 'selector_input_gradient': 'detached', 'selector_transfer_source': 'none', 'selector_transfer_gradient': 'detached', 'aux_context_space': 'shared', 'aux_context_gradient': 'live'}
+ 
+ 
+@@ -45,4 +44,5 @@
+                  selector_transfer_source='none',
+                  selector_transfer_gradient='detached',
++                 aux_context_space='shared', aux_context_gradient='live',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+@@ -146,4 +146,12 @@
+         if selector_input_space != 'private' or selector_input_gradient != 'detached':
+             raise ValueError('Transfer study fixes detached private selector inputs')
++        if selector_transfer_source != 'none' or selector_transfer_gradient != 'detached':
++            raise ValueError('Context study fixes the disabled selector transfer')
++        if aux_context_space not in ('shared', 'private'):
++            raise ValueError('Auxiliary context space must be shared or private')
++        if aux_context_gradient not in ('live', 'detached'):
++            raise ValueError('Auxiliary context gradients must be live or detached')
++        self.aux_context_space = aux_context_space
++        self.aux_context_gradient = aux_context_gradient
+         self.selector_transfer_source = selector_transfer_source
+         self.selector_transfer_gradient = selector_transfer_gradient
+@@ -259,4 +267,16 @@
+         # Appended after inherited initialization; dense, zero and RNG-neutral.
+         self.selector_transfer_weight = nn.Parameter(torch.zeros(3))
++        # Copy the context group once, retaining any aliases WITHIN the group.
++        # No extra FeatureEmbeddingDict construction or reset: inherited RNG
++        # draws, original state and initial predictions remain undisturbed.
++        # Copy layers and encoders together to preserve their internal aliases.
++        context_copies = copy.deepcopy({
++            'layers': {name: self.embedding_layer.embedding_layers[name]
++                       for name in self.user_fields},
++            'encoders': {name: self.embedding_layer.feature_encoders[name]
++                         for name in self.user_fields
++                         if name in self.embedding_layer.feature_encoders}})
++        self.aux_context_layers = nn.ModuleDict(context_copies['layers'])
++        self.aux_context_encoders = nn.ModuleDict(context_copies['encoders'])
+         self.model_to_device()
+ 
+@@ -608,4 +628,24 @@
+         return result
+ 
++    def _private_context_embeddings(self, user):
++        # Match the pinned FeatureEmbeddingDict.forward casts and encoders.
++        # Consume only host-filtered features already used by the parent.
++        result = {}
++        for name in self.user_fields:
++            feature_type = self.feature_map.features[name]['type']
++            if feature_type == 'numeric':
++                inp = user[name].float().view(-1, 1)
++            elif feature_type in ('categorical', 'sequence'):
++                inp = user[name].long()
++            elif feature_type == 'embedding':
++                inp = user[name].float()
++            else:
++                raise ValueError('Unsupported context feature type')
++            value = self.aux_context_layers[name](inp)
++            if name in self.aux_context_encoders:
++                value = self.aux_context_encoders[name](value)
++            result[name] = value
++        return result
++
+     def forward(self, inputs):
+         if len(inputs) != 4 or inputs[3] is None:
+@@ -629,4 +669,13 @@
+             values = torch.cat([keys, action], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
++        # All cells execute the same extra lookups and encoder calls. Detach
++        # only auxiliary context inputs, never complete tower outputs/losses.
++        private_context_emb = self._private_context_embeddings(user)
++        private_context = torch.cat([private_context_emb[name]
++                                     for name in self.user_fields], dim=-1)
++        auxiliary_context = (private_context if self.aux_context_space == 'private'
++                             else context)
++        if self.aux_context_gradient == 'detached':
++            auxiliary_context = auxiliary_context.detach()
+         # Auxiliary target/history values remain private in every cell. The
+         # auxiliary selector can separately read primary or private geometry.
+@@ -672,5 +721,6 @@
+             # Factor only click's gate. Private item tables, auxiliary gates,
+             # additive evidence and primary selector ownership stay inherited.
+-            # Shared context and host clipping still couple the four losses.
++            # Context ownership is selected at the task tower below. Host
++            # dense clipping still couples losses across all factorial cells.
+             scores = self._apply_gate_components(scores, gain, mask)
+             scores = self._apply_selector_transfer(scores, raw_selector_scores, mask)
+@@ -688,6 +738,5 @@
+             task_context, task_target = context, target
+             if label != 'is_click':
+-                if self.block_aux_context_gradient:
+-                    task_context = context.detach()
++                task_context = auxiliary_context
+                 task_target = auxiliary_target
+             features = torch.cat([task_context, task_target, pooled[:, index]], dim=-1)

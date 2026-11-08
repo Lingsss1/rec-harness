@@ -1,0 +1,142 @@
+--- g2-r0053-joint_partition_semantic/model.py
++++ g2-r0055-joint_context_rank_separate/model.py
+@@ -1,8 +1,7 @@
+-"""Shared-context sparse direct connectivity in the buy first affine.
+-
+-The parent construction/reset/RNG sequence finishes before any intervention.
+-Packed branches physically discard selected direct first-affine connections,
+-retain all112 nonlinear channels and share every context input. The full-input
+-buy residual still precedes this layer. No priority or measured-utility claim.
++"""Context-only rank reduction in the sparse buy head.
++
++Prospective host study: fused reference, separated dense arithmetic control,
++and two context ranks. Retain local semantic branches, all nonlinear channels,
++full-input residual and all source-gradient/masking contracts. No result claim.
+ """
+ import torch
+@@ -13,5 +12,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'separate', 'owner_context_rank': 0}
+ 
+ 
+@@ -146,4 +145,84 @@
+ 
+ 
++class _ContextAffine(nn.Module):
++    """Separate the common context map; optionally constrain only its rank.
++
++    Installed after every inherited construction/reset/slice. All new weights
++    derive from the fresh untrained packed affine, without new RNG draws.
++    Local target/pool weights and bias are cloned unchanged. No full source
++    affine, checkpoint, data, spectral tensor or derived cache persists.
++    """
++    def __init__(self, source, context_width, projection, rank):
++        super().__init__()
++        if not isinstance(source, _PartitionedAffine):
++            raise ValueError('Expected a packed semantic affine')
++        if projection not in ('separate', 'rank'):
++            raise ValueError('Expected separate dense or rank context projection')
++        if projection == 'separate' and rank != 0:
++            raise ValueError('Separate dense context must have rank zero')
++        if projection == 'rank' and not 1 <= rank < min(context_width, source.out_features):
++            raise ValueError('Context rank must strictly reduce its rank ceiling')
++        if projection == 'rank' and rank * (context_width + source.out_features) >= context_width * source.out_features:
++            raise ValueError('Context factors must reduce parameter storage')
++        self.in_features = source.in_features
++        self.out_features = source.out_features
++        self.row_split = source.row_split
++        self.context_width = context_width
++        self.projection = projection
++        self.rank = rank
++        with torch.no_grad():
++            expected = torch.arange(context_width, device=source.first_columns.device)
++            if (not torch.equal(source.first_columns[:context_width], expected)
++                    or not torch.equal(source.second_columns[:context_width], expected)):
++                raise ValueError('Both branches must read every context coordinate in order')
++            self.register_buffer('first_columns', source.first_columns[context_width:].clone())
++            self.register_buffer('second_columns', source.second_columns[context_width:].clone())
++            self.first_weight = nn.Parameter(
++                source.first_weight[:, context_width:].detach().clone(),
++                requires_grad=source.first_weight.requires_grad)
++            self.second_weight = nn.Parameter(
++                source.second_weight[:, context_width:].detach().clone(),
++                requires_grad=source.second_weight.requires_grad)
++            self.bias = nn.Parameter(source.bias.detach().clone(),
++                                     requires_grad=source.bias.requires_grad)
++            context = torch.cat((source.first_weight[:, :context_width],
++                                 source.second_weight[:, :context_width]), dim=0).detach()
++            if projection == 'separate':
++                self.context_weight = nn.Parameter(context.clone(),
++                    requires_grad=source.first_weight.requires_grad)
++            else:
++                # CPU FP32 SVD only at construction; balanced top-r factors.
++                left, singular, right = torch.linalg.svd(
++                    context.to(device='cpu', dtype=torch.float32), full_matrices=False)
++                left, singular, right = left[:, :rank], singular[:rank], right[:rank, :]
++                pivots = left.abs().argmax(dim=0, keepdim=True)
++                signs = left.gather(0, pivots).squeeze(0).sign()
++                signs = torch.where(signs == 0, torch.ones_like(signs), signs)
++                root = singular.sqrt()
++                output_factor = (left * signs.unsqueeze(0)) * root.unsqueeze(0)
++                input_factor = root.unsqueeze(1) * (right * signs.unsqueeze(1))
++                self.context_input = nn.Parameter(input_factor.to(
++                    device=context.device, dtype=context.dtype).clone(),
++                    requires_grad=source.first_weight.requires_grad)
++                self.context_output = nn.Parameter(output_factor.to(
++                    device=context.device, dtype=context.dtype).clone(),
++                    requires_grad=source.first_weight.requires_grad)
++
++    def forward(self, features):
++        context = features[..., :self.context_width]
++        if self.projection == 'separate':
++            context = torch.nn.functional.linear(context, self.context_weight)
++        else:
++            context = torch.nn.functional.linear(context, self.context_input)
++            context = torch.nn.functional.linear(context, self.context_output)
++        first = torch.nn.functional.linear(
++            features.index_select(-1, self.first_columns), self.first_weight,
++            self.bias[:self.row_split])
++        second = torch.nn.functional.linear(
++            features.index_select(-1, self.second_columns), self.second_weight,
++            self.bias[self.row_split:])
++        return torch.cat((first, second), dim=-1) + context
++
++
+ class Model(MultiTaskModel):
+     def __init__(self, feature_map, model_id='TargetMatchOrderMoment', gpu=-1,
+@@ -173,4 +252,5 @@
+                  owner_affine_rank=0, owner_factor_balance='balanced',
+                  owner_input_partition='dense',
++                 owner_context_projection='fused', owner_context_rank=0,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -185,4 +265,14 @@
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         self.compression_routes = compression_routes
++        if owner_context_projection not in ('fused', 'separate', 'rank'):
++            raise ValueError('Unknown context projection')
++        if isinstance(owner_context_rank, bool) or not isinstance(owner_context_rank, int) or owner_context_rank < 0:
++            raise ValueError('Context rank must be a nonnegative integer')
++        if owner_context_projection != 'rank' and owner_context_rank != 0:
++            raise ValueError('Only rank context projection accepts positive rank')
++        if owner_context_projection == 'rank' and owner_context_rank == 0:
++            raise ValueError('Rank context projection requires positive rank')
++        if owner_context_projection != 'fused' and owner_input_partition != 'semantic':
++            raise ValueError('Context intervention fixes semantic local partition')
+         if owner_input_partition not in ('dense', 'semantic', 'mixed'):
+             raise ValueError('Unknown owner input partition')
+@@ -495,4 +585,12 @@
+                         self.key_width, self.value_width, embedding_dim,
+                         owner_input_partition)
++        # Only the buy first-affine context block changes. Fused mode is an
++        # exact no-op. Replacement removes all old context backing storage.
++        if owner_context_projection != 'fused':
++            for label, tower in zip(feature_map.labels, self.towers):
++                if label == 'buy':
++                    tower[0] = _ContextAffine(
++                        tower[0], len(self.user_fields) * embedding_dim,
++                        owner_context_projection, owner_context_rank)
+         self.model_to_device()
+ 

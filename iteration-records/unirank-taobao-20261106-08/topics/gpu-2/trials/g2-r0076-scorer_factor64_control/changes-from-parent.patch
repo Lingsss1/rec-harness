@@ -1,0 +1,140 @@
+--- g2-r0075-coordinate_weight_direct/model.py
++++ g2-r0076-scorer_factor64_control/model.py
+@@ -1,8 +1,8 @@
+-"""Prospective redundant-coordinate removal in the inherited local scorer.
+-
+-Retain nonlinear widths64/32; compare plain and orthonormal linear coordinates
+-with an approximately parameter-matched width50 control. All training is from
+-scratch under the frozen host recipe. Real-arithmetic initialization equality
+-does not imply BF16 equality, equal optimization, measured speed or utility.
++"""Prospective rank versus nonlinear-channel capacity in the local scorer.
++
++This bounded screen compares a rank48 input map retaining64 Dice outputs,
++a fullrank64 factorization control and a smaller56-channel quotient control.
++Everything initializes from the inherited untrained template. No effectiveness,
++FP32/BF16 equality, runtime improvement or novelty is established by this code.
+ """
+ import torch
+@@ -13,5 +13,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'budgeted_factor', 'owner_context_rank': 96, 'owner_context_scale': 'inherited', 'owner_context_balance': 'balanced', 'owner_context_evaluation': 'native', 'evaluation_summary_contraction': 'global', 'evaluation_coefficient_work': 'all', 'scorer_hidden_units': [64, 32], 'scorer_coordinates': 'orthogonal', 'scorer_coordinate_execution': 'weight', 'scorer_evaluation_execution': 'direct'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'budgeted_factor', 'owner_context_rank': 96, 'owner_context_scale': 'inherited', 'owner_context_balance': 'balanced', 'owner_context_evaluation': 'native', 'evaluation_summary_contraction': 'global', 'evaluation_coefficient_work': 'all', 'scorer_hidden_units': [64, 32], 'scorer_coordinates': 'orthogonal', 'scorer_coordinate_execution': 'weight', 'scorer_evaluation_execution': 'direct', 'scorer_factor_rank': 64}
+ 
+ 
+@@ -351,4 +351,61 @@
+ 
+ 
++class _ScorerFactorAffine(nn.Module):
++    """Balanced factors of the fresh orthogonal scorer weight.
++
++    Rank64 controls the new factorized optimization and two-GEMM execution.
++    Rank48 keeps every nonlinear output but restricts the shared linear map.
++    SVD is CPU FP32 construction work only. No checkpoint, observations,
++    full-sized weight backing storage, derived cache or new RNG is retained.
++    """
++    def __init__(self, source, rank):
++        super().__init__()
++        if not isinstance(source, _WeightCoordinateAffine):
++            raise ValueError('Expected the inherited orthogonal scorer')
++        if isinstance(rank, bool) or not isinstance(rank, int):
++            raise ValueError('Scorer rank must be an integer')
++        if not 1 <= rank <= min(source.out_features, source.in_features):
++            raise ValueError('Scorer rank exceeds the affine dimensions')
++        if source.out_features != 64 or source.bias is None:
++            raise ValueError('Factor contrast retains all64 scorer outputs')
++        self.in_features = source.in_features
++        self.out_features = source.out_features
++        self.key_width = source.key_width
++        self.rank = rank
++        with torch.no_grad():
++            left, singular, right = torch.linalg.svd(
++                source.weight.detach().to(device='cpu', dtype=torch.float32),
++                full_matrices=False)
++            left, singular, right = left[:, :rank], singular[:rank], right[:rank, :]
++            pivots = left.abs().argmax(dim=0, keepdim=True)
++            signs = left.gather(0, pivots).squeeze(0).sign()
++            signs = torch.where(signs == 0, torch.ones_like(signs), signs)
++            root = singular.sqrt()
++            output_factor = (left * signs.unsqueeze(0)) * root.unsqueeze(0)
++            input_factor = root.unsqueeze(1) * (right * signs.unsqueeze(1))
++            self.input_factor = nn.Parameter(
++                input_factor.to(device=source.weight.device,
++                                dtype=source.weight.dtype).clone(),
++                requires_grad=source.weight.requires_grad)
++            self.output_factor = nn.Parameter(
++                output_factor.to(device=source.weight.device,
++                                 dtype=source.weight.dtype).clone(),
++                requires_grad=source.weight.requires_grad)
++        # Reuse the bias Parameter; the replaced module has no remaining owner.
++        self.bias = source.bias
++
++    def forward(self, features):
++        # Transform only the small input factor. Trainable coordinates remain
++        # orthogonal; no activation or bias occurs between the two factors.
++        # Both factors stay inside functional_call for auxiliary detachment.
++        dimension = self.key_width
++        shared = self.input_factor[:, :dimension] / (2.0 ** 0.5)
++        difference = self.input_factor[:, dimension:2 * dimension] * ((3.0 / 2.0) ** 0.5)
++        effective = torch.cat((shared + difference, shared - difference,
++                               self.input_factor[:, 2 * dimension:]), dim=-1)
++        hidden = torch.nn.functional.linear(features, effective)
++        return torch.nn.functional.linear(hidden, self.output_factor, self.bias)
++
++
+ class Model(MultiTaskModel):
+     def __init__(self, feature_map, model_id='TargetMatchOrderMoment', gpu=-1,
+@@ -387,5 +444,6 @@
+                  scorer_coordinates='orthogonal',
+                  scorer_coordinate_execution='weight',
+-                 scorer_evaluation_execution='hoisted',
++                 scorer_evaluation_execution='direct',
++                 scorer_factor_rank=64,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -403,8 +461,8 @@
+             raise ValueError('Unknown scorer coordinates')
+         if scorer_coordinates != 'redundant' and (
+-                tuple(scorer_hidden_units) != (64, 32)
++                tuple(scorer_hidden_units) not in ((64, 32), (56, 32))
+                 or tuple(attention_hidden_units) != (64, 32)
+                 or evaluation_projection != 'merged_hoist'):
+-            raise ValueError('Coordinate reduction retains64/32 and merged evaluation')
++            raise ValueError('Coordinate contrast permits only64/32 or56/32 and merged evaluation')
+         if scorer_coordinate_execution not in ('explicit', 'weight'):
+             raise ValueError('Unknown scorer coordinate execution')
+@@ -413,4 +471,12 @@
+         if scorer_coordinate_execution != 'weight' or scorer_coordinates != 'orthogonal':
+             raise ValueError('This candidate requires orthogonal weight coordinates')
++        if (isinstance(scorer_factor_rank, bool)
++                or not isinstance(scorer_factor_rank, int)
++                or scorer_factor_rank not in (0, 48, 64)):
++            raise ValueError('Scorer factor rank must be0,48 or64')
++        if scorer_factor_rank and (tuple(scorer_hidden_units) != (64, 32)
++                                   or scorer_evaluation_execution != 'direct'):
++            raise ValueError('Factor contrast retains64/32 and direct evaluation')
++        self.scorer_factor_rank = scorer_factor_rank
+         self.scorer_coordinate_execution = scorer_coordinate_execution
+         self.scorer_evaluation_execution = scorer_evaluation_execution
+@@ -819,4 +885,9 @@
+         self.local_activation[0] = _WeightCoordinateAffine(
+             self.local_activation[0], self.key_width)
++        # Replace only after every inherited construction, slice and coordinate
++        # projection. Fullrank and reducedrank share the same SVD convention.
++        if scorer_factor_rank:
++            self.local_activation[0] = _ScorerFactorAffine(
++                self.local_activation[0], scorer_factor_rank)
+         self.model_to_device()
+ 
+@@ -1289,5 +1360,4 @@
+         query = target[:, None, :].expand(-1, slots, -1)
+         first = self.local_activation[0]
+-        weight = first.weight
+         if self.scorer_evaluation_execution == 'direct':
+             # One full reduced GEMM instead of query/history GEMMs plus
+@@ -1296,4 +1366,5 @@
+             hidden = first(self._interactions(target, values))
+         else:
++            weight = first.weight
+             if self.scorer_coordinates == 'plain':
+                 # These already ARE the effective q and [k,q*k,a] weights.

@@ -1,0 +1,121 @@
+--- g1-r0048-match_fixed_direction_click_task/model.py
++++ g1-r0049-match_crossradius_click_shared/model.py
+@@ -17,5 +17,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'match', 'match_action_availability': 'both', 'match_action_content': 'observed', 'match_replacement_gradient': 'blocked', 'match_observed_gradient': 'blocked', 'match_action_basis': 'identity', 'match_basis_initialization': 'unchanged', 'summary_rotation_partition': 'click', 'summary_stratum_operator': 'mean', 'summary_projection_scope': 'history', 'summary_contrast_direction': 'fixed'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'shared', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'match', 'match_action_availability': 'both', 'match_action_content': 'observed', 'match_replacement_gradient': 'blocked', 'match_observed_gradient': 'blocked', 'match_action_basis': 'identity', 'match_basis_initialization': 'unchanged', 'summary_rotation_partition': 'click', 'summary_stratum_operator': 'mean', 'summary_projection_scope': 'history', 'summary_contrast_direction': 'fixed', 'summary_contrast_radius': 'opposite_partition'}
+ 
+ 
+@@ -26,5 +26,5 @@
+                  compression_routes='uf', block_aux_scorer_grad=True,
+                  block_aux_context_grad=False, block_aux_item_grad=True, num_tasks=None,
+-                 residual_input='match_detail', residual_routing='task', residual_hidden=16,
++                 residual_input='match_detail', residual_routing='shared', residual_hidden=16,
+                  temporal_detail='position', block_detail='ordinal',
+                  curvature_detail='quadratic', joint_detail='duplicate_match',
+@@ -42,4 +42,5 @@
+                  summary_projection_scope='history',
+                  summary_contrast_direction='fixed',
++                 summary_contrast_radius='opposite_partition',
+                  match_replacement_gradient='blocked',
+                  match_observed_gradient='blocked',
+@@ -170,4 +171,12 @@
+             raise ValueError('Fixed direction requires the stopped history-mean consumer')
+         self.summary_contrast_direction = summary_contrast_direction
++        if summary_contrast_radius not in ('same_partition', 'opposite_partition'):
++            raise ValueError('Unknown action-contrast radius source')
++        if summary_contrast_radius == 'opposite_partition':
++            if (summary_contrast_direction != 'fixed'
++                    or summary_projection_scope != 'history'
++                    or summary_rotation_partition not in ('click', 'rotated_click')):
++                raise ValueError('Opposite radius requires fixed-direction history means')
++        self.summary_contrast_radius = summary_contrast_radius
+         self.click_index = list(feature_map.labels).index('is_click')
+         self.residual_input = residual_input
+@@ -340,4 +349,14 @@
+         else:
+             membership = (task_masks[self.click_index] > 0) & mask.bool()
++            radius_membership = None
++            if self.summary_contrast_radius == 'opposite_partition':
++                if self.summary_rotation_partition == 'click':
++                    radius_membership = self._rotate_valid_membership(
++                        membership.reshape(mask.shape[0], 10, 10),
++                        mask.bool().reshape(mask.shape[0], 10, 10)).reshape_as(mask)
++                else:
++                    # Save the real membership before the inherited rotation.
++                    # Do not rotate twice: odd valid counts are not involutions.
++                    radius_membership = membership
+             if self.summary_rotation_partition == 'rotated_click':
+                 # Count-matched artificial groups: only group membership moves.
+@@ -347,5 +366,6 @@
+                     mask.bool().reshape(mask.shape[0], 10, 10)).reshape_as(mask)
+             if self.summary_projection_scope == 'history':
+-                summary_values = self._history_stratified_summary_values(values, mask, membership)
++                summary_values = self._history_stratified_summary_values(
++                    values, mask, membership, radius_membership=radius_membership)
+             else:
+                 # Exact blockwise operator retained for parity with round44.
+@@ -385,27 +405,28 @@
+                           actions.reshape(batch, length, width - self.key_width)], dim=-1)
+ 
+-    def _history_stratified_summary_values(self, values, mask, membership):
+-        """Collapse centroid orientation at fixed weighted mean and distance.
+-
+-        First compute the exact ancestor group means in FP32. In original
+-        mode all subsequent arithmetic is unchanged. Fixed mode replaces
+-        d=mu1-mu0 by ||d||*u for a prespecified dense unit vector u, using
+-        nu_g=M+(g-p1)*||d||*u. M is the event-weighted whole-history mean.
+-        Both occupied groups preserve their total vector, centroid distance
+-        and projected Frobenius energy in exact arithmetic. Empty or single
+-        occupied groups keep the original means exactly.
+-
+-        The raw/scaled match coefficients sum to zero, so their summaries
+-        factor into a signed geometric coefficient times d. Thus replacing
+-        its direction preserves their norms analytically. BF16 coefficient
+-        centering and cast errors can leak the unchanged common mean; host
+-        certificates must measure this before attribution. Individual event
+-        norms, convexity, functional input rank and optimization are not
+-        preserved. Only stopped match-action rows consume the intervention.
+-        Original masks/values and all other consumers are left unchanged.
++    def _history_stratified_summary_values(self, values, mask, membership, radius_membership=None):
++        """Place canonical means using a count-matched opposite radius.
++
++        For placement P, M=sum(n_g*mu_g)/N and p=n_1/N are inherited.
++        Use nu_g=M+(g-p)*R(Q)*u, where Q is the same or the opposite
++        membership of this same masked history. Rotation preserves each
++        block's membership count, so P and Q have identical group counts.
++        The new radius is zero if donor means coincide; there is no epsilon
++        division or learned/calibrated scale. Both occupied groups preserve
++        the whole-history total action vector. Centroid distance, projected
++        energy and downstream summary norms intentionally follow the donor.
++        Empty/single occupied placement groups keep original means exactly.
++
++        With no radius_membership, every tensor operation is the exact
++        r0048 bridge. Only the new branch adds a second FP32 group reduction.
++        Original item values/masks, observed pools, ordinal action summaries
++        and all local gradient owners remain inherited. BF16 common-mean
++        cancellation leakage requires host certification before attribution.
+         """
+         batch, length, width = values.shape
+         if length != 100 or mask.shape != values.shape[:2] or membership.shape != mask.shape:
+             raise ValueError('Expected frozen history and membership shapes')
++        if radius_membership is not None and radius_membership.shape != mask.shape:
++            raise ValueError('Expected one donor membership per history position')
+         valid = mask.bool()
+         member = membership.bool() & valid
+@@ -425,4 +446,14 @@
+                 # No fitted scale, vocabulary assumptions or random axis.
+                 radius32 = torch.linalg.vector_norm(contrast32, dim=-1, keepdim=True)
++                if radius_membership is not None:
++                    donor_member = radius_membership.bool() & valid
++                    donor_groups = torch.stack((valid & ~donor_member, donor_member), dim=1)
++                    donor_weights32 = donor_groups.float()
++                    donor_counts32 = donor_weights32.sum(dim=-1, keepdim=True)
++                    donor_means32 = (torch.bmm(donor_weights32, original.float())
++                                     / donor_counts32.clamp_min(1))
++                    donor_contrast32 = donor_means32[:, 1:2, :] - donor_means32[:, 0:1, :]
++                    radius32 = torch.linalg.vector_norm(
++                        donor_contrast32, dim=-1, keepdim=True)
+                 axis32 = torch.arange(action_width, device=values.device, dtype=torch.float32)
+                 axis32 = (1.0 - 2.0 * axis32.remainder(2)) / (action_width ** 0.5)

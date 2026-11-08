@@ -1,0 +1,113 @@
+--- g1-r0044-match_mean_click_task/model.py
++++ g1-r0045-match_residual_click_shared/model.py
+@@ -1,10 +1,10 @@
+-"""Conditional action-centroid controls for historical-feedback attribution.
+-
+-Replace only stopped match-action summary rows 0/4 by contractions of the
+-blockwise click-stratum means. Compare true and count-matched shifted groups
+-under task/shared routing. Original item/ordinal/pool paths and masks survive.
+-The rotate operator is retained as an exact-source bridge to round 43.
+-Means retain per-stratum action composition; this is not a click-only model.
+-Host tensor, numerical and performance checks remain required.
++"""Complementary projection controls for historical-feedback attribution.
++
++Only stopped match-action summary rows 0/4 receive within-stratum deviations
++A - P(A), where P averages actions within blockwise click/shifted strata.
++The observed pool, ordinal action summaries, item features, visibility masks,
++learned modules, initialization and gradient ownership remain inherited.
++Mean and rotate modes retain the round-44 bridge. This is an attribution
++experiment; residualization is not removal of all historical feedback.
+ """
+ import torch
+@@ -15,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'match', 'match_action_availability': 'both', 'match_action_content': 'observed', 'match_replacement_gradient': 'blocked', 'match_observed_gradient': 'blocked', 'match_action_basis': 'identity', 'match_basis_initialization': 'unchanged', 'summary_rotation_partition': 'click', 'summary_stratum_operator': 'mean'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'shared', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'match', 'match_action_availability': 'both', 'match_action_content': 'observed', 'match_replacement_gradient': 'blocked', 'match_observed_gradient': 'blocked', 'match_action_basis': 'identity', 'match_basis_initialization': 'unchanged', 'summary_rotation_partition': 'click', 'summary_stratum_operator': 'residual'}
+ 
+ 
+@@ -24,5 +24,5 @@
+                  compression_routes='uf', block_aux_scorer_grad=True,
+                  block_aux_context_grad=False, block_aux_item_grad=True, num_tasks=None,
+-                 residual_input='match_detail', residual_routing='task', residual_hidden=16,
++                 residual_input='match_detail', residual_routing='shared', residual_hidden=16,
+                  temporal_detail='position', block_detail='ordinal',
+                  curvature_detail='quadratic', joint_detail='duplicate_match',
+@@ -37,5 +37,5 @@
+                  match_basis_initialization='unchanged',
+                  summary_rotation_partition='click',
+-                 summary_stratum_operator='mean',
++                 summary_stratum_operator='residual',
+                  match_replacement_gradient='blocked',
+                  match_observed_gradient='blocked',
+@@ -130,10 +130,19 @@
+             raise ValueError('Unknown historical feedback rotation partition')
+         self.summary_rotation_partition = summary_rotation_partition
+-        if summary_stratum_operator not in ('rotate', 'mean'):
++        if summary_stratum_operator not in ('rotate', 'mean', 'residual'):
+             raise ValueError('Unknown within-stratum action operator')
+-        if summary_stratum_operator == 'mean':
++        if summary_stratum_operator in ('mean', 'residual'):
+             if (summary_rotation_partition == 'unrestricted'
+                     or summary_action_alignment != 'rotated'):
+-                raise ValueError('Mean controls require a declared feedback partition')
++                raise ValueError('Projection controls require a declared feedback partition')
++        if summary_stratum_operator == 'residual':
++            if (summary_rotation_group != 'match'
++                    or summary_action_group != 'all'
++                    or action_in_pool is not True
++                    or match_action_content != 'observed'
++                    or match_action_availability != 'both'
++                    or match_observed_gradient != 'blocked'
++                    or match_action_basis != 'identity'):
++                raise ValueError('Residual controls require the frozen stopped match-action consumer')
+         self.summary_stratum_operator = summary_stratum_operator
+         self.click_index = list(feature_map.labels).index('is_click')
+@@ -349,18 +358,17 @@
+ 
+     def _stratified_summary_values(self, values, mask, membership):
+-        """Rotate or average actions within two historical-feedback strata.
+-
+-        Mean mode replaces each valid action by its stratum centroid. This
+-        preserves group sums and removes every within-stratum deviation in
+-        exact arithmetic. Empty groups use zero; singleton groups are identities.
+-        It retains per-stratum auxiliary composition and changes norms/histograms.
+-        The rotate bridge below has the original permutation arithmetic.
+-        No original mask or event is added to a consumer.
+-        Positive and negative strata are separately packed
+-        in original valid-rank order within each ten-position block. Each uses
+-        a shift of floor(stratum_count/2). Original positions, block boundaries,
+-        valid masks, item coordinates and task masks remain fixed. Singleton
+-        strata are identities. Invalid destinations retain their old values and
+-        can never be sources for valid destinations. No state, fitting or RNG.
++        """Project onto group constants, retain their complement, or rotate.
++
++        On valid positions, mean computes P(A); residual computes A - P(A)
++        in FP32 before casting back. In exact arithmetic P and I-P are
++        orthogonal complementary projections: group sums of the residual
++        vanish, and the two branches reconstruct the original actions.
++        Singleton/homogeneous groups have zero residual. Residuals need not
++        lie in the convex hull of the action embeddings. Their norm/scale
++        differs from the mean; this is an explicit interpretation limit.
++        Invalid destinations keep their original values but never contribute
++        to valid sources. No source crosses a block, sample or group.
++        Only rows 0/4 consume this stream; their local action gradients are
++        stopped later. The unchanged mean/rotate modes are source bridges.
+         """
+         batch, length, width = values.shape
+@@ -370,5 +378,5 @@
+         member = membership.bool().reshape(batch, 10, 10) & valid
+         groups = torch.stack((valid & ~member, member), dim=-2)
+-        if self.summary_stratum_operator == 'mean':
++        if self.summary_stratum_operator in ('mean', 'residual'):
+             # Orthogonal projection onto blockwise group-constant action values.
+             # No new parameters, tokens or events. The observed pool and ordinal
+@@ -383,4 +391,8 @@
+                 means32 = torch.bmm(group_weights, actions.float()) / counts32.clamp_min(1)
+                 projected32 = torch.bmm(group_weights.transpose(1, 2), means32)
++                if self.summary_stratum_operator == 'residual':
++                    # Complement only on the summary stream; FP32 subtraction
++                    # avoids an extra low-precision rounding of the centroid.
++                    projected32 = actions.float() - projected32
+             projected = projected32.to(values.dtype).reshape(batch, 10, 10, action_width)
+             original = actions.reshape(batch, 10, 10, action_width)

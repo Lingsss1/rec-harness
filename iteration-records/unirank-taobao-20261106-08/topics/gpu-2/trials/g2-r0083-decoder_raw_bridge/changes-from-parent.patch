@@ -1,0 +1,128 @@
+--- g3-r0058-fixed_angle_negative/model.py
++++ g2-r0083-decoder_raw_bridge/model.py
+@@ -1,9 +1,9 @@
+-"""Auxiliary scalar-angle replacement at fixed forward architecture.
+-
+-A prospective 2x2 study crosses native versus fixed pi/4 nuisance-exclusion
+-angle with external +/- sign. Auxiliary radius, transported Q orientation
+-bit and inherited validity are retained. All helpers run in all four cells.
+-Only the shared-context surrogate VJP selection changes; it is not the
+-ordinary derivative of the reported joint BCE. No novelty claim is made.
++"""Prospective training-calibrated mask-to-native-action decoder.
++
++Treatment: decoder_raw_bridge. Native modules, learned initialization, task masks,
++objectives and surrogate VJP are inherited unchanged. The codebook is learned
++from authorized training histories only and is frozen in evaluation. This is
++an inference-redundancy diagnostic, not strictly action-blind training and not
++a new architecture claim. No new model performance has been measured.
+ """
+ import torch
+@@ -893,5 +893,102 @@
+             self.register_buffer(storage_name, buffer.detach().clone())
+             self._auxiliary_state_names[name] = storage_name
++        # BEGIN training-only decoder state, after all inherited initialization.
++        # No learned parameter, existing row, RNG stream or optimizer is changed.
++        action_table = self.embedding_layer.embedding_layers[self.action_field]
++        action_spec = feature_map.features[self.action_field]
++        if not isinstance(action_table, nn.Embedding):
++            raise ValueError('Native decoder requires a categorical action embedding')
++        if self.action_field in self.embedding_layer.feature_encoders:
++            raise ValueError('Encoded action features are outside this study')
++        if any(name != self.action_field and layer is action_table
++               for name, layer in self.embedding_layer.embedding_layers.items()):
++            raise ValueError('Action embedding must not be shared')
++        if (action_table.num_embeddings != int(action_spec['vocab_size'])
++                or action_table.embedding_dim != embedding_dim
++                or action_table.padding_idx != action_spec.get('padding_idx')):
++            raise ValueError('Action embedding specification mismatch')
++        self.action_decoder_sentinel = action_table.num_embeddings
++        excluded = {0}
++        for special in ('padding_idx', 'oov_idx'):
++            if action_spec.get(special) is not None:
++                excluded.add(int(action_spec[special]))
++        eligible = [row for row in range(action_table.num_embeddings)
++                    if row not in excluded]
++        if not eligible:
++            raise ValueError('Decoder needs a declared nonspecial fallback row')
++        self.action_decoder_fallback = eligible[0]
++        self.register_buffer('_action_decoder_min', torch.full(
++            (16,), self.action_decoder_sentinel, dtype=torch.long))
++        self.register_buffer('_action_decoder_max', torch.full(
++            (16,), -1, dtype=torch.long))
++        self.register_buffer('_action_decoder_train_events', torch.zeros((), dtype=torch.long))
++        self.register_buffer('_action_decoder_train_errors', torch.zeros((), dtype=torch.long))
++        # END training-only decoder state.
+         self.model_to_device()
++
++    def _action_signature(self, mask, task_masks):
++        """Canonical four-bit signature of the supplied, unchanged task masks."""
++        valid = mask.bool()
++        signature = torch.zeros_like(mask, dtype=torch.long)
++        labels = list(self.feature_map.labels)
++        for bit, label in enumerate(('is_click', 'cart', 'fav', 'buy')):
++            task_mask = task_masks[labels.index(label)]
++            if task_mask.shape != mask.shape:
++                raise ValueError('Historical task mask shape mismatch')
++            signature = signature + ((task_mask > 0) & valid).long() * (1 << bit)
++        return signature, valid
++
++    def _observe_action_codes(self, signature, raw_history, valid):
++        """Train-only, label-free codebook; preserve ambiguities as min/max.
++
++        Never consult target actions, labels, external metadata or validation
++        actions. If several IDs share a signature, retain the smallest and
++        record the range instead of claiming an exact inverse. Masked events
++        contribute only neutral sentinels. Updates are order-independent.
++        """
++        if not self.training:
++            raise RuntimeError('Action codebook updates are forbidden during evaluation')
++        if raw_history.shape != signature.shape or raw_history.dtype != torch.long:
++            raise ValueError('Expected historical categorical action IDs')
++        with torch.no_grad():
++            flat_signature = signature.reshape(-1)
++            minimum = torch.where(valid, raw_history, torch.full_like(
++                raw_history, self.action_decoder_sentinel)).reshape(-1)
++            maximum = torch.where(valid, raw_history, torch.full_like(
++                raw_history, -1)).reshape(-1)
++            self._action_decoder_min.scatter_reduce_(
++                0, flat_signature, minimum, reduce='amin', include_self=True)
++            self._action_decoder_max.scatter_reduce_(
++                0, flat_signature, maximum, reduce='amax', include_self=True)
++
++    def _study_action_item(self, item, mask, task_masks):
++        """Decode native rows without reinitializing the action embeddings.
++
++        Training calibration reads only valid authorized history action IDs.
++        Validation freezes all codebook state. Unknown validation signatures
++        use the fixed first nonspecial row; they are a declared limitation,
++        never a reason to observe validation actions or refit this codebook.
++        """
++        signature, valid = self._action_signature(mask, task_masks)
++        if self.training:
++            raw_history = item[self.action_field][:, :-1]
++            self._observe_action_codes(signature, raw_history, valid)
++        decoded = self._action_decoder_min[signature]
++        known = decoded < self.action_decoder_sentinel
++        history = torch.where(known, decoded, torch.full_like(
++            decoded, self.action_decoder_fallback))
++        if self.training:
++            with torch.no_grad():
++                self._action_decoder_train_events.add_(valid.sum(dtype=torch.long))
++                self._action_decoder_train_errors.add_(
++                    ((history != raw_history) & valid).sum(dtype=torch.long))
++        # BEGIN declared treatment selection.
++        history = item[self.action_field][:, :-1]
++        # END declared treatment selection.
++        history = torch.where(valid, history, torch.zeros_like(history))
++        target = torch.zeros((mask.shape[0], 1), device=mask.device, dtype=torch.long)
++        result = dict(item)
++        result[self.action_field] = torch.cat([history, target], dim=1)
++        return result
+ 
+     def _represent(self, inputs):
+@@ -918,4 +1015,5 @@
+             auxiliary = auxiliary | (task_masks[index] > 0)
+         auxiliary = auxiliary & mask.bool()
++        item = self._study_action_item(item, mask, task_masks)
+         user_emb = self.embedding_layer(user)
+         item_emb = self.embedding_layer(item)

@@ -1,0 +1,149 @@
+--- g2-r0012-recent_forward/model.py
++++ g2-r0013-recent_collapsed/model.py
+@@ -1,16 +1,16 @@
+-"""Count-matched attribution of temporal compression resolution.
+-
+-A 2x2 factorial crosses recent/equal widths with chronological/stratum_reverse
+-content placement. Reversal moves complete item/action vectors only among valid
+-positions in the SAME inherited auxiliary-union stratum. Padding, every stratum
+-mask, and all 30 per-sample summary counts are exactly unchanged. This tests
+-content recency conditional on that stratum schedule, not every effect of time.
+-
+-The rank lookup executes in chronological cells too, matching operator overhead.
+-A reversal is an involution, so gathering the assignment columns routes original
+-values without materializing a second B x 100 x value_width tensor. No events
+-are discarded. Occupied Dice, parameters, initialization and source gates are
+-inherited. Identity cells are same-seed replays, not independent repetitions.
+-Host numerical validation and training remain required. No novelty claim.
++"""Prospective temporal readout x compression-resolution factorial.
++
++All 100 authorized events retain the ancestor's fixed compression and scorer.
++An extra, initially zero logit branch jointly reads context, target, total
++history and either a recent-minus-older contrast or a duplicate total. The
++boundary is the final 10 exposure positions, not elapsed time. The duplicate
++control has the same parameters and dense operators; it removes only the new
++age-separated information and still trains every branch weight. Functional
++input rank and optimization conditioning necessarily differ and are confounds.
++
++The recent/equal layouts cross this readout intervention. Scorer, source gates,
++masking, inherited towers and Dice state ownership remain as in the ancestor.
++This tests an information-flow bottleneck, not originality or efficacy. Local
++checks are static/algebraic; host tensor checks and evaluation are required.
+ """
+ import torch
+@@ -33,4 +33,6 @@
+     'scorer_population': 'occupied',
+     'content_order': 'chronological',
++    'temporal_readout': 'collapsed',
++    'residual_hidden_units': 32,
+ }
+ 
+@@ -75,5 +77,5 @@
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='CountMatchedTemporalCompression', gpu=-1,
++    def __init__(self, feature_map, model_id='TemporalContrastReadout', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+@@ -81,5 +83,6 @@
+                  block_aux_context_grad=False, block_aux_item_grad=True,
+                  history_partition='recent', scorer_population='occupied',
+-                 content_order='chronological', num_tasks=None,
++                 content_order='chronological', temporal_readout='collapsed',
++                 residual_hidden_units=32, num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -111,5 +114,12 @@
+         if content_order not in ('chronological', 'stratum_reverse'):
+             raise ValueError('Unknown content order')
++        if content_order != 'chronological':
++            raise ValueError('This study keeps content chronological')
+         self.content_order = content_order
++        if temporal_readout not in ('separate', 'collapsed'):
++            raise ValueError('Unknown temporal readout')
++        if residual_hidden_units != 32:
++            raise ValueError('Residual width is fixed at 32 for attribution')
++        self.temporal_readout = temporal_readout
+         widths = (20, 20, 20, 20, 10, 5, 2, 1, 1, 1)
+         if history_partition == 'equal':
+@@ -124,4 +134,10 @@
+                                  for left, right in zip(boundaries[:-1], boundaries[1:])])
+         self.register_buffer('partition', partition, persistent=False)
++        # Both layouts have a boundary at index 90; no summary crosses it.
++        if 90 not in boundaries:
++            raise ValueError('The last-ten boundary must align with summaries')
++        age_sign = torch.tensor([1.0 if left >= 90 else -1.0
++                                 for left in boundaries[:-1]])
++        self.register_buffer('age_sign', age_sign, persistent=False)
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -159,4 +175,17 @@
+             self.towers.append(nn.Sequential(*tower))
+         self.reset_parameters()
++        # Preserve ancestor initialization AND the post-construction CPU RNG.
++        # New modules are made on CPU and moved by model_to_device below.
++        # No shared reset is called after adding the residual heads.
++        with torch.random.fork_rng(devices=[]):
++            self.residual_heads = nn.ModuleList([
++                nn.Sequential(nn.Linear(input_width + self.value_width,
++                                        residual_hidden_units),
++                              nn.ReLU(), nn.Linear(residual_hidden_units, 1))
++                for _ in feature_map.labels
++            ])
++            for head in self.residual_heads:
++                nn.init.zeros_(head[-1].weight)
++                nn.init.zeros_(head[-1].bias)
+         self.model_to_device()
+ 
+@@ -261,15 +290,21 @@
+         weights = weights * counts.to(weights.dtype)
+         weighted = (weights.unsqueeze(-1) * values).reshape(batch, 10, 3, self.value_width)
+-        return weighted.sum(dim=1)
++        total = weighted.sum(dim=1)
++        contrast = (weighted * self.age_sign.to(weighted.dtype).view(1, 10, 1, 1)).sum(dim=1)
++        # Compute both reductions in every cell. The replacement control
++        # duplicates total: no age contrast reaches its logit branch.
++        readout = contrast if self.temporal_readout == 'separate' else total
++        return total, readout
+ 
+     def forward(self, inputs):
+         context, target, values, mask, auxiliary = self._represent(inputs)
+         values, counts = self._compress_both(values, mask, auxiliary)
+-        # Within each partition, both content orders score the exact same
+-        # occupied rows, although their input distributions may differ.
++        # The readout replacement changes no compression counts, occupied
++        # scorer rows, input ordering or inherited Dice populations.
+         active = counts > 0
+         primary_weights = self.local_activation(self._interactions(target, values), active)
+-        primary_strata = self._pool(primary_weights, values, counts)
++        primary_strata, primary_readout = self._pool(primary_weights, values, counts)
+         uniform = primary_strata[:, 0, :]
++        click_readout = primary_readout[:, 0, :]
+ 
+         if self.training:
+@@ -281,17 +316,21 @@
+             aux_values = values.detach() if self.block_aux_item_grad else values
+             aux_weights = self._auxiliary_activation(self._interactions(aux_target, aux_values), active)
+-            aux_strata = self._pool(aux_weights, aux_values, counts)
++            aux_strata, aux_readout = self._pool(aux_weights, aux_values, counts)
+         else:
+             # Identical values/parameters and no state update: inference needs
+             # just one scorer pass for every factorial cell.
+             aux_context, aux_target = context, target
+-            aux_strata = primary_strata
++            aux_strata, aux_readout = primary_strata, primary_readout
+         feedback = aux_strata[:, 1, :] + aux_strata[:, 2, :]
++        feedback_readout = aux_readout[:, 1, :] + aux_readout[:, 2, :]
+         predictions = {}
+-        for label, tower in zip(self.feature_map.labels, self.towers):
++        for label, tower, head in zip(self.feature_map.labels, self.towers, self.residual_heads):
+             if label == 'is_click':
+                 features = torch.cat([context, target, uniform], dim=-1)
++                extra = click_readout
+             else:
+                 features = torch.cat([aux_context, aux_target, feedback], dim=-1)
+-            predictions[label + '_pred'] = torch.sigmoid(tower(features))
++                extra = feedback_readout
++            logits = tower(features) + head(torch.cat([features, extra], dim=-1))
++            predictions[label + '_pred'] = torch.sigmoid(logits)
+         return predictions

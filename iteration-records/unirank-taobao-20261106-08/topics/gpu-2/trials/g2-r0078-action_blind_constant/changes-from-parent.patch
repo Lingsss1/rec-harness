@@ -1,0 +1,88 @@
+--- g3-r0058-fixed_angle_negative/model.py
++++ g2-r0078-action_blind_constant/model.py
+@@ -1,9 +1,8 @@
+-"""Auxiliary scalar-angle replacement at fixed forward architecture.
+-
+-A prospective 2x2 study crosses native versus fixed pi/4 nuisance-exclusion
+-angle with external +/- sign. Auxiliary radius, transported Q orientation
+-bit and inherited validity are retained. All helpers run in all four cells.
+-Only the shared-context surrogate VJP selection changes; it is not the
+-ordinary derivative of the reported joint BCE. No novelty claim is made.
++"""Prospective conditional historical-action utility study.
++
++Inherit g3-r0058-fixed_angle_negative without changing learned modules,
++initialization, supplied masks, item alignment, joint BCE or surrogate VJP.
++Only the action-code input to the embedding lookup is treated. All modules
++and embedding rows stay allocated. No new effectiveness or novelty is claimed.
+ """
+ import torch
+@@ -15,4 +14,6 @@
+ 
+ CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle'}
++
++HISTORICAL_ACTION_TREATMENT = 'blind_constant'
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -895,4 +896,55 @@
+         self.model_to_device()
+ 
++    def _action_inputs(self, item, mask):
++        """Treat only valid historical codes; retain padding and target bytes.
++
++        A fixed half-length rotation is a bijection of each row's valid
++        ranks, including noncontiguous masks. It preserves the row's action
++        multiset but changes action/item/position/task-mask alignment. No
++        action moves between examples. Empty and singleton rows are identities.
++        The constant-token arm retains a learned action channel at the same
++        width and all allocated parameters, but removes variation of codes
++        beyond the unchanged supplied masks. Effective embedding-row usage
++        necessarily differs and must be reported with measured host costs.
++        """
++        if HISTORICAL_ACTION_TREATMENT == 'permute_eval' and self.training:
++            # Exactly the incumbent tensor path and RNG during training.
++            return item
++        action = item[self.action_field]
++        if (action.ndim != 2 or action.shape[1] != mask.shape[1] + 1
++                or action.shape[0] != mask.shape[0]):
++            raise ValueError('Expected aligned action codes [B,101]')
++        history = action[:, :-1]
++        valid = mask.bool()
++        if HISTORICAL_ACTION_TREATMENT == 'blind_constant':
++            # Use an existing nonspecial token as a learned shared constant.
++            # Selection uses schema metadata, never the observed action codes.
++            spec = self.feature_map.features[self.action_field]
++            excluded = {0}
++            for name in ('padding_idx', 'oov_idx'):
++                if spec.get(name) is not None:
++                    excluded.add(int(spec[name]))
++            constant_id = next((index for index in range(1, int(spec['vocab_size']))
++                                if index not in excluded), None)
++            if constant_id is None:
++                raise ValueError('Action-blind control needs a nonspecial vocabulary row')
++            treated = torch.full_like(history, constant_id)
++        elif HISTORICAL_ACTION_TREATMENT in ('permute_both', 'permute_eval'):
++            ranks = (valid.long().cumsum(dim=-1) - 1).clamp_min(0)
++            counts = valid.long().sum(dim=-1, keepdim=True)
++            # Invalid entries add zero even when their packed indices collide.
++            packed = torch.zeros_like(history).scatter_add(
++                -1, ranks, torch.where(valid, history, torch.zeros_like(history)))
++            source = (ranks + counts // 2).remainder(counts.clamp_min(1))
++            treated = packed.gather(-1, source)
++        else:
++            raise ValueError('Unknown historical action treatment')
++        # New shallow mapping: never mutate host dictionaries or tensor storage.
++        # The frozen host supplies zero target action; preserve it exactly.
++        result = dict(item)
++        result[self.action_field] = torch.cat(
++            [torch.where(valid, treated, history), action[:, -1:]], dim=1)
++        return result
++
+     def _represent(self, inputs):
+         # Do not allow the framework fallback that treats every event as
+@@ -918,4 +970,6 @@
+             auxiliary = auxiliary | (task_masks[index] > 0)
+         auxiliary = auxiliary & mask.bool()
++        # Apply before every action-dependent scorer, value and moment path.
++        item = self._action_inputs(item, mask)
+         user_emb = self.embedding_layer(user)
+         item_emb = self.embedding_layer(item)

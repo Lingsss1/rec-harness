@@ -1,0 +1,238 @@
+--- g2-r0086-summary_full_block_shuffle/model.py
++++ g2-r0087-summary_unrestricted_bridge/model.py
+@@ -15,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'pooling_view': 'supplied', 'moment_view': 'supplied', 'moment_within_shuffle': False, 'moment_block_shuffle': True}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'pooling_view': 'supplied', 'moment_view': 'supplied', 'moment_within_shuffle': False, 'moment_block_shuffle': True, 'moment_block_anchor': 'none'}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -888,4 +888,5 @@
+                  pooling_view='supplied', moment_view='supplied',
+                  moment_within_shuffle=False, moment_block_shuffle=False,
++                 moment_block_anchor='newest',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -907,4 +908,9 @@
+         self.moment_within_shuffle = moment_within_shuffle
+         self.moment_block_shuffle = moment_block_shuffle
++        if moment_within_shuffle:
++            raise ValueError('Endpoint study preserves within-block event order')
++        if moment_block_anchor not in ('none', 'newest', 'oldest'):
++            raise ValueError('Unknown full-block endpoint anchor')
++        self.moment_block_anchor = moment_block_anchor
+         self.compression_routes = compression_routes
+         if block_aux_scorer_grad is not True:
+@@ -1169,5 +1175,5 @@
+         values = torch.cat([keys, item_emb[self.action_field][:, :-1]], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
+-        # Compute the identical canonical index work in every factorial cell.
++        # Compute identical canonical index work in every endpoint cell.
+         # Embeddings are evaluated once in supplied order. Both history paths
+         # gather from that tensor, so parameter ownership and initialization
+@@ -1176,5 +1182,5 @@
+         identity = torch.arange(100, device=mask.device).expand(mask.shape[0], -1)
+         # Retain canonical index work as in the previous identity bridge.
+-        # Draw/build BOTH group treatments in EVERY cell, including identity,
++        # Build all endpoint maps in EVERY cell, including identity,
+         # so all four cells consume the same training RNG stream and work.
+         # Eval uses no global RNG or mutable state. Its draw depends on batch
+@@ -1184,8 +1190,8 @@
+             generator = torch.Generator(device=mask.device)
+             generator.manual_seed(862104)
+-        within_order, block_order = _summary_group_orders(mask, generator)
++        within_order, block_orders = _summary_group_orders(mask, generator)
+         moment_order = within_order if self.moment_within_shuffle else identity
+         if self.moment_block_shuffle:
+-            moment_order = moment_order.gather(1, block_order)
++            moment_order = moment_order.gather(1, block_orders[self.moment_block_anchor])
+         pool_order = identity
+         moment_item = _gather_history_item(item, moment_order)
+@@ -1963,13 +1969,14 @@
+ 
+ def _summary_group_orders(mask, generator=None):
+-    """Two destination-to-source bijections; no fields, labels or IDs as keys.
+-
+-    Within: permute valid events independently in each fixed ten-slot block.
+-    Coarse: permute ONLY fully occupied blocks, retaining their internal order.
+-    Nonfull blocks (including arbitrary holes) never change coarse position.
+-    Every invalid slot remains exactly fixed under either treatment.
+-    The composed map within.gather(1, coarse) applies independent within-block
+-    permutations to donor blocks before moving those blocks as complete units.
+-    Float64 random sort ties are stable, a negligible finite-RNG limitation.
++    """Joint destination-to-source maps preserving all invalid positions.
++
++    Draw the same 100 within-block and ten block priorities per row as the
++    previous factorial. Build all endpoint modes in every cell; selection
++    introduces no extra RNG. Randomize only fully occupied ten-slot blocks,
++    excluding the selected endpoint. Every field, action and membership moves
++    with its event. Latest/earliest mean greatest/least supplied slot index,
++    with no assertion of clock-time recency. Nonfull blocks remain fixed.
++    Conditional on the eligible blocks each permutation is uniform, apart
++    from negligible float64-priority ties. Identity draws remain admissible.
+     """
+     if mask.ndim != 2 or mask.shape[1] != 100:
+@@ -1985,53 +1992,62 @@
+     block_ids = torch.arange(10, device=mask.device).view(1, 10).expand(batch, -1)
+     within_order = (10 * block_ids.unsqueeze(-1) + local_order).reshape(batch, 100)
+-    eligible = valid.all(dim=2)
++    full = valid.all(dim=2)
+     block_noise = torch.rand((batch, 10), device=mask.device,
+                              dtype=torch.float64, generator=generator)
+-    block_sources = block_noise.masked_fill(~eligible, float('inf')).argsort(dim=1, stable=True)
+-    block_rank = (eligible.long().cumsum(dim=1) - 1).clamp_min(0)
+-    donor = torch.where(eligible, block_sources.gather(1, block_rank), block_ids)
+-    block_order = (10 * donor.unsqueeze(-1) + local).reshape(batch, 100)
+-    return within_order, block_order
++    newest = block_ids.masked_fill(~full, -1).amax(dim=1, keepdim=True)
++    oldest = block_ids.masked_fill(~full, 10).amin(dim=1, keepdim=True)
++    block_orders = {}
++    for mode in ('none', 'newest', 'oldest'):
++        eligible = full
++        if mode == 'newest':
++            eligible = full & (block_ids != newest)
++        elif mode == 'oldest':
++            eligible = full & (block_ids != oldest)
++        sources = block_noise.masked_fill(~eligible, float('inf')).argsort(dim=1, stable=True)
++        ranks = (eligible.long().cumsum(dim=1) - 1).clamp_min(0)
++        donor = torch.where(eligible, sources.gather(1, ranks), block_ids)
++        block_orders[mode] = (10 * donor.unsqueeze(-1) + local).reshape(batch, 100)
++    return within_order, block_orders
+ 
+ 
+ def check_summary_group_contract(device='cpu'):
+-    """Host-only prerequisite: index/association/gradient and RNG checks.
+-
+-    No data access, scoring or training. Call separately from forward.
+-    Returns treatment strength on constructed fixtures, not population rates.
++    """Host prerequisite; no training, scoring, data access or file writes.
++
++    Checks event/membership association, gradient transport, anchor selection,
++    invalid positions, effective movement, and repeatable isolated eval RNG.
++    Does not certify full-model performance or population treatment strength.
+     """
+     device = torch.device(device)
+-    mask = torch.zeros((8, 100), device=device)
+-    for row, count in enumerate((0, 1, 2, 17, 20, 64, 99, 100)):
++    lengths = (0, 1, 2, 17, 20, 30, 64, 99, 100)
++    mask = torch.zeros((11, 100), device=device)
++    for row, count in enumerate(lengths):
+         mask[row, 100-count:] = 1
+-    # Include irregular padding, two full blocks, and noncontiguous partials.
+-    mask[4] = 0
+-    mask[4, 10:30] = 1
+-    mask[4, 42:46] = 1
+-    positions = torch.arange(100, device=device).expand(8, -1)
++    # Irregular padding with three noncontiguous full blocks and partials.
++    for lo, hi in ((10, 20), (40, 50), (80, 90), (23, 27), (95, 99)):
++        mask[9, lo:hi] = 1
++    mask[10, torch.arange(0, 100, 3, device=device)] = 1
+     valid = mask.bool()
++    batch = mask.shape[0]
++    positions = torch.arange(100, device=device).expand(batch, -1)
++    full = valid.reshape(batch, 10, 10).all(dim=2)
++    bpos = torch.arange(10, device=device).expand(batch, -1)
++    before_cpu = torch.random.get_rng_state().clone()
++    before_device = torch.cuda.get_rng_state(device).clone() if device.type == 'cuda' else None
+     generator = torch.Generator(device=device).manual_seed(862104)
+-    global_before = torch.random.get_rng_state().clone()
+-    if device.type == 'cuda':
+-        device_before = torch.cuda.get_rng_state(device).clone()
+-    within, blocks = _summary_group_orders(mask, generator)
+-    assert torch.equal(global_before, torch.random.get_rng_state())
+-    if device.type == 'cuda':
+-        assert torch.equal(device_before, torch.cuda.get_rng_state(device))
++    within, orders = _summary_group_orders(mask, generator)
++    assert torch.equal(before_cpu, torch.random.get_rng_state())
++    if before_device is not None:
++        assert torch.equal(before_device, torch.cuda.get_rng_state(device))
+     again = _summary_group_orders(mask, torch.Generator(device=device).manual_seed(862104))
+-    assert torch.equal(within, again[0]) and torch.equal(blocks, again[1])
+-    # Fixture-wide nonidentity, but random identity for a row is admissible.
+-    assert bool(((within != positions) & valid).any())
+-    assert bool(((blocks != positions) & valid).any())
+-    assert torch.equal(within // 10, positions // 10)
+-    assert torch.equal(blocks % 10, positions % 10)
+-    full = valid.reshape(8, 10, 10).all(dim=2)
+-    donor = (blocks.reshape(8, 10, 10)[:, :, 0] // 10)
+-    bpos = torch.arange(10, device=device).expand(8, -1)
+-    assert torch.equal(donor[~full], bpos[~full])
+-    assert bool(full.gather(1, donor)[full].all())
++    assert torch.equal(within, again[0])
++    assert all(torch.equal(orders[k], again[1][k]) for k in orders)
++    # Even no-treatment and anchor modes draw exactly the inherited RNG budget.
++    expected_rng = torch.Generator(device=device).manual_seed(862104)
++    torch.rand((batch, 10, 10), dtype=torch.float64, device=device, generator=expected_rng)
++    torch.rand((batch, 10), dtype=torch.float64, device=device, generator=expected_rng)
++    assert torch.equal(generator.get_state(), expected_rng.get_state())
++    fields = ('item_id', 'cate_id', 'campaign_id', 'customer_id', 'brand', 'price_bucket', 'action')
+     token = positions + 1
+-    fields = ('item_id', 'cate_id', 'campaign_id', 'customer_id', 'brand', 'price_bucket', 'action')
+-    item = {name: torch.cat((token * (k+2), torch.full((8, 1), 2000+k, device=device)), dim=1)
++    item = {name: torch.cat((token * (k+2), torch.full((batch, 1), 2000+k, device=device)), dim=1)
+             for k, name in enumerate(fields)}
+     item['action'][:, -1] = 0
+@@ -2039,29 +2055,46 @@
+     values = torch.stack([item[name][:, :-1].float() for name in fields], dim=-1)
+     values.requires_grad_()
+-    strength = {}
+-    for label, order in (('identity', positions), ('within', within),
+-                         ('blocks', blocks), ('both', within.gather(1, blocks))):
++    moved_fractions = {}
++    eligible_counts = {}
++    for mode, order in [('supplied', positions)] + list(orders.items()):
+         assert torch.equal(order.sort(dim=1).values, positions)
+         assert torch.equal(order[~valid], positions[~valid])
+         assert torch.equal(mask.gather(1, order), mask)
+-        moved_item = _gather_history_item(item, order)
+-        for name in fields:
+-            assert torch.equal(moved_item[name][:, -1], item[name][:, -1])
+-            assert torch.equal(moved_item[name][:, :-1], item[name][:, :-1].gather(1, order))
+-            assert torch.equal(moved_item[name][:, :-1][~valid], item[name][:, :-1][~valid])
+-        moved_values = _gather_history_values(values, order)
++        assert torch.equal(order % 10, positions % 10)
++        donor = order.reshape(batch, 10, 10)[:, :, 0] // 10
++        assert torch.equal(donor[~full], bpos[~full])
++        assert bool(full.gather(1, donor)[full].all())
++        eligible = full
++        if mode in ('newest', 'oldest'):
++            anchor = (bpos.masked_fill(~full, -1).amax(dim=1, keepdim=True)
++                      if mode == 'newest' else bpos.masked_fill(~full, 10).amin(dim=1, keepdim=True))
++            anchored = full & (bpos == anchor)
++            assert torch.equal(donor[anchored], bpos[anchored])
++            eligible = full & ~anchored
++            # With <=2 full blocks anchoring leaves at most one movable unit.
++            small = full.sum(dim=1) <= 2
++            assert torch.equal(order[small], positions[small])
++        if mode != 'supplied':
++            eligible_counts[mode] = eligible.sum(dim=1)
++            assert bool(((order != positions) & valid).any())
++        moved = _gather_history_item(item, order)
++        transported_values = _gather_history_values(values, order)
+         for k, name in enumerate(fields):
+-            assert torch.equal(moved_values[:, :, k], moved_item[name][:, :-1].float())
++            assert torch.equal(moved[name][:, -1], item[name][:, -1])
++            assert torch.equal(moved[name][:, :-1], item[name][:, :-1].gather(1, order))
++            assert torch.equal(transported_values[:, :, k], moved[name][:, :-1].float())
+         for membership in memberships:
+-            transported = membership.gather(1, order)
+-            assert torch.equal(torch.zeros_like(membership).scatter(1, order, transported), membership)
+-            assert torch.equal(transported.sum(1), membership.sum(1))
++            moved_membership = membership.gather(1, order)
++            assert torch.equal(moved_membership.sum(dim=1), membership.sum(dim=1))
++            assert torch.equal(torch.zeros_like(membership).scatter(1, order, moved_membership), membership)
+         union = memberships[0].bool()
+         moved_union = union.gather(1, order)
+         assert torch.equal(torch.zeros_like(union).scatter(1, order, moved_union), union)
+-        weights = torch.arange(moved_values.numel(), device=device, dtype=values.dtype).reshape_as(values)
+-        gradient, = torch.autograd.grad((moved_values * weights).sum(), values)
++        weights = torch.arange(transported_values.numel(), device=device, dtype=values.dtype).reshape_as(values)
++        gradient, = torch.autograd.grad((transported_values * weights).sum(), values)
+         expected = torch.zeros_like(values).scatter(1, order.unsqueeze(-1).expand_as(values), weights)
+         assert torch.equal(gradient, expected)
+-        strength[label] = float(((order != positions) & valid).sum() / valid.sum().clamp_min(1))
+-    return {'contract': 'passed', 'fixture_moved_fractions': strength}
++        moved_fractions[mode] = float(((order != positions) & valid).sum() / valid.sum().clamp_min(1))
++    assert torch.equal(eligible_counts['newest'], eligible_counts['oldest'])
++    return {'contract': 'passed', 'fixture_moved_fractions': moved_fractions,
++            'population_treatment_strength': 'requires host measurement'}

@@ -1,0 +1,194 @@
+--- g3-r0048-orthogonal_native_replay/model.py
++++ g3-r0049-orthogonal_native_negative/model.py
+@@ -1,16 +1,18 @@
+-"""Orthogonal auxiliary direction by native parallel-component presence.
+-
+-Let C be the occupied-row-centered aggregate auxiliary context cotangent,
+-K the occupied-row-centered click cotangent, P=proj_K(C), O=C-P.
+-This prospective 2x2 study selects O, -O, C, or C-2O in FP64, then casts
+-once and adds the unchanged click cotangent. C is used directly at the
+-native both-present endpoint. Each arm computes every candidate transfer
+-and inherited norm-matched projection; no rescaling is selected.
+-All forward modules, state updates, true-label BCEs, private task learning,
+-parameter initialization and host training settings are inherited unchanged.
+-This prescribed first-order surrogate VJP concerns occupied example/context
+-row space before repeated-ID scatter and adaptive optimization. It does not
+-establish parameter-space orthogonality, equal optimizer steps, or novelty.
+-Static checks only locally; host numerical gates and replays are required.
++"""Example assignment by sign for click-orthogonal auxiliary transfer.
++
++C is the occupied-row-centered aggregate auxiliary context cotangent, K the
++centered click cotangent, and O=C-proj_K(C). Native arms select +/-O.
++Replacement arms half-swap O between mutually occupied batch pairs, center
++and project back into K's orthogonal subspace, and match its Frobenius norm
++to O before selecting either sign. Every arm computes every replacement.
++Exact zero replacement maps to zero, with no arbitrary fallback direction.
++All operations preceding the one inherited cast are FP64.
++
++This is a first-order surrogate VJP on example/context rows before sparse
++embedding scatter and adaptive optimization. The assignment replacement also
++requires restoring orthogonality; it is not a pure permutation intervention.
++No parameter-space orthogonality, equal optimizer steps, independence of
++paired examples, new scalar objective, or novelty is asserted. The host must
++check degeneracies, replay bridges and tensor numerics before interpretation.
+ """
+ import torch
+@@ -21,5 +23,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'aligned', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'native'}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -108,47 +110,73 @@
+ 
+ 
++def _reassign_orthogonal(click_gradient, orthogonal, occupied):
++    """Pair-exchange O, restore row geometry, then match native ||O||.
++
++    The fixed half-batch involution exchanges rows only when BOTH members
++    have a history. Empty rows remain zero. Restoring zero mean and global
++    K orthogonality after permutation changes more than assignment alone.
++    All-empty, zero-K and zero-O inputs are defined. An exactly zero
++    reprojected candidate remains zero; the host must report its frequency
++    and the norm-restoration scale before interpreting the contrast.
++    """
++    with torch.autocast(device_type=click_gradient.device.type, enabled=False):
++        half = orthogonal.shape[0] // 2
++        eligible = occupied & torch.roll(occupied, shifts=half, dims=0)
++        swapped = torch.where(
++            eligible, torch.roll(orthogonal, shifts=half, dims=0), orthogonal)
++        count = occupied.to(dtype=torch.float64).sum().clamp_min(1.0)
++        swapped = torch.where(
++            occupied, swapped - swapped.sum(dim=0, keepdim=True) / count, 0.0)
++        click = torch.where(occupied, click_gradient.to(dtype=torch.float64), 0.0)
++        reference = torch.where(
++            occupied, click - click.sum(dim=0, keepdim=True) / count, 0.0)
++        tiny = torch.finfo(torch.float64).tiny
++        reference = reference / reference.abs().amax().clamp_min(tiny)
++        coefficient = ((swapped * reference).sum()
++                       / reference.square().sum().clamp_min(tiny))
++        restored = swapped - coefficient * reference
++        # Robust Frobenius normalization without a squared-norm epsilon.
++        target_scale = orthogonal.abs().amax()
++        safe_target_scale = torch.where(
++            target_scale > 0, target_scale, torch.ones_like(target_scale))
++        target_norm = target_scale * (orthogonal / safe_target_scale).square().sum().sqrt()
++        scale = restored.abs().amax()
++        safe_scale = torch.where(scale > 0, scale, torch.ones_like(scale))
++        unit = restored / safe_scale
++        unit_norm = unit.square().sum().sqrt()
++        safe_norm = torch.where(unit_norm > 0, unit_norm, torch.ones_like(unit_norm))
++        replacement = (unit / safe_norm) * target_norm
++    return replacement
++
++
+ def _reduce_context_transfer(click_gradient, gradients, occupied,
+                              parallel_orientation, orthogonal_orientation,
+-                             click_relative_transfer):
+-    """Select an O sign and native P presence; preserve click exactly.
+-
+-    All cells compute C, P, O, both inherited norm-matched projections,
+-    -O and C-2O. Aligned endpoints select C or O directly for faithful
+-    historical replays. Reversal preserves the selected auxiliary norm
+-    at a fixed state (up to FP64 roundoff), without claiming matched
+-    parameter gradients after repeated-ID scatter or optimizer updates.
+-    """
+-    if parallel_orientation != 'aligned':
+-        raise ValueError('Direction factorial fixes the parallel component sign')
++                             click_relative_transfer, orthogonal_assignment):
++    """Compute both assignments and signs in all four factorial cells."""
++    if parallel_orientation != 'aligned' or click_relative_transfer != 'orthogonal_native':
++        raise ValueError('Assignment study freezes native orthogonal-only transfer')
+     if orthogonal_orientation not in ('aligned', 'reversed'):
+         raise ValueError('Unknown orthogonal orientation')
+-    if click_relative_transfer not in (
+-            'centered', 'parallel_native', 'orthogonal_native', 'blocked'):
+-        raise ValueError('Unknown click-relative transfer selection')
++    if orthogonal_assignment not in ('native', 'paired_reprojected'):
++        raise ValueError('Unknown orthogonal assignment')
+     centered, parallel, orthogonal = _click_relative_components(
+         click_gradient, gradients, occupied)
+     _matched_parallel, _matched_orthogonal = _norm_matched_projections(
+         centered, parallel, orthogonal)
++    replacement = _reassign_orthogonal(click_gradient, orthogonal, occupied)
+     with torch.autocast(device_type=click_gradient.device.type, enabled=False):
+-        # Compute both reversals in EVERY cell, including aligned replays.
+-        # Keep endpoints direct: do not reconstruct C as P+O.
+-        reversed_orthogonal = -orthogonal
+-        reflected_centered = centered - 2.0 * orthogonal
+-        blocked = torch.zeros_like(centered)
+-        if click_relative_transfer == 'centered':
+-            transfer = (centered if orthogonal_orientation == 'aligned'
+-                        else reflected_centered)
+-        elif click_relative_transfer == 'parallel_native':
+-            transfer = parallel
+-        elif click_relative_transfer == 'orthogonal_native':
++        native_negative = -orthogonal
++        replacement_negative = -replacement
++        if orthogonal_assignment == 'native':
+             transfer = (orthogonal if orthogonal_orientation == 'aligned'
+-                        else reversed_orthogonal)
++                        else native_negative)
+         else:
+-            transfer = blocked
++            transfer = (replacement if orthogonal_orientation == 'aligned'
++                        else replacement_negative)
+         return click_gradient + transfer.to(dtype=click_gradient.dtype)
+ 
+ 
+ class _CollectedContextTransfer(torch.autograd.Function):
+-    """Four identity edges; select O sign and native P presence.
++    """Four identity edges; select orthogonal assignment and sign.
+ 
+     Only the first output supplies click's context uses; the other outputs
+@@ -160,5 +188,5 @@
+     @staticmethod
+     def forward(ctx, context, occupied, parallel_orientation, orthogonal_orientation,
+-                click_relative_transfer):
++                click_relative_transfer, orthogonal_assignment):
+         if context.ndim != 2 or context.shape[0] < 2 or context.shape[0] % 2:
+             raise ValueError('Frozen training requires even context batches [B,D]')
+@@ -174,4 +202,9 @@
+                 'centered', 'parallel_native', 'orthogonal_native', 'blocked'):
+             raise ValueError('Unknown click-relative transfer selection')
++        if click_relative_transfer != 'orthogonal_native':
++            raise ValueError('Assignment study requires orthogonal-only transfer')
++        if orthogonal_assignment not in ('native', 'paired_reprojected'):
++            raise ValueError('Unknown orthogonal assignment')
++        ctx.orthogonal_assignment = orthogonal_assignment
+         ctx.click_relative_transfer = click_relative_transfer
+         ctx.parallel_orientation = parallel_orientation
+@@ -186,6 +219,6 @@
+             click_gradient, (cart_gradient, fav_gradient, buy_gradient), occupied,
+             ctx.parallel_orientation, ctx.orthogonal_orientation,
+-            ctx.click_relative_transfer)
+-        return total, None, None, None, None
++            ctx.click_relative_transfer, ctx.orthogonal_assignment)
++        return total, None, None, None, None, None
+ 
+ 
+@@ -219,4 +252,5 @@
+                  auxiliary_reduction_precision='float64',
+                  click_relative_transfer='orthogonal_native',
++                 orthogonal_assignment='paired_reprojected',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -277,4 +311,9 @@
+                 'centered', 'parallel_native', 'orthogonal_native', 'blocked'):
+             raise ValueError('Unknown click-relative transfer selection')
++        if click_relative_transfer != 'orthogonal_native':
++            raise ValueError('Assignment study requires orthogonal-only transfer')
++        if orthogonal_assignment not in ('native', 'paired_reprojected'):
++            raise ValueError('Unknown orthogonal assignment')
++        self.orthogonal_assignment = orthogonal_assignment
+         self.click_relative_transfer = click_relative_transfer
+         self.parallel_orientation = parallel_orientation
+@@ -931,5 +970,6 @@
+             collected_contexts = _CollectedContextTransfer.apply(
+                 context, occupied, self.parallel_orientation,
+-                self.orthogonal_orientation, self.click_relative_transfer)
++                self.orthogonal_orientation, self.click_relative_transfer,
++                self.orthogonal_assignment)
+             product_context_by_label = dict(zip(('cart', 'fav', 'buy'), collected_contexts[1:]))
+             # Other auxiliary context uses are blocked below. Preserve their

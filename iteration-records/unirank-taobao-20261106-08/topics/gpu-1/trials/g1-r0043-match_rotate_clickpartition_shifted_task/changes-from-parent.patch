@@ -1,0 +1,250 @@
+--- g1-r0038-match_rotate_stop_task/model.py
++++ g1-r0043-match_rotate_clickpartition_shifted_task/model.py
+@@ -1,10 +1,10 @@
+-"""Conditional action-alignment controls with stopped match-summary gradients.
+-
+-Rotate only action inputs of raw/scaled target-match summaries (rows 0/4)
+-by valid rank inside each original ten-position history block. The action
+-multiset, validity/task masks, item summaries, direct pools, ordinal action
+-summaries and learned modules are inherited. Selected match-action summary
+-derivatives stay blocked. Task/shared routing reuses the same four-adapter
+-bank. Compare with aligned r0037 controls; no new-architecture claim.
++"""Function-matched initialization controls for invertible action-summary bases.
++
++Rows 0/4 retain stopped observed action content. Transport only their consuming
++first-layer weight columns after the inherited initialization, preserving the
++initial function in real arithmetic without additional state or random draws.
++Swap tests permutation equivariance; Hadamard tests the frozen optimization and
++numerical system after removing unmatched first-layer initialization.
++No architecture novelty or locally executed tensor/performance claim is made.
+ """
+ import torch
+@@ -15,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'match', 'match_action_availability': 'both', 'match_action_content': 'observed', 'match_replacement_gradient': 'blocked', 'match_observed_gradient': 'blocked'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'match', 'match_action_availability': 'both', 'match_action_content': 'observed', 'match_replacement_gradient': 'blocked', 'match_observed_gradient': 'blocked', 'match_action_basis': 'identity', 'match_basis_initialization': 'unchanged', 'summary_rotation_partition': 'rotated_click'}
+ 
+ 
+@@ -34,4 +34,7 @@
+                  summary_rotation_group='match', match_action_availability='both',
+                  match_action_content='observed',
++                 match_action_basis='identity',
++                 match_basis_initialization='unchanged',
++                 summary_rotation_partition='rotated_click',
+                  match_replacement_gradient='blocked',
+                  match_observed_gradient='blocked',
+@@ -99,5 +102,6 @@
+         self.match_action_availability = match_action_availability
+         if match_action_content not in ('observed', 'item_duplicate',
+-                                         'raw_observed', 'scaled_observed'):
++                                         'raw_observed', 'scaled_observed',
++                                         'raw_duplicate', 'scaled_duplicate'):
+             raise ValueError('Unknown match-action content replacement')
+         self.match_action_content = match_action_content
+@@ -108,4 +112,22 @@
+             raise ValueError('Unknown observed match-action gradient control')
+         self.match_observed_gradient = match_observed_gradient
++        if match_action_basis not in ('identity', 'swap', 'hadamard'):
++            raise ValueError('Unknown match-action basis')
++        if match_action_basis != 'identity':
++            if (match_action_content != 'observed'
++                    or match_observed_gradient != 'blocked'
++                    or match_action_availability != 'both'
++                    or summary_action_group != 'all'
++                    or summary_rotation_group != 'none'
++                    or action_in_pool is not True):
++                raise ValueError('Basis controls require both aligned stopped observed rows')
++        self.match_action_basis = match_action_basis
++        if match_basis_initialization not in ('unchanged', 'transport'):
++            raise ValueError('Unknown basis initialization control')
++        self.match_basis_initialization = match_basis_initialization
++        if summary_rotation_partition not in ('unrestricted', 'click', 'rotated_click'):
++            raise ValueError('Unknown historical feedback rotation partition')
++        self.summary_rotation_partition = summary_rotation_partition
++        self.click_index = list(feature_map.labels).index('is_click')
+         self.residual_input = residual_input
+         self.residual_routing = residual_routing
+@@ -192,5 +214,36 @@
+                 nn.init.zeros_(adapter[-1].weight)
+                 nn.init.zeros_(adapter[-1].bias)
++        # The inherited fork has restored RNG before this deterministic map.
++        # Transport every bank, including banks averaged by shared routing.
++        if self.match_basis_initialization == 'transport':
++            self._transport_match_input_weights(input_width, embedding_dim)
+         self.model_to_device()
++
++    def _transport_match_input_weights(self, input_width, action_width):
++        """For z'=Qz initialize W'=W Q^T, leaving W'z'=Wz.
++
++        Residual input order: context, target, base, three match counts,
++        then five full-width summaries. Only action columns in rows 0/4
++        move. Both Q choices are symmetric orthogonal matrices. No optimizer
++        change: AdamW is permutation equivariant in exact arithmetic but is
++        generally not equivariant under a dense orthogonal mixing. BF16 and
++        reduction ordering also limit function/trajectory equivalence.
++        """
++        if self.match_action_basis == 'identity':
++            return
++        first = input_width + len(self.match_fields) + self.key_width
++        last = first + 4 * self.value_width
++        with torch.no_grad():
++            for adapter in self.residual_bank:
++                weight = adapter[0].weight
++                raw = weight[:, first:first + action_width].clone()
++                scaled = weight[:, last:last + action_width].clone()
++                if self.match_action_basis == 'swap':
++                    left, right = scaled, raw
++                else:
++                    left = (raw + scaled) / (2.0 ** 0.5)
++                    right = (raw - scaled) / (2.0 ** 0.5)
++                weight[:, first:first + action_width].copy_(left)
++                weight[:, last:last + action_width].copy_(right)
+ 
+     def _represent(self, inputs):
+@@ -211,4 +264,8 @@
+         if mask.ndim != 2 or mask.shape[1] != 100:
+             raise ValueError('Frozen protocol requires 100 history positions')
++        # Every mask used for conditional permutation must be supplied and shaped.
++        for task_mask in task_masks:
++            if not torch.is_tensor(task_mask) or task_mask.shape != mask.shape:
++                raise ValueError('Historical task mask shape mismatch')
+         auxiliary = torch.zeros_like(mask, dtype=torch.bool)
+         for index in self.auxiliary_indices:
+@@ -237,5 +294,16 @@
+         # The observed values returned below still feed the unchanged pool
+         # and scorer. Neither item IDs nor original task masks are reindexed.
+-        summary_values = self._summary_values(values, mask)
++        if self.summary_rotation_partition == 'unrestricted':
++            # Exact ancestor arithmetic for the unrestricted/aligned bridges.
++            summary_values = self._summary_values(values, mask)
++        else:
++            membership = (task_masks[self.click_index] > 0) & mask.bool()
++            if self.summary_rotation_partition == 'rotated_click':
++                # Count-matched artificial groups: only group membership moves.
++                # The event/action stream and all original task masks stay fixed.
++                membership = self._rotate_valid_membership(
++                    membership.reshape(mask.shape[0], 10, 10),
++                    mask.bool().reshape(mask.shape[0], 10, 10)).reshape_as(mask)
++            summary_values = self._stratified_summary_values(values, mask, membership)
+         detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._target_match_summary(
+             item, self._action_channel(summary_values, self.action_in_summaries), mask,
+@@ -265,4 +333,39 @@
+         source_rank = (ranks + shift).remainder(counts.clamp_min(1))
+         source_position = packed_positions.gather(-1, source_rank)
++        actions = values[:, :, self.key_width:].reshape(batch, 10, 10, width - self.key_width)
++        gathered = actions.gather(
++            2, source_position.unsqueeze(-1).expand(-1, -1, -1, width - self.key_width))
++        actions = torch.where(valid.unsqueeze(-1), gathered, actions)
++        return torch.cat([values[:, :, :self.key_width],
++                          actions.reshape(batch, length, width - self.key_width)], dim=-1)
++
++    def _stratified_summary_values(self, values, mask, membership):
++        """Rotate action embeddings within two frozen historical-feedback strata.
++
++        Partition membership only restricts a permutation; no mask or event is
++        added to a consumer. Positive and negative strata are separately packed
++        in original valid-rank order within each ten-position block. Each uses
++        a shift of floor(stratum_count/2). Original positions, block boundaries,
++        valid masks, item coordinates and task masks remain fixed. Singleton
++        strata are identities. Invalid destinations retain their old values and
++        can never be sources for valid destinations. No state, fitting or RNG.
++        """
++        batch, length, width = values.shape
++        if length != 100 or mask.shape != values.shape[:2] or membership.shape != mask.shape:
++            raise ValueError('Expected frozen history and membership shapes')
++        valid = mask.bool().reshape(batch, 10, 10)
++        member = membership.bool().reshape(batch, 10, 10) & valid
++        groups = torch.stack((valid & ~member, member), dim=-2)
++        ranks = (groups.long().cumsum(dim=-1) - 1).clamp_min(0)
++        counts = groups.long().sum(dim=-1, keepdim=True)
++        positions = torch.arange(10, device=values.device, dtype=torch.long).view(1, 1, 1, 10)
++        packed_positions = torch.zeros_like(ranks).scatter_add(
++            -1, ranks, positions * groups.long())
++        shift = (counts // 2) * int(self.summary_action_alignment == 'rotated')
++        source_rank = (ranks + shift).remainder(counts.clamp_min(1))
++        per_group_source = packed_positions.gather(-1, source_rank)
++        # Each valid destination belongs to exactly one group. Select its source
++        # index BEFORE gathering embeddings, avoiding a doubled embedding stream.
++        source_position = (per_group_source * groups.long()).sum(dim=-2)
+         actions = values[:, :, self.key_width:].reshape(batch, 10, 10, width - self.key_width)
+         gathered = actions.gather(
+@@ -380,6 +483,6 @@
+         """Select alignment, then gate only raw/scaled match action rows.
+ 
+-        The availability switch is independent of the alignment switch.
+-        Submitted cells rotate raw/scaled match action rows and retain both.
++        The availability switch is independent of the legacy alignment
++        switch. Submitted cells retain alignment and vary availability.
+ 
+         Raw row 0 and scaled/gated row 4 can be rotated independently.
+@@ -425,5 +528,10 @@
+ 
+     def _match_action_content(self, item_summaries, actions):
+-        """Replace one or both match-action rows with existing item content.
++        """Replace or duplicate match-action rows, preserving all other inputs.
++
++        raw_duplicate copies observed row 0 to both rows 0/4;
++        scaled_duplicate copies observed row 4 to both rows 0/4. Their local
++        derivatives obey match_observed_gradient; match_replacement_gradient
++        applies only to the inherited item-derived replacement modes below.
+ 
+         raw_observed replaces scaled row 4; scaled_observed replaces raw
+@@ -436,5 +544,42 @@
+         live. Attached retains the original derivative. Original row
+         availability gates execute AFTER replacement. Rows 1/2/3 are identity.
+-        """
++
++        For mixed content, stop only the retained observed match row when
++        requested. Earlier mixed-content runs used attached derivatives;
++        the full observed/item_duplicate endpoints keep their exact code paths.
++        """
++        if self.match_action_basis != 'identity':
++            # Both streams were masked and contracted by the ancestor code.
++            # Only these two residual action consumers lose local derivatives;
++            # action pools, ordinal rows and ordinary item paths stay live.
++            raw = actions[:, 0:1, :].detach()
++            scaled = actions[:, 4:5, :].detach()
++            if self.match_action_basis == 'swap':
++                first, last = scaled, raw
++            else:
++                # FP32 arithmetic bounds extra bf16 cancellation/rounding.
++                # The cast makes this approximately invertible in bf16;
++                # the exact row exchange above adds no quantization.
++                raw32, scaled32 = raw.float(), scaled.float()
++                first = ((raw32 + scaled32) / (2.0 ** 0.5)).to(actions.dtype)
++                last = ((raw32 - scaled32) / (2.0 ** 0.5)).to(actions.dtype)
++            # Availability/family gates remain outside this helper. Init
++            # rejects nonidentity configurations that discard either row.
++            return torch.cat([first, actions[:, 1:4, :], last], dim=1)
++        # Copy a single already-masked, already-contracted action summary
++        # into both match-action slots. No item content, fitting, norm
++        # adjustment, new state or RNG enters this replacement. The source
++        # is aligned in submitted cells (summary_rotation_group='none').
++        # Stop the source derivative for BOTH selected outputs; pool and
++        # ordinal action paths remain live. The original availability and
++        # summary-family gates still execute after this helper.
++        if self.match_action_content in ('raw_duplicate', 'scaled_duplicate'):
++            source_row = 0 if self.match_action_content == 'raw_duplicate' else 4
++            duplicate = actions[:, source_row:source_row + 1, :]
++            if self.match_observed_gradient == 'blocked':
++                duplicate = duplicate.detach()
++            selected = torch.tensor((True, False, False, False, True),
++                                    device=actions.device, dtype=torch.bool).view(1, 5, 1)
++            return torch.where(selected, duplicate, actions)
+         if self.match_action_content == 'observed':
+             if self.match_observed_gradient == 'attached':
+@@ -462,4 +607,13 @@
+         selected = torch.tensor(replace_rows[self.match_action_content],
+                                 device=actions.device, dtype=torch.bool).view(1, 5, 1)
++        if (self.match_observed_gradient == 'blocked'
++                and self.match_action_content in ('raw_observed', 'scaled_observed')):
++            retained_rows = {
++                'raw_observed': (True, False, False, False, False),
++                'scaled_observed': (False, False, False, False, True),
++            }
++            retained = torch.tensor(retained_rows[self.match_action_content],
++                                    device=actions.device, dtype=torch.bool).view(1, 5, 1)
++            actions = torch.where(retained, actions.detach(), actions)
+         return torch.where(selected, duplicate.to(actions.dtype), actions)
+ 

@@ -1,0 +1,74 @@
+--- g2-r0076-scorer_factor64_control/model.py
++++ g2-r0077-scorer_energy64_low/model.py
+@@ -13,5 +13,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'budgeted_factor', 'owner_context_rank': 96, 'owner_context_scale': 'inherited', 'owner_context_balance': 'balanced', 'owner_context_evaluation': 'native', 'evaluation_summary_contraction': 'global', 'evaluation_coefficient_work': 'all', 'scorer_hidden_units': [64, 32], 'scorer_coordinates': 'orthogonal', 'scorer_coordinate_execution': 'weight', 'scorer_evaluation_execution': 'direct', 'scorer_factor_rank': 64}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'budgeted_factor', 'owner_context_rank': 96, 'owner_context_scale': 'inherited', 'owner_context_balance': 'balanced', 'owner_context_evaluation': 'native', 'evaluation_summary_contraction': 'global', 'evaluation_coefficient_work': 'all', 'scorer_hidden_units': [64, 32], 'scorer_coordinates': 'orthogonal', 'scorer_coordinate_execution': 'weight', 'scorer_evaluation_execution': 'direct', 'scorer_factor_rank': 64, 'scorer_factor_energy_rank': 48}
+ 
+ 
+@@ -352,12 +352,12 @@
+ 
+ class _ScorerFactorAffine(nn.Module):
+-    """Balanced factors of the fresh orthogonal scorer weight.
+-
+-    Rank64 controls the new factorized optimization and two-GEMM execution.
+-    Rank48 keeps every nonlinear output but restricts the shared linear map.
++    """Balanced scorer factors with a fixed initial product-energy target.
++
++    Compare ranks64/48 and energies E64/E48 in orthogonal stored coordinates.
++    Every cell retains all64 nonlinear outputs and two-GEMM execution.
+     SVD is CPU FP32 construction work only. No checkpoint, observations,
+     full-sized weight backing storage, derived cache or new RNG is retained.
+     """
+-    def __init__(self, source, rank):
++    def __init__(self, source, rank, energy_rank=0):
+         super().__init__()
+         if not isinstance(source, _WeightCoordinateAffine):
+@@ -377,4 +377,21 @@
+                 source.weight.detach().to(device='cpu', dtype=torch.float32),
+                 full_matrices=False)
++            # Energy is measured in the stored orthogonal weight coordinates,
++            # before any input-coordinate transformation. The target rank is
++            # a fixed architecture choice; no data or trained weight is read.
++            if (isinstance(energy_rank, bool) or not isinstance(energy_rank, int)
++                    or energy_rank not in (0, 48, 64)):
++                raise ValueError('Unknown fixed scorer energy target')
++            if energy_rank:
++                retained_energy = singular[:rank].square().sum()
++                target_energy = singular[:energy_rank].square().sum()
++                if (not torch.isfinite(retained_energy)
++                        or not torch.isfinite(target_energy)
++                        or retained_energy <= 0 or target_energy <= 0):
++                    raise ValueError('Cannot rescale degenerate scorer energy')
++                # A weight gain g is split as sqrt(g) across the two factors.
++                # No scale, SVD tensor or derived product persists in forward.
++                gain = (target_energy / retained_energy).sqrt()
++                singular = singular * gain
+             left, singular, right = left[:, :rank], singular[:rank], right[:rank, :]
+             pivots = left.abs().argmax(dim=0, keepdim=True)
+@@ -446,4 +463,5 @@
+                  scorer_evaluation_execution='direct',
+                  scorer_factor_rank=64,
++                 scorer_factor_energy_rank=48,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -478,4 +496,10 @@
+                                    or scorer_evaluation_execution != 'direct'):
+             raise ValueError('Factor contrast retains64/32 and direct evaluation')
++        if (isinstance(scorer_factor_energy_rank, bool)
++                or not isinstance(scorer_factor_energy_rank, int)
++                or scorer_factor_energy_rank not in (0, 48, 64)):
++            raise ValueError('Unknown fixed scorer energy target')
++        if scorer_factor_energy_rank and not scorer_factor_rank:
++            raise ValueError('Scorer energy target requires trainable factors')
+         self.scorer_factor_rank = scorer_factor_rank
+         self.scorer_coordinate_execution = scorer_coordinate_execution
+@@ -889,5 +913,6 @@
+         if scorer_factor_rank:
+             self.local_activation[0] = _ScorerFactorAffine(
+-                self.local_activation[0], scorer_factor_rank)
++                self.local_activation[0], scorer_factor_rank,
++                scorer_factor_energy_rank)
+         self.model_to_device()
+ 

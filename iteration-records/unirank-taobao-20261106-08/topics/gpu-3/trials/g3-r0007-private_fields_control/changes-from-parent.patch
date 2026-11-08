@@ -1,0 +1,126 @@
+--- g3-r0005-private_aux_items/model.py
++++ g3-r0007-private_fields_control/model.py
+@@ -1,13 +1,17 @@
+-"""Auxiliary-owned item/action tables under a primary-owned history selector.
+-
+-The primary click path and shared context tables follow the incumbent. Auxiliary
+-heads may learn one private item/action representation shared by cart/fav/buy.
+-A four-mode replacement suite separates adaptive private values from a frozen
+-initial basis and from tied primary-only/joint embedding updates. All modes have
+-identical allocated capacity and initialization, but active capacity and backward
+-cost differ. Clones start from the inherited initialization, never a checkpoint.
+-Related work: STEM (Su et al., AAAI 2024), arXiv:2308.13537v2, and the local DIN
+-adaptation. This is neither a STEM reproduction nor an originality claim.
+-Forward uses only the frozen host inputs; current target action is never used.
++"""Field-selective shared/private item values with a primary-owned selector.
++
++Two independently switched groups are cate_id/brand and all remaining item/action
++fields. A shared group supplies the current primary tables to auxiliary heads,
++allowing auxiliary gradients into those tables. A private group supplies learned
++auxiliary copies. Both target and historical values obey the same ownership.
++All four factorial cells allocate and look up the same copied tables and preserve
++the inherited initialization. Unused copies receive no loss gradient; effective
++capacity and backward cost therefore differ and must be reported by the host.
++The 00 cell reproduces g3-r0005-private_aux_items; 11 recovers tied-joint values.
++There is no late cross-task residual. Context sharing and selector ownership stay
++fixed. These are local tests of label-granularity-motivated field ownership.
++STEM already studies field-selective task embeddings (Su et al., AAAI 2024,
++https://arxiv.org/html/2308.13537v2, section 5.3); no originality is claimed.
++Only frozen host inputs are consumed; the target action is never consumed.
+ """
+ import copy
+@@ -18,14 +22,15 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'share_label_fields': False, 'share_other_fields': False}
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='PrivateAuxiliaryItemRepresentation', gpu=-1,
++    def __init__(self, feature_map, model_id='FieldSelectiveAuxiliaryRepresentation', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(128, 32),
+                  tower_hidden_units=(128, 64), routing='task',
+                  feedback_in_score=True, selector_gradient='primary',
+                  auxiliary_selector='none', block_aux_context_gradient=False,
+-                 auxiliary_item_mode='private', num_tasks=None,
++                 auxiliary_item_mode='private', share_label_fields=False,
++                 share_other_fields=False, num_tasks=None,
+                  task='binary_classification', **kwargs):
+         labels = list(feature_map.labels)
+@@ -54,4 +59,10 @@
+         if block_aux_context_gradient:
+             raise ValueError('This study fixes context sharing; auxiliary_item_mode controls item ownership')
++        if auxiliary_item_mode != 'private':
++            raise ValueError('Field ownership requires learned private fallback tables')
++        if not isinstance(share_label_fields, bool) or not isinstance(share_other_fields, bool):
++            raise ValueError('Field ownership switches must be boolean')
++        self.share_label_fields = share_label_fields
++        self.share_other_fields = share_other_fields
+         self.auxiliary_item_mode = auxiliary_item_mode
+         self.block_aux_context_gradient = block_aux_context_gradient
+@@ -122,4 +133,22 @@
+             for name in self.aux_item_fields
+             if name in self.embedding_layer.feature_encoders}))
++        label_fields = {'cate_id', 'brand'}
++        if not label_fields.issubset(self.item_fields):
++            raise ValueError('Frozen category and brand item fields are required')
++        self.shared_auxiliary_fields = tuple(
++            name for name in self.aux_item_fields
++            if (share_label_fields if name in label_fields else share_other_fields))
++        # An embedding alias crossing ownership groups would silently leak
++        # updates. Reject it instead of changing the host feature definition.
++        for name in self.aux_item_fields:
++            for other in self.embedding_layer.embedding_layers:
++                if name == other:
++                    continue
++                if (self.embedding_layer.embedding_layers[name]
++                        is self.embedding_layer.embedding_layers[other]):
++                    if (other not in self.aux_item_fields or
++                            ((name in self.shared_auxiliary_fields) !=
++                             (other in self.shared_auxiliary_fields))):
++                        raise ValueError('Embedding alias crosses field ownership boundary')
+         self.model_to_device()
+ 
+@@ -171,26 +200,20 @@
+             values = torch.cat([keys, action], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
+-        # No private representation is supplied to the selector in this study.
+-        # Selectors retain the inherited primary-owned input geometry, avoiding
+-        # a simultaneous selector rewrite or extra Dice statistics updates.
+-        if self.auxiliary_item_mode == 'private':
+-            private_emb = self._private_item_embeddings(item)
+-        else:
+-            with torch.no_grad():
+-                private_emb = self._private_item_embeddings(item)
+-        private_target = torch.cat([private_emb[name][:, -1]
+-                                    for name in self.item_fields], dim=-1)
+-        private_values = torch.cat([private_emb[name][:, :-1]
+-                                    for name in self.item_fields], dim=-1)
+-        private_values = private_values.masked_fill(~valid, 0)
++        # Always execute the same lookups. A table's value is selected once per
++        # field and reused for target and history. No blends, new dimensions,
++        # extra Dice calls, loss changes, or new random draws are introduced.
++        private_emb = self._private_item_embeddings(item)
++        auxiliary_emb = {
++            name: (item_emb[name] if name in self.shared_auxiliary_fields
++                   else private_emb[name])
++            for name in self.aux_item_fields}
++        auxiliary_target = torch.cat([auxiliary_emb[name][:, -1]
++                                      for name in self.item_fields], dim=-1)
++        auxiliary_values = torch.cat([auxiliary_emb[name][:, :-1]
++                                      for name in self.item_fields], dim=-1)
++        auxiliary_values = auxiliary_values.masked_fill(~valid, 0)
+         if self.action_field:
+-            private_action = private_emb[self.action_field][:, :-1].masked_fill(~valid, 0)
+-            private_values = torch.cat([private_values, private_action], dim=-1)
+-        if self.auxiliary_item_mode in ('private', 'fixed'):
+-            auxiliary_target, auxiliary_values = private_target, private_values
+-        elif self.auxiliary_item_mode == 'tied_primary':
+-            auxiliary_target, auxiliary_values = target.detach(), values.detach()
+-        else:
+-            auxiliary_target, auxiliary_values = target, values
++            auxiliary_action = auxiliary_emb[self.action_field][:, :-1].masked_fill(~valid, 0)
++            auxiliary_values = torch.cat([auxiliary_values, auxiliary_action], dim=-1)
+         batch, length, _ = keys.shape
+         if length:

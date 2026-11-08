@@ -1,0 +1,202 @@
+--- g3-r0038-centered_aligned/model.py
++++ g3-r0039-parallel_reflected/model.py
+@@ -1,9 +1,9 @@
+-"""Prospective occupied-row gradient direction x mean-presence factorial.
+-
+-All forward values and true-label joint BCE are inherited. Only auxiliary
+-product-context input cotangents change: centered +/-C, or full M+/-C,
+-where M is the occupied-row mean. These are explicit first-order surrogate
+-backward attribution controls, not derivatives of the identity forward or
+-a claimed new scalar objective. No modules, parameters, buffers or RNG added.
++"""Prospective click-reference direction factorial for auxiliary context transfer.
++
++Split centered auxiliary context cotangent C into P parallel to centered click
++context cotangent and O=C-P. Use +P+O, -P+O, +P-O, or -P-O. Forward values and
++true-label BCE stay fixed. This is a first-order surrogate backward attribution
++study, not a PCGrad reproduction, an identity derivative or a scalar objective.
++Norm claims concern this context edge only, before sparse embedding scatter.
+ """
+ import torch
+@@ -14,5 +14,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'reversed', 'orthogonal_orientation': 'aligned'}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -20,53 +20,71 @@
+ 
+ 
+-class _ProductContextComponents(torch.autograd.Function):
+-    """Identity forward; occupied-row cotangent projection/reflection.
+-
+-    At a common state, let A = occupied * G, M = occupied * mean_H(A),
+-    and C = A-M. Centered cells return +/-C; full cells return M+/-C.
+-    M and C are orthogonal in exact arithmetic, so reversal preserves each
+-    cell's Frobenius norm. Centered reversal also preserves every row norm.
+-    FP32 reductions and output casting require dtype-aware host checks.
+-    Norm equality at this edge need not survive repeated-ID sparse scatter,
+-    addition of click gradients or the host optimizers. First-order only.
++def _click_reference_components(primary, auxiliary, occupied):
++    """FP32 global batch/context projection, exposed for host preflight.
++
++    Center over occupied rows; all components then have zero occupied-row mean.
++    Scale the click reference before squaring to avoid a fixed epsilon altering
++    projection of small native gradients. A zero reference gives P=0. An empty
++    batch gives C=P=O=0. No per-example or per-field alignment is claimed.
++    """
++    active_auxiliary = torch.where(occupied, auxiliary.float(), 0.0)
++    active_primary = torch.where(occupied, primary.float(), 0.0)
++    count = occupied.to(torch.float32).sum().clamp_min(1.0)
++    centered = torch.where(
++        occupied, active_auxiliary - active_auxiliary.sum(dim=0, keepdim=True) / count, 0.0)
++    reference = torch.where(
++        occupied, active_primary - active_primary.sum(dim=0, keepdim=True) / count, 0.0)
++    scale = reference.abs().amax().clamp_min(torch.finfo(torch.float32).tiny)
++    direction = reference / scale
++    # Nonzero normal reference has at least one scaled entry with abs=1.
++    # For zero reference both numerator and projected vector are zero.
++    coefficient = (centered * direction).sum() / direction.square().sum().clamp_min(1.0)
++    parallel = coefficient * direction
++    return centered, parallel, centered - parallel
++
++
++class _ClickReferenceTransfer(torch.autograd.Function):
++    """Two identity outputs collect click and auxiliary cotangents in one VJP.
++
++    Click's output feeds all click context uses; auxiliary's output feeds only
++    auxiliary product context. Other auxiliary context paths remain detached.
++    Only aggregate auxiliary input cotangents change. At a common state private
++    parameter derivatives are unaffected. No extra backward pass, RNG, learned
++    state, optimizer access or labels in forward. Higher-order use is outside
++    this interface. Every cell computes the same decomposition for fair cost.
+     """
+     @staticmethod
+-    def forward(ctx, context, occupied, component, orientation):
+-        if context.shape[0] < 2 or context.shape[0] % 2:
+-            raise ValueError('Direction study requires even training batches')
++    def forward(ctx, context, occupied, parallel_orientation, orthogonal_orientation):
++        if context.ndim != 2 or context.shape[0] < 2 or context.shape[0] % 2:
++            raise ValueError('Frozen training requires an even context batch [B,D]')
+         if occupied.shape != (context.shape[0], 1) or occupied.dtype != torch.bool:
+             raise ValueError('Expected history occupancy bool[B,1]')
+-        if component not in ('full', 'centered'):
+-            raise ValueError('Unknown product context component')
+-        if orientation not in ('aligned', 'reversed'):
+-            raise ValueError('Unknown centered cotangent orientation')
+-        ctx.component = component
+-        ctx.orientation = orientation
++        if parallel_orientation not in ('aligned', 'reversed'):
++            raise ValueError('Unknown parallel orientation')
++        if orthogonal_orientation not in ('aligned', 'reversed'):
++            raise ValueError('Unknown orthogonal orientation')
++        ctx.parallel_orientation = parallel_orientation
++        ctx.orthogonal_orientation = orthogonal_orientation
+         ctx.save_for_backward(occupied)
+-        return context.view_as(context)
++        return context.view_as(context), context.view_as(context)
+ 
+     @staticmethod
+-    def backward(ctx, gradient):
++    def backward(ctx, primary_gradient, auxiliary_gradient):
+         (occupied,) = ctx.saved_tensors
+-        # Preserve the native full control's exact incoming arithmetic.
+-        # Empty-history input cotangents must already be zero: host preflight
+-        # verifies the downstream has_history gate for this frozen graph.
+-        if ctx.component == 'full' and ctx.orientation == 'aligned':
+-            return gradient, None, None, None
+-        with torch.autocast(device_type=gradient.device.type, enabled=False):
+-            active = torch.where(occupied, gradient.float(), 0.0)
+-            count = occupied.to(torch.float32).sum().clamp_min(1.0)
+-            mean = active.sum(dim=0, keepdim=True) / count
+-            centered = torch.where(occupied, active - mean, 0.0)
+-            if ctx.component == 'full':
+-                # Reflect about the occupied-row mean: M-C = 2M-A.
+-                result = torch.where(occupied, mean - centered, 0.0)
++        # Autograd materializes unused output cotangents as zeros by default.
++        with torch.autocast(device_type=primary_gradient.device.type, enabled=False):
++            centered, parallel, _ = _click_reference_components(
++                primary_gradient, auxiliary_gradient, occupied)
++            if ctx.parallel_orientation == ctx.orthogonal_orientation:
++                # Do not reconstruct C=P+O in the two replay cells.
++                transfer = centered
+             else:
+-                result = centered
+-        result = result.to(dtype=gradient.dtype)
+-        if ctx.component == 'centered' and ctx.orientation == 'reversed':
+-            # Negate after cast: exact negative of the representable aligned C.
+-            result = -result
+-        return result, None, None, None
++                # -P+O = C-2P. Negation below also supplies +P-O.
++                transfer = centered - 2.0 * parallel
++        transfer = transfer.to(dtype=primary_gradient.dtype)
++        if ctx.orthogonal_orientation == 'reversed':
++            transfer = -transfer
++        # Retain click's original cotangent, including its empty rows.
++        return primary_gradient + transfer, None, None, None
+ 
+ 
+@@ -94,4 +112,6 @@
+                  product_context_magnitude='native',
+                  product_context_orientation='aligned',
++                 parallel_orientation='reversed',
++                 orthogonal_orientation='aligned',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -128,9 +148,15 @@
+         if product_context_assignment != 'aligned':
+             raise ValueError('Direction factorial fixes example assignment to aligned')
+-        if product_context_orientation not in ('aligned', 'reversed'):
+-            raise ValueError('Unknown centered cotangent orientation')
++        if product_context_orientation != 'aligned':
++            raise ValueError('Use separate component orientations in this study')
++        if parallel_orientation not in ('aligned', 'reversed'):
++            raise ValueError('Unknown parallel orientation')
++        if orthogonal_orientation not in ('aligned', 'reversed'):
++            raise ValueError('Unknown orthogonal orientation')
++        self.parallel_orientation = parallel_orientation
++        self.orthogonal_orientation = orthogonal_orientation
+         self.product_context_orientation = product_context_orientation
+-        if product_context_component not in ('full', 'centered'):
+-            raise ValueError('Unknown product context component')
++        if product_context_component != 'centered':
++            raise ValueError('This factorial retains centered auxiliary transfer')
+         if block_aux_residual_context_grad is not True:
+             raise ValueError('Component study isolates product-only context transfer')
+@@ -777,4 +803,8 @@
+         context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._represent(inputs)
+         batch = values.shape[0]
++        if self.training:
++            context, transfer_context = _ClickReferenceTransfer.apply(
++                context, mask.bool().any(dim=1, keepdim=True),
++                self.parallel_orientation, self.orthogonal_orientation)
+         if (self.training and self.training_support == 'full') or self.inference_support == 'full':
+             # This training path is exactly the incumbent's operator sequence:
+@@ -839,5 +869,5 @@
+             # gate both uses together. Historical action joins this group.
+             # Context includes only supplied non-item/non-action features.
+-            aux_context = context.detach() if self.block_aux_context_grad else context
++            aux_context = transfer_context.detach() if self.block_aux_context_grad else transfer_context
+             aux_target = target.detach() if self.block_aux_item_grad else target
+             aux_values = values.detach() if self.block_aux_item_grad else values
+@@ -875,8 +905,4 @@
+         total_count = grouped_counts[:, :, 0].sum(dim=1, keepdim=True)
+         has_history = (total_count > 0).to(uniform.dtype)
+-        if self.training:
+-            if batch < 2 or batch % 2:
+-                raise ValueError('Frozen training direction study requires even batches')
+-            product_context_occupied = has_history.bool()
+         predictions = {}
+         for index, (label, tower) in enumerate(zip(self.feature_map.labels, self.towers)):
+@@ -914,9 +940,6 @@
+                 if self.block_aux_product_context_grad:
+                     product_context = product_context.detach()
+-                # Forward identity and ordinary private parameter gradients.
+-                # Only the auxiliary product-context input VJP is projected/reflected.
+-                product_context = _ProductContextComponents.apply(
+-                    product_context, product_context_occupied,
+-                    self.product_context_component, self.product_context_orientation)
++                # Paired identity above collects the auxiliary context VJP;
++                # private product-module gradients stay ordinary.
+             signal = torch.cat([task_detail, task_position_detail, task_block_detail,
+                                 task_curvature_detail, task_joint_detail], dim=-1)

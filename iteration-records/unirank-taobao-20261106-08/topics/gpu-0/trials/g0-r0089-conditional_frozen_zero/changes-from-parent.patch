@@ -1,0 +1,172 @@
+--- g0-r0088-full_frozen_zero_bridge/model.py
++++ g0-r0089-conditional_frozen_zero/model.py
+@@ -1,13 +1,9 @@
+-"""Action-codebook learning control with exact historical membership access.
+-
+-Freeze only the action-channel backward edge, before adding the unchanged
+-learnable membership embedding. Full and blind arms retain their original
+-forward values at a fixed state. The action table remains allocated and is
+-initialized identically, but receives no loss gradient in blocked mode.
+-No table is shared with item/context features. Every other learned module,
+-mask, summary, true-label loss and inherited surrogate context VJP stays
+-unchanged. This tests dependence on action-codebook adaptation; fixed random
+-feature geometry and downstream optimization remain alternative explanations.
+-No new performance or conditional-information claim is made.
++"""Conditional action composition versus event alignment, with a frozen codebook.
++
++Cross full actions / per-history exact-mask-stratum action means with zero /
++action-RMS membership initialization. Every cell computes the same conditional
++mean helper. Homogeneous strata are exact identities by anchored residual
++averaging. All inherited scoring, task masks, item content, order, private
++learning, loss and context surrogate VJP remain unchanged. No novelty claim.
+ """
+ import torch
+@@ -18,5 +14,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'historical_action_mode': 'full', 'action_codebook_gradient': 'blocked'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'historical_action_mode': 'membership_counts_only', 'action_codebook_gradient': 'blocked', 'membership_initialization': 'zero'}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -925,6 +921,7 @@
+                  click_relative_transfer='orthogonal_native',
+                  orthogonal_assignment='nuisance_line_fixed_angle_occupied_cycle_source_bit',
+-                 historical_action_mode='full',
++                 historical_action_mode='membership_counts_only',
+                  action_codebook_gradient='blocked',
++                 membership_initialization='zero',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -938,5 +935,5 @@
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+-        if historical_action_mode not in ('full', 'blind', 'counts_only', 'within_membership_cycle'):
++        if historical_action_mode not in ('full', 'blind', 'counts_only', 'within_membership_cycle', 'membership_counts_only'):
+             raise ValueError('Unknown historical action intervention')
+         self.historical_action_mode = historical_action_mode
+@@ -944,4 +941,7 @@
+             raise ValueError('Unknown action-codebook gradient mode')
+         self.action_codebook_gradient = action_codebook_gradient
++        if membership_initialization not in ('zero', 'action_rms'):
++            raise ValueError('Unknown membership initialization')
++        self.membership_initialization = membership_initialization
+         self.compression_routes = compression_routes
+         if block_aux_scorer_grad is not True:
+@@ -1185,5 +1185,32 @@
+         with torch.random.fork_rng(devices=[]):
+             self.membership_embedding = nn.Embedding(16, embedding_dim)
+-            nn.init.zeros_(self.membership_embedding.weight)
++            if membership_initialization == 'zero':
++                nn.init.zeros_(self.membership_embedding.weight)
++            else:
++                # Reuse the Gaussian values already drawn by nn.Embedding.
++                # Center across all 16 mask codes and match a SINGLE scalar:
++                # the centered RMS of the initial nonpadding action table.
++                # No sample actions, vocab names, labels or fitted statistics.
++                # Both full and blind cells receive exactly this same table.
++                with torch.no_grad():
++                    weight = self.membership_embedding.weight
++                    random_rows = weight.detach().float()
++                    random_rows = random_rows - random_rows.mean(dim=0, keepdim=True)
++                    action_weight = self.embedding_layer.embedding_layers[
++                        self.action_field].weight.detach().float().to(random_rows.device)
++                    codes = torch.arange(action_weight.shape[0], device=action_weight.device)
++                    keep = codes != 0
++                    padding_idx = feature_map.features[self.action_field].get('padding_idx')
++                    if padding_idx is not None:
++                        keep = keep & (codes != int(padding_idx))
++                    action_rows = action_weight[keep]
++                    if action_rows.shape[0] == 0:
++                        raise ValueError('Action codebook has no nonpadding rows')
++                    action_rows = action_rows - action_rows.mean(dim=0, keepdim=True)
++                    action_rms = action_rows.square().mean().sqrt()
++                    random_rms = random_rows.square().mean().sqrt()
++                    initialized = random_rows * (
++                        action_rms / random_rms.clamp_min(torch.finfo(torch.float32).tiny))
++                    weight.copy_(initialized.to(weight.dtype))
+         self.membership_indices = tuple(list(feature_map.labels).index(label)
+                                         for label in ('is_click', 'cart', 'fav', 'buy'))
+@@ -1226,4 +1253,73 @@
+                 'cycle_changed_rows': changed.any(dim=1).sum()}
+ 
++    def _membership_action_means(self, history, mask, task_masks):
++        """Per-row, exact-mask-stratum mean; no cross-row/event-item lookup.
++
++        Anchor at the first valid event in each stratum, then average FP32
++        residuals. Constant strata have identically zero residuals, so their
++        replacement equals the original exactly (also after the dtype cast).
++        Anchor choice cancels algebraically; FP32 summation order can matter
++        in heterogeneous strata. All arms run this helper, with no RNG,
++        persistent state, CPU extraction or gradients into any other field.
++        Target action never enters. Invalid slots retain their original value.
++        """
++        batch, length, width = history.shape
++        valid = mask.bool()
++        codes = self._membership_codes(mask, task_masks)
++        positions = torch.arange(length, device=history.device).unsqueeze(0).expand(batch, -1)
++        positions = torch.where(valid, positions, length)
++        first = torch.full((batch, 16), length, device=history.device, dtype=torch.long)
++        first.scatter_reduce_(1, codes, positions, reduce='amin', include_self=True)
++        anchors = history.float().gather(
++            1, first.clamp_max(length - 1).unsqueeze(-1).expand(-1, -1, width))
++        event_index = codes.unsqueeze(-1).expand(-1, -1, width)
++        event_anchor = anchors.gather(1, event_index)
++        residual = torch.where(valid.unsqueeze(-1), history.float() - event_anchor, 0.0)
++        # Avoid floating atomic scatter reductions. This small stratum/event
++        # assignment costs B*16*L FP32 elements and executes in every cell.
++        strata = torch.arange(16, device=history.device).view(1, 16, 1)
++        assignment = ((strata == codes.unsqueeze(1)) & valid.unsqueeze(1)).float()
++        with torch.autocast(device_type=history.device.type, enabled=False):
++            sums = torch.bmm(assignment, residual)
++            counts = assignment.sum(dim=-1)
++            means = anchors + sums / counts.clamp_min(1.0).unsqueeze(-1)
++        replacement = means.gather(1, event_index).to(history.dtype)
++        return torch.where(valid.unsqueeze(-1), replacement, history)
++
++    def conditional_action_diagnostics(self, inputs):
++        """Optional training-only host preflight, not an automatic collector.
++
++        Nonzero within-row/stratum ID variation is required to interpret an
++        alignment contrast. Returns mergeable counts and maximum channel
++        displacement; use alongside inherited membership_diagnostics.
++        Never read labels, target actions or data outside supplied inputs.
++        """
++        _, item, mask, task_masks = self.get_inputs(inputs, return_multi_masks=True)
++        valid = mask.bool()
++        codes = self._membership_codes(mask, task_masks)
++        ids = item[self.action_field][:, :-1]
++        vocab_size = int(self.feature_map.features[self.action_field]['vocab_size'])
++        low = torch.full((ids.shape[0], 16), vocab_size, device=ids.device, dtype=torch.long)
++        high = torch.full((ids.shape[0], 16), -1, device=ids.device, dtype=torch.long)
++        low.scatter_reduce_(1, codes, torch.where(valid, ids, vocab_size),
++                            reduce='amin', include_self=True)
++        high.scatter_reduce_(1, codes, torch.where(valid, ids, -1),
++                             reduce='amax', include_self=True)
++        heterogeneous = high > low
++        history = self.embedding_layer(item)[self.action_field][:, :-1]
++        replacement = self._membership_action_means(history, mask, task_masks)
++        difference = torch.where(valid.unsqueeze(-1),
++                                 replacement.float() - history.float(), 0.0)
++        displaced = (difference != 0).any(dim=-1) & valid
++        return {'valid_events': valid.sum(),
++                'valid_rows': valid.any(dim=1).sum(),
++                'occupied_row_strata': (high >= 0).sum(),
++                'heterogeneous_row_strata': heterogeneous.sum(),
++                'heterogeneous_rows': heterogeneous.any(dim=1).sum(),
++                'events_in_heterogeneous_strata': (heterogeneous.gather(1, codes) & valid).sum(),
++                'displaced_events': displaced.sum(),
++                'displaced_rows': displaced.any(dim=1).sum(),
++                'max_abs_channel_difference': difference.abs().amax()}
++
+     def _historical_action_values(self, item_emb, mask, task_masks):
+         """Replace only the historical action channel, before ANY summary.
+@@ -1240,6 +1336,9 @@
+         history = item_emb[self.action_field][:, :-1]
+         valid = mask.bool().unsqueeze(-1)
++        conditional = self._membership_action_means(history, mask, task_masks)
+         if self.historical_action_mode == 'full':
+             return history
++        if self.historical_action_mode == 'membership_counts_only':
++            return conditional
+         if self.historical_action_mode == 'counts_only':
+             active = torch.where(valid, history.float(), 0.0)

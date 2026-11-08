@@ -1,0 +1,155 @@
+--- g1-r0067-coarse_axis/model.py
++++ g1-r0068-axis_with_sign/model.py
+@@ -1,10 +1,10 @@
+-"""Single-view sign quotient of inherited local/coarse history moments.
+-
+-A selected moment m is oriented so its first maximum-absolute coordinate
+-is nonnegative. This retains the whole vector up to one global sign,
+-without averaging learned predictions or adding a second loss view.
+-All four cells compute both orientations; only the two selections vary.
+-No full event-reversal/permutation invariance or novelty is asserted.
+-Native tensor, gradient, BF16, parity and cost checks are host-owned.
++"""Prospective coarse orientation information-restoration factorial.
++
++Cross raw/canonical coarse moment with detached pivot-sign/constant scalar.
++Both learned summary consumers receive the scalar; local and other moments
++stay unchanged. All cells add the same128 zero-initialized dense weights.
++Information recoverability does not guarantee one-pass learnability.
++No new measured result, novelty or whole-order-invariance claim.
++Native tensor/autograd/resource checks belong to the authorized host.
+ """
+ import torch
+@@ -15,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'canonicalize_local': False, 'canonicalize_coarse': True}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'canonicalize_coarse': True, 'expose_coarse_sign': True}
+ 
+ 
+@@ -35,5 +35,5 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16, summary_placement='block',
+-                 canonicalize_local=False, canonicalize_coarse=True,
++                 canonicalize_coarse=True, expose_coarse_sign=True,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -48,8 +48,8 @@
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         self.compression_routes = compression_routes
+-        if not isinstance(canonicalize_local, bool) or not isinstance(canonicalize_coarse, bool):
+-            raise ValueError('Moment orientation switches must be booleans')
+-        self.canonicalize_local = canonicalize_local
++        if not isinstance(canonicalize_coarse, bool) or not isinstance(expose_coarse_sign, bool):
++            raise ValueError('Chart and sign availability switches must be booleans')
+         self.canonicalize_coarse = canonicalize_coarse
++        self.expose_coarse_sign = expose_coarse_sign
+         if block_aux_scorer_grad is not True:
+             raise ValueError('Auxiliary scorer parameter gradients must stay blocked')
+@@ -230,5 +230,26 @@
+             self.register_buffer(storage_name, buffer.detach().clone())
+             self._auxiliary_state_names[name] = storage_name
++        # Widen AFTER all inherited initialization. Copy the old subspace
++        # and zero only the added columns; preserve host RNG and all buffers.
++        # All four cells instantiate the same modules in the same order.
++        with torch.random.fork_rng(devices=[]):
++            for index in range(self.num_tasks):
++                self.residual_bank[index][0] = self._with_scalar_input(
++                    self.residual_bank[index][0])
++                self.history_projections[index] = self._with_scalar_input(
++                    self.history_projections[index])
+         self.model_to_device()
++
++    @staticmethod
++    def _with_scalar_input(layer):
++        """Extend one affine input with a zero column, preserving old state."""
++        extended = nn.Linear(layer.in_features + 1, layer.out_features,
++                             bias=layer.bias is not None)
++        with torch.no_grad():
++            extended.weight[:, :-1].copy_(layer.weight)
++            extended.weight[:, -1:].zero_()
++            if layer.bias is not None:
++                extended.bias.copy_(layer.bias)
++        return extended
+ 
+     def _represent(self, inputs):
+@@ -246,6 +267,6 @@
+         else:
+             raise ValueError('Released historical task masks are required')
+-        # The framework may assign device copies into item_dict. Keep the
+-        # caller-owned mapping intact; no tensor is mutated here.
++        # get_inputs may replace mapping entries with device copies.
++        # Never mutate the caller-owned item mapping.
+         copied = (inputs[0], dict(inputs[1]), inputs[2], supplied)
+         user, item, mask, task_masks = self.get_inputs(copied, return_multi_masks=True)
+@@ -267,25 +288,22 @@
+         detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._target_match_summary(
+             item, values, mask)
+-        # Select before ANY learned consumer, including every auxiliary
+-        # adapter and context/history projection. Other channels stay intact.
+-        # Compute both alternatives in every cell, including signed_bridge.
+-        canonical_local = self._canonical_moment(position_detail)
+-        canonical_coarse = self._canonical_moment(block_detail)
+-        position_detail = canonical_local if self.canonicalize_local else position_detail
+-        block_detail = canonical_coarse if self.canonicalize_coarse else block_detail
+-        return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union
++        # The sign and chart use only this already-masked moment. The
++        # scalar has no embedding gradient, including on auxiliary routes.
++        # Both alternatives execute in every cell, train and eval alike.
++        coarse_axis, coarse_sign = self._coarse_chart(block_detail)
++        block_detail = coarse_axis if self.canonicalize_coarse else block_detail
++        orientation_code = (coarse_sign if self.expose_coarse_sign
++                            else torch.ones_like(coarse_sign))
++        return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union, orientation_code
+ 
+     @staticmethod
+-    def _canonical_moment(moment):
+-        """[B,D] -> representative of {m,-m}, with no added learned state.
+-
+-        FP32 detached pivot selection uses the first maximum-absolute
+-        coordinate. Ties therefore resolve identically for m and -m; zero
+-        uses positive orientation and remains zero. Multiply the WHOLE
+-        vector, preserving norm, relative coordinate signs and outer product.
+-        This is not coordinatewise abs. The local Jacobian away from pivot
+-        boundaries is orientation * identity; the discrete choice has no
+-        gradient. Learned embeddings can cross those boundaries, which is
+-        an optimization confound to measure rather than hide.
++    def _coarse_chart(moment):
++        """Return (c,s) with c=s*m and m=s*c; s is a detached [B,1] bit.
++
++        Lowest-index max-absolute FP32 pivot; zero uses +1. This preserves
++        the exact prior chart convention. c alone quotients m/-m, whereas
++        the pair retains the raw information. No learned bypass reconstructs
++        m: both fixed-capacity nonlinear consumers must learn to use the bit.
++        Their inability to do so would not refute information sufficiency.
+         """
+         if moment.ndim != 2 or moment.shape[1] < 1:
+@@ -296,5 +314,5 @@
+         orientation = torch.where(pivot < 0, -torch.ones_like(pivot),
+                                   torch.ones_like(pivot)).to(moment.dtype)
+-        return moment * orientation
++        return moment * orientation, orientation
+ 
+     def _target_match_summary(self, item, values, mask):
+@@ -759,5 +777,5 @@
+ 
+     def forward(self, inputs):
+-        context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._represent(inputs)
++        context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union, orientation_code = self._represent(inputs)
+         batch = values.shape[0]
+         if (self.training and self.training_support == 'full') or self.inference_support == 'full':
+@@ -908,5 +926,6 @@
+                                 task_curvature_detail, task_joint_detail], dim=-1)
+             residual_features = torch.cat([adapter_context, task_target, base,
+-                                           match_counts.to(base.dtype), signal], dim=-1)
++                                           match_counts.to(base.dtype), signal,
++                                           orientation_code.to(base.dtype)], dim=-1)
+             # Task routing is required by __init__. Each adapter still
+             # receives its own task's features once; every parameter remains
+@@ -919,5 +938,6 @@
+                                     for adapter in self.residual_bank], dim=1)
+                 correction = bank[:, index, :] if self.residual_routing == 'task' else bank.mean(dim=1)
+-            history_features = torch.cat([base, match_counts.to(base.dtype), signal], dim=-1)
++            history_features = torch.cat([base, match_counts.to(base.dtype), signal,
++                                          orientation_code.to(base.dtype)], dim=-1)
+             correction = correction + self._context_history_correction(
+                 index, adapter_context, history_features, task_blocks, block_counts)

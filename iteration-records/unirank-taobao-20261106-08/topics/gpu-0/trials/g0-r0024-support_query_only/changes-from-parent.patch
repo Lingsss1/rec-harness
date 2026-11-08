@@ -1,0 +1,115 @@
+--- g0-r0022-support_rotated_attached/model.py
++++ g0-r0024-support_query_only/model.py
+@@ -1,9 +1,9 @@
+-"""Compression-population and gradient controls for the DIN scorer.
+-
+-The primary readout always uses uniform block means. Extra target-partition
+-rows affect Dice statistics but are never read out. The 2x2 study replaces
+-aligned support with a count-matched rotated duplicate, and optionally stops
+-gradients at support preactivations before each Dice layer. Learned modules,
+-initialization, residual summaries and auxiliary ownership are inherited.
++"""Target/history input-gradient ownership of normalization support.
++
++Extra primary strata 3..6 influence native Dice statistics, never the readout.
++The factorial gates their target-query and compressed-history input gradients
++independently. All native scorer and mean/variance gradients remain attached.
++Predictions and buffers are identical at fixed state; learned construction,
++initialization, compression, residuals and auxiliary ownership are inherited.
+ """
+ import torch
+@@ -14,5 +14,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'support_query_gradient': True, 'support_value_gradient': False}
+ 
+ 
+@@ -28,5 +28,6 @@
+                  match_support='available', match_scaling='norm', coarse_extension='duplicate',
+                  primary_partition='uniform', normalization_support='rotated_duplicate',
+-                 support_gradient='attached', task='binary_classification', **kwargs):
++                 support_gradient='attached', support_query_gradient=True,
++                 support_value_gradient=False, task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+@@ -93,4 +94,10 @@
+         self.normalization_support = normalization_support
+         self.support_gradient = support_gradient
++        if normalization_support != 'rotated_duplicate' or support_gradient != 'attached':
++            raise ValueError('This factorial freezes rotated support and native attached Dice')
++        if not isinstance(support_query_gradient, bool) or not isinstance(support_value_gradient, bool):
++            raise ValueError('Support operand gradient switches must be booleans')
++        self.support_query_gradient = support_query_gradient
++        self.support_value_gradient = support_value_gradient
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -500,27 +507,34 @@
+         return torch.cat([query, keys, query - keys, query * keys, action], dim=-1).reshape(batch * slots, -1)
+ 
++    def _primary_interactions(self, target, values):
++        """Gate only extra-support input roles, before every interaction term.
++
++        Layout is [batch, 10 blocks, 7 strata]. Rows 0..2 keep their original
++        graph; rows 3..6 may use detached query and/or value operands. Values
++        include historical action as well as item keys. Native Dice still
++        differentiates through both moments and all scorer parameters. No
++        preactivation detach is used, and the auxiliary builder is untouched.
++        Shared embedding-table gradients can survive through other roles,
++        readouts and summaries even when a support operand is detached.
++        """
++        batch, slots, _ = values.shape
++        if slots != 70:
++            raise ValueError('Primary support routing requires 70 ordered strata')
++        if not self.training or (self.support_query_gradient and self.support_value_gradient):
++            # Exact native bridge, including graph/operation order.
++            return self._interactions(target, values)
++        retained = (torch.arange(slots, device=values.device).remainder(7) < 3).view(1, slots, 1)
++        query = target[:, None, :].expand(-1, slots, -1)
++        if not self.support_query_gradient:
++            query = torch.where(retained, query, query.detach())
++        if not self.support_value_gradient:
++            values = torch.where(retained, values, values.detach())
++        keys = values[:, :, :self.key_width]
++        action = values[:, :, self.key_width:]
++        return torch.cat([query, keys, query - keys, query * keys, action], dim=-1).reshape(batch * slots, -1)
++
+     def _primary_activation(self, interactions):
+-        """Forward-identical stop-gradient on nonreadout support rows.
+-
+-        Flattened order is batch, block, seven strata. The first three strata
+-        retain the incumbent gradient paths. Before EACH Dice, rows 3..6
+-        become constants for moment estimation in the blocked cell. This
+-        removes their backward contribution to the preceding affine layer
+-        and embedding sources, while preserving their forward activations,
+-        batch moments and running-buffer updates at a fixed parameter state.
+-        Selected rows still differentiate through their own batch moments;
+-        shared scorer parameters and later updates can consequently differ.
+-        No extra scorer pass, parameters, persistent state or RNG is added.
+-        """
+-        if not self.training or self.support_gradient == 'attached':
+-            return self.local_activation(interactions)
+-        retained = (torch.arange(interactions.shape[0], device=interactions.device)
+-                    .remainder(7) < 3).unsqueeze(-1)
+-        hidden = interactions
+-        for layer in self.local_activation:
+-            if isinstance(layer, Dice):
+-                hidden = torch.where(retained, hidden, hidden.detach())
+-            hidden = layer(hidden)
+-        return hidden
++        """Keep the complete native scorer graph and state updates attached."""
++        return self.local_activation(interactions)
+ 
+     def _auxiliary_activation(self, interactions):
+@@ -550,8 +564,8 @@
+         batch = values.shape[0]
+         all_values, all_counts = self._compress_with_match(values, mask, auxiliary, match_union)
+-        # All four cells score 70 slots; only uniform slots enter the primary
+-        # readout. Gradient pairs share exact forward populations. Population
+-        # pairs preserve counts/empty rows, but change aligned support means.
+-        primary_weights = self._primary_activation(self._interactions(target, all_values))
++        # All four cells score the identical 70-slot population. Only input
++        # role gradients of extra support rows vary; uniform readout and all
++        # scorer/normalization derivatives stay attached.
++        primary_weights = self._primary_activation(self._primary_interactions(target, all_values))
+         all_strata = self._pool_seven(primary_weights, all_values, all_counts)
+         uniform = all_strata[:, 0, :]

@@ -1,0 +1,94 @@
+--- g3-r0015-position_shared_joint/model.py
++++ g3-r0017-position_gradient_project/model.py
+@@ -25,5 +25,5 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'shared', 'position_aux_gradient': 'joint'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'shared', 'position_aux_gradient': 'joint', 'position_gradient_rule': 'project'}
+ 
+ 
+@@ -41,4 +41,5 @@
+                  position_scope='event', position_feedback_identity=False,
+                  position_sharing='shared', position_aux_gradient='joint',
++                 position_gradient_rule='project',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+@@ -116,4 +117,10 @@
+         self.position_sharing = position_sharing
+         self.position_aux_gradient = position_aux_gradient
++        if position_sharing != 'shared' or position_aux_gradient != 'joint':
++            raise ValueError('Gradient study requires the shared joint forward graph')
++        if position_gradient_rule not in ('project', 'norm', 'joint', 'primary'):
++            raise ValueError('Unknown positional gradient rule')
++        self.position_gradient_rule = position_gradient_rule
++        self.position_primary_index = labels.index('is_click')
+         self.primary_gate_component = primary_gate_component
+         self.gate_transfer_source = gate_transfer_source
+@@ -522,2 +529,67 @@
+                 logits + correction[:, index:index + 1].to(dtype=logits.dtype))
+         return outputs
++
++
++    def training_loss(self, inputs, probabilities, train_labels):
++        """Four BCE values; alter only one tensor's auxiliary gradient.
++
++        Host owns backward, clipping, optimizer steps, scheduling and labels.
++        autograd.grad probes retain the original graph without writing .grad
++        or replaying forward/BatchNorm. Detached corrections add no second
++        derivatives. Every policy computes both probes for a matched recipe.
++        """
++        if probabilities.ndim != 2 or probabilities.shape[1] != len(self.towers):
++            raise ValueError('Expected probabilities [B,4] in FeatureMap label order')
++        if train_labels.shape != probabilities.shape:
++            raise ValueError('Expected training labels matching probabilities')
++        with torch.autocast(device_type=probabilities.device.type, enabled=False):
++            # Use the supplied probabilities without changing host clipping.
++            element_losses = torch.nn.functional.binary_cross_entropy(
++                probabilities.float(), train_labels.float(), reduction='none')
++            task_losses = element_losses.mean(dim=0)
++            total = task_losses.sum()
++            if not torch.is_grad_enabled() or not probabilities.requires_grad:
++                return total
++            primary_loss = task_losses[self.position_primary_index]
++            auxiliary_loss = torch.stack([
++                task_losses[i] for i in range(len(self.towers))
++                if i != self.position_primary_index]).sum()
++            primary_gradient = torch.autograd.grad(
++                primary_loss, self.position_gate_weight,
++                retain_graph=True, create_graph=False, allow_unused=True)[0]
++            auxiliary_gradient = torch.autograd.grad(
++                auxiliary_loss, self.position_gate_weight,
++                retain_graph=True, create_graph=False, allow_unused=True)[0]
++            # A zero-length history skips the complete route in forward.
++            if primary_gradient is None:
++                primary_gradient = torch.zeros_like(self.position_gate_weight)
++            if auxiliary_gradient is None:
++                auxiliary_gradient = torch.zeros_like(self.position_gate_weight)
++            primary_gradient = primary_gradient.detach().float()
++            auxiliary_gradient = auxiliary_gradient.detach().float()
++            primary_norm = torch.linalg.vector_norm(primary_gradient)
++            safe_primary_norm = torch.where(primary_norm > 0, primary_norm,
++                                            torch.ones_like(primary_norm))
++            primary_unit = primary_gradient / safe_primary_norm
++            opposing_component = (auxiliary_gradient * primary_unit).sum().clamp(max=0)
++            projected = auxiliary_gradient - opposing_component * primary_unit
++            auxiliary_norm = torch.linalg.vector_norm(auxiliary_gradient)
++            safe_auxiliary_norm = torch.where(auxiliary_norm > 0, auxiliary_norm,
++                                              torch.ones_like(auxiliary_norm))
++            retention = (torch.linalg.vector_norm(projected) /
++                         safe_auxiliary_norm).clamp(min=0, max=1)
++            norm_matched = auxiliary_gradient * retention
++            if self.position_gradient_rule == 'project':
++                desired_auxiliary = projected
++            elif self.position_gradient_rule == 'norm':
++                desired_auxiliary = norm_matched
++            elif self.position_gradient_rule == 'joint':
++                desired_auxiliary = auxiliary_gradient
++            else:
++                desired_auxiliary = torch.zeros_like(auxiliary_gradient)
++            correction = (desired_auxiliary - auxiliary_gradient).detach()
++            surrogate = (self.position_gate_weight.float() * correction).sum()
++            # Parentheses ensure an exactly zero scalar at finite values.
++            # d(loss)/d(position) = g_click + desired_auxiliary; all other
++            # leaves retain their original gradients before global clipping.
++            return total + (surrogate - surrogate.detach())

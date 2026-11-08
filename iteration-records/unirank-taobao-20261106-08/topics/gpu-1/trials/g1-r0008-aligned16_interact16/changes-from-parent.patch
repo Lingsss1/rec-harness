@@ -1,0 +1,129 @@
+--- g2-r0004-context_only/model.py
++++ g1-r0008-aligned16_interact16/model.py
+@@ -1,18 +1,17 @@
+-"""Prospective source-path attribution under fixed compressed UF histories.
+-
+-Auxiliary gradients into the shared scorer are always blocked. Independent
+-switches control auxiliary gradients through supplied context embeddings and
+-through target/history item-and-action embeddings. Four cells keep identical
+-modules, initialization order, 30 summaries, forward values and inference.
+-Neither/both endpoints correspond to the earlier both_blocked/scorer_only
+-operators. Same-seed endpoint replays are consistency checks, not repetition.
+-
+-These are computational path gates: tied target/history tables remain tied,
+-and cross-source aliases must be audited by the host before ownership claims.
+-Persistent Dice state updates only in the primary scorer call. Preparation
+-performs no numerical execution or training; torch.func support and the
+-forward/backward/masking gates in proposal.json remain host prerequisites.
+-No architecture novelty or new predictive improvement is claimed.
++"""Prospective aligned initialization for the inherited storage/interaction study.
++
++Only projection initialization differs from the corresponding random-map
++ancestor: square maps start at identity and 8->16 maps at [I8; I8]. Maps
++remain trainable. Both have the ancestor singular spectrum (unit for 16->16,
++sqrt(2) for 8->16); rectangular output variances/correlations are not matched.
++The random orthogonal draw is retained before overwrite to pair RNG state
++with that ancestor. Module construction, all other initial weights, 30 UF
++slots, scorer, towers and auxiliary gradient gates are inherited unchanged.
++No performance, speedup, mechanism confirmation or novelty is claimed.
++
++Host numerical forward/backward/masking, initialization and optimizer checks
++are required. Preparation performs syntax and source checks only.
+ """
++import math
+ import torch
+ from torch import nn
+@@ -24,4 +23,5 @@
+ CONFIG = {
+     'embedding_dim': 16,
++    'table_embedding_dim': 16,
+     'attention_hidden_units': [64, 32],
+     'tower_hidden_units': [128, 64],
+@@ -35,6 +35,6 @@
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='SourcePathCompression', gpu=-1,
+-                 embedding_dim=16, attention_hidden_units=(64, 32),
++    def __init__(self, feature_map, model_id='AlignedCapacityCompression', gpu=-1,
++                 embedding_dim=16, table_embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+                  compression_routes='uf', block_aux_scorer_grad=True,
+@@ -59,5 +59,9 @@
+         self.block_aux_context_grad = block_aux_context_grad
+         self.block_aux_item_grad = block_aux_item_grad
+-        self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
++        if embedding_dim != 16 or table_embedding_dim not in (8, 16):
++            raise ValueError('Aligned maps require interaction width 16 and table width 8 or 16')
++        self.table_embedding_dim = table_embedding_dim
++        self.interaction_embedding_dim = embedding_dim
++        self.embedding_layer = FeatureEmbeddingDict(feature_map, table_embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+                             if spec.get('source') == 'item' and spec['type'] != 'meta']
+@@ -74,6 +78,6 @@
+         self.value_width = self.key_width + embedding_dim
+ 
+-        # Inherit the action-aware scorer and towers from the previous factorial.
+-        # All cells instantiate exactly the same modules in exactly this order.
++        # Keep the source scorer/tower hidden widths. Only their input widths
++        # follow the interaction width; table storage varies independently.
+         layers = []
+         width = 4 * self.key_width + embedding_dim
+@@ -94,5 +98,47 @@
+             self.towers.append(nn.Sequential(*tower))
+         self.reset_parameters()
++        # Construct after the source reset so projection initialization does not
++        # change the source's embedding/tower initialization at matched widths.
++        # Projection aliases follow actual shared table objects, including any
++        # cross-source aliases; the host must still audit gradient ownership.
++        self.embedding_projections = nn.ModuleDict()
++        owners = []
++        required = set(self.user_fields + self.item_fields + [self.action_field])
++        for name, spec in feature_map.features.items():
++            if name not in required:
++                continue
++            if spec.get('embedding_dim', table_embedding_dim) != table_embedding_dim:
++                raise ValueError('Per-field dimension override is outside this factorial')
++            if name in self.embedding_layer.feature_encoders:
++                raise ValueError('Encoded fields need a separate projection audit')
++            table = self.embedding_layer.embedding_layers[name]
++            projection = next((project for owner, project in owners if owner is table), None)
++            if projection is None:
++                projection = nn.Linear(table_embedding_dim, embedding_dim, bias=False)
++                # For independent isotropic input coordinates, keep mean output
++                # coordinate variance equal across rectangular/square maps.
++                gain = math.sqrt(max(1.0, embedding_dim / table_embedding_dim))
++                nn.init.orthogonal_(projection.weight, gain=gain)
++                # Keep the identical RNG consumption as the random ancestor,
++                # then set a coordinate-aligned map without drawing randomness.
++                # For 8->16, both copies initially expose every stored coordinate;
++                # no output coordinate is initialized to zero. These weights
++                # stay trainable, including initially zero off-diagonals.
++                with torch.no_grad():
++                    aligned = torch.eye(table_embedding_dim,
++                                        dtype=projection.weight.dtype,
++                                        device=projection.weight.device)
++                    aligned = aligned.repeat(embedding_dim // table_embedding_dim, 1)
++                    projection.weight.copy_(aligned)
++                owners.append((table, projection))
++            self.embedding_projections[name] = projection
+         self.model_to_device()
++
++    def _project_fields(self, values, fields):
++        if values.shape[-1] != len(fields) * self.table_embedding_dim:
++            raise ValueError('Unexpected raw embedding width')
++        pieces = torch.split(values, self.table_embedding_dim, dim=-1)
++        return torch.cat([self.embedding_projections[name](piece)
++                          for name, piece in zip(fields, pieces)], dim=-1)
+ 
+     def _represent(self, inputs):
+@@ -176,5 +222,10 @@
+     def forward(self, inputs):
+         context, target, values, mask, auxiliary = self._represent(inputs)
++        # Masked arithmetic means commute with a bias-free field projection.
++        # Apply it to the 30 compressed slots, not all 100 historical events.
+         values, counts = self._compress_both(values, mask, auxiliary)
++        context = self._project_fields(context, self.user_fields)
++        target = self._project_fields(target, self.item_fields)
++        values = self._project_fields(values, self.item_fields + [self.action_field])
+         # Both calls include all 30 slots: each BatchNorm sees the identical
+         # population. Selecting ten versus twenty slots BEFORE scoring would

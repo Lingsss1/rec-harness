@@ -1,0 +1,91 @@
+--- g0-r0050-content_keys_transfer/model.py
++++ g0-r0051-target_keys_blocked/model.py
+@@ -1,11 +1,11 @@
+-"""Prospective content-key replacement in task-conditioned block retrieval.
+-
+-Cross unscored/scored addressing with the inherited auxiliary context gate.
+-Content mode reuses the already computed masked uniform block means as keys;
+-all task-specific signed target-score-weighted block VALUES remain unchanged.
+-Scored mode replays the preceding retrieval implementation. Same modules,
+-initialization, native Dice populations and occupied-block support in all cells.
+-No new parameters or buffers. Auxiliary content inputs are detached alongside
+-other item/action values during training. No measured benefit or novelty claim.
++"""Prospective target-content keys for secondary compressed-history retrieval.
++
++Target item coordinates multiply unscored masked block means before the tied
++rank projection. Historical action coordinates are unchanged; no target action
++is read. Compare with raw content keys, crossed with the existing auxiliary
++adapter-context gradient gate. Same learned modules, buffers and initialization
++as r0050; signed target-scored VALUES, original base and moments stay unchanged.
++Target dependence here is in local block addressing, unlike the unsuccessful
++r0047 target modulation after global pooling. No efficacy or novelty is claimed.
+ """
+ import torch
+@@ -16,5 +16,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'history_retrieval': 'context', 'retrieval_key_source': 'content'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': True, 'context_fusion': 'product', 'interaction_rank': 16, 'history_retrieval': 'context', 'retrieval_key_source': 'content', 'retrieval_key_interaction': 'target_product'}
+ 
+ 
+@@ -34,7 +34,8 @@
+                  auxiliary_train_population='primary', auxiliary_eval_population='primary',
+                  block_aux_tower_context_grad=True,
+-                 block_aux_adapter_context_grad=False,
++                 block_aux_adapter_context_grad=True,
+                  context_fusion='product', interaction_rank=16,
+                  history_retrieval='context', retrieval_key_source='content',
++                 retrieval_key_interaction='target_product',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -76,4 +77,9 @@
+             raise ValueError('Unknown retrieval key source')
+         self.retrieval_key_source = retrieval_key_source
++        if retrieval_key_source != 'content' or history_retrieval != 'context':
++            raise ValueError('This study freezes contextual retrieval with unscored content keys')
++        if retrieval_key_interaction not in ('target_product', 'content'):
++            raise ValueError('Unknown content-key interaction')
++        self.retrieval_key_interaction = retrieval_key_interaction
+         if residual_input != 'match_detail':
+             raise ValueError('The original match-detail channel must be retained')
+@@ -684,5 +690,5 @@
+ 
+     def _context_history_correction(self, index, context, history,
+-                                    block_base, block_counts, block_content):
++                                    block_base, block_counts, block_content, target):
+         # Only supplied context and already-masked compressed history enter.
+         # FP32 bounded projections and a shared RMS denominator reduce gross
+@@ -693,12 +699,20 @@
+         # Counts are valid events, not target scorer weights. Empty blocks
+         # remain excluded even if a future source gives them nonzero values.
+-        # Address with unscored content OR the original scored contribution.
+-        # Uniform means precede all target-scorer factors; no division by
+-        # a learned score (which may be zero or negative) is needed.
+-        # Keep the original target-weighted block_base as VALUES below.
+-        # Both key-source alternatives execute in every factorial cell.
++        # Unscored uniform means precede all target-scorer factors. Keep
++        # the original signed block_base as VALUES below. Retain the unused
++        # scored-mean preparation from r0050 in every cell for source parity;
++        # this study selects only content or target-times-content KEY inputs.
+         scored_means = block_base.float() / block_counts.float().clamp_min(1).unsqueeze(-1)
+         content_means = block_content.float() * (block_counts > 0).unsqueeze(-1).to(torch.float32)
+-        means = content_means if self.retrieval_key_source == 'content' else scored_means
++        # Explicit target/history item interaction on the KEY path only.
++        # Padding the multiplier with ONES retains historical action content;
++        # the current action embedding is never read. Both alternatives are
++        # calculated in every cell. No trainable projection or state is added.
++        target_multiplier = torch.cat([
++            target.float(), torch.ones_like(content_means[:, 0, self.key_width:])
++        ], dim=-1)
++        target_content = content_means * target_multiplier.unsqueeze(1)
++        means = (target_content if self.retrieval_key_interaction == 'target_product'
++                 else content_means)
+         keys = torch.tanh(torch.nn.functional.linear(
+             means, self.history_projections[index].weight[:, :self.value_width]).float())
+@@ -905,5 +919,5 @@
+             history_features = torch.cat([base, match_counts.to(base.dtype), signal], dim=-1)
+             correction = correction + self._context_history_correction(
+-                index, adapter_context, history_features, task_blocks, block_counts, task_content)
++                index, adapter_context, history_features, task_blocks, block_counts, task_content, task_target)
+             pooled = base + has_history * correction
+             features = torch.cat([tower_context, task_target, pooled], dim=-1)

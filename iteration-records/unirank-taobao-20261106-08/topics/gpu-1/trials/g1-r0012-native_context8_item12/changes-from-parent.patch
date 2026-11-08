@@ -1,0 +1,125 @@
+--- g2-r0004-context_only/model.py
++++ g1-r0012-native_context8_item12/model.py
+@@ -1,18 +1,16 @@
+-"""Prospective source-path attribution under fixed compressed UF histories.
+-
+-Auxiliary gradients into the shared scorer are always blocked. Independent
+-switches control auxiliary gradients through supplied context embeddings and
+-through target/history item-and-action embeddings. Four cells keep identical
+-modules, initialization order, 30 summaries, forward values and inference.
+-Neither/both endpoints correspond to the earlier both_blocked/scorer_only
+-operators. Same-seed endpoint replays are consistency checks, not repetition.
+-
+-These are computational path gates: tied target/history tables remain tied,
+-and cross-source aliases must be audited by the host before ownership claims.
+-Persistent Dice state updates only in the primary scorer call. Preparation
+-performs no numerical execution or training; torch.func support and the
+-forward/backward/masking gates in proposal.json remain host prerequisites.
+-No architecture novelty or new predictive improvement is claimed.
++"""Native source-specific capacity study under the frozen host protocol.
++
++Cross context width 8/16 with item-and-action width 12/16. Tables retain their
++sharing identities and feed the narrower scorer/readout directly, without
++coordinate copying or projection. Scorer/tower hidden widths, thirty masked
++summaries, feedback routes and all auxiliary gradient gates are inherited.
++
++Widths change parameter shapes, initialization and optimizer trajectories;
++this is a capacity contrast, not an exact reparameterization claim. The 16/16
++endpoint must reproduce the source under the host's numerical checks. Same
++seed replays are compatibility/timing controls, not independent repetitions.
++No predictive retention, measured speedup or architecture novelty is claimed.
+ """
++import copy
+ import torch
+ from torch import nn
+@@ -24,4 +22,6 @@
+ CONFIG = {
+     'embedding_dim': 16,
++    'context_embedding_dim': 8,
++    'item_embedding_dim': 12,
+     'attention_hidden_units': [64, 32],
+     'tower_hidden_units': [128, 64],
+@@ -34,7 +34,39 @@
+ 
+ 
++def _capacity_layout(feature_map, context_width, item_width):
++    """Copy architecture metadata; never modify the host-owned feature map.
++
++    Mirror the embedding library's ordered sharing rule. If an alias group
++    crosses the two sources, keep the larger requested width for the whole
++    group, preserving the table identity and both computational paths.
++    """
++    if context_width not in (8, 16) or item_width not in (12, 16):
++        raise ValueError('Context width must be 8/16 and item width 12/16')
++    local_map = copy.copy(feature_map)
++    local_map.features = copy.deepcopy(feature_map.features)
++    owner_for = {}
++    owner_widths = {}
++    for name, spec in feature_map.features.items():
++        if spec['type'] == 'meta':
++            continue
++        if spec['type'] not in ('categorical', 'sequence'):
++            raise ValueError('This contrast requires the supplied categorical tables')
++        if spec.get('feature_encoder') or 'pretrained_emb' in spec:
++            raise ValueError('Encoded or pretrained fields require a separate audit')
++        shared = spec.get('share_embedding')
++        owner = owner_for[shared] if shared in owner_for else name
++        owner_for[name] = owner
++        requested = item_width if spec.get('source') in ('item', 'action') else context_width
++        owner_widths[owner] = max(owner_widths.get(owner, 0), requested)
++    widths = {name: owner_widths[owner] for name, owner in owner_for.items()}
++    for name, width in widths.items():
++        local_map.features[name]['embedding_dim'] = width
++    return local_map, widths
++
++
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='SourcePathCompression', gpu=-1,
+-                 embedding_dim=16, attention_hidden_units=(64, 32),
++    def __init__(self, feature_map, model_id='NativeSourceCapacity', gpu=-1,
++                 embedding_dim=16, context_embedding_dim=8, item_embedding_dim=12,
++                 attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+                  compression_routes='uf', block_aux_scorer_grad=True,
+@@ -59,5 +91,12 @@
+         self.block_aux_context_grad = block_aux_context_grad
+         self.block_aux_item_grad = block_aux_item_grad
+-        self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
++        if embedding_dim != 16:
++            raise ValueError('Keep fallback embedding_dim=16; use source-specific widths')
++        local_map, self.table_widths = _capacity_layout(
++            feature_map, context_embedding_dim, item_embedding_dim)
++        self.embedding_layer = FeatureEmbeddingDict(local_map, embedding_dim)
++        for name, width in self.table_widths.items():
++            if self.embedding_layer.embedding_layers[name].embedding_dim != width:
++                raise ValueError('Shared embedding width does not match local layout')
+         self.item_fields = [name for name, spec in feature_map.features.items()
+                             if spec.get('source') == 'item' and spec['type'] != 'meta']
+@@ -71,11 +110,14 @@
+         self.auxiliary_indices = [list(feature_map.labels).index(label)
+                                   for label in ('cart', 'fav', 'buy')]
+-        self.key_width = len(self.item_fields) * embedding_dim
+-        self.value_width = self.key_width + embedding_dim
+-
+-        # Inherit the action-aware scorer and towers from the previous factorial.
+-        # All cells instantiate exactly the same modules in exactly this order.
++        self.key_width = sum(self.table_widths[name] for name in self.item_fields)
++        self.action_width = self.table_widths[self.action_field]
++        self.value_width = self.key_width + self.action_width
++        self.context_width = sum(self.table_widths[name] for name in self.user_fields)
++
++        # Native widths flow into the scorer and towers. Hidden widths, Dice,
++        # module order, compression and gradient gates remain inherited.
++        # No expansion maps, repeated coordinates or unused map parameters.
+         layers = []
+-        width = 4 * self.key_width + embedding_dim
++        width = 4 * self.key_width + self.action_width
+         for hidden in attention_hidden_units:
+             layers.extend([nn.Linear(width, hidden), Dice(hidden)])
+@@ -83,5 +125,5 @@
+         layers.append(nn.Linear(width, 1))
+         self.local_activation = nn.Sequential(*layers)
+-        input_width = len(self.user_fields) * embedding_dim + self.key_width + self.value_width
++        input_width = self.context_width + self.key_width + self.value_width
+         self.towers = nn.ModuleList()
+         for _ in feature_map.labels:

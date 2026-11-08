@@ -1,0 +1,100 @@
+--- g0-r0039-context_product/model.py
++++ g0-r0047-target_history_pair/model.py
+@@ -1,11 +1,14 @@
+-"""Prospective context/history fusion study on the frozen compressed-history model.
+-
+-Append rank-16 task-specific context and compressed-history projections to the
+-incumbent. Product versus sum fusion is crossed with the existing auxiliary
+-adapter-context gradient gate. All four cells have identical learned capacity,
+-initialization order and native Dice populations. New zero output matrices
+-preserve the parent's initial predictions, not its subsequent training path.
+-Fusion uses ordinary differentiable FP32 arithmetic, not a surrogate gradient.
+-No novelty or predictive benefit is established. Host tensor checks are required.
++"""Prospective target modulation of task-specific context/history factors.
++
++The three new cells use identical task-specific rank-16 target projections,
++zero-initialized after inherited modules inside the inherited RNG fork.
++Before shared RMS normalization, q=tanh(context projection), h=tanh(history
++projection), and t=tanh(target projection) combine as:
++  triple: q*h*(1+t); additive: q*h+t; history_pair: q*h+h*t.
++This tests bounded target reweighting against two target main/pair effects.
++History already depends on the target; no pure interaction-order or novelty
++claim follows from this contrast. Ordinary autograd only. All inherited
++masking, source ownership, Dice populations and training loss are retained.
++Host numerical and performance checks remain required.
+ """
+ import torch
+@@ -16,5 +19,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'target_fusion': 'history_pair'}
+ 
+ 
+@@ -36,4 +39,5 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16,
++                 target_fusion='history_pair',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -67,4 +71,9 @@
+                 or interaction_rank < 1):
+             raise ValueError('Interaction rank must be a positive integer')
++        if context_fusion != 'product':
++            raise ValueError('Target-modulation study retains signed context/history product')
++        if target_fusion not in ('triple', 'additive', 'history_pair'):
++            raise ValueError('Unknown target-factor coupling')
++        self.target_fusion = target_fusion
+         self.context_fusion = context_fusion
+         self.interaction_rank = interaction_rank
+@@ -212,4 +221,12 @@
+             for output in self.interaction_outputs:
+                 nn.init.zeros_(output.weight)
++            # Append AFTER all inherited learned initialization. Zero target
++            # factors give identical inherited fusion values in all cells.
++            self.target_projections = nn.ModuleList([
++                nn.Linear(self.key_width, interaction_rank, bias=False)
++                for _ in feature_map.labels
++            ])
++            for projection in self.target_projections:
++                nn.init.zeros_(projection.weight)
+         # Add only nonlearned state, AFTER every inherited learned module and
+         # initialization. Native Dice has running mean/variance and counters.
+@@ -676,15 +693,22 @@
+         return weighted.sum(dim=1)
+ 
+-    def _context_history_correction(self, index, context, history):
+-        # Only supplied context and already-masked compressed history enter.
+-        # FP32 bounded projections and a shared RMS denominator reduce gross
+-        # scale confounding between product and sum. Their geometry and
+-        # optimization still differ; equal norms do not imply equal capacity.
++    def _context_history_correction(self, index, context, history, target):
++        # Current target includes item fields only; unknown target action is
++        # excluded by _represent. Auxiliary target embeddings arrive detached
++        # under the inherited primary-owned item/action information flow.
++        # The target projection parameters still learn from their own task.
+         query = torch.tanh(self.context_queries[index](context).float())
+         summary = torch.tanh(self.history_projections[index](history).float())
+-        if self.context_fusion == 'product':
+-            fused = query * summary
++        target_factor = torch.tanh(self.target_projections[index](target).float())
++        inherited = query * summary
++        if self.target_fusion == 'triple':
++            fused = inherited * (1.0 + target_factor)
++        elif self.target_fusion == 'additive':
++            fused = inherited + target_factor
+         else:
+-            fused = (query + summary) * (2.0 ** -0.5)
++            fused = inherited + summary * target_factor
++        # Same FP32 RMS and epsilon in every cell. In the triple cell the
++        # bounded factor preserves coordinate signs before normalization;
++        # it can reweight coordinates but cannot create a missing factor.
+         fused = fused * torch.rsqrt(fused.square().mean(dim=-1, keepdim=True) + 1e-4)
+         return self.interaction_outputs[index](fused.to(history.dtype))
+@@ -833,5 +857,5 @@
+             history_features = torch.cat([base, match_counts.to(base.dtype), signal], dim=-1)
+             correction = correction + self._context_history_correction(
+-                index, adapter_context, history_features)
++                index, adapter_context, history_features, task_target)
+             pooled = base + has_history * correction
+             features = torch.cat([tower_context, task_target, pooled], dim=-1)

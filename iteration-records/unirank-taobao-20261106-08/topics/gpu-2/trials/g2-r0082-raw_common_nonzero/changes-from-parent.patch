@@ -1,0 +1,96 @@
+--- g3-r0058-fixed_angle_negative/model.py
++++ g2-r0082-raw_common_nonzero/model.py
+@@ -1,9 +1,8 @@
+-"""Auxiliary scalar-angle replacement at fixed forward architecture.
+-
+-A prospective 2x2 study crosses native versus fixed pi/4 nuisance-exclusion
+-angle with external +/- sign. Auxiliary radius, transported Q orientation
+-bit and inherited validity are retained. All helpers run in all four cells.
+-Only the shared-context surrogate VJP selection changes; it is not the
+-ordinary derivative of the reported joint BCE. No novelty claim is made.
++"""Prospective action-information contrast with common nonzero initialization.
++
++All action rows start from one inherited random embedding row, with padding
++zero. Rows remain separate trainable parameters. Preserve the incumbent's
++modules, RNG draws, masks, auxiliary objectives and surrogate context VJP.
++Treatment: raw_common_nonzero. This source contains no measured new result.
+ """
+ import torch
+@@ -816,4 +815,16 @@
+         if self.action_field is None:
+             raise ValueError('Historical action field is required')
++        # BEGIN common-action metadata: no modules, buffers or RNG draws.
++        action_spec = feature_map.features[self.action_field]
++        excluded = {0}
++        for special in ('padding_idx', 'oov_idx'):
++            if action_spec.get(special) is not None:
++                excluded.add(int(action_spec[special]))
++        rows = [index for index in range(int(action_spec['vocab_size']))
++                if index not in excluded][:16]
++        if len(rows) != 16:
++            raise ValueError('Study requires 16 nonspecial action rows')
++        self.action_code_rows = tuple(rows)
++        # END common-action metadata.
+         self.auxiliary_indices = [list(feature_map.labels).index(label)
+                                   for label in ('cart', 'fav', 'buy')]
+@@ -893,5 +904,54 @@
+             self.register_buffer(storage_name, buffer.detach().clone())
+             self._auxiliary_state_names[name] = storage_name
++        # BEGIN common-action initialization, after all inherited RNG draws.
++        action_table = self.embedding_layer.embedding_layers[self.action_field]
++        action_spec = feature_map.features[self.action_field]
++        if not isinstance(action_table, nn.Embedding):
++            raise ValueError('Common action initialization requires nn.Embedding')
++        if self.action_field in self.embedding_layer.feature_encoders:
++            raise ValueError('Action feature encoders are outside this study')
++        if any(name != self.action_field and layer is action_table
++               for name, layer in self.embedding_layer.embedding_layers.items()):
++            raise ValueError('Action embedding must not be shared')
++        if (action_table.num_embeddings != int(action_spec['vocab_size'])
++                or action_table.embedding_dim != embedding_dim
++                or action_table.padding_idx != action_spec.get('padding_idx')):
++            raise ValueError('Action table does not match the feature specification')
++        with torch.no_grad():
++            # Clone before writing; the same inherited random row in every arm.
++            # Independent parameter rows remain trainable under host Adagrad.
++            anchor = action_table.weight[self.action_code_rows[0]].detach().clone()
++            action_table.weight.copy_(anchor.unsqueeze(0).expand_as(action_table.weight))
++            action_table.weight[0].zero_()
++            if action_table.padding_idx is not None:
++                action_table.weight[action_table.padding_idx].zero_()
++        # END common-action initialization.
+         self.model_to_device()
++
++    def _study_action_item(self, item, mask, task_masks):
++        """Preserve item fields and masks; replace only the action input.
++
++        Every arm constructs the same mask signature and codebook. Mask-only
++        and constant arms never read historical action values. The common
++        nonzero initialization is done once, never at forward/update time.
++        """
++        valid = mask.bool()
++        signature = torch.zeros_like(mask, dtype=torch.long)
++        labels = list(self.feature_map.labels)
++        for bit, label in enumerate(('is_click', 'cart', 'fav', 'buy')):
++            task_mask = task_masks[labels.index(label)]
++            if task_mask.shape != mask.shape:
++                raise ValueError('Historical task mask shape mismatch')
++            signature = signature + ((task_mask > 0) & valid).long() * (1 << bit)
++        codebook = torch.tensor(self.action_code_rows, device=mask.device, dtype=torch.long)
++        signature_codes = codebook[signature]
++        history = item[self.action_field][:, :-1]
++        if history.shape != mask.shape:
++            raise ValueError('Historical action shape mismatch')
++        history = torch.where(valid, history, torch.zeros_like(signature))
++        target = torch.zeros((mask.shape[0], 1), device=mask.device, dtype=torch.long)
++        result = dict(item)
++        result[self.action_field] = torch.cat([history, target], dim=1)
++        return result
+ 
+     def _represent(self, inputs):
+@@ -918,4 +978,5 @@
+             auxiliary = auxiliary | (task_masks[index] > 0)
+         auxiliary = auxiliary & mask.bool()
++        item = self._study_action_item(item, mask, task_masks)
+         user_emb = self.embedding_layer(user)
+         item_emb = self.embedding_layer(item)

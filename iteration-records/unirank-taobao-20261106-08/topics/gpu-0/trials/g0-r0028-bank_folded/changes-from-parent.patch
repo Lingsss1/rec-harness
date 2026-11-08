@@ -1,0 +1,63 @@
+--- g0-r0027-support_folded/model.py
++++ g0-r0028-bank_folded/model.py
+@@ -1,9 +1,10 @@
+-"""Training-only normalization support with staged inference pruning.
+-
+-Training retains the incumbent 70-row scorer population and every gradient
+-path. In eval mode, Dice uses stored moments, so the 40 support rows have no
+-readout or cross-row dependency. The three modes retain the complete path,
+-skip only support scoring, or skip support compression and scoring together.
+-This is an execution-cost study; numerical parity and speed need host checks.
++"""Direct task-adapter execution at fixed learned capacity.
++
++The inherited task readout evaluates four adapters and selects one, four
++separate times. With task routing fixed, direct execution evaluates only the
++selected Linear/ReLU/Linear adapter for each task. All adapters remain learned
++and initialized in the inherited order. Scorers, Dice populations, source
++ownership and all data/label/loss contracts are unchanged within each pair.
++No numerical parity or runtime improvement is claimed before host checks.
+ """
+ import torch
+@@ -14,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'all'}
+ 
+ 
+@@ -29,5 +30,6 @@
+                  primary_partition='uniform', normalization_support='rotated_duplicate',
+                  support_gradient='attached', inference_support='fully_pruned',
+-                 training_support='folded', task='binary_classification', **kwargs):
++                 training_support='folded', residual_execution='all',
++                 task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+@@ -106,4 +108,7 @@
+             raise ValueError('This suite shares the validated pruned eval path')
+         self.training_support = training_support
++        if residual_execution not in ('direct', 'all'):
++            raise ValueError('Unknown task-adapter execution mode')
++        self.residual_execution = residual_execution
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -729,9 +734,14 @@
+             residual_features = torch.cat([task_context, task_target, base,
+                                            match_counts.to(base.dtype), signal], dim=-1)
+-            # Equal bank execution in all cells; no task-specific scorer rows
+-            # or extra stateful normalization is introduced.
+-            bank = torch.stack([adapter(residual_features)
+-                                for adapter in self.residual_bank], dim=1)
+-            correction = bank[:, index, :] if self.residual_routing == 'task' else bank.mean(dim=1)
++            # Task routing is required by __init__. Each adapter still
++            # receives its own task's features once; every parameter remains
++            # in the loss graph. Unselected adapters are stateless and their
++            # outputs have zero loss derivative in the all-bank control.
++            if self.residual_execution == 'direct':
++                correction = self.residual_bank[index](residual_features)
++            else:
++                bank = torch.stack([adapter(residual_features)
++                                    for adapter in self.residual_bank], dim=1)
++                correction = bank[:, index, :] if self.residual_routing == 'task' else bank.mean(dim=1)
+             pooled = base + has_history * correction
+             features = torch.cat([task_context, task_target, pooled], dim=-1)

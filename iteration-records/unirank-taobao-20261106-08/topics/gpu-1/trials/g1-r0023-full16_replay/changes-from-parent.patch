@@ -1,0 +1,108 @@
+--- g1-r0022-learned_completion15/model.py
++++ g1-r0023-full16_replay/model.py
+@@ -1,15 +1,13 @@
+-"""Prospective rank-fifteen item embeddings with one learned output coordinate.
+-
+-The first fifteen source-coupled coordinates remain direct lookup values.
+-One zero-initialized, bias-free field-shared linear functional supplies the
+-sixteenth coordinate for both target and history before UF compression.
+-This changes the orientation and downstream interactions of a rank-fifteen
+-representation, not its per-ID rank or its available sample information.
+-Learned/frozen cells have identical construction, initial values and forward
+-operators; only completion.requires_grad differs. No numerical benefit,
+-originality or host execution is claimed by this source artifact.
++"""Prospective separation of effective item capacity from arithmetic layout.
++
++Native15, zero-lifted15 and masked16 retain exactly the same fifteen item
++coordinates in real arithmetic, while table storage and dense contraction
++widths differ. All active initial coordinates come from the unchanged full16
++source. Padding is constant, has no learnable map, and precedes compression.
++The full16 cell retains all coordinates. BF16 trajectories need not agree.
++No numerical equivalence, predictive benefit or novelty is asserted here.
+ """
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'id_embedding_dim': 15, 'attribute_embedding_dim': 15, 'action_embedding_dim': 16, 'source_coupled_initialization': True, 'item_coordinate_mode': 'zero_lift16', 'completion_trainable': True}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'id_embedding_dim': 16, 'attribute_embedding_dim': 16, 'action_embedding_dim': 16, 'source_coupled_initialization': True, 'item_coordinate_mode': 'native'}
+ 
+ import copy
+@@ -180,5 +178,6 @@
+             for name in self.item_fields:
+                 embedded = item_emb[name]
+-                item_emb[name] = self._lift_item(name, embedded)
++                item_emb[name] = torch.cat(
++                    (embedded[..., :15], embedded.new_zeros(embedded.shape[:-1] + (1,))), dim=-1)
+         target = torch.cat([item_emb[name][:, -1] for name in self.item_fields], dim=-1)
+         keys = torch.cat([item_emb[name][:, :-1] for name in self.item_fields], dim=-1)
+@@ -187,8 +186,4 @@
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
+         return context, target, values, mask, auxiliary
+-
+-    def _lift_item(self, name, embedded):
+-        return torch.cat(
+-            (embedded[..., :15], embedded.new_zeros(embedded.shape[:-1] + (1,))), dim=-1)
+ 
+     def _compress_both(self, values, mask, auxiliary):
+@@ -293,9 +288,9 @@
+ 
+ 
+-class _CoupledModel(_NativeModel):
++class Model(_NativeModel):
+     def __init__(self, feature_map, model_id='ItemCapacityLayout', gpu=-1,
+-                 id_embedding_dim=15, attribute_embedding_dim=15,
++                 id_embedding_dim=16, attribute_embedding_dim=16,
+                  action_embedding_dim=16, source_coupled_initialization=True,
+-                 item_coordinate_mode='zero_lift16', **kwargs):
++                 item_coordinate_mode='native', **kwargs):
+         if not isinstance(source_coupled_initialization, bool):
+             raise ValueError('Initialization coupling must be boolean')
+@@ -351,50 +346,2 @@
+                     raise ValueError('Unmapped source tensor shape: ' + name)
+                 target.copy_(value)
+-
+-
+-class Model(_CoupledModel):
+-    def __init__(self, feature_map, model_id='Rank15CoordinateCompletion', gpu=-1,
+-                 completion_trainable=True,
+-                 id_embedding_dim=15, attribute_embedding_dim=15,
+-                 action_embedding_dim=16, source_coupled_initialization=True,
+-                 item_coordinate_mode='zero_lift16', **kwargs):
+-        if not isinstance(completion_trainable, bool):
+-            raise ValueError('Completion trainability must be boolean')
+-        if (id_embedding_dim != 15 or attribute_embedding_dim != 15
+-                or action_embedding_dim != 16
+-                or source_coupled_initialization is not True
+-                or item_coordinate_mode != 'zero_lift16'):
+-            raise ValueError('Completion requires coupled uniform15 tables and width16 outputs')
+-        super().__init__(
+-            feature_map, model_id=model_id, gpu=gpu,
+-            id_embedding_dim=id_embedding_dim,
+-            attribute_embedding_dim=attribute_embedding_dim,
+-            action_embedding_dim=action_embedding_dim,
+-            source_coupled_initialization=source_coupled_initialization,
+-            item_coordinate_mode=item_coordinate_mode, **kwargs)
+-        # Add AFTER source copying: the reference has no completion state.
+-        # new_zeros consumes no random draws; the inherited sampler RNG and
+-        # all inherited parameter/buffer initialization remain unchanged.
+-        # Keep this outside embedding_layer: it is a dense AdamW parameter.
+-        # Preserve table aliases in the completion as well as the lookup.
+-        owners = []
+-        self.completion_indices = {}
+-        for name in self.item_fields:
+-            table = self.embedding_layer.embedding_layers[name]
+-            index = next((i for i, owner in enumerate(owners) if table is owner), None)
+-            if index is None:
+-                index = len(owners)
+-                owners.append(table)
+-            self.completion_indices[name] = index
+-        self.coordinate_completion = nn.Parameter(
+-            self.local_activation[0].weight.new_zeros((len(owners), 15)),
+-            requires_grad=completion_trainable)
+-
+-    def _lift_item(self, name, embedded):
+-        # No bias: zero/padding vectors remain zero. Retain one tied map per
+-        # field across all 101 positions. Auxiliary item detachment later in
+-        # forward also blocks auxiliary gradients into these coefficients.
+-        index = self.completion_indices[name]
+-        missing = torch.matmul(
+-            embedded[..., :15], self.coordinate_completion[index].unsqueeze(-1))
+-        return torch.cat((embedded[..., :15], missing), dim=-1)

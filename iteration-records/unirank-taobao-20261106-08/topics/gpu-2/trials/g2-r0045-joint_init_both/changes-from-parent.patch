@@ -1,0 +1,90 @@
+--- g2-r0044-joint_assignment_preferred/model.py
++++ g2-r0045-joint_init_both/model.py
+@@ -1,10 +1,9 @@
+-"""Nearly matched private-head budgets: width versus residual and depth.
+-
+-Only cart/fav allocation changes. The inherited full random template is
+-initialized before fixed slicing/removal; click/buy Parameters, input masks,
+-losses and source-gradient ownership are retained. Shared dense clipping can
+-still couple private heads to optimized shared branches. These are replacement
+-controls with compensating widths, not a pure fixed-width factorial, and the
+-realized parameter budgets differ slightly. No empirical improvement is claimed.
++"""Initialization-scale diagnostic at fixed private-head capacity.
++
++A 2x2 contrast rescales only cart/fav hidden and/or readout weights after
++all inherited template initialization and architecture slicing. Deterministic
++multipliers match dimension-specific Xavier-normal marginal variance; no
++new random draws, learned parameters, forward operators or losses are added.
++This tests an initialization confound, not architectural originality.
+ """
+ import torch
+@@ -15,5 +14,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'xavier', 'private_readout_scale': 'xavier'}
+ 
+ 
+@@ -40,4 +39,6 @@
+                  nonowner_residual_overrides=None,
+                  nonowner_tower_depth_overrides=None,
++                 private_hidden_scale='inherited',
++                 private_readout_scale='inherited',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -52,4 +53,8 @@
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         self.compression_routes = compression_routes
++        if private_hidden_scale not in ('inherited', 'xavier'):
++            raise ValueError('Unknown private hidden initialization scale')
++        if private_readout_scale not in ('inherited', 'xavier'):
++            raise ValueError('Unknown private readout initialization scale')
+         if tuple(auxiliary_context_tasks) != ('buy',):
+             raise ValueError('This factorial fixes buy-only auxiliary context ownership')
+@@ -310,5 +315,46 @@
+             if label in ('cart', 'fav') and self.nonowner_residual_modes[label] == 'removed':
+                 self.residual_bank[index] = nn.Identity()
++        # Every parent draw and reduction has finished. Only the two fully
++        # upstream-detached private heads change; shared dense clipping still
++        # makes exact equality of subsequent click updates an empirical check.
++        for label, tower in zip(feature_map.labels, self.towers):
++            if label in ('cart', 'fav'):
++                self._rescale_private_initialization(
++                    tower, input_width, tower_hidden_units,
++                    private_hidden_scale, private_readout_scale)
+         self.model_to_device()
++
++    @staticmethod
++    def _rescale_private_initialization(tower, input_width, template_widths,
++                                        hidden_scale, readout_scale):
++        """Match retained weights' marginal variance without drawing weights.
++
++        The upstream reset initializes tower Linear weights with Xavier normal
++        and zero biases before slicing. A sliced coefficient retains variance
++        2/(template fan_in + template fan_out). Multiply by the square root of
++        template fan-sum / actual fan-sum to get dimension-specific variance.
++        A shallow readout comes from the original final affine, hence its
++        source fan-sum is template_widths[-1]+1 even though it now reads the
++        first hidden layer. This does not restore the removed layer/function.
++        Dice alpha/running buffers, biases and all residual weights are intact.
++        This constructor-only operation adds no prediction-time arithmetic.
++        """
++        if hidden_scale == 'inherited' and readout_scale == 'inherited':
++            return
++        linears = [layer for layer in tower if isinstance(layer, nn.Linear)]
++        if len(linears) not in (2, 3):
++            raise ValueError('Expected shallow or deep inherited private tower')
++        source_inputs = (input_width, template_widths[0])
++        with torch.no_grad():
++            if hidden_scale == 'xavier':
++                for index, linear in enumerate(linears[:-1]):
++                    source_sum = source_inputs[index] + template_widths[index]
++                    actual_sum = linear.in_features + linear.out_features
++                    linear.weight.mul_((source_sum / actual_sum) ** 0.5)
++            if readout_scale == 'xavier':
++                output = linears[-1]
++                source_sum = template_widths[-1] + 1
++                actual_sum = output.in_features + output.out_features
++                output.weight.mul_((source_sum / actual_sum) ** 0.5)
+ 
+     @staticmethod

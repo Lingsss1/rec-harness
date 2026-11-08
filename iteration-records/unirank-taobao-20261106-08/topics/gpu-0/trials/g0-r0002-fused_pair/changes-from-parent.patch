@@ -1,0 +1,146 @@
+--- g0-r0001-mass_normalized/model.py
++++ g0-r0002-fused_pair/model.py
+@@ -1,17 +1,21 @@
+-"""Field-summary activation-mass study; performance not yet measured.
++"""Paired content/volume summary tokens; prospective and unmeasured.
+ 
+-Inherited architecture: g0-r0000-field_global, source SHA256
+- a3b2aa2e254ec5d995d9a4361592af40fb25a9c1c09023bc7d1223d2b5ccc125.
+-Only retrieval normalization changes; all parameter declarations and their order
+-are inherited. Sigmoid sum retains activation mass, normalized sigmoid removes
+-it, and count-scaled sigmoid substitutes visible count/2 for learned gate mass.
+-The unchanged softmax branch provides a contemporary reference.
++Lineage: g0-r0001-mass_normalized (source SHA256
++ ecb9698efa49ce67c7df576df98a4b77de5a87db6a6cba881ea3505cfeffd116).
++All arms retain the parent's field queries, normalized sigmoid retrieval,
++static tokens, historical feedback presence/counts, shared interaction blocks,
++four task tokens, raw-feature skip, task towers and default four-BCE loss.
++Two independently projected five-token banks replace the one summary bank.
++Only the inputs of those banks differ across the four capacity-matched arms:
++split=(u,n*u/2), normalized_pair=(u,u), scaled_pair=(n*u/2,n*u/2),
++fused_pair=((u+n*u/2)/2,(u+n*u/2)/2). n is visible exposure count,
++not per-feedback count, exactly as in the preceding ungrouped count control.
+ 
+-DIN primary text (arXiv:1706.06978v4, section 4.3) already motivates retaining
+-activation intensity. This is a bounded per-field adaptation within a small
+-unified token model, not an originality claim or an exact DIN reproduction.
+-Pinned UniRank HiFormer and TokenMixer implementations were inspected as
+-architectural references; their original-paper equivalence is unverified.
+-All inputs, masks, loss and training/scoring belong to the frozen host contract.
++Explicit log counts were ALREADY supplied by the parent. No new sample
++information is introduced; this tests representation and optimization bias.
++DIN section 4.3 already motivates activation intensity. UniRank's pinned
++HiFormer/TokenMixer code supplies nearby post-pooling interaction references;
++this is not their reproduction and originality is unverified.
++Host owns all data, masks, optimizer, training, scoring and assessment.
+ """
+ import math
+@@ -22,5 +26,5 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'token_dim': 32, 'num_heads': 2, 'num_layers': 2, 'field_retrieval': True, 'feedback_groups': False, 'tower_hidden_units': [128, 64], 'pooling_mode': 'sigmoid_normalized'}
++CONFIG = {'embedding_dim': 16, 'token_dim': 32, 'num_heads': 2, 'num_layers': 2, 'field_retrieval': True, 'feedback_groups': False, 'tower_hidden_units': [128, 64], 'pooling_mode': 'sigmoid_normalized', 'representation_mode': 'fused_pair'}
+ 
+ 
+@@ -50,8 +54,9 @@
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='FieldFeedbackSummary', gpu=-1,
++    def __init__(self, feature_map, model_id='PairedContentVolumeSummary', gpu=-1,
+                  embedding_dim=16, token_dim=32, num_heads=2, num_layers=2,
+                  field_retrieval=True, feedback_groups=False,
+-                 pooling_mode='sigmoid_normalized', tower_hidden_units=(128, 64), num_tasks=None,
++                 pooling_mode='sigmoid_normalized', representation_mode='fused_pair',
++                 tower_hidden_units=(128, 64), num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if len(feature_map.labels) != 4 or num_tasks not in (None, 4):
+@@ -66,4 +71,9 @@
+         if not field_retrieval or feedback_groups:
+             raise ValueError('This study fixes field retrieval and global pooling')
++        if pooling_mode != 'sigmoid_normalized':
++            raise ValueError('Paired representation study fixes normalized retrieval')
++        if representation_mode not in ('split', 'normalized_pair', 'scaled_pair', 'fused_pair'):
++            raise ValueError('Unknown paired representation mode')
++        self.representation_mode = representation_mode
+         self.pooling_mode = pooling_mode
+         self.field_retrieval = field_retrieval
+@@ -88,12 +98,13 @@
+         self.static_proj = nn.ModuleList([nn.Linear(embedding_dim, token_dim)
+                                          for _ in range(static_count)])
+-        self.summary_proj = nn.Linear((f + 1) * embedding_dim, token_dim)
++        self.summary_proj = nn.ModuleList([
++            nn.Linear((f + 1) * embedding_dim, token_dim) for _ in range(2)])
+         self.count_proj = nn.Linear(1, token_dim, bias=False)
+-        self.identities = nn.Parameter(torch.empty(1, static_count + 5 + 4, token_dim))
++        self.identities = nn.Parameter(torch.empty(1, static_count + 10 + 4, token_dim))
+         self.blocks = nn.ModuleList([Interaction(token_dim, num_heads)
+                                      for _ in range(num_layers)])
+-        # All variants retain raw static fields, all five summaries and counts.
+-        # This direct path also keeps empty-history prediction well defined.
+-        input_width = static_count * embedding_dim + 6 * token_dim + 5
++        # Every arm has ten summary tokens, identical parameter shapes and
++        # identical count inputs. Keep the direct raw/summary/count path.
++        input_width = static_count * embedding_dim + 11 * token_dim + 5
+         self.towers = nn.ModuleList()
+         for _ in feature_map.labels:
+@@ -110,25 +121,23 @@
+ 
+     def _masked_weights(self, scores, mask):
+-        # scores: [B,F,L]; mask: [B,G,L]. Every arm uses exactly the
+-        # same visible positions. Empty retrievals produce all-zero weights.
++        # Same normalized sigmoid arithmetic as the committed parent.
++        # Explicit masking makes an empty retrieval exactly zero.
+         valid = mask[:, :, None, :].bool()
+-        if self.pooling_mode == 'softmax':
+-            # Exact arithmetic of the committed field_global parent.
+-            weights = torch.softmax(scores[:, None].float().masked_fill(~valid, -1e9), dim=-1)
+-            weights = weights * valid.to(weights.dtype)
+-            return weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+-        # Compute gates and reductions in FP32, before the inherited BF16
+-        # value pooling. A fixed bound avoids unbounded exponential sums.
+         gates = torch.sigmoid(scores[:, None].float()) * valid.to(torch.float32)
+-        if self.pooling_mode == 'sigmoid_sum':
+-            return gates
+-        mass = gates.sum(dim=-1, keepdim=True)
+-        normalized = gates / mass.clamp_min(1e-9)
+-        if self.pooling_mode == 'sigmoid_count':
+-            # At zero score sigmoid(s)=1/2, so this equals sigmoid_sum.
+-            # Unlike gate mass, visible count cannot depend on the target.
+-            count = valid.to(torch.float32).sum(dim=-1, keepdim=True)
+-            return normalized * (0.5 * count)
+-        return normalized
++        return gates / gates.sum(dim=-1, keepdim=True).clamp_min(1e-9)
++
++    def _pair_summaries(self, summaries, exposure_count):
++        # Both banks are deterministic views of the SAME retrieved content.
++        # Global exposure scaling matches g0-r0001-count_scaled; count_proj
++        # continues to encode each feedback group's own log count separately.
++        scaled = summaries * (0.5 * exposure_count[:, None, None].to(summaries.dtype))
++        if self.representation_mode == 'split':
++            return summaries, scaled
++        if self.representation_mode == 'normalized_pair':
++            return summaries, summaries
++        if self.representation_mode == 'scaled_pair':
++            return scaled, scaled
++        fused = 0.5 * (summaries + scaled)
++        return fused, fused
+ 
+     def forward(self, inputs):
+@@ -167,9 +176,13 @@
+         else:
+             summaries = history.new_zeros((b, 5, (f + 1) * d))
+-        # The ungrouped controls retain identical group counts and absence flags;
+-        # only the contents retrieved for a nonempty group change.
++        # Keep the inherited absence gates and explicit count information.
+         summaries = summaries * present[:, :, None]
+-        history_tokens = self.summary_proj(summaries) * present[:, :, None]
+-        history_tokens = history_tokens + self.count_proj(count_features[:, :, None].to(history_tokens.dtype))
++        paired = self._pair_summaries(summaries, counts[:, 0])
++        history_banks = []
++        for projection, summary in zip(self.summary_proj, paired):
++            bank = projection(summary) * present[:, :, None]
++            bank = bank + self.count_proj(count_features[:, :, None].to(bank.dtype))
++            history_banks.append(bank)
++        history_tokens = torch.cat(history_banks, dim=1)
+         static_tokens = torch.stack([proj(value) for proj, value in zip(self.static_proj, static)], dim=1)
+         task_tokens = static_tokens.new_zeros((b, 4, static_tokens.shape[-1]))

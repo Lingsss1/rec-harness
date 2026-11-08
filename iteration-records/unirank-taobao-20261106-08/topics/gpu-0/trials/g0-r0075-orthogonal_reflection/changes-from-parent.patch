@@ -1,0 +1,162 @@
+--- g0-r0074-sum_sum_bridge/model.py
++++ g0-r0075-orthogonal_reflection/model.py
+@@ -1,12 +1,10 @@
+-"""Prospective field direction versus allocation factorial for buy context.
+-
+-Let N be the summed residual/product VJP and P the product-route VJP.
+-Cross unit directions of N/P within context fields with N/P field norms,
+-restoring the global per-example norm to ||N||. Two new hybrid cells and
+-two exact-formula corner bridges preserve all forward and private-branch
+-computations. Only the buy context embedding-output VJP changes. This is
+-an explicit first-order training surrogate, not the forward derivative.
+-No new learned state, loss weights, optimizer changes or input information.
+-Host tensor/BF16/autograd checks and all empirical outcomes remain pending.
++"""Prospective norm-preserving buy-context orientation factorial.
++
++Independently reverse the parallel and perpendicular parts of the summed
++buy-to-context cotangent, using the product-route cotangent as the axis in
++each context field. Keep native per-field norms, the forward, private
++branch derivatives, learned state, construction order and information
++ownership. Native and full-reversal corners bypass reconstruction. This
++is a first-order surrogate; tensor/BF16 and empirical checks are host-only.
+ """
+ import torch
+@@ -17,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'primary_summary_vjp': 'native', 'cartfav_summary_vjp': 'native', 'buy_summary_vjp': 'removed_restored', 'buy_context_vjp': 'sum_sum'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'primary_summary_vjp': 'native', 'cartfav_summary_vjp': 'native', 'buy_summary_vjp': 'removed_restored', 'buy_context_vjp': 'flip_orthogonal'}
+ 
+ 
+@@ -81,15 +79,18 @@
+ 
+ class _BuyContextVJP(torch.autograd.Function):
+-    """Separate field direction from field magnitude at a common input.
+-
+-    N_f = (residual + product)_f; P_f = product_f. Allocation chooses
+-    ||N_f|| or ||P_f||*||N||/||P||. Direction chooses unit(N_f) or unit(P_f).
+-    Both exact-formula old corners bypass field reconstruction. All four
+-    choices are computed in every training cell to match backward work.
+-    With zero selected direction, borrow the other field direction; with
+-    globally zero P, borrow N's allocation. Globally zero N requests zero.
+-    Degenerate fields cannot identify direction; they must be reported as
+-    a limitation. Norm matching here does not match sparse repeated-ID
+-    sums, combined-task context gradients, clipping or optimizer steps.
++    """Cross signs of fieldwise parallel and perpendicular buy cotangents.
++
++    N = residual + product. In each context field let u = unit(product),
++    A = <N,u>u, and T = N-A. Cross the signs in +/-A +/-T while keeping
++    ||N_f|| for every field f. At nonzero product, T equals the residual
++    component orthogonal to that route. These are first-order surrogates,
++    not derivatives of the identical forward. No cross-task dot products,
++    task-loss gradients or optimizer edits occur.
++    Zero product fields use unit(N), hence T=0; those fields do not identify
++    an orthogonal-direction effect. Zero N fields remain zero. Reflecting
++    twice gives -N. Norm correction only removes FP32 reflection roundoff;
++    it does not match repeated-ID sums, other tasks' sums, sparse updates,
++    dense clipping or optimizer trajectories. All four cells execute the
++    same geometry. No learned state, persistent diagnostics or RNG added.
+     """
+     @staticmethod
+@@ -106,5 +107,4 @@
+     @staticmethod
+     def _row_norm(vector):
+-        # Works on [B,C] or [B,F,D]; avoids squaring unscaled large values.
+         scale = vector.abs().amax(dim=-1, keepdim=True)
+         safe_scale = torch.where(scale > 0, scale, torch.ones_like(scale))
+@@ -124,42 +124,43 @@
+         product = product_grad.float()
+         total = residual + product
+-        total_norm = _BuyContextVJP._row_norm(total)
+-        product_norm = _BuyContextVJP._row_norm(product)
++        fields = total.reshape(total.shape[0], -1, ctx.field_width)
++        product_fields = product.reshape(product.shape[0], -1, ctx.field_width)
++        native_norm = _BuyContextVJP._row_norm(fields)
++        product_norm = _BuyContextVJP._row_norm(product_fields)
++        safe_native = torch.where(native_norm > 0, native_norm,
++                                  torch.ones_like(native_norm))
+         safe_product = torch.where(product_norm > 0, product_norm,
+                                    torch.ones_like(product_norm))
+-        # Preserve r0073 product_sum_norm exactly, including its fallback
+-        # and divide-then-multiply evaluation order, for the P/P corner.
+-        matched_product = torch.where(
+-            product_norm > 0, (product / safe_product) * total_norm, total)
+-
+-        total_fields = total.reshape(total.shape[0], -1, ctx.field_width)
+-        product_fields = product.reshape(product.shape[0], -1, ctx.field_width)
+-        total_field_norm = _BuyContextVJP._row_norm(total_fields)
+-        product_field_norm = _BuyContextVJP._row_norm(product_fields)
+-        safe_total_field = torch.where(total_field_norm > 0, total_field_norm,
+-                                       torch.ones_like(total_field_norm))
+-        safe_product_field = torch.where(product_field_norm > 0, product_field_norm,
+-                                         torch.ones_like(product_field_norm))
+-        native_unit = total_fields / safe_total_field
+-        product_unit = product_fields / safe_product_field
+-        sum_direction = torch.where(total_field_norm > 0, native_unit, product_unit)
+-        product_direction = torch.where(product_field_norm > 0, product_unit, native_unit)
+-        # Normalize fractions before multiplying; no unbounded norm ratio.
+-        product_allocation = (product_field_norm / safe_product.unsqueeze(-1)
+-                              * total_norm.unsqueeze(-1))
+-        product_allocation = torch.where(product_norm.unsqueeze(-1) > 0,
+-                                         product_allocation, total_field_norm)
+-        product_sum_fields = (product_direction * total_field_norm).reshape_as(total)
+-        sum_product_fields = (sum_direction * product_allocation).reshape_as(total)
+-        if ctx.mode == 'sum_sum':
++        axis = torch.where(product_norm > 0, product_fields / safe_product,
++                           fields / safe_native)
++        # Scale N before projection: no raw squared norms or unbounded ratios.
++        scale = fields.abs().amax(dim=-1, keepdim=True)
++        safe_scale = torch.where(scale > 0, scale, torch.ones_like(scale))
++        scaled = fields / safe_scale
++        parallel = (scaled * axis).sum(dim=-1, keepdim=True) * axis
++        # A-T = 2A-N. Opposite reflection is its exact negative.
++        reflected = 2.0 * parallel - scaled
++        reflected_norm = _BuyContextVJP._row_norm(reflected)
++        safe_reflected = torch.where(reflected_norm > 0, reflected_norm,
++                                     torch.ones_like(reflected_norm))
++        orthogonal_flip = torch.where(
++            reflected_norm > 0,
++            (reflected / safe_reflected) * native_norm, fields)
++        # Ensure an exact native fallback when the reference axis is absent.
++        # A nonzero N then defines the axis itself: A=N and T=0.
++        orthogonal_flip = torch.where(product_norm > 0, orthogonal_flip, fields)
++        orthogonal_flip = orthogonal_flip.reshape_as(total)
++        parallel_flip = -orthogonal_flip
++        reversed_total = -total
++        if ctx.mode == 'native':
+             result = total
+-        elif ctx.mode == 'product_sum_fields':
+-            result = product_sum_fields
+-        elif ctx.mode == 'sum_product_fields':
+-            result = sum_product_fields
+-        elif ctx.mode == 'product_product':
+-            result = matched_product
++        elif ctx.mode == 'flip_orthogonal':
++            result = orthogonal_flip
++        elif ctx.mode == 'flip_parallel':
++            result = parallel_flip
++        elif ctx.mode == 'reverse_both':
++            result = reversed_total
+         else:
+-            raise ValueError('Unknown buy field VJP control')
++            raise ValueError('Unknown buy field orientation control')
+         return result.to(ctx.input_dtype), None, None
+ 
+@@ -184,5 +185,5 @@
+                  primary_summary_vjp='native',
+                  cartfav_summary_vjp='native', buy_summary_vjp='removed_restored',
+-                 buy_context_vjp='sum_sum',
++                 buy_context_vjp='flip_orthogonal',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -232,7 +233,7 @@
+         self.cartfav_summary_vjp = cartfav_summary_vjp
+         self.buy_summary_vjp = buy_summary_vjp
+-        if buy_context_vjp not in ('sum_sum', 'product_sum_fields',
+-                                   'sum_product_fields', 'product_product'):
+-            raise ValueError('Unknown buy field VJP control')
++        if buy_context_vjp not in ('native', 'flip_orthogonal',
++                                   'flip_parallel', 'reverse_both'):
++            raise ValueError('Unknown buy field orientation control')
+         if (not isinstance(embedding_dim, int) or isinstance(embedding_dim, bool)
+                 or embedding_dim < 1):

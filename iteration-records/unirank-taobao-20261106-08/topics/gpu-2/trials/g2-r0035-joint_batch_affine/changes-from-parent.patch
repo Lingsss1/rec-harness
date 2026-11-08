@@ -1,0 +1,121 @@
+--- g2-r0034-joint_dice_both/model.py
++++ g2-r0035-joint_batch_affine/model.py
+@@ -1,8 +1,9 @@
+-"""Evaluation-only affine factoring under the fixed joint model.
+-
+-All learned Parameters, initialization and training operations are inherited.
+-Controls separate splitting, query reuse and signed-weight algebraic merging.
+-The rewrite is exact over real arithmetic; BF16 quality/cost need measurement.
+-No parameter reduction, weight tying or architectural novelty is claimed.
++"""Evaluation-only batching of independent task towers.
++
++Learned Parameters, initialization, and tensor operations during training are
++inherited from g2-r0034-joint_dice_both. Independent task affine maps and Dice
++channels may be dispatched together at evaluation, without tying weights or
++mixing running statistics. Packing costs and BF16 differences need measurement.
++This is an implementation study, with no architectural novelty claim.
+ """
+ import torch
+@@ -13,5 +14,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'evaluation_tower_batching': 'affine'}
+ 
+ 
+@@ -29,5 +30,5 @@
+                  primary_partition='uniform', normalization_support='rotated_duplicate',
+                  support_gradient='attached', evaluation_projection='merged_hoist',
+-                 evaluation_dice='both',
++                 evaluation_dice='both', evaluation_tower_batching='affine',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -48,4 +49,9 @@
+             raise ValueError('Unknown evaluation Dice location')
+         self.evaluation_dice = evaluation_dice
++        if evaluation_tower_batching not in ('none', 'affine', 'dice', 'both'):
++            raise ValueError('Unknown evaluation task-tower batching control')
++        if evaluation_dice != 'both':
++            raise ValueError('This study retains the incumbent Dice factoring')
++        self.evaluation_tower_batching = evaluation_tower_batching
+         if block_aux_scorer_grad is not True:
+             raise ValueError('Auxiliary scorer parameter gradients must stay blocked')
+@@ -591,4 +597,58 @@
+         return hidden * mixture
+ 
++    def _evaluation_batched_towers(self, task_features):
++        """Batch dispatch only; every task retains its own learned function.
++
++        Affine batching uses [tasks,batch,width] with one independent weight
++        matrix per task. Dice batching concatenates CHANNELS, not examples:
++        each channel keeps its own original running mean, variance and alpha.
++        Frozen BatchNorm is pointwise; no moments are estimated or updated.
++        All stacks/concatenations are ephemeral and rebuilt from live tensors.
++        No Parameter, buffer, initialization, detach, or persistent cache is added.
++        """
++        if self.training:
++            raise ValueError('Task-tower batching is evaluation-only')
++        hidden = task_features
++        for depth in range(len(self.towers[0])):
++            layers = [tower[depth] for tower in self.towers]
++            if isinstance(layers[0], nn.Linear):
++                if self.evaluation_tower_batching in ('affine', 'both'):
++                    # baddbmm preserves separate biases without a separate
++                    # low-precision output-plus-bias rounding site. The GEMM
++                    # dispatch still differs from four independent Linear calls.
++                    weights = torch.stack([layer.weight for layer in layers])
++                    biases = torch.stack([layer.bias for layer in layers])
++                    packed = torch.baddbmm(
++                        biases[:, None, :], torch.stack(hidden),
++                        weights.transpose(1, 2))
++                    hidden = list(packed.unbind(dim=0))
++                else:
++                    hidden = [layer(value) for layer, value in zip(layers, hidden)]
++            elif isinstance(layers[0], Dice):
++                if self.evaluation_tower_batching in ('dice', 'both'):
++                    for layer in layers:
++                        if (layer.training or layer.bn.training or layer.bn.affine
++                                or layer.bn.running_mean is None
++                                or layer.bn.running_var is None
++                                or layer.bn.eps != layers[0].bn.eps):
++                            raise ValueError('Expected frozen, independent upstream Dice gates')
++                    packed = torch.cat(hidden, dim=-1)
++                    running_mean = torch.cat([layer.bn.running_mean for layer in layers])
++                    running_var = torch.cat([layer.bn.running_var for layer in layers])
++                    normalized = torch.nn.functional.batch_norm(
++                        packed, running_mean, running_var, weight=None, bias=None,
++                        training=False, momentum=0.0, eps=layers[0].bn.eps)
++                    probability = torch.sigmoid(normalized)
++                    alpha = torch.cat([layer.alpha for layer in layers])
++                    packed = packed * torch.addcmul(alpha, probability, 1 - alpha)
++                    hidden = list(packed.split(layers[0].alpha.numel(), dim=-1))
++                else:
++                    hidden = [self._evaluation_dice(layer, value)
++                              for layer, value in zip(layers, hidden)]
++            else:
++                raise ValueError('Expected inherited Linear/Dice task towers')
++        return {label + '_pred': torch.sigmoid(logits)
++                for label, logits in zip(self.feature_map.labels, hidden)}
++
+     def forward(self, inputs):
+         context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._represent(inputs)
+@@ -649,4 +709,5 @@
+         has_history = (total_count > 0).to(uniform.dtype)
+         predictions = {}
++        task_features = []
+         for index, (label, tower) in enumerate(zip(self.feature_map.labels, self.towers)):
+             if label == 'is_click':
+@@ -676,4 +737,7 @@
+             pooled = base + has_history * correction
+             features = torch.cat([task_context, task_target, pooled], dim=-1)
++            if not self.training and self.evaluation_tower_batching != 'none':
++                task_features.append(features)
++                continue
+             if self.training or self.evaluation_dice not in ('towers', 'both'):
+                 logits = tower(features)
+@@ -686,3 +750,5 @@
+                         logits = layer(logits)
+             predictions[label + '_pred'] = torch.sigmoid(logits)
++        if not self.training and self.evaluation_tower_batching != 'none':
++            return self._evaluation_batched_towers(task_features)
+         return predictions

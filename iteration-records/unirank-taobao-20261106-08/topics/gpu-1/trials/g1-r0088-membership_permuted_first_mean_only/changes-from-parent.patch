@@ -1,0 +1,81 @@
+--- g1-r0087-membership_full_mean_only/model.py
++++ g1-r0088-membership_permuted_first_mean_only/model.py
+@@ -1,10 +1,12 @@
+-"""Conditional membership utility through scorer mean-gradient coupling.
+-
+-Retain native BatchNorm forward values, running-state updates and evaluation.
+-Compare explicit full and mean-only input VJPs at identical learned capacity.
+-Mean-only retains r*(g-mean(g)) and omits the variance-derivative term;
+-forward centering and variance scaling both remain. This is a first-order
+-surrogate diagnostic, not native mixed-precision gradient equivalence or a
+-new information source. Historical actions and host masks remain unchanged.
++"""Layer attribution of conditional task-membership utility.
++
++Inherit g1-r0087 mean-only scorer input VJPs and the uniform auxiliary
++readout. Retain the mean-derivative correction in the first Dice only;
++use detached population moments in the second Dice. Native forward
++normalization, running-state updates, evaluation, learned parameters,
++valid-history construction and all gradient-transfer helpers survive.
++This is a first-order surrogate diagnostic, not native BCE differentiation.
++The both/second_only settings support explicit bridge/factorial checks,
++but only first_only is proposed in this batch. No torch execution locally.
+ """
+ import torch
+@@ -15,5 +17,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'membership_use': 'full', 'primary_scorer_normalization': 'native', 'auxiliary_history_readout': 'uniform', 'primary_moment_gradient': 'mean_only'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'membership_use': 'permuted', 'primary_scorer_normalization': 'native', 'auxiliary_history_readout': 'uniform', 'primary_moment_gradient': 'mean_only', 'primary_mean_layers': 'first_only'}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -938,8 +940,9 @@
+                  click_relative_transfer='orthogonal_native',
+                  orthogonal_assignment='nuisance_line_fixed_angle_occupied_cycle_source_bit',
+-                 membership_use='full',
++                 membership_use='permuted',
+                  primary_scorer_normalization='native',
+                  primary_moment_gradient='mean_only',
+                  auxiliary_history_readout='uniform',
++                 primary_mean_layers='first_only',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -972,4 +975,12 @@
+             raise ValueError('Close grouped auxiliary readout in this contrast')
+         self.primary_moment_gradient = primary_moment_gradient
++        # Plain metadata only; module construction, buffers and RNG stay fixed.
++        if tuple(attention_hidden_units) != (64, 32):
++            raise ValueError('Layer attribution requires the frozen two-layer scorer')
++        if primary_mean_layers not in ('both', 'first_only', 'second_only'):
++            raise ValueError('Unknown scorer mean-gradient layer selection')
++        if primary_mean_layers != 'both' and primary_moment_gradient != 'mean_only':
++            raise ValueError('Layer attribution is defined for the mean-only VJP')
++        self.primary_mean_layers = primary_mean_layers
+         if auxiliary_history_readout not in ('feedback', 'uniform'):
+             raise ValueError('Unknown auxiliary history readout')
+@@ -1608,6 +1619,8 @@
+         retain their inherited normalization mass. Every arm recomputes
+         detached FP32 mean/variance and uses the same wrapper/work. No
+-        modules, persistent state, labels, masks or RNG are added. At
+-        evaluation use the original Dice directly. Functional auxiliary
++        modules, persistent state, labels, masks or RNG are added. The
++        configured scorer layer keeps the mean correction; the other uses
++        the inherited detached-moment VJP. At evaluation use the original
++        Dice directly. Functional auxiliary
+         scoring, tower Dice and collected context transfer are untouched.
+         """
+@@ -1622,6 +1635,14 @@
+             variance = work.var(dim=0, unbiased=False, keepdim=True)
+             inverse_std = torch.rsqrt(variance + layer.bn.eps)
++        mode = self.primary_moment_gradient
++        if mode == 'mean_only' and self.primary_mean_layers != 'both':
++            # Identity selects a registered scorer layer without aliasing it
++            # through another module attribute. Both use the inherited VJP
++            # helper and perform identical component reductions.
++            selected_index = 1 if self.primary_mean_layers == 'first_only' else 3
++            if layer is not self.local_activation[selected_index]:
++                mode = 'detached'
+         normalized = _PrimaryPopulationJacobian.apply(
+-            hidden, normalized, mean, inverse_std, self.primary_moment_gradient)
++            hidden, normalized, mean, inverse_std, mode)
+         gate = torch.sigmoid(normalized)
+         return gate * hidden + layer.alpha * (1 - gate) * hidden

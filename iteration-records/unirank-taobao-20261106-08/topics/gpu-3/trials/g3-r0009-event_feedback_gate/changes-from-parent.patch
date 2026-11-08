@@ -1,0 +1,129 @@
+--- g3-r0008-feedback_match_evidence/model.py
++++ g3-r0009-event_feedback_gate/model.py
+@@ -1,16 +1,17 @@
+-"""Feedback-resolved target-history evidence with task-specific logit readouts.
+-
+-Retains the archived private-auxiliary DIN adaptation and adds deterministic
+-history statistics: exposure and four feedback channels crossed with all events,
+-same category, same brand, and joint category/brand matches. Each cell supplies
+-a normalized log count and a within-channel fraction. A zero-initialized 40-to-4
+-linear map lets each task use complementary feedback without sharing item-table
+-gradients. Initialization of every inherited component is unchanged.
+-
+-The 2x2 controls remove target equality or erase feedback-channel identity.
+-Allocated capacity is equal; feature rank and optimization geometry can differ.
+-Related work inspected: DIN primary text and pinned UniRank INFNet source
+-(feedback-mask aggregation). This is neither a reproduction nor a novelty claim.
+-Uses only released prefixes and host masks; never current labels/target action.
++"""Task-specific match/feedback gating before inherited DIN pooling.
++
++The parent supplies feedback-resolved count/fraction corrections only at the
++prediction logits. Here event-local exposure/feedback x target-match indicators
++also modulate the inherited task-specific pooling scores. The nonnegative bounded
++gain is 1+tanh(W_t phi_event); W starts at zero without consuming RNG. A mean
++gain replacement preserves uniform history rescaling but removes event-specific
++routing. A second factor erases feedback identity only inside the new gate.
++The inherited additive evidence, action embeddings and selector stay resolved.
++
++All variants allocate the same 80 extra dense parameters and start at the
++parent's function. Private auxiliary item tables and primary-only gradients to
++the selector trunk remain unchanged. Only the frozen prefix and host masks are
++used. DIN primary text and pinned benchmark INFNet source were inspected;
++original INFNet detailed text is unavailable. No novelty claim is made.
+ """
+ import copy
+@@ -22,9 +23,9 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True}
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='FeedbackMatchEvidence', gpu=-1,
++    def __init__(self, feature_map, model_id='TaskEventEvidenceGate', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(128, 32),
+                  tower_hidden_units=(128, 64), routing='task',
+@@ -32,5 +33,6 @@
+                  auxiliary_selector='none', block_aux_context_gradient=False,
+                  auxiliary_item_mode='private', target_matches=True,
+-                 feedback_identity=True, num_tasks=None,
++                 feedback_identity=True, gate_scope='event',
++                 gate_feedback_identity=True, num_tasks=None,
+                  task='binary_classification', **kwargs):
+         labels = list(feature_map.labels)
+@@ -67,4 +69,12 @@
+         if not all(name in feature_map.features for name in ('cate_id', 'brand')):
+             raise ValueError('Category and brand fields are required')
++        if not target_matches or not feedback_identity:
++            raise ValueError('The inherited additive evidence must remain resolved and target matched')
++        if gate_scope not in ('event', 'mean'):
++            raise ValueError('gate_scope must be event or mean')
++        if not isinstance(gate_feedback_identity, bool):
++            raise ValueError('Gate feedback identity switch must be boolean')
++        self.gate_scope = gate_scope
++        self.gate_feedback_identity = gate_feedback_identity
+         self.target_matches = target_matches
+         self.feedback_identity = feedback_identity
+@@ -146,8 +156,10 @@
+         # No extra bias: empty histories receive exactly zero logit correction.
+         self.evidence_weight = nn.Parameter(torch.zeros(len(labels), self.evidence_width))
++        self.gate_width = (1 + len(labels)) * 4
++        self.event_gate_weight = nn.Parameter(torch.zeros(len(labels), self.gate_width))
+         self.model_to_device()
+ 
+     def _history_evidence(self, item, mask, multi_masks):
+-        """Return [B,40], ordered channel / match-bin / (log-count, fraction).
++        """Return ([B,40] statistics, [B,L,5] channels, [B,L,4] matches).
+ 
+         Channel order is exposure, then feature_map.labels. Feedback masks may
+@@ -187,5 +199,30 @@
+                 evidence = torch.cat([evidence[:, :1],
+                                       shared.expand(-1, len(self.towers), -1, -1)], dim=1)
+-        return evidence.reshape(mask.shape[0], self.evidence_width)
++        # Return the same input-only channel/match tensors to the routing path.
++        # Counts and the original additive readout are identical to the parent.
++        return evidence.reshape(mask.shape[0], self.evidence_width), channels, match_tensor
++
++    def _event_route_gain(self, channels, matches, mask):
++        """Nonnegative [B,L,T] gain; empty/padded positions have neutral gain.
++
++        The mean replacement averages the bounded event modulation over valid
++        events, then broadcasts it. It can rescale a user's pooled history but
++        cannot choose individual events. Both replacements calculate event and
++        mean gains; only the applied gain changes.
++        """
++        with torch.autocast(device_type=mask.device.type, enabled=False):
++            if not self.gate_feedback_identity:
++                collapsed = channels[:, :, 1:].mean(dim=-1, keepdim=True)
++                channels = torch.cat([channels[:, :, :1],
++                                      collapsed.expand(-1, -1, len(self.towers))], dim=-1)
++            event_features = (channels.unsqueeze(-1) * matches.unsqueeze(-2)).flatten(2)
++            modulation = torch.tanh(torch.nn.functional.linear(
++                event_features, self.event_gate_weight))
++            valid = mask.to(dtype=torch.bool).unsqueeze(-1)
++            modulation = modulation.masked_fill(~valid, 0)
++            denominator = valid.float().sum(dim=1, keepdim=True).clamp_min(1.0)
++            mean_modulation = modulation.sum(dim=1, keepdim=True) / denominator
++            applied = modulation if self.gate_scope == 'event' else mean_modulation
++            return (1.0 + applied).expand_as(modulation).masked_fill(~valid, 1.0)
+ 
+     def _history_scores(self, hidden, interactions):
+@@ -225,5 +262,5 @@
+             raise ValueError('Historical feedback masks must be supplied by the host')
+         user, item, mask, multi_masks = self.get_inputs(inputs, return_multi_masks=True)
+-        evidence = self._history_evidence(item, mask, multi_masks)
++        evidence, channels, matches = self._history_evidence(item, mask, multi_masks)
+         correction = torch.nn.functional.linear(evidence, self.evidence_weight)
+         user_emb = self.embedding_layer(user)
+@@ -278,4 +315,10 @@
+                 scores = scores.mean(dim=-1, keepdim=True).expand(-1, -1, len(self.towers))
+             scores = scores.masked_fill(~valid, 0)
++            gain = self._event_route_gain(channels, matches, mask)
++            # Compute the product in FP32, then restore the score dtype for
++            # inherited BF16 bmm. Each gate row is trained only by its own task.
++            # Deterministic gate inputs add no auxiliary path into primary item
++            # tables or the primary-owned selector trunk.
++            scores = (scores.float() * gain).to(dtype=scores.dtype)
+             pooled = torch.bmm(scores.transpose(1, 2), values)
+             # Detach the representation, if requested, before pooling; never

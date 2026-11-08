@@ -1,0 +1,183 @@
+--- g0-r0069-buy_summary_direction/model.py
++++ g0-r0079-feedback_union/model.py
+@@ -1,13 +1,12 @@
+-"""Prospective cart/favorite versus buy summary-gradient factorial.
+-
+-The click summary VJP remains native. Independently choose native or
+-norm-restored mean-removed summary VJPs for cart/favorite and buy. Inherit
+-r0068's product forward, live RMS Jacobian, native query VJP, all learned
+-modules and frozen information/gradient ownership. No new learned state,
+-loss reweighting, optimizer change or current-label routing is introduced.
+-Auxiliary summary inputs remain detached: changed task-specific history
+-projection updates can affect shared context only through later learning
+-and global dense clipping. First-order surrogate; no higher-order claim.
+-Host tensor/autograd/BF16 checks and all new outcomes remain unmeasured.
++"""Prospective additive feedback compression with matched source controls.
++
++Keep all five incumbent details and the complete incumbent prediction path.
++Append a zero-output-initialized low-rank context/summary product branch.
++Its source is task-aligned feedback, valid-rank-rotated task feedback,
++aligned union feedback, or a duplicate target-match summary. All sources
++share task-specific availability support and coefficient L2 norm, learned
++capacity, initialization, and forward bank construction. New branch uses
++native autograd; inherited buy-summary surrogate remains unchanged.
++No local training or measured improvement is claimed.
+ """
+ import torch
+@@ -18,6 +17,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'primary_summary_vjp': 'native', 'cartfav_summary_vjp': 'native', 'buy_summary_vjp': 'removed_restored'}
+-
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'primary_summary_vjp': 'native', 'cartfav_summary_vjp': 'native', 'buy_summary_vjp': 'removed_restored', 'extension_source': 'union_aligned'}
+ 
+ class _SummaryProductVJP(torch.autograd.Function):
+@@ -100,4 +98,5 @@
+                  primary_summary_vjp='native',
+                  cartfav_summary_vjp='native', buy_summary_vjp='removed_restored',
++                 extension_source='union_aligned',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -147,4 +146,8 @@
+         self.cartfav_summary_vjp = cartfav_summary_vjp
+         self.buy_summary_vjp = buy_summary_vjp
++        if extension_source not in ('task_aligned', 'task_rotated',
++                                     'union_aligned', 'match_duplicate'):
++            raise ValueError('Unknown additive summary source')
++        self.extension_source = extension_source
+         if context_fusion != 'product':
+             raise ValueError('This placement study fixes product fusion')
+@@ -292,4 +295,16 @@
+             for output in self.interaction_outputs:
+                 nn.init.zeros_(output.weight)
++            # Append after all inherited initialization; fork preserves the
++            # host RNG. Every source control constructs the same modules.
++            self.extension_projections = nn.ModuleList([
++                nn.Linear(self.value_width, interaction_rank, bias=False)
++                for _ in feature_map.labels
++            ])
++            self.extension_outputs = nn.ModuleList([
++                nn.Linear(interaction_rank, self.value_width, bias=False)
++                for _ in feature_map.labels
++            ])
++            for output in self.extension_outputs:
++                nn.init.zeros_(output.weight)
+         # Add only nonlearned state, AFTER every inherited learned module and
+         # initialization. Native Dice has running mean/variance and counters.
+@@ -335,5 +350,98 @@
+         detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._target_match_summary(
+             item, values, mask)
+-        return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union
++        extension_bank = self._feedback_extension_bank(item, values, mask, task_masks)
++        return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union, extension_bank
++
++    @staticmethod
++    def _extension_coefficients(raw, valid, counts, target_norm2):
++        # Mask before centering; no padding membership may enter a mean.
++        raw = torch.where(valid.bool(), raw.float(), torch.zeros_like(raw).float())
++        centered = raw - valid * (raw.sum(dim=-1, keepdim=True)
++                                  / counts.clamp_min(1.0))
++        norm2 = centered.square().sum(dim=(-2, -1), keepdim=True)
++        scale = (target_norm2 / norm2.clamp_min(1e-12)).sqrt()
++        coefficients = centered * scale * (norm2 > 1e-10).to(centered.dtype)
++        return coefficients, norm2
++
++    def _feedback_extension_bank(self, item, values, mask, task_masks):
++        """Retain feedback/value covariance alongside existing match details.
++
++        Common support for task i requires heterogeneous task membership,
++        heterogeneous union membership and heterogeneous target affinity
++        within at least one block each. All four source cells use that same
++        intersection. Thus empty, homogeneous and match-free rows cannot
++        identify this hypothesis. Counts and norms match at coefficient
++        level; realized summary norms and downstream gradients need not.
++        """
++        batch, length, width = values.shape
++        if length != 100 or len(task_masks) != self.num_tasks:
++            raise ValueError('Frozen history/task schema mismatch')
++        for task_mask in task_masks:
++            if task_mask.shape != mask.shape:
++                raise ValueError('Historical task mask shape mismatch')
++        valid = mask.bool().reshape(batch, 1, 10, 10)
++        typed = torch.stack([m > 0 for m in task_masks], dim=1)
++        typed = typed.reshape(batch, self.num_tasks, 10, 10) & valid
++        union = typed.any(dim=1, keepdim=True)
++        membership = torch.cat([typed, union], dim=1)
++        rotated = self._rotate_valid_membership(
++            membership, valid.expand_as(membership))
++        affinity_parts = []
++        for name in self.match_fields:
++            ids = item[name]
++            history_ids, target_id = ids[:, :-1], ids[:, -1:]
++            usable = mask.bool() & (history_ids > 0) & (target_id > 0)
++            for special in self.match_excluded_ids[name]:
++                usable = usable & (history_ids != special) & (target_id != special)
++            affinity_parts.append(usable & (history_ids == target_id))
++        affinity = torch.stack(affinity_parts, dim=-1).float().mean(dim=-1)
++        affinity = affinity.reshape(batch, 1, 10, 10)
++        vf = valid.float()
++        counts = vf.sum(dim=-1, keepdim=True)
++        position = torch.arange(10, device=values.device,
++                                dtype=torch.float32).view(1, 1, 1, 10) / 9.0
++        centered_position = vf * (position - (position * vf).sum(
++            dim=-1, keepdim=True) / counts.clamp_min(1.0))
++        target_norm2 = centered_position.square().sum(
++            dim=(-2, -1), keepdim=True)
++        raw_aligned = torch.cat([membership.float(), affinity], dim=1)
++        raw_rotated = torch.cat([rotated.float(), affinity], dim=1)
++        aligned, norm2 = self._extension_coefficients(
++            raw_aligned, vf, counts, target_norm2)
++        rotated_coefficients, _ = self._extension_coefficients(
++            raw_rotated, vf, counts, target_norm2)
++        common = ((norm2[:, :self.num_tasks] > 1e-10)
++                  & (norm2[:, self.num_tasks:self.num_tasks + 1] > 1e-10)
++                  & (norm2[:, self.num_tasks + 1:] > 1e-10))
++        safe_values = torch.where(mask.bool().unsqueeze(-1), values,
++                                  torch.zeros_like(values))
++        aligned_details = torch.bmm(aligned.to(values.dtype).reshape(
++            batch, self.num_tasks + 2, length), safe_values)
++        rotated_details = torch.bmm(rotated_coefficients.to(values.dtype).reshape(
++            batch, self.num_tasks + 2, length), safe_values)
++        denominator = counts.sum(dim=-2).clamp_min(1.0).sqrt().to(aligned_details.dtype)
++        aligned_details = aligned_details / denominator
++        rotated_details = rotated_details / denominator
++        if self.extension_source == 'task_aligned':
++            selected = aligned_details[:, :self.num_tasks]
++        elif self.extension_source == 'task_rotated':
++            selected = rotated_details[:, :self.num_tasks]
++        elif self.extension_source == 'union_aligned':
++            selected = aligned_details[:, self.num_tasks:self.num_tasks + 1].expand(
++                -1, self.num_tasks, -1)
++        else:
++            selected = aligned_details[:, self.num_tasks + 1:].expand(
++                -1, self.num_tasks, -1)
++        gate = common.reshape(batch, self.num_tasks, 1)
++        return torch.where(gate, selected, torch.zeros_like(selected))
++
++    def _feedback_extension_correction(self, index, context, summary):
++        # Reuse the task's context query, preserving the adapter context gate.
++        # Bias-free projections ensure zero branch output on unsupported rows.
++        query = torch.tanh(self.context_queries[index](context).float())
++        compressed = torch.tanh(self.extension_projections[index](summary).float())
++        fused = query * compressed
++        fused = fused * torch.rsqrt(fused.square().mean(dim=-1, keepdim=True) + 1e-4)
++        return self.extension_outputs[index](fused.to(summary.dtype))
+ 
+     def _target_match_summary(self, item, values, mask):
+@@ -807,5 +915,5 @@
+ 
+     def forward(self, inputs):
+-        context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._represent(inputs)
++        context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union, extension_bank = self._represent(inputs)
+         batch = values.shape[0]
+         if (self.training and self.training_support == 'full') or self.inference_support == 'full':
+@@ -970,4 +1078,9 @@
+             correction = correction + self._context_history_correction(
+                 index, adapter_context, history_features, task_blocks, block_counts)
++            extension_summary = extension_bank[:, index, :]
++            if self.training and label != 'is_click':
++                extension_summary = extension_summary.detach()
++            correction = correction + self._feedback_extension_correction(
++                index, adapter_context, extension_summary)
+             pooled = base + has_history * correction
+             features = torch.cat([tower_context, task_target, pooled], dim=-1)

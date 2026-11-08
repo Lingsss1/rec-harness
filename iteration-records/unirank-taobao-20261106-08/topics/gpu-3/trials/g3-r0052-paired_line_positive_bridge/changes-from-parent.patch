@@ -1,0 +1,153 @@
+--- g3-r0051-paired_positive_bridge/model.py
++++ g3-r0052-paired_line_positive_bridge/model.py
+@@ -1,15 +1,16 @@
+-"""Batch-global tangent orientation versus a fixed coordinate convention.
+-
+-Four prospective cells use +/-Q or +/-U. Q is the inherited paired tangent,
+-centered on occupied rows and orthogonal to centered click K and native O.
+-U orients exactly the same line by making Q's first largest-absolute flattened
+-coordinate nonnegative. Thus U(-G)=U(G) at fixed click/state, while Q is odd
+-under joint auxiliary-cotangent reversal. This removes one batch-global
+-orientation bit, not all label information or within-line relative signs.
+-All cells compute U and both negative directions. Same forward, modules,
+-private true-label losses and inherited FP64/cast boundary. No RNG or state.
+-This is a surrogate backward control, not a scalar-objective derivative,
+-parameter-space orthogonality claim, production mechanism or novelty claim.
+-Only static checks can run locally; host tensor/parity/replay gates pending.
++"""Fixed-carrier tangent line versus auxiliary-derived paired tangent line.
++
++Four prospective cells deliver +/-R or +/-Q into shared context. Q is the
++inherited paired tangent. R uses a fixed modular-coordinate carrier projected
++out of centered click K and native auxiliary O, then matched to ||O||. Its
++canonical line receives exactly Q's batch-global pivot orientation bit.
++The replacement retains auxiliary norm/subspace/bit information; it is not a
++label-independent gradient. Both sources and both signs execute in all cells.
++All learned modules, forward/state behavior and private true-label losses
++are inherited. FP64 geometry precedes the inherited cast, embedding scatter
++and adaptive optimizer; parameter-update geometry is not asserted.
++No RNG, persistent state, installations or training. Local static checks
++only; host geometry/private-gradient/parity/replay checks remain pending.
++A surrogate backward mechanism, not a scalar-objective or novelty claim.
+ """
+ import torch
+@@ -212,13 +213,75 @@
+ 
+ 
++def _fixed_coordinate_carrier(orthogonal, occupied):
++    """A state-free modular-coordinate carrier, centered and norm matched.
++
++    Two Park-Miller modular multiplications map flattened row/field
++    coordinates to fixed +/-1 entries. This is an arbitrary deterministic
++    carrier, not isotropic noise or a sample-ID hash. Values stay within
++    int64 range. No generator, input IDs, labels or persistent state enter.
++    Its radius is native ||O||, so this control retains auxiliary magnitude.
++    All-empty, zero-O and constant occupied carriers map to zero.
++    """
++    with torch.autocast(device_type=orthogonal.device.type, enabled=False):
++        index = torch.arange(1, orthogonal.numel() + 1,
++                             device=orthogonal.device, dtype=torch.int64)
++        hashed = (index * 48271).remainder(2147483647)
++        hashed = (hashed * 48271).remainder(2147483647)
++        carrier = (2 * hashed.remainder(2) - 1).to(dtype=torch.float64)
++        carrier = carrier.reshape_as(orthogonal)
++        carrier = torch.where(occupied, carrier, 0.0)
++        count = occupied.to(dtype=torch.float64).sum().clamp_min(1.0)
++        carrier = torch.where(
++            occupied, carrier - carrier.sum(dim=0, keepdim=True) / count, 0.0)
++        target_scale = orthogonal.abs().amax()
++        safe_target_scale = torch.where(
++            target_scale > 0, target_scale, torch.ones_like(target_scale))
++        target_norm = target_scale * (orthogonal / safe_target_scale).square().sum().sqrt()
++        scale = carrier.abs().amax()
++        safe_scale = torch.where(scale > 0, scale, torch.ones_like(scale))
++        unit = carrier / safe_scale
++        length = unit.square().sum().sqrt()
++        safe_length = torch.where(length > 0, length, torch.ones_like(length))
++        return (unit / safe_length) * target_norm
++
++
++def _fixed_line_with_orientation(click_gradient, orthogonal, occupied, tangent):
++    """Replace Q's line while transporting its coordinate orientation bit.
++
++    Project the fixed carrier out of centered K/native O using precisely
++    the inherited tangent helper, including its 1e-6 degeneracy gate.
++    Canonicalize that line V and return s(Q)*V. s uses the same first-max
++    pivot convention as _canonical_tangent. For Q=0 return zero, even if V
++    exists. If V degenerates while Q does not, return zero and require a
++    host validity report; do not silently use another direction.
++
++    At fixed click/state, V is even under simultaneous auxiliary-gradient
++    reversal and s(Q) is odd for nonzero Q, hence R is odd away from
++    finite-precision ties/gates. Auxiliary information remains in ||O||,
++    the subspace excluding O and the one transported bit. This does not
++    remove all labels, preserve covariance or define isotropic noise.
++    """
++    carrier = _fixed_coordinate_carrier(orthogonal, occupied)
++    fixed_tangent = _tangent_orthogonal(
++        click_gradient, orthogonal, occupied, carrier)
++    canonical_fixed = _canonical_tangent(fixed_tangent)
++    with torch.autocast(device_type=tangent.device.type, enabled=False):
++        flat = tangent.reshape(-1)
++        pivot_index = flat.abs().argmax().reshape(1)
++        pivot = torch.gather(flat, dim=0, index=pivot_index).squeeze(0)
++        sign = torch.where(pivot < 0, -torch.ones_like(pivot), torch.ones_like(pivot))
++        return torch.where(pivot != 0, canonical_fixed * sign,
++                           torch.zeros_like(canonical_fixed))
++
++
+ def _reduce_context_transfer(click_gradient, gradients, occupied,
+                              parallel_orientation, orthogonal_orientation,
+                              click_relative_transfer, orthogonal_assignment):
+-    """Compute native, paired, tangent and canonical directions in every cell."""
++    """Compute both lines, orientation bit and both signs in every cell."""
+     if parallel_orientation != 'aligned' or click_relative_transfer != 'orthogonal_native':
+         raise ValueError('Assignment study freezes native orthogonal-only transfer')
+     if orthogonal_orientation not in ('aligned', 'reversed'):
+         raise ValueError('Unknown orthogonal orientation')
+-    if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent'):
++    if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented'):
+         raise ValueError('Unknown orthogonal assignment')
+     centered, parallel, orthogonal = _click_relative_components(
+@@ -229,4 +292,6 @@
+     tangent = _tangent_orthogonal(click_gradient, orthogonal, occupied, replacement)
+     canonical = _canonical_tangent(tangent)
++    fixed_oriented = _fixed_line_with_orientation(
++        click_gradient, orthogonal, occupied, tangent)
+     with torch.autocast(device_type=click_gradient.device.type, enabled=False):
+         native_negative = -orthogonal
+@@ -234,4 +299,5 @@
+         tangent_negative = -tangent
+         canonical_negative = -canonical
++        fixed_negative = -fixed_oriented
+         if orthogonal_assignment == 'native':
+             transfer = (orthogonal if orthogonal_orientation == 'aligned'
+@@ -242,11 +308,13 @@
+         elif orthogonal_assignment == 'paired_tangent':
+             transfer = tangent if orthogonal_orientation == 'aligned' else tangent_negative
++        elif orthogonal_assignment == 'canonical_tangent':
++            transfer = canonical if orthogonal_orientation == 'aligned' else canonical_negative
+         else:
+-            transfer = canonical if orthogonal_orientation == 'aligned' else canonical_negative
++            transfer = fixed_oriented if orthogonal_orientation == 'aligned' else fixed_negative
+         return click_gradient + transfer.to(dtype=click_gradient.dtype)
+ 
+ 
+ class _CollectedContextTransfer(torch.autograd.Function):
+-    """Four identity edges; select batch-global orientation source and sign.
++    """Four identity edges; select tangent line source and sign.
+ 
+     Only the first output supplies click's context uses; the other outputs
+@@ -274,5 +342,5 @@
+         if click_relative_transfer != 'orthogonal_native':
+             raise ValueError('Assignment study requires orthogonal-only transfer')
+-        if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent'):
++        if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented'):
+             raise ValueError('Unknown orthogonal assignment')
+         ctx.orthogonal_assignment = orthogonal_assignment
+@@ -383,5 +451,5 @@
+         if click_relative_transfer != 'orthogonal_native':
+             raise ValueError('Assignment study requires orthogonal-only transfer')
+-        if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent'):
++        if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented'):
+             raise ValueError('Unknown orthogonal assignment')
+         self.orthogonal_assignment = orthogonal_assignment

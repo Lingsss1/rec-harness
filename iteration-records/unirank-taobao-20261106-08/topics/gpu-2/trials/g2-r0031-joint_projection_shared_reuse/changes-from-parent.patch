@@ -1,0 +1,133 @@
+--- g2-r0029-joint_allocation_click14/model.py
++++ g2-r0031-joint_projection_shared_reuse/model.py
+@@ -1,8 +1,11 @@
+-"""Task residual capacity allocation under fixed joint representations.
+-
+-Only adapter hidden widths change. Labels select widths explicitly in feature
+-map order. Scorer, compression, masks, gradient ownership, tower architecture,
+-zero output initialization and evaluation-only readout pruning are inherited.
+-This is a capacity allocation study, with no architectural novelty claim.
++"""Auxiliary tower common-input sharing under fixed joint representations.
++
++Split the auxiliary first affine into common context/target and task history
++maps. Controls keep independent common maps, or tie them with repeated work;
++the candidate ties and evaluates the common map once within each forward.
++All split cells use the same cart-donor initial common weights. No random
++draws are added; the original initialization sequence precedes this change.
++Scorer, summaries, adapters, Dice states and source gradients are inherited.
++Standard affine decomposition and weight tying carry no novelty claim.
+ """
+ import torch
+@@ -13,5 +16,37 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'auxiliary_projection': 'shared_reuse'}
++
++
++class _AuxiliaryFirstProjection(nn.Module):
++    """Task history affine plus an explicitly supplied common projection.
++
++    A shared weight has exactly one owner on Model, so device transfers and
++    optimizers cannot accidentally turn three aliases into distinct weights.
++    Independent controls own separate equal-initialized common Parameters.
++    """
++
++    def __init__(self, original, prefix_width, initial_common, independent):
++        super().__init__()
++        self.prefix_width = prefix_width
++        if independent:
++            self.context_weight = nn.Parameter(initial_common.detach().clone())
++        else:
++            self.register_parameter('context_weight', None)
++        self.history_weight = nn.Parameter(
++            original.weight[:, prefix_width:].detach().clone())
++        # This Parameter is removed from its old owner when that affine is
++        # replaced; neither the obsolete weight nor an unused copy survives.
++        self.bias = original.bias
++
++    def forward(self, features, common_projection=None):
++        if common_projection is None:
++            if self.context_weight is None:
++                raise ValueError('Tied auxiliary projection must be supplied')
++            common_projection = torch.nn.functional.linear(
++                features[:, :self.prefix_width], self.context_weight)
++        history_projection = torch.nn.functional.linear(
++            features[:, self.prefix_width:], self.history_weight, self.bias)
++        return common_projection + history_projection
+ 
+ 
+@@ -23,5 +58,5 @@
+                  block_aux_context_grad=False, block_aux_item_grad=True, num_tasks=None,
+                  residual_input='match_detail', residual_routing='task', residual_hidden=14,
+-                 auxiliary_residual_hidden=10,
++                 auxiliary_residual_hidden=10, auxiliary_projection='shared_reuse',
+                  temporal_detail='position', block_detail='ordinal',
+                  curvature_detail='quadratic', joint_detail='duplicate_match',
+@@ -37,7 +72,12 @@
+         if compression_routes != 'uf':
+             raise ValueError('This source-path study freezes click/auxiliary routes to uf')
++        if auxiliary_projection not in ('independent_split', 'shared_repeat', 'shared_reuse'):
++            raise ValueError('Unknown auxiliary common-input projection control')
++        if not tower_hidden_units:
++            raise ValueError('Auxiliary projection study requires a hidden tower layer')
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         self.compression_routes = compression_routes
++        self.auxiliary_projection = auxiliary_projection
+         if block_aux_scorer_grad is not True:
+             raise ValueError('Auxiliary scorer parameter gradients must stay blocked')
+@@ -157,4 +197,20 @@
+                 nn.init.zeros_(adapter[-1].weight)
+                 nn.init.zeros_(adapter[-1].bias)
++        # Preserve ALL inherited initialization and RNG draws first. Copy the
++        # cart prefix as a fixed donor in every split cell, including untied
++        # controls; shared versus independent then starts at identical values.
++        self.auxiliary_prefix_width = input_width - self.value_width
++        cart_index = list(feature_map.labels).index('cart')
++        common_initial = self.towers[cart_index][0].weight[
++            :, :self.auxiliary_prefix_width].detach().clone()
++        independent = auxiliary_projection == 'independent_split'
++        if independent:
++            self.register_parameter('shared_auxiliary_context_weight', None)
++        else:
++            self.shared_auxiliary_context_weight = nn.Parameter(common_initial.clone())
++        for index in self.auxiliary_indices:
++            self.towers[index][0] = _AuxiliaryFirstProjection(
++                self.towers[index][0], self.auxiliary_prefix_width,
++                common_initial, independent)
+         self.model_to_device()
+ 
+@@ -567,4 +623,12 @@
+         total_count = grouped_counts[:, :, 0].sum(dim=1, keepdim=True)
+         has_history = (total_count > 0).to(uniform.dtype)
++        # Local tensor reuse only: no cross-call cache, detach, extra state,
++        # shared Dice moments or new information. Item/target stop-gradient
++        # and context ownership are already applied above during training.
++        aux_prefix = torch.cat([aux_context, aux_target], dim=-1)
++        shared_projection = None
++        if self.auxiliary_projection == 'shared_reuse':
++            shared_projection = torch.nn.functional.linear(
++                aux_prefix, self.shared_auxiliary_context_weight)
+         predictions = {}
+         for index, (label, tower) in enumerate(zip(self.feature_map.labels, self.towers)):
+@@ -595,4 +659,18 @@
+             pooled = base + has_history * correction
+             features = torch.cat([task_context, task_target, pooled], dim=-1)
+-            predictions[label + '_pred'] = torch.sigmoid(tower(features))
++            if label == 'is_click':
++                logits = tower(features)
++            else:
++                common_projection = shared_projection
++                if common_projection is None:
++                    common_weight = (tower[0].context_weight
++                                     if self.auxiliary_projection == 'independent_split'
++                                     else self.shared_auxiliary_context_weight)
++                    common_projection = torch.nn.functional.linear(aux_prefix, common_weight)
++                logits = tower[0](features, common_projection=common_projection)
++                # Keep each task's Dice/BatchNorm, later affines and output
++                # independent, in the original order and called exactly once.
++                for layer_index in range(1, len(tower)):
++                    logits = tower[layer_index](logits)
++            predictions[label + '_pred'] = torch.sigmoid(logits)
+         return predictions

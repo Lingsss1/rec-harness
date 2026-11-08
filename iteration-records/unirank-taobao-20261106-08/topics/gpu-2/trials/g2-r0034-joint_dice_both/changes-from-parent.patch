@@ -1,0 +1,68 @@
+--- g2-r0033-joint_affine_merged_hoist/model.py
++++ g2-r0034-joint_dice_both/model.py
+@@ -13,5 +13,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both'}
+ 
+ 
+@@ -29,4 +29,5 @@
+                  primary_partition='uniform', normalization_support='rotated_duplicate',
+                  support_gradient='attached', evaluation_projection='merged_hoist',
++                 evaluation_dice='both',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -44,4 +45,7 @@
+             raise ValueError('Unknown evaluation affine factoring control')
+         self.evaluation_projection = evaluation_projection
++        if evaluation_dice not in ('scorer', 'towers', 'both'):
++            raise ValueError('Unknown evaluation Dice location')
++        self.evaluation_dice = evaluation_dice
+         if block_aux_scorer_grad is not True:
+             raise ValueError('Auxiliary scorer parameter gradients must stay blocked')
+@@ -562,6 +566,28 @@
+         # buffers, masks and 30-row evaluation population as the reference.
+         for index in range(1, len(self.local_activation)):
+-            hidden = self.local_activation[index](hidden)
++            layer = self.local_activation[index]
++            if self.evaluation_dice in ('scorer', 'both') and isinstance(layer, Dice):
++                hidden = self._evaluation_dice(layer, hidden)
++            else:
++                hidden = layer(hidden)
+         return hidden
++
++    def _evaluation_dice(self, layer, hidden):
++        """Factor only the mixture, preserving the original frozen BN gate.
++
++        Upstream Dice: p*x + alpha*(1-p)*x, p=sigmoid(BN(x)).
++        Here: x * (alpha + p*(1-alpha)), using one broadcast addcmul.
++        Original BN, epsilon, running statistics and sigmoid are unchanged.
++        No constants/derived tensors persist between calls. This never runs
++        during training or substitutes for any training Dice population.
++        Alpha remains FP32 under the frozen autocast recipe. Compared with
++        the upstream BF16 expression, the complement and p*x rounding sites
++        change; real-arithmetic identity is not a BF16 equality claim.
++        """
++        if self.training or layer.training or layer.bn.training:
++            raise ValueError('Dice mixture factoring is evaluation-only')
++        probability = torch.sigmoid(layer.bn(hidden))
++        mixture = torch.addcmul(layer.alpha, probability, 1 - layer.alpha)
++        return hidden * mixture
+ 
+     def forward(self, inputs):
+@@ -650,4 +676,13 @@
+             pooled = base + has_history * correction
+             features = torch.cat([task_context, task_target, pooled], dim=-1)
+-            predictions[label + '_pred'] = torch.sigmoid(tower(features))
++            if self.training or self.evaluation_dice not in ('towers', 'both'):
++                logits = tower(features)
++            else:
++                logits = features
++                for layer in tower:
++                    if isinstance(layer, Dice):
++                        logits = self._evaluation_dice(layer, logits)
++                    else:
++                        logits = layer(logits)
++            predictions[label + '_pred'] = torch.sigmoid(logits)
+         return predictions

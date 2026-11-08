@@ -1,0 +1,135 @@
+--- g0-r0019-cubic_gated_duplicate/model.py
++++ g0-r0020-feedback_rotated/model.py
+@@ -1,9 +1,10 @@
+-"""Fifth-summary replacement by a coarse cubic ordinal contrast.
+-
+-All cells construct the same coefficients and learned modules. New cubic
+-and scrambled contrasts are projected off valid constants, coarse linear
+-ranks and the inherited quadratic. Eligibility and coefficient norm match
+-between the three replacement cells. The bridge returns the exact incumbent
+-fifth expression. Positions are array ordinals, never elapsed time.
++"""Feedback/value alignment as a capacity-fixed fifth summary replacement.
++
++Only released masked historical feedback is used. Within each ten-event
++block, center the union-feedback indicator and remove local-position and
++target-match directions. Compare the aligned contraction with a deterministic
++valid-rank rotation, a common-gate duplicate and the exact incumbent bridge.
++Every cell builds all alternatives, modules and inherited coefficients.
++Original-method novelty and predictive improvement remain unverified.
+ """
+ import torch
+@@ -14,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'feedback_extension': 'rotated'}
+ 
+ 
+@@ -27,4 +28,5 @@
+                  curvature_detail='quadratic', joint_detail='duplicate_match',
+                  match_support='available', match_scaling='norm', coarse_extension='duplicate',
++                 feedback_extension='rotated',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -80,5 +82,10 @@
+         if coarse_extension not in ('cubic', 'scrambled', 'duplicate', 'bridge'):
+             raise ValueError('Unknown coarse ordinal replacement')
++        if coarse_extension != 'duplicate':
++            raise ValueError('The inherited fifth must be the gated match duplicate')
+         self.coarse_extension = coarse_extension
++        if feedback_extension not in ('aligned', 'rotated', 'duplicate', 'bridge'):
++            raise ValueError('Unknown feedback-alignment replacement')
++        self.feedback_extension = feedback_extension
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -174,16 +181,12 @@
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
+         detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts = self._target_match_summary(
+-            item, values, mask)
++            item, values, mask, auxiliary)
+         return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts
+ 
+-    def _target_match_summary(self, item, values, mask):
+-        """Five masked value summaries; only the fifth direction/gate varies.
+-
+-        Quadratic/scrambled coefficients are orthogonal to valid constants
+-        and coarse linear ranks under event-count weighting. A common gate
+-        excludes fewer than three occupied blocks and degenerate residuals.
+-        All fourth coefficients match the inherited coarse coefficient norm.
+-        Duplicate coefficients copy that coarse vector and add no new moment.
+-        FP32 coefficient construction precedes the inherited bf16 contraction.
++    def _target_match_summary(self, item, values, mask, auxiliary):
++        """Retain four summaries; replace only the redundant fifth channel.
++
++        Coefficients are FP32, parameter-free and masked before contraction.
++        All summaries keep the inherited sqrt(valid-event-count) denominator.
+         """
+         matches = []
+@@ -261,4 +264,6 @@
+             incumbent_fifth, centered_position, fourth, linear,
+             block_rank, scrambled_rank, valid, counts, total)
++        fifth = self._feedback_extension_coefficients(
++            fifth, centered, centered_position, auxiliary, valid, counts)
+         coefficients = torch.stack(
+             (centered, centered_position, block_coefficients, fourth, fifth), dim=-2)
+@@ -270,4 +275,60 @@
+         return (summaries[:, 0, :], summaries[:, 1, :], summaries[:, 2, :],
+                 summaries[:, 3, :], summaries[:, 4, :], match_counts)
++
++    def _feedback_extension_coefficients(self, incumbent, affinity, position,
++                                         auxiliary, valid, counts):
++        """Residual feedback/value covariance with common support and scale.
++
++        Rotation acts on the ordered VALID positions of each block, so it
++        preserves each block's feedback count even with noncontiguous masks.
++        It rearranges indicator/value alignment; it is not a new random seed
++        or a claim that all feedback information has been destroyed.
++
++        Block centering removes every block-constant direction. Removing
++        local position and residual target match then excludes all four
++        inherited coefficient directions. The fifth incumbent is collinear
++        with target match. New summaries can still overlap information in
++        the inherited feedback-stratified pooling path.
++        """
++        feedback = auxiliary.reshape_as(valid).to(torch.float32) * valid
++        valid_rank = valid.to(torch.int64).cumsum(dim=-1) - 1
++        count_int = counts.to(torch.int64)
++        # Gather only valid positions, ordered by their array ordinal.
++        ordinal = torch.arange(10, device=valid.device, dtype=torch.int64).view(1, 1, 10)
++        valid_order = (ordinal + (1 - valid.to(torch.int64)) * 10).argsort(dim=-1)
++        source_rank = (valid_rank + count_int // 2).remainder(count_int.clamp_min(1))
++        source_index = valid_order.gather(-1, source_rank)
++        rotated_feedback = feedback.gather(-1, source_index) * valid
++
++        position_norm2 = position.square().sum(dim=(1, 2), keepdim=True)
++        basis = self._joint_residual(
++            affinity, position, position_norm2, torch.zeros_like(affinity),
++            torch.zeros_like(position_norm2), valid, counts)
++        basis_norm2 = basis.square().sum(dim=(1, 2), keepdim=True)
++        basis = basis * (basis_norm2 > 1e-10).to(valid.dtype)
++        basis_norm2 = basis.square().sum(dim=(1, 2), keepdim=True)
++        aligned = self._joint_residual(
++            feedback, position, position_norm2, basis, basis_norm2, valid, counts)
++        rotated = self._joint_residual(
++            rotated_feedback, position, position_norm2, basis, basis_norm2, valid, counts)
++        aligned_norm2 = aligned.square().sum(dim=(1, 2), keepdim=True)
++        rotated_norm2 = rotated.square().sum(dim=(1, 2), keepdim=True)
++        incumbent_norm2 = incumbent.square().sum(dim=(1, 2), keepdim=True)
++        # Fixed threshold rejects tiny residuals before normalization. Gate
++        # construction and both normalizations execute in every study cell.
++        support = ((incumbent_norm2 > 1e-10) & (position_norm2 > 1e-10)
++                   & (aligned_norm2 > 1e-8) & (rotated_norm2 > 1e-8)).to(valid.dtype)
++        aligned = (aligned * (incumbent_norm2 / aligned_norm2.clamp_min(1e-8)).sqrt()
++                   * support)
++        rotated = (rotated * (incumbent_norm2 / rotated_norm2.clamp_min(1e-8)).sqrt()
++                   * support)
++        duplicate = incumbent * support
++        if self.feedback_extension == 'aligned':
++            return aligned
++        if self.feedback_extension == 'rotated':
++            return rotated
++        if self.feedback_extension == 'duplicate':
++            return duplicate
++        return incumbent
+ 
+     def _coarse_extension_coefficients(self, incumbent, position, quadratic,

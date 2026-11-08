@@ -1,0 +1,121 @@
+--- g3-r0011-gate_redistribute_only/model.py
++++ g3-r0013-composition_collapsed/model.py
+@@ -1,16 +1,21 @@
+-"""Separate click's event-weight redistribution from coefficient-mass changes.
+-
+-Inherits g3-r0010-gate_self_live, including private auxiliary embeddings,
+-primary-owned retrieval, all auxiliary forward gates, and additive evidence.
+-For masked signed scores s and nonnegative event gains g, define b=sum|s|
+-and m=sum|s*g|. Four cells use s*g (full), (s*g/m)*b (redistribute),
+-(s/b)*m (scale), or s (none) ONLY for click. Normalization is in FP32;
+-zero gated mass falls back to s for redistribution and zero for scale.
+-
+-Redistribution preserves coefficient L1 mass, not the norm of the pooled
+-vector: cancellation and value geometry can still change the latter. All
+-normalizers remain differentiable. This is an attribution experiment, not
+-a claim of new attention normalization or cross-task complementarity.
+-No new parameters, RNG draws, losses, information, or host settings.
++"""Task-owned, history-conditioned feedback/match routing.
++
++Inherit g3-r0011-gate_redistribute_only without changing its embeddings,
++selectors, towers, additive evidence, static gates or coefficient-L1 rule.
++The new residual uses 20 input-only event features (five feedback/exposure
++channels times four target matches). For each task t, a zero-initialized
++20x20 matrix gives r_it = e_i^T W_t h / sqrt(20), where h is the masked
++history mean. The replacement control substitutes e_i for h, retaining
++bilinear event-local interactions, parameter allocation and compute.
++A second factor collapses only the NEW route's feedback identities.
++The inherited resolved gate and additive evidence stay intact in all cells.
++
++Both residual alternatives are evaluated in every cell. All residuals are
++zero at initialization and no new RNG draws are introduced. The inherited
++self donor scales the click gate logit by 1.5, including this residual.
++Each W_t receives only its corresponding task loss through this path;
++no learned auxiliary donor is sent to click. Context sharing and host dense
++clipping remain indirect cross-task coupling. This tests history feedback
++as input, not the value of auxiliary-label supervision or a new-priority claim.
+ """
+ import copy
+@@ -22,9 +27,9 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'history', 'conditioning_feedback_identity': False}
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='TaskGateComponents', gpu=-1,
++    def __init__(self, feature_map, model_id='HistoryCompositionGate', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(128, 32),
+                  tower_hidden_units=(128, 64), routing='task',
+@@ -35,4 +40,5 @@
+                  gate_feedback_identity=True, gate_transfer_source='self',
+                  gate_transfer_gradient='live', primary_gate_component='redistribute',
++                 gate_conditioning='history', conditioning_feedback_identity=False,
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+@@ -86,4 +92,12 @@
+         if primary_gate_component not in ('full', 'redistribute', 'scale', 'none'):
+             raise ValueError('Unknown primary gate component')
++        if primary_gate_component != 'redistribute':
++            raise ValueError('Composition study fixes click mass-preserving redistribution')
++        if gate_conditioning not in ('history', 'local'):
++            raise ValueError('gate_conditioning must be history or local')
++        if not isinstance(conditioning_feedback_identity, bool):
++            raise ValueError('Conditioning identity switch must be boolean')
++        self.gate_conditioning = gate_conditioning
++        self.conditioning_feedback_identity = conditioning_feedback_identity
+         self.primary_gate_component = primary_gate_component
+         self.gate_transfer_source = gate_transfer_source
+@@ -172,4 +186,8 @@
+         self.gate_width = (1 + len(labels)) * 4
+         self.event_gate_weight = nn.Parameter(torch.zeros(len(labels), self.gate_width))
++        # Registered after the complete inherited initialization. The new
++        # route is zero at step zero; neither allocation nor controls draw RNG.
++        self.composition_gate_weight = nn.Parameter(torch.zeros(
++            len(labels), self.gate_width, self.gate_width))
+         self.model_to_device()
+ 
+@@ -217,4 +235,35 @@
+         return evidence.reshape(mask.shape[0], self.evidence_width), channels, match_tensor
+ 
++    def _composition_gate_logits(self, channels, matches, mask):
++        """Input-only bilinear route; caller disables autocast for FP32.
++
++        History means are within each example and use valid positions only.
++        No cross-example statistics, learned embeddings, or current actions
++        enter this route. Collapsing preserves exposure and the sum of the
++        four feedback slots, including overlapping feedback masks.
++        """
++        if not self.conditioning_feedback_identity:
++            collapsed = channels[:, :, 1:].mean(dim=-1, keepdim=True)
++            channels = torch.cat([channels[:, :, :1],
++                                  collapsed.expand(-1, -1, len(self.towers))], dim=-1)
++        valid = mask.bool().unsqueeze(-1)
++        features = (channels.unsqueeze(-1) * matches.unsqueeze(-2)).flatten(2)
++        features = features.masked_fill(~valid, 0)
++        count = valid.float().sum(dim=1).clamp_min(1.0)
++        history_mean = features.sum(dim=1) / count
++        history_logits, local_logits = [], []
++        scale = math.sqrt(self.gate_width)
++        # Avoid allocating [B,L,T,D] projected features at the frozen batch
++        # size. Both replacements execute the same task loop in all cells.
++        for task_index in range(len(self.towers)):
++            projected = torch.nn.functional.linear(
++                features, self.composition_gate_weight[task_index].transpose(0, 1)) / scale
++            history_logits.append((projected * history_mean[:, None, :]).sum(dim=-1))
++            local_logits.append((projected * features).sum(dim=-1))
++        history_logits = torch.stack(history_logits, dim=-1)
++        local_logits = torch.stack(local_logits, dim=-1)
++        result = history_logits if self.gate_conditioning == 'history' else local_logits
++        return result.masked_fill(~valid, 0)
++
+     def _event_route_gain(self, channels, matches, mask):
+         """Bounded [B,L,T] gains with a donor added only to click logits.
+@@ -232,4 +281,6 @@
+             gate_logits = torch.nn.functional.linear(
+                 event_features, self.event_gate_weight)
++            gate_logits = gate_logits + self._composition_gate_logits(
++                channels, matches, mask)
+             # Both donor alternatives are calculated in every variant. The
+             # contracted four labels may be ordered arbitrarily by FeatureMap.

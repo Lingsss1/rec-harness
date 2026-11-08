@@ -1,0 +1,103 @@
+--- g3-r0058-fixed_angle_negative/model.py
++++ g2-r0081-mask_signature_zero_affine/model.py
+@@ -1,10 +1,13 @@
+-"""Auxiliary scalar-angle replacement at fixed forward architecture.
+-
+-A prospective 2x2 study crosses native versus fixed pi/4 nuisance-exclusion
+-angle with external +/- sign. Auxiliary radius, transported Q orientation
+-bit and inherited validity are retained. All helpers run in all four cells.
+-Only the shared-context surrogate VJP selection changes; it is not the
+-ordinary derivative of the reported joint BCE. No novelty claim is made.
++"""Mask-only action substitution with common zero categorical initialization.
++
++Encode the four supplied task-mask bits in the existing action table, keeping
++all original modules and capacity. Discard raw action values before embedding.
++After all inherited initialization, zero only the action table once; its rows
++remain independent and trainable. The paired raw-action control uses the same
++zeroing. A fixed signature relabeling checks categorical invariance. This is a
++prospective attribution experiment, not a new architecture/performance claim.
+ """
++
++MASK_SIGNATURE_ASSIGNMENT = 'affine'
+ import torch
+ from torch import nn
+@@ -816,4 +819,19 @@
+         if self.action_field is None:
+             raise ValueError('Historical action field is required')
++        # Plain metadata only; no module, buffer, RNG or width changes.
++        signature_spec = feature_map.features[self.action_field]
++        signature_excluded = {0}
++        for special in ('padding_idx', 'oov_idx'):
++            if signature_spec.get(special) is not None:
++                signature_excluded.add(int(signature_spec[special]))
++        signature_rows = []
++        for index in range(int(signature_spec['vocab_size'])):
++            if index not in signature_excluded:
++                signature_rows.append(index)
++                if len(signature_rows) == 16:
++                    break
++        if len(signature_rows) != 16:
++            raise ValueError('Mask signature preflight requires 16 nonspecial action embedding rows')
++        self.mask_signature_rows = tuple(signature_rows)
+         self.auxiliary_indices = [list(feature_map.labels).index(label)
+                                   for label in ('cart', 'fav', 'buy')]
+@@ -893,5 +911,53 @@
+             self.register_buffer(storage_name, buffer.detach().clone())
+             self._auxiliary_state_names[name] = storage_name
++        # Common categorical start, AFTER every inherited initialization.
++        # Execute the original random draws first; consume no additional RNG.
++        # Rows are neither tied nor frozen: normal host Adagrad updates them.
++        action_table = self.embedding_layer.embedding_layers[self.action_field]
++        if not isinstance(action_table, nn.Embedding):
++            raise ValueError('Common action initialization requires an nn.Embedding table')
++        if self.action_field in self.embedding_layer.feature_encoders:
++            raise ValueError('Common action initialization requires no action feature encoder')
++        if any(name != self.action_field and layer is action_table
++               for name, layer in self.embedding_layer.embedding_layers.items()):
++            raise ValueError('Action embedding must not be shared with another feature')
++        if (action_table.num_embeddings != int(feature_map.features[self.action_field]['vocab_size'])
++                or action_table.embedding_dim != embedding_dim):
++            raise ValueError('Action table shape differs from the frozen feature specification')
++        with torch.no_grad():
++            action_table.weight.zero_()
+         self.model_to_device()
++
++    def _mask_only_action_item(self, item, mask, task_masks):
++        """Use only the supplied four mask bits, never historical action values.
++
++        The original table, all widths and all trainable modules are retained.
++        Table-row labels are arbitrary: two fixed bijections are proposed.
++        Sixteen nonspecial rows are a host preflight prerequisite, not an
++        assumed dataset fact. Insufficient capacity fails explicitly before
++        any code is silently folded, hashed or read from the action channel.
++        A performance loss cannot prove code information absent from masks.
++        """
++        rows = self.mask_signature_rows
++        valid = mask.bool()
++        signature = torch.zeros_like(mask, dtype=torch.long)
++        labels = list(self.feature_map.labels)
++        for bit, label in enumerate(('is_click', 'cart', 'fav', 'buy')):
++            task_mask = task_masks[labels.index(label)]
++            if task_mask.shape != mask.shape:
++                raise ValueError('Historical task mask shape mismatch')
++            signature = signature + ((task_mask > 0) & valid).long() * (1 << bit)
++        if MASK_SIGNATURE_ASSIGNMENT == 'affine':
++            signature = (5 * signature + 3).remainder(16)
++        elif MASK_SIGNATURE_ASSIGNMENT != 'canonical':
++            raise ValueError('Unknown prospective signature assignment')
++        codebook = torch.tensor(rows, device=mask.device, dtype=torch.long)
++        history = torch.where(valid, codebook[signature], torch.zeros_like(signature))
++        target = torch.zeros((mask.shape[0], 1), device=mask.device, dtype=torch.long)
++        # Copy before replacement; no action values or action-derived lookup
++        # enter this helper. Target and padded action IDs remain exactly zero.
++        result = dict(item)
++        result[self.action_field] = torch.cat([history, target], dim=1)
++        return result
+ 
+     def _represent(self, inputs):
+@@ -918,4 +984,5 @@
+             auxiliary = auxiliary | (task_masks[index] > 0)
+         auxiliary = auxiliary & mask.bool()
++        item = self._mask_only_action_item(item, mask, task_masks)
+         user_emb = self.embedding_layer(user)
+         item_emb = self.embedding_layer(item)

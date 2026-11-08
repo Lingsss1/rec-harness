@@ -1,0 +1,71 @@
+--- g0-r0086-full_membership_bridge/model.py
++++ g0-r0087-blind_frozen/model.py
+@@ -1,12 +1,13 @@
+-"""Explicit mask-membership access for conditional historical action utility.
+-
+-Inherit the complete incumbent architecture and surrogate context VJP.
+-Append a zero-initialized 16-row embedding of the four supplied historical
+-mask bits to the existing action channel by addition. In blind mode this
+-channel has no event action information: the inherited action-table mean
+-is constant across valid events. Full mode retains every event action.
+-The two new arms have identical capacity and initialization. Target action,
+-padding, item order, masks, objective and host training are unchanged.
+-This is a prospective representation-control study; no novelty is claimed.
++"""Action-codebook learning control with exact historical membership access.
++
++Freeze only the action-channel backward edge, before adding the unchanged
++learnable membership embedding. Full and blind arms retain their original
++forward values at a fixed state. The action table remains allocated and is
++initialized identically, but receives no loss gradient in blocked mode.
++No table is shared with item/context features. Every other learned module,
++mask, summary, true-label loss and inherited surrogate context VJP stays
++unchanged. This tests dependence on action-codebook adaptation; fixed random
++feature geometry and downstream optimization remain alternative explanations.
++No new performance or conditional-information claim is made.
+ """
+ import torch
+@@ -17,5 +18,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'historical_action_mode': 'full'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'historical_action_mode': 'blind', 'action_codebook_gradient': 'blocked'}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -924,5 +925,6 @@
+                  click_relative_transfer='orthogonal_native',
+                  orthogonal_assignment='nuisance_line_fixed_angle_occupied_cycle_source_bit',
+-                 historical_action_mode='full',
++                 historical_action_mode='blind',
++                 action_codebook_gradient='blocked',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -939,4 +941,7 @@
+             raise ValueError('Unknown historical action intervention')
+         self.historical_action_mode = historical_action_mode
++        if action_codebook_gradient not in ('native', 'blocked'):
++            raise ValueError('Unknown action-codebook gradient mode')
++        self.action_codebook_gradient = action_codebook_gradient
+         self.compression_routes = compression_routes
+         if block_aux_scorer_grad is not True:
+@@ -1092,10 +1097,10 @@
+         if self.action_field is None:
+             raise ValueError('Historical action field is required')
+-        if historical_action_mode == 'blind':
++        if historical_action_mode == 'blind' or action_codebook_gradient == 'blocked':
+             action_spec = feature_map.features[self.action_field]
+             if (action_spec.get('feature_encoder') or action_spec.get('share_embedding')
+                     or 'pretrained_emb' in action_spec
+                     or not isinstance(self.embedding_layer.embedding_layers[self.action_field], nn.Embedding)):
+-                raise ValueError('Blind codebook control requires an ordinary unshared action embedding')
++                raise ValueError('Action codebook control requires an ordinary unshared action embedding')
+         self.auxiliary_indices = [list(feature_map.labels).index(label)
+                                   for label in ('cart', 'fav', 'buy')]
+@@ -1310,4 +1315,8 @@
+         # Current action is unknown and never enters either summary or scorer.
+         action_values = self._historical_action_values(item_emb, mask, task_masks)
++        # Cut only the action-table edge. The membership table is added below
++        # and remains fully learnable. No values, modules, state or RNG change.
++        if self.action_codebook_gradient == 'blocked':
++            action_values = action_values.detach()
+         # Expose every membership pattern at the SAME sites as action values:
+         # before scoring, compression, position/block and target-match summaries.

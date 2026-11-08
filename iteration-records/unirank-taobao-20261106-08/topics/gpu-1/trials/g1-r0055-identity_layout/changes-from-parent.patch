@@ -1,0 +1,157 @@
+--- g1-r0054-supplied_unchanged/model.py
++++ g1-r0055-identity_layout/model.py
+@@ -1,11 +1,12 @@
+-"""Prospective blockwise nonlinear summary study; validation results unmeasured.
+-
+-Reuse ten frozen compressed blocks and every learned parameter of the incumbent.
+-Compare mean_j tanh(W [M*b_j, global_details]) with tanh(W [sum_j b_j,
+-global_details]), crossed with the existing auxiliary adapter-context gate.
+-Both summary paths execute in every cell for a measured work-matched contrast.
+-The original signed pooled base and five detail paths remain intact. This tests
+-projection/aggregation order, not a new attention mechanism or verified novelty.
+-Native tensor, BF16, autograd and resource checks belong to the host.
++"""Prospective group-preserving order factorial; no new local performance.
++
++Keep original ten-slot event groups. Independently canonicalize valid events
++inside each group and the order of completely valid groups, using complete
++encoded event tuples including action and all task eligibility bits. Partial
++and empty groups stay fixed. This removes only these two ordering choices;
++original group membership and padding still carry supplied-order traces.
++All cells compute the same layout candidates and inherit every learned module.
++Native tensor/autograd, exact identity parity and measured cost require host
++checks. No claim of arbitrary-event permutation invariance or novelty.
+ """
+ import torch
+@@ -16,5 +17,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'within_block_order': 'supplied', 'whole_block_order': 'supplied'}
+ 
+ 
+@@ -36,4 +37,5 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16, summary_placement='block',
++                 within_block_order='supplied', whole_block_order='supplied',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -48,4 +50,10 @@
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         self.compression_routes = compression_routes
++        if within_block_order not in ('supplied', 'canonical'):
++            raise ValueError('Unknown within-original-block order')
++        if whole_block_order not in ('supplied', 'canonical'):
++            raise ValueError('Unknown whole-full-block order')
++        self.within_block_order = within_block_order
++        self.whole_block_order = whole_block_order
+         if block_aux_scorer_grad is not True:
+             raise ValueError('Auxiliary scorer parameter gradients must stay blocked')
+@@ -245,4 +253,5 @@
+         if mask.ndim != 2 or mask.shape[1] != 100:
+             raise ValueError('Frozen protocol requires 100 history positions')
++        item, task_masks = self._history_layout(item, mask, task_masks)
+         auxiliary = torch.zeros_like(mask, dtype=torch.bool)
+         for index in self.auxiliary_indices:
+@@ -261,4 +270,102 @@
+             item, values, mask)
+         return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union
++
++    def _history_layout(self, item, mask, task_masks):
++        """Preserve source groups; content-sort members and/or full groups.
++
++        Exact lexicographic sorting produces dense ranks of COMPLETE tuples.
++        Equal tuples get equal ranks; original positions never break a rank
++        tie. Sorted rank vectors are collision-free keys for block multisets.
++        A block's original ordered content ranks are a secondary key for
++        identical multisets. Thus the blocks-only cell also has no positional
++        tie breaker. After member canonicalization these tied blocks become
++        identical, so that secondary key cannot leak member order downstream.
++        """
++        batch, length = mask.shape
++        if length != 100 or len(task_masks) != self.num_tasks:
++            raise ValueError('Frozen history and all task masks are required')
++        for eligibility in task_masks:
++            if eligibility.shape != mask.shape:
++                raise ValueError('Historical task mask shape mismatch')
++        for field in item.values():
++            if field.ndim != 2 or field.shape != (batch, length + 1):
++                raise ValueError('Expected event fields with unchanged target')
++        valid = mask.bool()
++        positions = torch.arange(length, device=mask.device, dtype=torch.long)
++        positions = positions.unsqueeze(0).expand(batch, -1)
++        raw_keys = [item[name][:, :-1]
++                    for name in self.item_fields + [self.action_field]]
++        raw_keys.extend(task_masks)
++        # Mask invalid keys before sorting. Invalid IDs/masks never become
++        # evidence, and remain unchanged at their original destinations.
++        keys = [torch.where(valid, key, torch.zeros_like(key))
++                for key in raw_keys]
++        order = positions
++        for key in reversed(keys):
++            sorting = torch.argsort(key.gather(1, order), dim=1, stable=True)
++            order = order.gather(1, sorting)
++        # Inverting a stable sort alone would retain original ranks for tied
++        # tuples. Collapse equality explicitly before scattering ranks back.
++        different = torch.zeros_like(valid)
++        for key in keys:
++            sorted_key = key.gather(1, order)
++            adjacent = sorted_key[:, 1:] != sorted_key[:, :-1]
++            different = different | torch.cat(
++                [torch.zeros_like(adjacent[:, :1]), adjacent], dim=1)
++        sorted_rank = different.long().cumsum(dim=1)
++        rank = torch.zeros_like(positions).scatter(1, order, sorted_rank)
++
++        groups, width = 10, 10
++        group_valid = valid.reshape(batch, groups, width)
++        group_rank = rank.reshape(batch, groups, width)
++        local = torch.arange(width, device=mask.device, dtype=torch.long)
++        local = local.view(1, 1, width).expand(batch, groups, -1)
++        members = torch.argsort(group_rank, dim=2, stable=True)
++        partition = torch.argsort(
++            (~group_valid).long().gather(2, members), dim=2, stable=True)
++        members = members.gather(2, partition)
++        destination_rank = (group_valid.long().cumsum(dim=2) - 1).clamp_min(0)
++        members = members.gather(2, destination_rank)
++        members = torch.where(group_valid, members, local)
++        offsets = torch.arange(groups, device=mask.device, dtype=torch.long)
++        offsets = offsets.view(1, groups, 1) * width
++        canonical_members = members + offsets
++        # Completely valid blocks have ten canonical member ranks. Partial
++        # blocks are never moved and cannot change full-block relative order.
++        canonical_rank = rank.gather(1, canonical_members.reshape(batch, length))
++        canonical_rank = canonical_rank.reshape(batch, groups, width)
++        full = group_valid.all(dim=2)
++        block_positions = torch.arange(groups, device=mask.device, dtype=torch.long)
++        block_positions = block_positions.unsqueeze(0).expand(batch, -1)
++        block_order = block_positions
++        # Least-significant key first: ordered content resolves multiset
++        # ties for the blocks-only cell, independently of source block rank.
++        for key_vector in (group_rank, canonical_rank):
++            for coordinate in range(width - 1, -1, -1):
++                key = key_vector[:, :, coordinate]
++                sorting = torch.argsort(key.gather(1, block_order), dim=1, stable=True)
++                block_order = block_order.gather(1, sorting)
++        partition = torch.argsort(
++            (~full).long().gather(1, block_order), dim=1, stable=True)
++        block_order = block_order.gather(1, partition)
++        full_rank = (full.long().cumsum(dim=1) - 1).clamp_min(0)
++        canonical_blocks = block_order.gather(1, full_rank)
++        canonical_blocks = torch.where(full, canonical_blocks, block_positions)
++
++        # Both index candidates above execute in every factorial cell. Only
++        # these two selectors differ; no learned state or RNG is introduced.
++        selected_members = (canonical_members if self.within_block_order == 'canonical'
++                            else positions.reshape(batch, groups, width))
++        selected_blocks = (canonical_blocks if self.whole_block_order == 'canonical'
++                           else block_positions)
++        sources = selected_members.gather(
++            1, selected_blocks.unsqueeze(-1).expand(-1, -1, width))
++        sources = sources.reshape(batch, length)
++        reordered = {
++            name: torch.cat([field[:, :-1].gather(1, sources), field[:, -1:]], dim=1)
++            for name, field in item.items()
++        }
++        eligibility = [task_mask.gather(1, sources) for task_mask in task_masks]
++        return reordered, eligibility
+ 
+     def _target_match_summary(self, item, values, mask):

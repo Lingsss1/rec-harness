@@ -1,0 +1,80 @@
+--- g0-r0087-full_frozen/model.py
++++ g0-r0088-full_frozen_initialized/model.py
+@@ -1,13 +1,11 @@
+-"""Action-codebook learning control with exact historical membership access.
+-
+-Freeze only the action-channel backward edge, before adding the unchanged
+-learnable membership embedding. Full and blind arms retain their original
+-forward values at a fixed state. The action table remains allocated and is
+-initialized identically, but receives no loss gradient in blocked mode.
+-No table is shared with item/context features. Every other learned module,
+-mask, summary, true-label loss and inherited surrogate context VJP stays
+-unchanged. This tests dependence on action-codebook adaptation; fixed random
+-feature geometry and downstream optimization remain alternative explanations.
+-No new performance or conditional-information claim is made.
++"""Mask-membership initialization control for conditional action utility.
++
++Only the initial values of the existing learnable 16-row membership table
++change. Its centered Gaussian rows match the centered RMS of the initial
++nonpadding action codebook, with no sample action or label information.
++The action codebook edge remains blocked, and the inherited context VJP
++remains a surrogate rather than the derivative of ordinary joint BCE.
++Zero-RMS action tables make this initialization intervention uninformative.
++No novelty, equivalence or action-redundancy claim is established here.
+ """
+ import torch
+@@ -18,5 +16,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'historical_action_mode': 'full', 'action_codebook_gradient': 'blocked'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'historical_action_mode': 'full', 'action_codebook_gradient': 'blocked', 'membership_initialization': 'action_rms'}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -927,4 +925,5 @@
+                  historical_action_mode='full',
+                  action_codebook_gradient='blocked',
++                 membership_initialization='action_rms',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -944,4 +943,7 @@
+             raise ValueError('Unknown action-codebook gradient mode')
+         self.action_codebook_gradient = action_codebook_gradient
++        if membership_initialization not in ('zero', 'action_rms'):
++            raise ValueError('Unknown membership initialization')
++        self.membership_initialization = membership_initialization
+         self.compression_routes = compression_routes
+         if block_aux_scorer_grad is not True:
+@@ -1185,5 +1187,32 @@
+         with torch.random.fork_rng(devices=[]):
+             self.membership_embedding = nn.Embedding(16, embedding_dim)
+-            nn.init.zeros_(self.membership_embedding.weight)
++            if membership_initialization == 'zero':
++                nn.init.zeros_(self.membership_embedding.weight)
++            else:
++                # Reuse the Gaussian values already drawn by nn.Embedding.
++                # Center across all 16 mask codes and match a SINGLE scalar:
++                # the centered RMS of the initial nonpadding action table.
++                # No sample actions, vocab names, labels or fitted statistics.
++                # Both full and blind cells receive exactly this same table.
++                with torch.no_grad():
++                    weight = self.membership_embedding.weight
++                    random_rows = weight.detach().float()
++                    random_rows = random_rows - random_rows.mean(dim=0, keepdim=True)
++                    action_weight = self.embedding_layer.embedding_layers[
++                        self.action_field].weight.detach().float().to(random_rows.device)
++                    codes = torch.arange(action_weight.shape[0], device=action_weight.device)
++                    keep = codes != 0
++                    padding_idx = feature_map.features[self.action_field].get('padding_idx')
++                    if padding_idx is not None:
++                        keep = keep & (codes != int(padding_idx))
++                    action_rows = action_weight[keep]
++                    if action_rows.shape[0] == 0:
++                        raise ValueError('Action codebook has no nonpadding rows')
++                    action_rows = action_rows - action_rows.mean(dim=0, keepdim=True)
++                    action_rms = action_rows.square().mean().sqrt()
++                    random_rms = random_rows.square().mean().sqrt()
++                    initialized = random_rows * (
++                        action_rms / random_rms.clamp_min(torch.finfo(torch.float32).tiny))
++                    weight.copy_(initialized.to(weight.dtype))
+         self.membership_indices = tuple(list(feature_map.labels).index(label)
+                                         for label in ('is_click', 'cart', 'fav', 'buy'))

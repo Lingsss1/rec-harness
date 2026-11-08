@@ -1,0 +1,90 @@
+--- g3-r0028-context_route_detached/model.py
++++ g3-r0029-context_shared_primary/model.py
+@@ -1,13 +1,12 @@
+-"""Prospective task-conditioned context/event exchange.
+-
+-Parent: g3-r0022-selector_disabled. Same inherited prediction function at
+-initialization. A zero-initialized task matrix maps per-example normalized
+-shared context into the existing feedback-by-target-match event basis.
+-Compare routing that signal before pooling with its masked-mean logit readout,
+-and cross these with live/detached auxiliary context derivatives on this new
+-path only. Inherited auxiliary context gradients remain live in every cell.
+-All four cells allocate and calculate the same new projections and statistics.
+-No optimizer changes, labels in forward, extra inputs, or gradient surgery.
+-The implementation is an experimental adaptation, without a novelty claim.
++"""Prospective sharing of the context-conditioned history query.
++
++Parent: g3-r0028-context_route_detached. Compare one context projection shared
++across tasks under joint or click-only supervision with task-private queries.
++All allocated matrices, initialization, projection shapes, original context
++paths and losses stay inherited. Shared mode has fewer active matrix entries.
++Task/joint exactly preserves the parent's function for any fixed state.
++The auxiliary derivative switch changes only the selected projection matrix;
++it never detaches prediction outputs or the inherited context-to-tower path.
++No new inputs, parameters, RNG draws, loss hook, or novelty claim.
+ """
+ import copy
+@@ -19,5 +18,5 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary', 'rank_evidence_scope': 'event', 'rank_evidence_location': 'route', 'rank_feedback_identity': False, 'retain_position_route': False, 'rank_primary_gain': 2.0, 'rank_aux_gradient': 'primary', 'selector_input_space': 'private', 'selector_input_gradient': 'detached', 'selector_transfer_source': 'none', 'selector_transfer_gradient': 'detached', 'context_exchange_location': 'route', 'context_exchange_aux_gradient': 'detached'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary', 'rank_evidence_scope': 'event', 'rank_evidence_location': 'route', 'rank_feedback_identity': False, 'retain_position_route': False, 'rank_primary_gain': 2.0, 'rank_aux_gradient': 'primary', 'selector_input_space': 'private', 'selector_input_gradient': 'detached', 'selector_transfer_source': 'none', 'selector_transfer_gradient': 'detached', 'context_exchange_location': 'route', 'context_exchange_aux_gradient': 'detached', 'context_projection_sharing': 'shared', 'context_projection_aux_gradient': 'primary'}
+ 
+ 
+@@ -43,6 +42,12 @@
+                  context_exchange_location='route',
+                  context_exchange_aux_gradient='detached',
++                 context_projection_sharing='shared',
++                 context_projection_aux_gradient='primary',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
++        if context_projection_sharing not in ('task', 'shared'):
++            raise ValueError('Context projection sharing must be task or shared')
++        if context_projection_aux_gradient not in ('joint', 'primary'):
++            raise ValueError('Unknown context projection auxiliary derivative')
+         if context_exchange_location not in ('route', 'readout'):
+             raise ValueError('Context exchange location must be route or readout')
+@@ -62,4 +67,7 @@
+         if 'is_click' not in labels:
+             raise ValueError('The primary task is_click is required')
++        self.context_projection_sharing = context_projection_sharing
++        self.context_projection_aux_gradient = context_projection_aux_gradient
++        self.context_projection_primary_index = labels.index('is_click')
+         if auxiliary_selector not in ('none', 'detached', 'live', 'frozen'):
+             raise ValueError('Unknown auxiliary_selector')
+@@ -625,12 +633,13 @@
+ 
+     def _context_event_exchange(self, context, channels, matches, mask):
+-        """Return identical event logits and their masked mean in every cell.
+-
+-        All normalization is within an example, without learned affine terms.
+-        Task rows follow FeatureMap label order. Detachment on auxiliary rows
+-        blocks only the NEW path into shared context; the task projection and
+-        the inherited context-to-tower path still train. No cache or VJP probe.
+-        Raw event logits are bounded by sqrt(gate_width); empty/masked events
+-        contribute exactly zero, including to the readout alternative.
++        """Select task-private or shared context matrices, with local ownership.
++
++        Shared cells reuse the click-labeled row, independent of task order.
++        Matrix detachment on auxiliary computations leaves forward values
++        unchanged. Context-input ownership is the separate inherited switch.
++        All task loops run in every cell, with the same tensor allocation and
++        four projection shapes, but shared-mode unused matrix rows stay zero.
++        Normalize only within each example; retain strict event masking and
++        FP32 arithmetic. No current actions, labels, caches or VJP probes.
+         """
+         if context.ndim != 2 or context.shape[-1] != self.context_exchange_width:
+@@ -647,6 +656,12 @@
+                 if label != 'is_click' and self.context_exchange_aux_gradient == 'detached':
+                     task_context = task_context.detach()
++                projection_index = (self.context_projection_primary_index
++                                    if self.context_projection_sharing == 'shared'
++                                    else index)
++                projection = self.context_exchange_weight[projection_index]
++                if label != 'is_click' and self.context_projection_aux_gradient == 'primary':
++                    projection = projection.detach()
+                 query = torch.tanh(torch.nn.functional.linear(
+-                    task_context, self.context_exchange_weight[index])
++                    task_context, projection)
+                     / math.sqrt(self.context_exchange_width))
+                 event_logits.append((features * query[:, None, :]).sum(dim=-1)

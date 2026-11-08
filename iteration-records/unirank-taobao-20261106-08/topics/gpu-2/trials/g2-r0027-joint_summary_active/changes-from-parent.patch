@@ -1,0 +1,84 @@
+--- g2-r0026-joint_route_width12_indexed/model.py
++++ g2-r0027-joint_summary_active/model.py
+@@ -1,8 +1,8 @@
+-"""Indexed task-residual execution for the inherited joint model.
+-
+-Only the adapter selected by each task is evaluated. Learned modules, their
+-construction order and initialization, summary inputs, scorer populations,
+-normalization buffers and auxiliary gradient ownership remain inherited.
+-This is an execution control, not a new representation or routing mechanism.
++"""Frozen available/norm summary specialization with indexed task adapters.
++
++Only dead arithmetic inside _joint_coefficients is removed. All learned
++modules, initialization, live masks/gates, summary channels, scorer Dice
++populations and auxiliary gradient ownership inherit the width12 indexed
++reference. This is an execution optimization, not a new representation.
+ """
+ import torch
+@@ -344,58 +344,18 @@
+     def _joint_coefficients(self, affinity, position, fourth, valid, counts,
+                             rank, scrambled_rank):
+-        """Retain the incumbent gate; vary only duplicate-match support/scale.
+-
+-        All basis construction is FP32 and independent of learned values.
+-        Within-block centering gives orthogonality to every block-constant
+-        coefficient, including the inherited linear and quadratic moments.
+-        Two projection sweeps reduce finite-precision leakage into the
+-        remaining local-ordinal and target-match directions. The common
+-        support gate can carry availability information even in a duplicate
+-        direction. Build every inherited coefficient in all factorial cells;
+-        basic availability additionally admits matches lacking joint moments.
++        """Specialize the inherited available/norm branch without changing it.
++
++        The constructor already requires match_support='available' and
++        match_scaling='norm'. The discarded projections affect neither this
++        returned coefficient nor state, RNG, learned values or gradients.
++        Keep the live expression and operation order unchanged. The caller's
++        coarse-extension gate (including both residual norms) is retained.
+         """
+         position_norm2 = position.square().sum(dim=(1, 2), keepdim=True)
+         match_norm2 = affinity.square().sum(dim=(1, 2), keepdim=True)
+-        fourth_norm2 = fourth.square().sum(dim=(1, 2), keepdim=True)
+-        # Orthogonalize affinity against position first. A zero basis is
+-        # harmless; no inverse of a near-singular two-by-two matrix is used.
+-        basis = affinity
+-        for _ in range(2):
+-            slope = ((basis * position).sum(dim=(1, 2), keepdim=True)
+-                     / position_norm2.clamp_min(1e-10))
+-            basis = valid * (basis - slope * position)
+-            basis = valid * (basis - basis.sum(dim=-1, keepdim=True)
+-                             / counts.clamp_min(1))
+-        basis_norm2 = basis.square().sum(dim=(1, 2), keepdim=True)
+-        basis = basis * (basis_norm2 > 1e-10).to(valid.dtype)
+-        basis_norm2 = basis.square().sum(dim=(1, 2), keepdim=True)
+-
+-        ordered = self._joint_residual(
+-            affinity * rank, position, position_norm2,
+-            basis, basis_norm2, valid, counts)
+-        scrambled = self._joint_residual(
+-            affinity * scrambled_rank, position, position_norm2,
+-            basis, basis_norm2, valid, counts)
+-        ordered_norm2 = ordered.square().sum(dim=(1, 2), keepdim=True)
+-        scrambled_norm2 = scrambled.square().sum(dim=(1, 2), keepdim=True)
+-        support = ((ordered_norm2 > 1e-10) & (scrambled_norm2 > 1e-10)
+-                   & (position_norm2 > 1e-10) & (match_norm2 > 1e-10)
+-                   & (fourth_norm2 > 1e-10)).to(valid.dtype)
+-        ordered = ordered * (position_norm2 / ordered_norm2.clamp_min(1e-10)).sqrt() * support
+-        scrambled = scrambled * (position_norm2 / scrambled_norm2.clamp_min(1e-10)).sqrt() * support
+-        duplicate_match = affinity * (position_norm2 / match_norm2.clamp_min(1e-10)).sqrt() * support
+-        duplicate_curvature = fourth * (position_norm2 / fourth_norm2.clamp_min(1e-10)).sqrt() * support
+-        # Gate and rescaling depend only on the authorized masked input IDs
+-        # and positions. No labels, learned values, new state or RNG enter.
+         available = ((position_norm2 > 1e-10)
+                      & (match_norm2 > 1e-10)).to(valid.dtype)
+         available_norm = affinity * (position_norm2 / match_norm2.clamp_min(1e-10)).sqrt() * available
+-        available_raw = affinity * available
+-        joint_raw = affinity * support
+-        # All four cells build all four alternatives. The joint/norm cell
+-        # returns exactly the old expression for a same-seed parity bridge.
+-        if self.match_support == 'available':
+-            return available_norm if self.match_scaling == 'norm' else available_raw
+-        return duplicate_match if self.match_scaling == 'norm' else joint_raw
++        return available_norm
+ 
+     @staticmethod

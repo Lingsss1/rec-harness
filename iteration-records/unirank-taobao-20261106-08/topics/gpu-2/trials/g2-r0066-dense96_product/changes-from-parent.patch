@@ -1,0 +1,112 @@
+--- g2-r0065-basis96_native/model.py
++++ g2-r0066-dense96_product/model.py
+@@ -1,9 +1,9 @@
+-"""Marginal factor capacity between rank70 and full112.
+-
+-A prospective rank112/rank96 by balanced/output-heavy factorial. All forward,
+-masking, gradient ownership and inherited random construction stay unchanged.
+-The new budgeted_factor mode reduces storage versus the full-rank factored
+-parent, while explicitly remaining larger than a single dense context map.
+-No training, runtime reduction, quality preservation or novelty is claimed.
++"""Train a dense context map from the same fresh rank-truncated product.
++
++This prospective replacement isolates continued factorized optimization from
++its inherited spectral initialization. Rank96 and rank88 dense variants have
++the same number of trainable coefficients and unrestricted rank after updates.
++All history, gradients, nonlinear widths, random draws and host training stay
++inherited. No quality preservation, measured speedup or novelty is claimed.
+ """
+ import torch
+@@ -14,5 +14,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'budgeted_factor', 'owner_context_rank': 96, 'owner_context_scale': 'inherited', 'owner_context_balance': 'balanced', 'owner_context_evaluation': 'native'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'budgeted_factor', 'owner_context_rank': 96, 'owner_context_scale': 'inherited', 'owner_context_balance': 'balanced', 'owner_context_evaluation': 'native', 'owner_context_parameterization': 'dense_product'}
+ 
+ 
+@@ -156,6 +156,12 @@
+     """
+     def __init__(self, source, context_width, projection, rank, scale, balance,
+-                 evaluation='native'):
++                 evaluation='native', parameterization='factors'):
+         super().__init__()
++        if parameterization not in ('factors', 'dense_product'):
++            raise ValueError('Unknown context training parameterization')
++        if parameterization == 'dense_product' and (
++                projection != 'budgeted_factor' or evaluation != 'native'
++                or scale != 'inherited' or balance != 'balanced'):
++            raise ValueError('Dense product fixes budgeted balanced native initialization')
+         if not isinstance(source, _PartitionedAffine):
+             raise ValueError('Expected a packed semantic affine')
+@@ -196,5 +202,10 @@
+         self.row_split = source.row_split
+         self.context_width = context_width
+-        self.projection = projection
++        # Initialization rank is not a continuing rank constraint in the
++        # dense-product cell. The inherited separate-mode forward now reads
++        # one actual dense Parameter, optimized freely from the first step.
++        self.initialization_projection = projection
++        self.parameterization = parameterization
++        self.projection = 'separate' if parameterization == 'dense_product' else projection
+         self.rank = rank
+         if evaluation not in ('native', 'folded', 'fused'):
+@@ -255,10 +266,27 @@
+                     output_factor = (left * signs.unsqueeze(0)) * singular.unsqueeze(0)
+                     input_factor = right * signs.unsqueeze(1)
+-                self.context_input = nn.Parameter(input_factor.to(
+-                    device=context.device, dtype=context.dtype).clone(),
+-                    requires_grad=source.first_weight.requires_grad)
+-                self.context_output = nn.Parameter(output_factor.to(
+-                    device=context.device, dtype=context.dtype).clone(),
+-                    requires_grad=source.first_weight.requires_grad)
++                if parameterization == 'dense_product':
++                    # Materialize exactly the fresh native factor product in
++                    # FP32, outside any caller autocast. This is constructor
++                    # work only, before optimizer construction or data access.
++                    # Clone compact storage; retain neither factor nor source.
++                    native_input = input_factor.to(device=context.device,
++                                                   dtype=context.dtype)
++                    native_output = output_factor.to(device=context.device,
++                                                     dtype=context.dtype)
++                    with torch.autocast(device_type=context.device.type, enabled=False):
++                        product = native_output.float() @ native_input.float()
++                    if not torch.isfinite(product).all():
++                        raise ValueError('Nonfinite fresh context factor product')
++                    self.context_weight = nn.Parameter(
++                        product.to(dtype=context.dtype).clone(),
++                        requires_grad=source.first_weight.requires_grad)
++                else:
++                    self.context_input = nn.Parameter(input_factor.to(
++                        device=context.device, dtype=context.dtype).clone(),
++                        requires_grad=source.first_weight.requires_grad)
++                    self.context_output = nn.Parameter(output_factor.to(
++                        device=context.device, dtype=context.dtype).clone(),
++                        requires_grad=source.first_weight.requires_grad)
+ 
+     def _evaluation_forward(self, features):
+@@ -350,4 +378,5 @@
+                  owner_context_balance='balanced',
+                  owner_context_evaluation='native',
++                 owner_context_parameterization='factors',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -361,4 +390,12 @@
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
++        if owner_context_parameterization not in ('factors', 'dense_product'):
++            raise ValueError('Unknown context training parameterization')
++        if owner_context_parameterization == 'dense_product' and (
++                owner_context_projection != 'budgeted_factor'
++                or owner_context_evaluation != 'native'
++                or owner_context_scale != 'inherited'
++                or owner_context_balance != 'balanced'):
++            raise ValueError('Dense product requires balanced native factor initialization')
+         self.compression_routes = compression_routes
+         if owner_context_evaluation not in ('native', 'folded', 'fused'):
+@@ -703,5 +740,5 @@
+                         owner_context_projection, owner_context_rank,
+                         owner_context_scale, owner_context_balance,
+-                        owner_context_evaluation)
++                        owner_context_evaluation, owner_context_parameterization)
+         self.model_to_device()
+ 

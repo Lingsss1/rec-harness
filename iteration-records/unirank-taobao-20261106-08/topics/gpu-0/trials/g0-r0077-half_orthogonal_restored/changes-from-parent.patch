@@ -1,0 +1,170 @@
+--- g0-r0075-native_orientation_bridge/model.py
++++ g0-r0077-half_orthogonal_restored/model.py
+@@ -1,10 +1,13 @@
+-"""Prospective norm-preserving buy-context orientation factorial.
+-
+-Independently reverse the parallel and perpendicular parts of the summed
+-buy-to-context cotangent, using the product-route cotangent as the axis in
+-each context field. Keep native per-field norms, the forward, private
+-branch derivatives, learned state, construction order and information
+-ownership. Native and full-reversal corners bypass reconstruction. This
+-is a first-order surrogate; tensor/BF16 and empirical checks are host-only.
++"""Prospective partial-component buy-context cotangent study.
++
++Inherit r0076's learned modules, exact forward, summary VJPs and ownership.
++For each context field decompose the buy cotangent N=R+P into A parallel
++and T orthogonal to product-branch P. Test A+0.5*T versus 0.5*A+T,
++either raw or restored to native field norm. The half coefficient is fixed
++before execution; there is no sweep, learned gate or current-label routing.
++A common relative degeneracy gate returns native N in all cells. All
++four candidate VJPs execute in every cell. No new learned state or RNG.
++Only first-order surrogate backward is claimed. Host tensor/BF16/parity
++checks and every new performance/cost outcome remain pending.
+ """
+ import torch
+@@ -15,5 +18,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'primary_summary_vjp': 'native', 'cartfav_summary_vjp': 'native', 'buy_summary_vjp': 'removed_restored', 'buy_context_vjp': 'native'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'primary_summary_vjp': 'native', 'cartfav_summary_vjp': 'native', 'buy_summary_vjp': 'removed_restored', 'buy_context_vjp': 'half_orthogonal_restored'}
+ 
+ 
+@@ -79,18 +82,19 @@
+ 
+ class _BuyContextVJP(torch.autograd.Function):
+-    """Cross signs of fieldwise parallel and perpendicular buy cotangents.
+-
+-    N = residual + product. In each context field let u = unit(product),
+-    A = <N,u>u, and T = N-A. Cross the signs in +/-A +/-T while keeping
+-    ||N_f|| for every field f. At nonzero product, T equals the residual
+-    component orthogonal to that route. These are first-order surrogates,
+-    not derivatives of the identical forward. No cross-task dot products,
+-    task-loss gradients or optimizer edits occur.
+-    Zero product fields use unit(N), hence T=0; those fields do not identify
+-    an orthogonal-direction effect. Zero N fields remain zero. Reflecting
+-    twice gives -N. Norm correction only removes FP32 reflection roundoff;
+-    it does not match repeated-ID sums, other tasks' sums, sparse updates,
+-    dense clipping or optimizer trajectories. All four cells execute the
+-    same geometry. No learned state, persistent diagnostics or RNG added.
++    """Partially attenuate a fieldwise component; cross norm restoration.
++
++    R/P are residual/product branch cotangents, N=R+P, u=P/||P||,
++    A=<N,u>u and T=N-A, independently in each context embedding field.
++    half_orthogonal uses A+0.5*T; half_parallel uses 0.5*A+T.
++    Raw arms retain the resulting magnitude; restored arms retain its
++    direction at ||N_f||. Parallel coefficient keeps its native sign.
++    Both A and T must exceed 1e-6*||N_f|| and P,N must be nonzero;
++    otherwise every arm returns native N. This matches r0076 support.
++
++    Geometry is computed in FP32 with scaled N and safe denominators.
++    All four candidate cotangents execute in all modes, including native
++    diagnostic mode. Norms are matched before input-dtype cast, repeated-ID
++    accumulation and task summation; optimizer updates are not matched.
++    A first-order surrogate only, not the derivative of a scalar objective.
+     """
+     @staticmethod
+@@ -126,42 +130,56 @@
+         fields = total.reshape(total.shape[0], -1, ctx.field_width)
+         product_fields = product.reshape(product.shape[0], -1, ctx.field_width)
+-        native_norm = _BuyContextVJP._row_norm(fields)
+         product_norm = _BuyContextVJP._row_norm(product_fields)
+-        safe_native = torch.where(native_norm > 0, native_norm,
+-                                  torch.ones_like(native_norm))
+         safe_product = torch.where(product_norm > 0, product_norm,
+                                    torch.ones_like(product_norm))
+-        axis = torch.where(product_norm > 0, product_fields / safe_product,
+-                           fields / safe_native)
+-        # Scale N before projection: no raw squared norms or unbounded ratios.
++        axis = product_fields / safe_product
+         scale = fields.abs().amax(dim=-1, keepdim=True)
+         safe_scale = torch.where(scale > 0, scale, torch.ones_like(scale))
+         scaled = fields / safe_scale
++        native_scaled_norm = _BuyContextVJP._row_norm(scaled)
++        native_norm = scale * native_scaled_norm
+         parallel = (scaled * axis).sum(dim=-1, keepdim=True) * axis
+-        # A-T = 2A-N. Opposite reflection is its exact negative.
+-        reflected = 2.0 * parallel - scaled
+-        reflected_norm = _BuyContextVJP._row_norm(reflected)
+-        safe_reflected = torch.where(reflected_norm > 0, reflected_norm,
+-                                     torch.ones_like(reflected_norm))
+-        orthogonal_flip = torch.where(
+-            reflected_norm > 0,
+-            (reflected / safe_reflected) * native_norm, fields)
+-        # Ensure an exact native fallback when the reference axis is absent.
+-        # A nonzero N then defines the axis itself: A=N and T=0.
+-        orthogonal_flip = torch.where(product_norm > 0, orthogonal_flip, fields)
+-        orthogonal_flip = orthogonal_flip.reshape_as(total)
+-        parallel_flip = -orthogonal_flip
+-        reversed_total = -total
+-        if ctx.mode == 'native':
+-            result = total
+-        elif ctx.mode == 'flip_orthogonal':
+-            result = orthogonal_flip
+-        elif ctx.mode == 'flip_parallel':
+-            result = parallel_flip
+-        elif ctx.mode == 'reverse_both':
+-            result = reversed_total
++        orthogonal = scaled - parallel
++        parallel_norm = _BuyContextVJP._row_norm(parallel)
++        orthogonal_norm = _BuyContextVJP._row_norm(orthogonal)
++        threshold = 1e-6 * native_scaled_norm
++        support = ((product_norm > 0) & (scale > 0)
++                   & (parallel_norm > threshold)
++                   & (orthogonal_norm > threshold))
++        half_orthogonal = parallel + 0.5 * orthogonal
++        half_parallel = 0.5 * parallel + orthogonal
++        half_orthogonal_norm = _BuyContextVJP._row_norm(half_orthogonal)
++        half_parallel_norm = _BuyContextVJP._row_norm(half_parallel)
++        safe_half_orthogonal = torch.where(half_orthogonal_norm > 0,
++            half_orthogonal_norm, torch.ones_like(half_orthogonal_norm))
++        safe_half_parallel = torch.where(half_parallel_norm > 0,
++            half_parallel_norm, torch.ones_like(half_parallel_norm))
++        half_orthogonal_raw = half_orthogonal * scale
++        half_parallel_raw = half_parallel * scale
++        half_orthogonal_restored = (
++            half_orthogonal / safe_half_orthogonal) * native_norm
++        half_parallel_restored = (
++            half_parallel / safe_half_parallel) * native_norm
++        half_orthogonal_raw = torch.where(support, half_orthogonal_raw, fields)
++        half_parallel_raw = torch.where(support, half_parallel_raw, fields)
++        half_orthogonal_restored = torch.where(
++            support, half_orthogonal_restored, fields)
++        half_parallel_restored = torch.where(
++            support, half_parallel_restored, fields)
++        if ctx.mode == 'half_orthogonal_raw':
++            result = half_orthogonal_raw
++        elif ctx.mode == 'half_parallel_raw':
++            result = half_parallel_raw
++        elif ctx.mode == 'half_orthogonal_restored':
++            result = half_orthogonal_restored
++        elif ctx.mode == 'half_parallel_restored':
++            result = half_parallel_restored
++        elif ctx.mode == 'native':
++            result = fields
+         else:
+-            raise ValueError('Unknown buy field orientation control')
+-        return result.to(ctx.input_dtype), None, None
++            raise ValueError('Unknown buy partial-component/norm control')
++        return result.reshape_as(total).to(ctx.input_dtype), None, None
++
++
+ 
+ 
+@@ -185,5 +203,5 @@
+                  primary_summary_vjp='native',
+                  cartfav_summary_vjp='native', buy_summary_vjp='removed_restored',
+-                 buy_context_vjp='native',
++                 buy_context_vjp='half_orthogonal_restored',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -233,7 +251,7 @@
+         self.cartfav_summary_vjp = cartfav_summary_vjp
+         self.buy_summary_vjp = buy_summary_vjp
+-        if buy_context_vjp not in ('native', 'flip_orthogonal',
+-                                   'flip_parallel', 'reverse_both'):
+-            raise ValueError('Unknown buy field orientation control')
++        if buy_context_vjp not in ('native', 'half_orthogonal_raw', 'half_parallel_raw',
++                                   'half_orthogonal_restored', 'half_parallel_restored'):
++            raise ValueError('Unknown buy partial-component/norm control')
+         if (not isinstance(embedding_dim, int) or isinstance(embedding_dim, bool)
+                 or embedding_dim < 1):

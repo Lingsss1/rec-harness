@@ -1,0 +1,84 @@
+--- g2-r0056-joint_energy_full112/model.py
++++ g2-r0057-context_balance_output35/model.py
+@@ -1,8 +1,10 @@
+-"""Attributing context-rank loss to truncation versus initialization energy.
+-
+-Prospective host study: separate dense and raw-rank35 bridges, exact full-rank
+-factor control, and energy-restored rank35 candidate. Keep every inherited
+-forward/masking/gradient path; all new work is fresh-weight construction only.
+-No training, checkpoint pruning, measured speedup or quality claim is made.
++"""Context rank x factor balance, initialized from fresh inherited weights.
++
++The two balances retain the same singular directions and initial product at
++fixed rank over real arithmetic. Balanced mode is the exact inherited path.
++Output-heavy mode places singular values in the output factor, changing
++optimization coordinates without adding parameters or nonlinear channels.
++SVD runs only in construction. No checkpoint/data access, training recipe
++change, local training, measured improvement or novelty claim is made.
+ """
+ import torch
+@@ -13,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'full_rank_control', 'owner_context_rank': 112, 'owner_context_scale': 'inherited'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'rank', 'owner_context_rank': 35, 'owner_context_scale': 'inherited', 'owner_context_balance': 'output_heavy'}
+ 
+ 
+@@ -154,5 +156,5 @@
+     affine, checkpoint, data, spectral tensor or derived cache persists.
+     """
+-    def __init__(self, source, context_width, projection, rank, scale):
++    def __init__(self, source, context_width, projection, rank, scale, balance):
+         super().__init__()
+         if not isinstance(source, _PartitionedAffine):
+@@ -162,4 +164,8 @@
+         if scale not in ('inherited', 'frobenius'):
+             raise ValueError('Unknown context initialization scale')
++        if balance not in ('balanced', 'output_heavy'):
++            raise ValueError('Unknown context factor balance')
++        if projection == 'separate' and balance != 'balanced':
++            raise ValueError('Dense context has no factor-balance intervention')
+         if projection != 'rank' and scale != 'inherited':
+             raise ValueError('Only reduced rank accepts energy restoration')
+@@ -220,7 +226,16 @@
+                 signs = left.gather(0, pivots).squeeze(0).sign()
+                 signs = torch.where(signs == 0, torch.ones_like(signs), signs)
+-                root = singular.sqrt()
+-                output_factor = (left * signs.unsqueeze(0)) * root.unsqueeze(0)
+-                input_factor = root.unsqueeze(1) * (right * signs.unsqueeze(1))
++                if balance == 'balanced':
++                    # Exact inherited balanced construction, including operation order.
++                    root = singular.sqrt()
++                    output_factor = (left * signs.unsqueeze(0)) * root.unsqueeze(0)
++                    input_factor = root.unsqueeze(1) * (right * signs.unsqueeze(1))
++                else:
++                    # Same U_r diag(s_r) V_r product over real arithmetic.
++                    # Only factor coordinates change: all singular magnitude
++                    # is in the output factor; input rows are orthonormal.
++                    # Optimizers, clipping and BF16 are not gauge invariant.
++                    output_factor = (left * signs.unsqueeze(0)) * singular.unsqueeze(0)
++                    input_factor = right * signs.unsqueeze(1)
+                 self.context_input = nn.Parameter(input_factor.to(
+                     device=context.device, dtype=context.dtype).clone(),
+@@ -275,4 +290,5 @@
+                  owner_context_projection='fused', owner_context_rank=0,
+                  owner_context_scale='inherited',
++                 owner_context_balance='balanced',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -291,4 +307,8 @@
+         if owner_context_scale not in ('inherited', 'frobenius'):
+             raise ValueError('Unknown context initialization scale')
++        if owner_context_balance not in ('balanced', 'output_heavy'):
++            raise ValueError('Unknown context factor balance')
++        if owner_context_projection in ('fused', 'separate') and owner_context_balance != 'balanced':
++            raise ValueError('Factor balance requires a factored context map')
+         if owner_context_projection != 'rank' and owner_context_scale != 'inherited':
+             raise ValueError('Energy restoration requires reduced context rank')
+@@ -619,5 +639,5 @@
+                         tower[0], len(self.user_fields) * embedding_dim,
+                         owner_context_projection, owner_context_rank,
+-                        owner_context_scale)
++                        owner_context_scale, owner_context_balance)
+         self.model_to_device()
+ 

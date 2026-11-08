@@ -1,0 +1,180 @@
+--- g2-r0014-age_behavior/model.py
++++ g2-r0015-task_centroid/model.py
+@@ -1,15 +1,17 @@
+-"""Prospective temporal-detail x feedback-composition readout factorial.
+-
+-Keep the incumbent's 30 count-preserving compressed slots, occupied scorer,
+-source gradient gates and old towers. Every cell exposes the stratified total
+-F=positive+other to the same widened, zero-output residual head. Independently
+-replace an age contrast with its corresponding total, and a feedback contrast
+-B=positive-other with F. These duplicates preserve nominal capacity/operators
+-while removing the respective new information. Input rank and optimization
+-conditioning remain confounds. Positive means ANY authorized historical
+-cart/fav/buy mask, not a current label or task-specific conversion.
+-
+-No additional event selection, embedding bank or scorer is introduced. This
+-is a local information-retention test; efficacy and novelty are unverified.
++"""Task-resolved moments without additional history scoring.
++
++Inherit the incumbent's compressed scorer, source gates, age/behavior readout
++and towers. Add identical zero-output residual heads in all cells. Exact task
++sums preserve cart/fav/buy membership within each of ten temporal partitions;
++centroid replacement keeps exact task counts but substitutes the union mean;
++union replacement duplicates the existing union sums/counts for every task.
++All cells execute the same task-mask sum operator and the existing 30-slot
++scorer. No event is scored again. Historical masks can overlap; these are not
++exclusive groups, current labels, or advertisement conversion attributions.
++
++Task summaries are weighted by the existing union-positive slot activation,
++then exposed as totals, signed last-ten-minus-older sums and counts/100. The
++new auxiliary paths detach item/action/scorer representations while retaining
++context gradients. Efficacy, efficiency and originality remain unverified.
+ """
+ import torch
+@@ -35,4 +37,6 @@
+     'behavior_readout': 'separate',
+     'residual_hidden_units': 32,
++    'identity_content': 'centroid',
++    'identity_hidden_units': 32,
+ }
+ 
+@@ -77,5 +81,5 @@
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='TemporalBehaviorReadout', gpu=-1,
++    def __init__(self, feature_map, model_id='TaskResolvedMoments', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+@@ -84,5 +88,6 @@
+                  history_partition='recent', scorer_population='occupied',
+                  content_order='chronological', temporal_readout='separate',
+-                 behavior_readout='separate', residual_hidden_units=32, num_tasks=None,
++                 behavior_readout='separate', residual_hidden_units=32,
++                 identity_content='centroid', identity_hidden_units=32, num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -125,4 +130,11 @@
+             raise ValueError('Unknown behavior readout')
+         self.behavior_readout = behavior_readout
++        if temporal_readout != 'separate' or behavior_readout != 'separate':
++            raise ValueError('Freeze the incumbent marginal readouts')
++        if identity_content not in ('exact', 'centroid', 'union'):
++            raise ValueError('Unknown task-moment replacement')
++        if identity_hidden_units != 32:
++            raise ValueError('Identity residual width is fixed at 32')
++        self.identity_content = identity_content
+         widths = (20, 20, 20, 20, 10, 5, 2, 1, 1, 1)
+         if history_partition == 'equal':
+@@ -191,4 +203,19 @@
+                 nn.init.zeros_(head[-1].weight)
+                 nn.init.zeros_(head[-1].bias)
++        # A separate RNG fork leaves every inherited parameter and the caller's
++        # CPU RNG unchanged. All replacement cells have identical new shapes,
++        # initialization and module order. Zero output reproduces the parent
++        # predictions initially; it does not promise trained-model equality.
++        with torch.random.fork_rng(devices=[]):
++            identity_width = (len(self.user_fields) * embedding_dim
++                              + self.key_width + 6 * self.value_width + 30)
++            self.identity_heads = nn.ModuleList([
++                nn.Sequential(nn.Linear(identity_width, identity_hidden_units),
++                              nn.ReLU(), nn.Linear(identity_hidden_units, 1))
++                for _ in feature_map.labels
++            ])
++            for head in self.identity_heads:
++                nn.init.zeros_(head[-1].weight)
++                nn.init.zeros_(head[-1].bias)
+         self.model_to_device()
+ 
+@@ -223,5 +250,11 @@
+         values = torch.cat([keys, item_emb[self.action_field][:, :-1]], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
+-        return context, target, values, mask, auxiliary
++        # Preserve all three authorized task masks, including overlaps. The
++        # canonical order is independent of the FeatureMap label order.
++        task_members = torch.stack([
++            (task_masks[index] > 0) & mask.bool()
++            for index in self.auxiliary_indices
++        ], dim=1)
++        return context, target, values, mask, auxiliary, task_members
+ 
+     def _content_permutation(self, valid, auxiliary):
+@@ -300,7 +333,48 @@
+         return total, readout
+ 
++    def _identity_statistics(self, raw_values, mask, task_members, values, counts):
++        # [B,task,partition,event]; no extra scorer rows or parameters.
++        clean = torch.where(mask.bool().unsqueeze(-1), raw_values,
++                            torch.zeros_like(raw_values))
++        assignment = (task_members[:, :, None, :]
++                      & self.partition[None, None, :, :])
++        assignment = assignment.reshape(raw_values.shape[0], 30, 100).to(clean.dtype)
++        task_counts = assignment.sum(dim=-1, dtype=torch.float32).reshape(-1, 3, 10)
++        exact = torch.bmm(assignment, clean).float().reshape(-1, 3, 10, self.value_width)
++        union_means = values.reshape(-1, 10, 3, self.value_width)[:, :, 2, :]
++        union_counts = counts.reshape(-1, 10, 3)[:, :, 2].float()
++        centroid = task_counts.unsqueeze(-1) * union_means[:, None, :, :]
++        duplicated = (union_counts.unsqueeze(-1) * union_means)[:, None, :, :].expand(-1, 3, -1, -1)
++        # Compute all alternatives before replacement in every cell. Exact
++        # task counts stay visible in the exact/centroid pair. The union cell
++        # contains no resolved mask information on any path to a logit.
++        if self.identity_content == 'exact':
++            sums, exposed_counts = exact, task_counts
++        elif self.identity_content == 'centroid':
++            sums, exposed_counts = centroid, task_counts
++        else:
++            sums = duplicated
++            exposed_counts = union_counts[:, None, :].expand(-1, 3, -1)
++        return sums, exposed_counts
++
++    def _identity_readout(self, primary_weights, sums, counts):
++        # Each partition's existing union-positive score is reused for each
++        # task sum. Counts are already present in sums; never multiply twice.
++        weights = primary_weights.reshape(-1, 10, 3)[:, :, 2].float()
++        # Common FP32 elementwise/reduction path across replacements; the
++        # BMM itself still follows the frozen host autocast recipe.
++        weighted = sums.float() * weights[:, None, :, None]
++        total = weighted.sum(dim=2)
++        age = (weighted * self.age_sign.to(weighted.dtype)[None, None, :, None]).sum(dim=2)
++        # Counts are unweighted and FP32, on the fixed 100-event scale.
++        # Do not interpret them as rates per unit time: timestamps unavailable.
++        return torch.cat([total.flatten(1), age.flatten(1),
++                          counts.flatten(1) / 100.0], dim=-1)
++
+     def forward(self, inputs):
+-        context, target, values, mask, auxiliary = self._represent(inputs)
+-        values, counts = self._compress_both(values, mask, auxiliary)
++        context, target, raw_values, mask, auxiliary, task_members = self._represent(inputs)
++        values, counts = self._compress_both(raw_values, mask, auxiliary)
++        identity_sums, identity_counts = self._identity_statistics(
++            raw_values, mask, task_members, values, counts)
+         # The readout replacement changes no compression counts, occupied
+         # scorer rows, input ordering or inherited Dice populations.
+@@ -308,4 +382,8 @@
+         primary_weights = self.local_activation(self._interactions(target, values), active)
+         primary_strata, primary_readout = self._pool(primary_weights, values, counts)
++        identity = self._identity_readout(primary_weights, identity_sums, identity_counts)
++        # Scorer and both item/action sources are frozen to auxiliary losses.
++        # Computing this descriptor once also avoids another Dice population.
++        aux_identity = identity.detach() if self.training else identity
+         uniform = primary_strata[:, 0, :]
+         click_readout = primary_readout[:, 0, :]
+@@ -338,12 +416,17 @@
+                              else feedback)
+         predictions = {}
+-        for label, tower, head in zip(self.feature_map.labels, self.towers, self.residual_heads):
++        for label, tower, head, identity_head in zip(
++                self.feature_map.labels, self.towers, self.residual_heads,
++                self.identity_heads):
+             if label == 'is_click':
+                 features = torch.cat([context, target, uniform], dim=-1)
+                 extra = (click_readout, primary_feedback, primary_behavior)
++                identity_input = torch.cat([context, target, identity], dim=-1)
+             else:
+                 features = torch.cat([aux_context, aux_target, feedback], dim=-1)
+                 extra = (feedback_readout, feedback, feedback_behavior)
+-            logits = tower(features) + head(torch.cat((features,) + extra, dim=-1))
++                identity_input = torch.cat([aux_context, aux_target, aux_identity], dim=-1)
++            logits = (tower(features) + head(torch.cat((features,) + extra, dim=-1))
++                      + identity_head(identity_input))
+             predictions[label + '_pred'] = torch.sigmoid(logits)
+         return predictions

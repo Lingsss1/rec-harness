@@ -1,0 +1,110 @@
+--- g1-r0026-summary_action_task/model.py
++++ g1-r0027-ordinal_summary_task/model.py
+@@ -1,11 +1,12 @@
+-"""Prospective attribution of actions in pooled values versus five summaries.
+-
+-The DIN scorer receives zero action coordinates. Independently preserve
+-observed historical actions in count-weighted pooled values or in the five
+-inherited target/ordinal residual summaries, crossed with task/shared bank
+-readout. The pooled base also enters the residual bank; this intervention
+-does not isolate the direct tower from residual processing of that base.
+-Original action-derived masks, partitions and gradient ownership remain.
+-This is conditional action-token path attribution on the offline benchmark.
++"""Prospective localization of historical actions within residual summaries.
++
++Keep action embeddings in target-match summaries (indices 0 and 4) or in
++ordinal summaries (indices 1, 2 and 3), crossed with task/shared bank readout.
++All item coordinates, summary coefficients, original action-derived masks,
++compression, module shapes, initialization and gradient ownership remain.
++Scorer and pooled action channels stay zero. The all/none settings are bridge
++endpoints for host diagnostics, not additional submitted training variants.
++These interventions measure conditional token paths in the offline benchmark,
++not total feedback removal. Equal shapes do not imply equal active capacity.
+ No training or tensor validation is performed in the coding environment.
+ """
+@@ -17,5 +18,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': False, 'action_in_summaries': True}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': False, 'action_in_summaries': True, 'summary_action_group': 'ordinal'}
+ 
+ 
+@@ -33,5 +34,5 @@
+                  support_gradient='attached', action_in_scorer=False,
+                  action_in_pool=False, action_in_summaries=True,
+-                 task='binary_classification', **kwargs):
++                 summary_action_group='ordinal', task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+@@ -79,4 +80,9 @@
+         self.action_in_pool = action_in_pool
+         self.action_in_summaries = action_in_summaries
++        if action_in_pool is not False or action_in_summaries is not True:
++            raise ValueError('This study isolates action content inside summaries')
++        if summary_action_group not in ('match', 'ordinal', 'all', 'none'):
++            raise ValueError('Unknown summary action group')
++        self.summary_action_group = summary_action_group
+         self.residual_input = residual_input
+         self.residual_routing = residual_routing
+@@ -190,12 +196,12 @@
+         user_emb = self.embedding_layer(user)
+         embedding_item = item
+-        # Preserve the prior zero-token endpoint for bridge diagnostics:
+-        # neither observed IDs nor an action-parameter gradient graph is
+-        # retained when both paths are disabled. Mixed cells use observations.
+-        if not self.action_in_pool and not self.action_in_summaries:
++        # The none endpoint must match prior zero-token lookup and gradient
++        # semantics, including no action-parameter graph after lookup.
++        needs_action = self.summary_action_group != 'none'
++        if not needs_action:
+             embedding_item = dict(item)
+             embedding_item[self.action_field] = torch.zeros_like(item[self.action_field])
+         item_emb = self.embedding_layer(embedding_item)
+-        if not self.action_in_pool and not self.action_in_summaries:
++        if not needs_action:
+             item_emb[self.action_field] = torch.zeros_like(item_emb[self.action_field])
+         target = torch.cat([item_emb[name][:, -1] for name in self.item_fields], dim=-1)
+@@ -204,6 +210,6 @@
+         values = torch.cat([keys, item_emb[self.action_field][:, :-1]], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
+-        # All five summaries share this intervention. Item coordinates and
+-        # coefficients/match counts remain identical to the inherited model.
++        # All summaries are computed once from the same values. A projection
++        # after contraction selects only their historical action coordinates.
+         detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._target_match_summary(
+             item, self._action_channel(values, self.action_in_summaries), mask)
+@@ -301,4 +307,5 @@
+         summaries = summaries.reshape(batch, 10, 5, width).sum(dim=1)
+         summaries = summaries / total.sqrt().unsqueeze(-1).to(summaries.dtype)
++        summaries = self._summary_action_channels(summaries)
+         return (summaries[:, 0, :], summaries[:, 1, :], summaries[:, 2, :],
+                 summaries[:, 3, :], summaries[:, 4, :], match_counts,
+@@ -513,4 +520,28 @@
+             batch, 10, 7, self.value_width)
+         return weighted.sum(dim=1)
++
++    def _summary_action_channels(self, summaries):
++        """Select action content only; preserve five full-width summary slots.
++
++        Summary indices 0/4 carry the inherited target-match coefficients;
++        1/2/3 carry local position, coarse linear and quadratic coefficients.
++        The fifth match direction retains its existing support/scale gates.
++        All learned modules and all coefficient computations execute unchanged.
++        """
++        if self.summary_action_group == 'all':
++            return summaries
++        if self.summary_action_group == 'match':
++            keep = (1, 0, 0, 0, 1)
++        elif self.summary_action_group == 'ordinal':
++            keep = (0, 1, 1, 1, 0)
++        else:
++            keep = (0, 0, 0, 0, 0)
++        # torch.where eliminates disabled gradients without rescaling the
++        # surviving action content. No new learned state, RNG or scorer pass.
++        active = torch.tensor(keep, device=summaries.device,
++                              dtype=torch.bool).view(1, 5, 1)
++        action = summaries[:, :, self.key_width:]
++        action = torch.where(active, action, torch.zeros_like(action))
++        return torch.cat([summaries[:, :, :self.key_width], action], dim=-1)
+ 
+     def _action_channel(self, values, enabled):

@@ -1,0 +1,140 @@
+--- g0-r0019-cubic_gated_duplicate/model.py
++++ g0-r0021-target_partition_rotated/model.py
+@@ -1,9 +1,8 @@
+-"""Fifth-summary replacement by a coarse cubic ordinal contrast.
+-
+-All cells construct the same coefficients and learned modules. New cubic
+-and scrambled contrasts are projected off valid constants, coarse linear
+-ranks and the inherited quadratic. Eligibility and coefficient norm match
+-between the three replacement cells. The bridge returns the exact incumbent
+-fifth expression. Positions are array ordinals, never elapsed time.
++"""Target-aligned block compression before nonlinear DIN scoring.
++
++The three replacement cells build and score the same seven-slot population
++per block. Only the selected primary readout differs. Rotation preserves
++match counts among valid positions; all inherited residual summaries and
++auxiliary gradient ownership remain fixed. No new learned parameters.
+ """
+ import torch
+@@ -14,5 +13,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'rotated'}
+ 
+ 
+@@ -27,5 +26,5 @@
+                  curvature_detail='quadratic', joint_detail='duplicate_match',
+                  match_support='available', match_scaling='norm', coarse_extension='duplicate',
+-                 task='binary_classification', **kwargs):
++                 primary_partition='rotated', task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+@@ -81,4 +80,7 @@
+             raise ValueError('Unknown coarse ordinal replacement')
+         self.coarse_extension = coarse_extension
++        if primary_partition not in ('aligned', 'rotated', 'uniform'):
++            raise ValueError('Unknown primary partition readout')
++        self.primary_partition = primary_partition
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -173,7 +175,7 @@
+         values = torch.cat([keys, item_emb[self.action_field][:, :-1]], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
+-        detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts = self._target_match_summary(
++        detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._target_match_summary(
+             item, values, mask)
+-        return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts
++        return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union
+ 
+     def _target_match_summary(self, item, values, mask):
+@@ -269,5 +271,6 @@
+         summaries = summaries / total.sqrt().unsqueeze(-1).to(summaries.dtype)
+         return (summaries[:, 0, :], summaries[:, 1, :], summaries[:, 2, :],
+-                summaries[:, 3, :], summaries[:, 4, :], match_counts)
++                summaries[:, 3, :], summaries[:, 4, :], match_counts,
++                match_matrix.bool().any(dim=-1))
+ 
+     def _coarse_extension_coefficients(self, incumbent, position, quadratic,
+@@ -431,4 +434,47 @@
+         return means.reshape(batch, groups * 3, width), counts.reshape(batch, groups * 3)
+ 
++    def _compress_with_match(self, values, mask, auxiliary, match_union):
++        """Same seven means in every cell; each pair partitions valid events.
++
++        Valid-rank rotation operates inside a block, including noncontiguous
++        validity masks, and preserves target-match cardinality. Special IDs
++        have already been excluded by _target_match_summary. No labels,
++        external identities, timestamps, state or RNG enter this assignment.
++        """
++        batch, length, width = values.shape
++        if length != 100:
++            raise ValueError('Frozen protocol requires 100 history positions')
++        valid = mask.bool().reshape(batch, 10, 10)
++        feedback = auxiliary.bool().reshape(batch, 10, 10) & valid
++        matched = match_union.bool().reshape(batch, 10, 10) & valid
++        rotated = self._rotate_valid_membership(matched, valid)
++        assignment = torch.stack(
++            (valid, valid & ~feedback, feedback,
++             valid & ~matched, matched, valid & ~rotated, rotated), dim=-2)
++        assignment = assignment.to(values.dtype).reshape(batch * 10, 7, 10)
++        counts = assignment.sum(dim=-1)
++        sums = torch.bmm(assignment, values.reshape(batch * 10, 10, width))
++        means = sums / counts.clamp_min(1).unsqueeze(-1)
++        return means.reshape(batch, 70, width), counts.reshape(batch, 70)
++
++    @staticmethod
++    def _rotate_valid_membership(matched, valid):
++        # Pack membership by valid-event rank, rotate by half the valid
++        # count, then unpack to the original valid positions. Invalid
++        # entries contribute zero even when scatter indices coincide.
++        matched = matched & valid
++        ranks = (valid.long().cumsum(dim=-1) - 1).clamp_min(0)
++        counts = valid.long().sum(dim=-1, keepdim=True)
++        packed = torch.zeros_like(ranks).scatter_add(-1, ranks, matched.long())
++        source = (ranks + counts // 2).remainder(counts.clamp_min(1))
++        return packed.gather(-1, source).bool() & valid
++
++    def _pool_seven(self, weights, values, counts):
++        batch = values.shape[0]
++        weights = weights.reshape(batch, 70) * counts.to(weights.dtype)
++        weighted = (weights.unsqueeze(-1) * values).reshape(
++            batch, 10, 7, self.value_width)
++        return weighted.sum(dim=1)
++
+     def _interactions(self, target, values):
+         keys = values[:, :, :self.key_width]
+@@ -461,12 +507,25 @@
+ 
+     def forward(self, inputs):
+-        context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts = self._represent(inputs)
+-        values, counts = self._compress_both(values, mask, auxiliary)
+-        # Both scorer calls include all 30 slots: BatchNorm sees the identical
+-        # population. Selecting ten versus twenty slots BEFORE scoring would
+-        # change the forward operator and invalidate the gradient-only claim.
+-        primary_weights = self.local_activation(self._interactions(target, values))
+-        primary_strata = self._pool(primary_weights, values, counts)
+-        uniform = primary_strata[:, 0, :]
++        context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._represent(inputs)
++        batch = values.shape[0]
++        all_values, all_counts = self._compress_with_match(values, mask, auxiliary, match_union)
++        # All three cells expose EXACTLY the same ordered 70-slot population
++        # to Dice and its running-state update. Select only AFTER scoring.
++        primary_weights = self.local_activation(self._interactions(target, all_values))
++        all_strata = self._pool_seven(primary_weights, all_values, all_counts)
++        if self.primary_partition == 'aligned':
++            uniform = all_strata[:, 3, :] + all_strata[:, 4, :]
++        elif self.primary_partition == 'rotated':
++            uniform = all_strata[:, 5, :] + all_strata[:, 6, :]
++        else:
++            uniform = all_strata[:, 0, :]
++        # Auxiliary training retains the original ordered 30-slot population
++        # and the original scorer/item stop-gradient ownership. No extra
++        # slots enter its training Dice batch statistics. During evaluation
++        # Dice acts pointwise, so the first three primary strata are reused.
++        values = all_values.reshape(batch, 10, 7, self.value_width)[:, :, :3, :].reshape(
++            batch, 30, self.value_width)
++        counts = all_counts.reshape(batch, 10, 7)[:, :, :3].reshape(batch, 30)
++        primary_strata = all_strata[:, :3, :]
+ 
+         if self.training:

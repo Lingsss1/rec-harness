@@ -1,0 +1,93 @@
+--- g1-r0000-exchange_q1_w1/model.py
++++ g1-r0001-mass_m0_q0/model.py
+@@ -1,7 +1,9 @@
+-"""Two-round field/history exchange; prospective experiment, not a validated result.
++"""Prospective history-mass / query-refresh factorial; no measured outcome.
+ 
+-Adaptation of repeated cross retrieval and affine broadcast ideas inspected in
+-pinned EST and INFNet benchmark sources. No original-method reproduction or
+-priority claim. CONFIG toggles a capacity-matched 2x2 feedback contrast.
++Continues the unsuccessful two-round exchange trajectory. DIN primary text
++(arXiv:1706.06978v4, lines 272-277) motivates testing interest intensity;
++this square-root-count scaling is a bounded experimental adaptation, not DIN
++reproduction or a new-priority claim. All cells expose explicit log-count.
++Frozen host training, information visibility and four-task loss are inherited.
+ """
+ import math
+@@ -13,5 +15,5 @@
+ 
+ CONFIG = {'embedding_dim': 16, 'token_dim': 32,
+-          'refresh_query': True, 'feedback_write': True}
++          'refresh_query': False, 'mass_scaling': False}
+ 
+ 
+@@ -35,6 +37,7 @@
+ 
+ class Read(nn.Module):
+-    def __init__(self, width):
++    def __init__(self, width, mass_scaling):
+         super().__init__()
++        self.mass_scaling = bool(mass_scaling)
+         self.qnorm = nn.LayerNorm(width)
+         self.enorm = nn.LayerNorm(width)
+@@ -55,4 +58,10 @@
+         weights = weights * valid.to(weights.dtype)
+         weights = weights / weights.sum(-1, keepdim=True).clamp_min(1e-9)
++        # Both branches compute identical counts. The treatment changes only
++        # evidence magnitude, retaining relative event weights and strict masks.
++        # sqrt(n) lies in [0,10] for the frozen 100-event prefix; n=0 stays zero.
++        count = mask.float().sum(dim=-1, keepdim=True).unsqueeze(1)
++        scale = count.sqrt() if self.mass_scaling else torch.ones_like(count)
++        weights = weights * scale
+         return self.out(torch.bmm(weights.to(v.dtype), v))
+ 
+@@ -74,7 +83,7 @@
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='FieldHistoryExchange', gpu=-1,
++    def __init__(self, feature_map, model_id='HistoryMassExchange', gpu=-1,
+                  embedding_dim=16, token_dim=32, refresh_query=True,
+-                 feedback_write=True, num_tasks=None,
++                 mass_scaling=True, num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -83,5 +92,5 @@
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         self.refresh_query = bool(refresh_query)
+-        self.feedback_write = bool(feedback_write)
++        self.mass_scaling = bool(mass_scaling)
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [n for n, s in feature_map.features.items()
+@@ -99,7 +108,7 @@
+         self.event_proj = nn.Linear(event_width + 1, token_dim)
+         self.mixers = nn.ModuleList([FieldMix(token_dim) for _ in range(2)])
+-        self.readers = nn.ModuleList([Read(token_dim) for _ in range(2)])
++        self.readers = nn.ModuleList([Read(token_dim, self.mass_scaling) for _ in range(2)])
+         self.writer = Write(token_dim)
+-        tower_width = self.field_count * (embedding_dim + token_dim)
++        tower_width = self.field_count * (embedding_dim + token_dim) + 1
+         self.towers = nn.ModuleList([
+             nn.Sequential(nn.Linear(tower_width, 128), Dice(128),
+@@ -129,12 +138,17 @@
+         first_query = self.mixers[0](fields)
+         first_fields = first_query + self.readers[0](first_query, events, mask)
+-        # Both write conditions use the same modules and tensor sizes. Only the
+-        # source of conditioning differs; all write parameters remain active.
+-        write_condition = first_fields if self.feedback_write else first_query
+-        events = self.writer(events, write_condition, mask)
++        # Keep the best prior write condition fixed in this follow-up. A changed
++        # read magnitude can affect the subsequent broadcast as well as readout.
++        events = self.writer(events, first_fields, mask)
+         second_fields = self.mixers[1](first_fields)
+         query = first_fields if self.refresh_query else first_query
+         final_fields = second_fields + self.readers[1](query, events, mask)
+-        features = torch.cat([torch.cat(raw_fields, dim=-1), final_fields.flatten(1)], dim=-1)
++        # Identical scalar and active tower capacity in all four cells controls
++        # for learning the history-length prior directly. This is visible-prefix
++        # length, not full historical exposure count or a timestamp proxy.
++        log_count = torch.log1p(mask.float().sum(dim=-1, keepdim=True)) / math.log(101.0)
++        log_count = log_count.to(final_fields.dtype)
++        features = torch.cat([torch.cat(raw_fields, dim=-1),
++                              final_fields.flatten(1), log_count], dim=-1)
+         return {label + '_pred': torch.sigmoid(tower(features))
+                 for label, tower in zip(self.feature_map.labels, self.towers)}

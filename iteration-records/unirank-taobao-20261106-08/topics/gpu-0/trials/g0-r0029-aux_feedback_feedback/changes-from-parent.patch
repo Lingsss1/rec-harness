@@ -1,0 +1,107 @@
+--- g0-r0028-dispatch_folded/model.py
++++ g0-r0029-aux_feedback_feedback/model.py
+@@ -1,10 +1,11 @@
+-"""Direct task-adapter execution at fixed learned capacity.
+-
+-The inherited task readout evaluates four adapters and selects one, four
+-separate times. With task routing fixed, direct execution evaluates only the
+-selected Linear/ReLU/Linear adapter for each task. All adapters remain learned
+-and initialized in the inherited order. Scorers, Dice populations, source
+-ownership and all data/label/loss contracts are unchanged within each pair.
+-No numerical parity or runtime improvement is claimed before host checks.
++"""Auxiliary history normalization population/state factorial.
++
++All learned modules and the primary path come from the direct folded ancestor.
++Training always collects independent feedback-population running moments with
++native Dice and detached scorer/item inputs. Auxiliary readout chooses that
++feedback pass or detached primary strata. Eval chooses primary or feedback
++running moments. Independent moments are nonlearned checkpointed buffers;
++no labels, new features, losses or extra parameter gradients are introduced.
++Host parity, ownership, numerical and measured-cost checks remain required.
+ """
+ import torch
+@@ -15,5 +16,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'feedback', 'auxiliary_eval_population': 'feedback'}
+ 
+ 
+@@ -31,4 +32,5 @@
+                  support_gradient='attached', inference_support='fully_pruned',
+                  training_support='folded', residual_execution='direct',
++                 auxiliary_train_population='feedback', auxiliary_eval_population='feedback',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -111,4 +113,10 @@
+             raise ValueError('Unknown task-adapter execution mode')
+         self.residual_execution = residual_execution
++        if auxiliary_train_population not in ('feedback', 'primary'):
++            raise ValueError('Unknown auxiliary training normalization population')
++        if auxiliary_eval_population not in ('primary', 'feedback'):
++            raise ValueError('Unknown auxiliary evaluation normalization population')
++        self.auxiliary_train_population = auxiliary_train_population
++        self.auxiliary_eval_population = auxiliary_eval_population
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -171,4 +179,13 @@
+                 nn.init.zeros_(adapter[-1].weight)
+                 nn.init.zeros_(adapter[-1].bias)
++        # Add only nonlearned state, AFTER every inherited learned module and
++        # initialization. Native Dice has running mean/variance and counters.
++        # Registered clones move with the model and round-trip in checkpoints;
++        # they never alias the primary running buffers. No RNG is consumed.
++        self._auxiliary_state_names = {}
++        for index, (name, buffer) in enumerate(self.local_activation.named_buffers()):
++            storage_name = '_auxiliary_moment_' + str(index)
++            self.register_buffer(storage_name, buffer.detach().clone())
++            self._auxiliary_state_names[name] = storage_name
+         self.model_to_device()
+ 
+@@ -611,9 +628,10 @@
+             for name, parameter in self.local_activation.named_parameters()
+         }
+-        # Dice contains BatchNorm running state. Only the primary call may
+-        # update persistent buffers. Cloned auxiliary buffers also prevent an
+-        # in-place second update of state referenced by the first graph.
+-        buffers = {name: buffer.detach().clone()
+-                   for name, buffer in self.local_activation.named_buffers()}
++        # Independent registered state is updated by native BatchNorm during
++        # training and read during eval. Fixed momentum0.01 makes train output
++        # independent of previous running moments/counter values. The original
++        # primary buffers are never supplied to this functional call.
++        buffers = {name: getattr(self, storage_name)
++                   for name, storage_name in self._auxiliary_state_names.items()}
+         return torch.func.functional_call(
+             self.local_activation, (parameters, buffers), (interactions,), strict=True)
+@@ -699,8 +717,16 @@
+             aux_joint_detail = joint_detail.detach() if self.block_aux_item_grad else joint_detail
+             aux_weights = self._auxiliary_activation(self._interactions(aux_target, aux_values))
+-            aux_strata = self._pool(aux_weights, aux_values, counts)
++            feedback_population_strata = self._pool(aux_weights, aux_values, counts)
++            # Execute feedback scoring in every training cell to match work
++            # and collect a complete independent running-state trajectory.
++            # Primary strata have all support rows in their native moments;
++            # detach the entire result to preserve auxiliary source ownership.
++            if self.auxiliary_train_population == 'primary':
++                aux_strata = primary_strata.detach()
++            else:
++                aux_strata = feedback_population_strata
+         else:
+-            # Identical values/parameters and no state update: inference needs
+-            # just one scorer pass for every replacement cell.
++            # The eval factor never changes training operations. Each choice
++            # uses only frozen running moments; eval cannot update either set.
+             aux_context, aux_target = context, target
+             aux_detail = detail
+@@ -709,5 +735,9 @@
+             aux_curvature_detail = curvature_detail
+             aux_joint_detail = joint_detail
+-            aux_strata = primary_strata
++            if self.auxiliary_eval_population == 'feedback':
++                aux_weights = self._auxiliary_activation(self._interactions(target, values))
++                aux_strata = self._pool(aux_weights, values, counts)
++            else:
++                aux_strata = primary_strata
+         feedback = aux_strata[:, 1, :] + aux_strata[:, 2, :]
+         grouped_counts = counts.reshape(counts.shape[0], 10, 3)

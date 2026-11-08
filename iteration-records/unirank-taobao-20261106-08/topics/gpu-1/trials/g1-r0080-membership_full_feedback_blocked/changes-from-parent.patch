@@ -1,0 +1,168 @@
+--- g1-r0079-membership_full_control/model.py
++++ g1-r0080-membership_full_feedback_blocked/model.py
+@@ -1,10 +1,11 @@
+-"""Occupied-cycle auxiliary bit source at fixed forward architecture.
+-
+-Cross a cyclic permutation of occupied auxiliary cotangent triples with
+-native-source bridges and both external signs. Only the Q orientation bit
+-uses donors; native full-task radius, canonical fixed-angle line, support,
+-true-label joint BCE and all private learning are inherited. Every helper
+-runs in every arm. This is a first-order row-space surrogate VJP, not the
+-ordinary gradient of the reported scalar BCE. No novelty claim is made.
++"""Membership-content by scorer-normalization backward-path control.
++
++Only primary-scorer feedback rows (1 and 2 in each seven-row Dice
++population) are detached immediately before each Dice during training.
++Forward inputs, native batch/running moments and all support multiplicities
++are unchanged at a common state. Auxiliary losses, ownership and inherited
++context surrogate VJP remain intact. This is a declared surrogate backward
++operator; it does not add information beyond historical action codes.
++No novelty or measured improvement is claimed.
+ """
+ import torch
+@@ -15,5 +16,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'membership_use': 'full', 'feedback_normalization_gradient': 'blocked'}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -886,4 +887,6 @@
+                  click_relative_transfer='orthogonal_native',
+                  orthogonal_assignment='nuisance_line_fixed_angle_occupied_cycle_source_bit',
++                 membership_use='full',
++                 feedback_normalization_gradient='blocked',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -897,4 +900,12 @@
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
++        if membership_use not in ('full', 'blind', 'counts', 'permuted'):
++            raise ValueError('Unknown membership representation')
++        self.membership_use = membership_use
++        if feedback_normalization_gradient != 'blocked':
++            raise ValueError('This source requires blocked feedback Dice inputs')
++        if training_support != 'folded' or support_gradient != 'attached':
++            raise ValueError('Feedback backward control requires native folded support')
++        self.feedback_normalization_gradient = feedback_normalization_gradient
+         self.compression_routes = compression_routes
+         if block_aux_scorer_grad is not True:
+@@ -1146,9 +1157,20 @@
+         if mask.ndim != 2 or mask.shape[1] != 100:
+             raise ValueError('Frozen protocol requires 100 history positions')
++        for task_mask in task_masks:
++            if task_mask.shape != mask.shape:
++                raise ValueError('Historical task mask shape mismatch')
++        # Shape validation is shared; the blind representation never consumes
++        # task-mask values. Historical item fields/actions are untouched.
+         auxiliary = torch.zeros_like(mask, dtype=torch.bool)
+-        for index in self.auxiliary_indices:
+-            if task_masks[index].shape != mask.shape:
+-                raise ValueError('Historical task mask shape mismatch')
+-            auxiliary = auxiliary | (task_masks[index] > 0)
++        if self.membership_use != 'blind':
++            if self.membership_use == 'permuted':
++                valid_blocks = mask.bool().reshape(mask.shape[0], 10, 10)
++                # One deterministic valid-rank map for every bit preserves the
++                # entire joint mask-pattern multiset inside each block.
++                task_masks = [self._rotate_valid_membership(
++                    (task_mask > 0).reshape(mask.shape[0], 10, 10),
++                    valid_blocks).reshape_as(mask) for task_mask in task_masks]
++            for index in self.auxiliary_indices:
++                auxiliary = auxiliary | (task_masks[index] > 0)
+         auxiliary = auxiliary & mask.bool()
+         user_emb = self.embedding_layer(user)
+@@ -1401,4 +1423,30 @@
+         return residual, residual.square().sum(dim=(1, 2), keepdim=True)
+ 
++    def _replace_feedback_rows(self, means, counts):
++        """Replace content grouping without adding parameters or scorer rows.
++
++        Rows are [uniform, complement, membership, ...support]. Counts-only
++        retains actual per-block union counts and emptiness, but both nonempty
++        feedback means are the all-valid block mean. Blind uses half/half soft
++        mass independent of supplied membership; both rows cover valid events
++        uniformly. Empty blocks remain exactly zero. The uniform and target-
++        match support rows, values, action alignment and event order survive.
++        """
++        if self.membership_use not in ('blind', 'counts'):
++            return means, counts
++        uniform = means[:, :1, :]
++        total = counts[:, :1]
++        member_count = (total * 0.5 if self.membership_use == 'blind'
++                        else counts[:, 2:3])
++        complement_count = total - member_count
++        replacement_means = torch.cat((
++            uniform,
++            uniform * (complement_count > 0).to(means.dtype).unsqueeze(-1),
++            uniform * (member_count > 0).to(means.dtype).unsqueeze(-1),
++            means[:, 3:, :]), dim=1)
++        replacement_counts = torch.cat((
++            total, complement_count, member_count, counts[:, 3:]), dim=1)
++        return replacement_means, replacement_counts
++
+     def _compress_both(self, values, mask, auxiliary):
+         batch, length, width = values.shape
+@@ -1416,4 +1464,5 @@
+         sums = torch.bmm(assignment, grouped)
+         means = sums / counts.clamp_min(1).unsqueeze(-1)
++        means, counts = self._replace_feedback_rows(means, counts)
+         return means.reshape(batch, groups * 3, width), counts.reshape(batch, groups * 3)
+ 
+@@ -1446,4 +1495,5 @@
+         sums = torch.bmm(assignment, values.reshape(batch * 10, 10, width))
+         means = sums / counts.clamp_min(1).unsqueeze(-1)
++        means, counts = self._replace_feedback_rows(means, counts)
+         return means.reshape(batch, 70, width), counts.reshape(batch, 70)
+ 
+@@ -1467,4 +1517,5 @@
+         sums = torch.bmm(assignment, values.reshape(batch * 10, 10, width))
+         means = sums / counts.clamp_min(1).unsqueeze(-1)
++        means, counts = self._replace_feedback_rows(means, counts)
+         return means.reshape(batch, 50, width), counts.reshape(batch, 50)
+ 
+@@ -1483,4 +1534,21 @@
+         return rows.reshape(batch, 10, 5, width).index_select(2, index).reshape(
+             batch, 70, width)
++
++    def _feedback_dice_input(self, hidden):
++        """Keep values and native moments; block feedback-input cotangents.
++
++        Call only on the expanded seven-row primary scorer population.
++        Rows 0 and 3..6 retain their ordinary gradient. Rows 1 and 2 keep
++        their exact forward values and normalization mass, including empty
++        rows. Native Dice parameters and its running-state updates survive.
++        The gate does not touch auxiliary-context transfer or task losses.
++        """
++        if not self.training:
++            return hidden
++        if hidden.ndim != 2 or hidden.shape[0] % 70 != 0:
++            raise ValueError('Expected expanded [B*70,D] primary Dice input')
++        slot = torch.arange(hidden.shape[0], device=hidden.device).remainder(7)
++        feedback = ((slot == 1) | (slot == 2)).unsqueeze(-1)
++        return torch.where(feedback, hidden.detach(), hidden)
+ 
+     def _folded_support_activation(self, interactions, batch):
+@@ -1500,5 +1568,6 @@
+             if isinstance(layer, Dice):
+                 expanded = self._expand_support_rows(hidden.reshape(batch, 50, -1))
+-                expanded = layer(expanded.reshape(batch * 70, -1))
++                expanded = self._feedback_dice_input(expanded.reshape(batch * 70, -1))
++                expanded = layer(expanded)
+                 hidden = expanded.reshape(batch, 10, 7, -1)[:, :, :5, :].reshape(
+                     batch * 50, -1)
+@@ -1548,6 +1617,13 @@
+         No extra scorer pass, parameters, persistent state or RNG is added.
+         """
+-        if not self.training or self.support_gradient == 'attached':
++        if not self.training:
+             return self.local_activation(interactions)
++        if self.support_gradient == 'attached':
++            hidden = interactions
++            for layer in self.local_activation:
++                if isinstance(layer, Dice):
++                    hidden = self._feedback_dice_input(hidden)
++                hidden = layer(hidden)
++            return hidden
+         retained = (torch.arange(interactions.shape[0], device=interactions.device)
+                     .remainder(7) < 3).unsqueeze(-1)

@@ -1,0 +1,107 @@
+--- g2-r0041-joint_adapter_keep_buy/model.py
++++ g2-r0042-joint_stage_no_residual_shallow/model.py
+@@ -1,9 +1,9 @@
+-"""Matched residual capacity allocations under fixed buy-only context ownership.
+-
+-All four outputs and losses stay active. Instantiate the complete inherited
+-random template before removing fixed auxiliary adapter channels. Common
+-initialization draws, all forward methods and task gradient gates are inherited.
+-Global dense gradient clipping can couple private heads during optimization.
+-No measured efficiency, independence or architectural novelty is asserted.
++"""Factorial removal of private auxiliary residuals and hidden tower stages.
++
++The complete inherited random template is initialized before branch removal.
++Only cart/fav branches change; click/buy information flow and all four losses
++remain active. Shared dense clipping can still couple the optimized branches.
++A shallow tower is a new subnetwork, not an algebraically equivalent folding.
++No measured speed, independence, or architecture priority claim is made.
+ """
+ import torch
+@@ -14,5 +14,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [48, 32], 'fav': [48, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [48, 32], 'fav': [48, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'removed', 'nonowner_tower_depth': 1}
+ 
+ 
+@@ -36,4 +36,5 @@
+                  auxiliary_residual_overrides=None,
+                  auxiliary_context_tasks=('buy',),
++                 nonowner_residual='retained', nonowner_tower_depth=2,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -48,4 +49,12 @@
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         self.compression_routes = compression_routes
++        if tuple(auxiliary_context_tasks) != ('buy',):
++            raise ValueError('This factorial fixes buy-only auxiliary context ownership')
++        if nonowner_residual not in ('retained', 'removed'):
++            raise ValueError('Unknown nonowner residual intervention')
++        if isinstance(nonowner_tower_depth, bool) or nonowner_tower_depth not in (1, 2):
++            raise ValueError('Nonowner tower depth must be 1 or 2')
++        self.nonowner_residual = nonowner_residual
++        self.nonowner_tower_depth = nonowner_tower_depth
+         # The full-width template fixes the common initialization draws.
+         # Effective widths are architecture choices; host training is unchanged.
+@@ -222,8 +231,20 @@
+         # All discarded channels are removed, including Dice state, before
+         # optimizer construction; no full-sized backing tensors are retained.
+-        for label, tower in zip(feature_map.labels, self.towers):
++        for index, (label, tower) in enumerate(zip(feature_map.labels, self.towers)):
+             widths = (click_tower_hidden_units if label == 'is_click'
+                       else auxiliary_tower_overrides.get(label, auxiliary_tower_hidden_units))
+-            self._reduce_tower(tower, widths)
++            if label in ('cart', 'fav') and nonowner_tower_depth == 1:
++                # The full template output has 64 inputs. Retain its first
++                # h1 coefficients as a direct readout of the first hidden
++                # layer. The original second hidden layer and Dice, including
++                # their running buffers, are discarded before optimization.
++                # This changes the function and effective initialization scale.
++                # No checkpoint, labels, new RNG draw or empirical selection.
++                if widths[0] > tower[-1].in_features:
++                    raise ValueError('Shallow readout exceeds the template output width')
++                self._reduce_tower(tower, (widths[0], widths[0]))
++                self.towers[index] = nn.Sequential(tower[0], tower[1], tower[-1])
++            else:
++                self._reduce_tower(tower, widths)
+         # Keep every parent RNG draw, including all full-width residuals.
+         # This is an untrained channel subnetwork, not checkpoint pruning.
+@@ -253,4 +274,10 @@
+                 first.out_features = hidden
+                 output.in_features = hidden
++        # Remove storage and optimizer parameters, not merely output values.
++        # Identity is a parameterless slot marker and is never invoked below.
++        if nonowner_residual == 'removed':
++            for index, label in enumerate(feature_map.labels):
++                if label in ('cart', 'fav'):
++                    self.residual_bank[index] = nn.Identity()
+         self.model_to_device()
+ 
+@@ -800,15 +827,16 @@
+                 task_curvature_detail = aux_curvature_detail
+                 task_joint_detail = aux_joint_detail
+-            signal = torch.cat([task_detail, task_position_detail, task_block_detail,
+-                                task_curvature_detail, task_joint_detail], dim=-1)
+-            residual_features = torch.cat([task_context, task_target, base,
+-                                           match_counts.to(base.dtype), signal], dim=-1)
+-            # The constructor requires task routing. Each adapter is a pure
+-            # Linear/ReLU/Linear map: unselected outputs have no consumers,
+-            # running buffers, randomness or other side effects. Evaluate
+-            # only this task's adapter; every adapter still serves its own
+-            # task once in the complete four-task loss.
+-            correction = self.residual_bank[index](residual_features)
+-            pooled = base + has_history * correction
++            if label in ('cart', 'fav') and self.nonowner_residual == 'removed':
++                # These branches retain the inherited feedback-stratified
++                # base, context and target, with their original detach gates.
++                # Do not build unused residual inputs or allocate a correction.
++                pooled = base
++            else:
++                signal = torch.cat([task_detail, task_position_detail, task_block_detail,
++                                    task_curvature_detail, task_joint_detail], dim=-1)
++                residual_features = torch.cat([task_context, task_target, base,
++                                               match_counts.to(base.dtype), signal], dim=-1)
++                correction = self.residual_bank[index](residual_features)
++                pooled = base + has_history * correction
+             features = torch.cat([task_context, task_target, pooled], dim=-1)
+             if self.training or self.evaluation_dice not in ('towers', 'both'):

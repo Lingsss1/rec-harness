@@ -1,0 +1,145 @@
+--- g3-r0015-position_task_primary/model.py
++++ g3-r0018-rank_marginal_readout/model.py
+@@ -1,19 +1,17 @@
+-"""Position-route task sharing and gradient ownership; prospective, unmeasured.
+-
+-Inherit g3-r0014-position_collapsed without new parameters or RNG draws.
+-Factor 1: task-private position logits or the click row broadcast to all tasks.
+-Factor 2: joint loss gradients or stop only auxiliary position-logit gradients.
+-All cells execute the inherited four projections and both rank contractions.
+-Shared cells allocate all 320 position coefficients but use only the 80 in
+-the click row; allocated capacity is matched, functional capacity is not.
+-The shared joint/primary pair differs only in auxiliary backward ownership
+-at fixed weights. In task/primary, unused auxiliary positional rows remain
+-zero from initialization, while all other auxiliary pathways still train.
+-
+-The self donor still multiplies click gate logits by 1.5. Click coefficient
+-L1 mass is preserved. Context and dense gradient clipping remain indirect
+-task couplings. Rank counts supplied events, not time. Feedback visibility,
+-labels, loss weights and host training are unchanged. No novelty or measured
+-performance claim is made. Tensor/autograd checks belong to the host.
++"""Prospective task-private feedback/rank evidence placement study.
++
++Inherit g3-r0015-position_task_primary; retain its protected positional gate.
++Append one zero-initialized [task, channel*match, kernel] tensor after reset.
++Factorial: event-linked or history-marginal kernels; final-logit readout or
++additional gate logits. All cells calculate the same projected alternatives.
++New features resolve exposure/four overlapping feedback channels, crossed
++with exposure/category/brand/joint matches. Event rank counts valid events
++on the right, not elapsed time. Readout averages over valid events; routing
++uses the inherited self donor, tanh and click coefficient-mass preservation.
++Only new task-private rows learn from their own task; indirect coupling via
++shared context and host clipping persists. No current action/label is read.
++Initial predictions equal the parent because every new coefficient is zero.
++No measured improvement, verified novelty, or original-method reproduction
++is asserted. Host tensor/autograd, precision, cost and scoring are required.
+ """
+ import copy
+@@ -25,5 +23,5 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary', 'rank_evidence_scope': 'marginal', 'rank_evidence_location': 'readout'}
+ 
+ 
+@@ -41,4 +39,5 @@
+                  position_scope='event', position_feedback_identity=False,
+                  position_sharing='task', position_aux_gradient='primary',
++                 rank_evidence_scope='marginal', rank_evidence_location='readout',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+@@ -116,4 +115,12 @@
+         self.position_sharing = position_sharing
+         self.position_aux_gradient = position_aux_gradient
++        if position_sharing != 'task' or position_aux_gradient != 'primary':
++            raise ValueError('Rank evidence study fixes inherited task/primary positions')
++        if rank_evidence_scope not in ('event', 'marginal'):
++            raise ValueError('Rank evidence scope must be event or marginal')
++        if rank_evidence_location not in ('readout', 'route'):
++            raise ValueError('Rank evidence location must be readout or route')
++        self.rank_evidence_scope = rank_evidence_scope
++        self.rank_evidence_location = rank_evidence_location
+         self.primary_gate_component = primary_gate_component
+         self.gate_transfer_source = gate_transfer_source
+@@ -209,4 +216,8 @@
+         self.position_gate_weight = nn.Parameter(torch.zeros(
+             len(labels), self.gate_width, 4))
++        # Append after all inherited initialization; zero allocation draws no
++        # RNG. Same parameter count/state/initial function in every cell.
++        self.rank_evidence_weight = nn.Parameter(torch.zeros(
++            len(labels), self.gate_width, 4))
+         self.model_to_device()
+ 
+@@ -331,5 +342,48 @@
+         return result.masked_fill(~valid.unsqueeze(-1), 0)
+ 
+-    def _event_route_gain(self, channels, matches, mask):
++    def _rank_evidence_logits(self, channels, matches, mask):
++        """Return task-private route [B,L,T] and readout [B,T] logits.
++
++        Both event/marginal projections and both placement alternatives run
++        in all cells. Only the selected output has a prediction path. These
++        features are input-only and have no gradient to an embedding table.
++        Marginal kernels retain the within-history rank profile but remove
++        its alignment with the event channels/matches in this new branch.
++        Existing inherited position routing remains event linked in all cells.
++        """
++        with torch.autocast(device_type=mask.device.type, enabled=False):
++            valid = mask.bool()
++            valid_float = valid.float()
++            features = (channels.float().unsqueeze(-1) *
++                        matches.float().unsqueeze(-2)).flatten(2)
++            features = features.masked_fill(~valid.unsqueeze(-1), 0)
++            count = valid_float.sum(dim=1, keepdim=True)
++            rank = (count - valid_float.cumsum(dim=1)).clamp_min(0)
++            scales = features.new_tensor((1.0, 4.0, 16.0, 64.0))
++            basis = torch.exp(-rank.unsqueeze(-1) / scales)
++            basis = basis.masked_fill(~valid.unsqueeze(-1), 0)
++            marginal = basis.sum(dim=1, keepdim=True) / count.clamp_min(1).unsqueeze(-1)
++            event_logits, marginal_logits = [], []
++            for task_index in range(len(self.towers)):
++                projected = torch.nn.functional.linear(
++                    features, self.rank_evidence_weight[task_index].transpose(0, 1)) / 2.0
++                event_logits.append((projected * basis).sum(dim=-1))
++                marginal_logits.append((projected * marginal).sum(dim=-1))
++            event_logits = torch.stack(event_logits, dim=-1)
++            marginal_logits = torch.stack(marginal_logits, dim=-1)
++            selected = (event_logits if self.rank_evidence_scope == 'event'
++                        else marginal_logits)
++            selected = selected.masked_fill(~valid.unsqueeze(-1), 0)
++            # A valid-event average gives a bounded linear statistic per task,
++            # without a learned bias; zero-length/all-empty histories are zero.
++            readout = selected.sum(dim=1) / count.clamp_min(1)
++            route = selected
++            if self.rank_evidence_location == 'readout':
++                route = torch.zeros_like(route)
++            else:
++                readout = torch.zeros_like(readout)
++            return route, readout
++
++    def _event_route_gain(self, channels, matches, mask, rank_route):
+         """Bounded [B,L,T] gains with a donor added only to click logits.
+ 
+@@ -350,4 +404,7 @@
+             gate_logits = gate_logits + self._position_gate_logits(
+                 channels, matches, mask)
++            # Each new row is task-private. The fixed self donor below cannot
++            # make another task's loss update this row directly.
++            gate_logits = gate_logits + rank_route
+             # Both donor alternatives are calculated in every variant. The
+             # contracted four labels may be ordered arbitrarily by FeatureMap.
+@@ -444,5 +501,7 @@
+         user, item, mask, multi_masks = self.get_inputs(inputs, return_multi_masks=True)
+         evidence, channels, matches = self._history_evidence(item, mask, multi_masks)
++        rank_route, rank_readout = self._rank_evidence_logits(channels, matches, mask)
+         correction = torch.nn.functional.linear(evidence, self.evidence_weight)
++        correction = correction.float() + rank_readout
+         user_emb = self.embedding_layer(user)
+         item_emb = self.embedding_layer(item)
+@@ -496,5 +555,5 @@
+                 scores = scores.mean(dim=-1, keepdim=True).expand(-1, -1, len(self.towers))
+             scores = scores.masked_fill(~valid, 0)
+-            gain = self._event_route_gain(channels, matches, mask)
++            gain = self._event_route_gain(channels, matches, mask, rank_route)
+             # Factor only click's gate. Private item tables, auxiliary gates,
+             # additive evidence and primary selector ownership stay inherited.

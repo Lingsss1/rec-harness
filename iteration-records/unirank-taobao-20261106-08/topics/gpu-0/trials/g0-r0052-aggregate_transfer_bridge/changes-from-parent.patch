@@ -1,0 +1,204 @@
+--- g0-r0039-context_product/model.py
++++ g0-r0052-aggregate_transfer_bridge/model.py
+@@ -1,11 +1,11 @@
+-"""Prospective context/history fusion study on the frozen compressed-history model.
+-
+-Append rank-16 task-specific context and compressed-history projections to the
+-incumbent. Product versus sum fusion is crossed with the existing auxiliary
+-adapter-context gradient gate. All four cells have identical learned capacity,
+-initialization order and native Dice populations. New zero output matrices
+-preserve the parent's initial predictions, not its subsequent training path.
+-Fusion uses ordinary differentiable FP32 arithmetic, not a surrogate gradient.
+-No novelty or predictive benefit is established. Host tensor checks are required.
++"""Prospective blockwise nonlinear summary study; validation results unmeasured.
++
++Reuse ten frozen compressed blocks and every learned parameter of the incumbent.
++Compare mean_j tanh(W [M*b_j, global_details]) with tanh(W [sum_j b_j,
++global_details]), crossed with the existing auxiliary adapter-context gate.
++Both summary paths execute in every cell for a measured work-matched contrast.
++The original signed pooled base and five detail paths remain intact. This tests
++projection/aggregation order, not a new attention mechanism or verified novelty.
++Native tensor, BF16, autograd and resource checks belong to the host.
+ """
+ import torch
+@@ -16,5 +16,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'aggregate'}
+ 
+ 
+@@ -35,5 +35,5 @@
+                  block_aux_tower_context_grad=True,
+                  block_aux_adapter_context_grad=False,
+-                 context_fusion='product', interaction_rank=16,
++                 context_fusion='product', interaction_rank=16, summary_placement='aggregate',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -69,4 +69,9 @@
+         self.context_fusion = context_fusion
+         self.interaction_rank = interaction_rank
++        if summary_placement not in ('block', 'aggregate'):
++            raise ValueError('Unknown history projection placement')
++        self.summary_placement = summary_placement
++        if context_fusion != 'product':
++            raise ValueError('This placement study fixes product fusion')
+         if residual_input != 'match_detail':
+             raise ValueError('The original match-detail channel must be retained')
+@@ -615,10 +620,10 @@
+         return packed.gather(-1, source).bool() & valid
+ 
+-    def _pool_seven(self, weights, values, counts):
++    def _pool_seven(self, weights, values, counts, return_blocks=False):
+         batch = values.shape[0]
+         weights = weights.reshape(batch, 70) * counts.to(weights.dtype)
+         weighted = (weights.unsqueeze(-1) * values).reshape(
+             batch, 10, 7, self.value_width)
+-        return weighted.sum(dim=1)
++        return weighted if return_blocks else weighted.sum(dim=1)
+ 
+     def _interactions(self, target, values):
+@@ -670,17 +675,44 @@
+             self.local_activation, (parameters, buffers), (interactions,), strict=True)
+ 
+-    def _pool(self, weights, values, counts):
++    def _pool(self, weights, values, counts, return_blocks=False):
+         batch, slots, _ = values.shape
+         weights = weights.reshape(batch, slots) * counts.to(weights.dtype)
+         weighted = (weights.unsqueeze(-1) * values).reshape(batch, 10, 3, self.value_width)
+-        return weighted.sum(dim=1)
+-
+-    def _context_history_correction(self, index, context, history):
+-        # Only supplied context and already-masked compressed history enter.
+-        # FP32 bounded projections and a shared RMS denominator reduce gross
+-        # scale confounding between product and sum. Their geometry and
+-        # optimization still differ; equal norms do not imply equal capacity.
++        return weighted if return_blocks else weighted.sum(dim=1)
++
++    def _context_history_correction(self, index, context, history, block_base, block_counts):
++        """Test tied nonlinear projection before versus after block aggregation.
++
++        b_j is the existing signed target-scored contribution of block j;
++        r contains the original global counts and five detail summaries.
++        For M occupied blocks, the mean of [M*b_j, r] is [sum(b_j), r].
++        Only the location of tanh relative to this averaging is changed.
++        No softmax, new learned matrix, target label or unmasked event enters.
++        Both paths execute in every cell, including backward via an algebraic
++        zero. This is a work-matched diagnostic, with actual costs host-measured.
++        """
+         query = torch.tanh(self.context_queries[index](context).float())
+-        summary = torch.tanh(self.history_projections[index](history).float())
++        aggregate = torch.tanh(self.history_projections[index](history).float())
++        occupied = block_counts > 0
++        support = occupied.to(torch.float32)
++        number = support.sum(dim=1, keepdim=True)
++        # Mask before projection as well as after it: invalid block values
++        # cannot affect the local input, even in a noncontiguous support case.
++        safe_blocks = torch.where(occupied.unsqueeze(-1), block_base,
++                                  torch.zeros_like(block_base))
++        local_base = (safe_blocks.float() * number.unsqueeze(-1)).to(history.dtype)
++        shared_detail = history[:, self.value_width:].unsqueeze(1).expand(
++            -1, block_base.shape[1], -1)
++        local_inputs = torch.cat([local_base, shared_detail], dim=-1)
++        local_hidden = torch.tanh(self.history_projections[index](local_inputs).float())
++        local_hidden = torch.where(occupied.unsqueeze(-1), local_hidden,
++                                   torch.zeros_like(local_hidden))
++        local = local_hidden.sum(dim=1) / number.clamp_min(1.0)
++        if self.summary_placement == 'block':
++            summary = local + 0.0 * aggregate
++        else:
++            summary = aggregate + 0.0 * local
++        # Same product and RMS normalization as the incumbent. Global base,
++        # residual adapter and all five moment paths outside this branch stay.
+         if self.context_fusion == 'product':
+             fused = query * summary
+@@ -698,5 +730,8 @@
+             all_values, all_counts = self._compress_with_match(values, mask, auxiliary, match_union)
+             primary_weights = self._primary_activation(self._interactions(target, all_values))
+-            all_strata = self._pool_seven(primary_weights, all_values, all_counts)
++            all_block_strata = self._pool_seven(
++                primary_weights, all_values, all_counts, return_blocks=True)
++            all_strata = all_block_strata.sum(dim=1)
++            primary_block_strata = all_block_strata[:, :, :3, :]
+             uniform = all_strata[:, 0, :]
+             values = all_values.reshape(batch, 10, 7, self.value_width)[:, :, :3, :].reshape(
+@@ -714,5 +749,8 @@
+                 all_counts = self._expand_support_rows(unique_counts.unsqueeze(-1)).squeeze(-1)
+                 primary_weights = self._primary_activation(self._interactions(target, all_values))
+-                all_strata = self._pool_seven(primary_weights, all_values, all_counts)
++                all_block_strata = self._pool_seven(
++                    primary_weights, all_values, all_counts, return_blocks=True)
++                all_strata = all_block_strata.sum(dim=1)
++                primary_block_strata = all_block_strata[:, :, :3, :]
+                 primary_strata = all_strata[:, :3, :]
+             else:
+@@ -728,5 +766,7 @@
+                     batch, 30, self.value_width)
+                 read_counts = unique_counts.reshape(batch, 10, 5)[:, :, :3].reshape(batch, 30)
+-                primary_strata = self._pool(weights, read_values, read_counts)
++                primary_block_strata = self._pool(
++                    weights, read_values, read_counts, return_blocks=True)
++                primary_strata = primary_block_strata.sum(dim=1)
+             uniform = primary_strata[:, 0, :]
+             values = unique_values.reshape(batch, 10, 5, self.value_width)[:, :, :3, :].reshape(
+@@ -748,5 +788,7 @@
+                 values, counts = self._compress_both(values, mask, auxiliary)
+             primary_weights = self._primary_activation(self._interactions(target, values))
+-            primary_strata = self._pool(primary_weights, values, counts)
++            primary_block_strata = self._pool(
++                primary_weights, values, counts, return_blocks=True)
++            primary_strata = primary_block_strata.sum(dim=1)
+             uniform = primary_strata[:, 0, :]
+ 
+@@ -764,5 +806,7 @@
+             aux_joint_detail = joint_detail.detach() if self.block_aux_item_grad else joint_detail
+             aux_weights = self._auxiliary_activation(self._interactions(aux_target, aux_values))
+-            feedback_population_strata = self._pool(aux_weights, aux_values, counts)
++            feedback_population_blocks = self._pool(
++                aux_weights, aux_values, counts, return_blocks=True)
++            feedback_population_strata = feedback_population_blocks.sum(dim=1)
+             # Execute feedback scoring in every training cell to match work
+             # and collect a complete independent running-state trajectory.
+@@ -771,6 +815,8 @@
+             if self.auxiliary_train_population == 'primary':
+                 aux_strata = primary_strata.detach()
++                aux_block_strata = primary_block_strata.detach()
+             else:
+                 aux_strata = feedback_population_strata
++                aux_block_strata = feedback_population_blocks
+         else:
+             # The eval factor never changes training operations. Each choice
+@@ -784,9 +830,13 @@
+             if self.auxiliary_eval_population == 'feedback':
+                 aux_weights = self._auxiliary_activation(self._interactions(target, values))
+-                aux_strata = self._pool(aux_weights, values, counts)
++                aux_block_strata = self._pool(
++                    aux_weights, values, counts, return_blocks=True)
++                aux_strata = aux_block_strata.sum(dim=1)
+             else:
+                 aux_strata = primary_strata
++                aux_block_strata = primary_block_strata
+         feedback = aux_strata[:, 1, :] + aux_strata[:, 2, :]
+         grouped_counts = counts.reshape(counts.shape[0], 10, 3)
++        block_counts = grouped_counts[:, :, 0]
+         total_count = grouped_counts[:, :, 0].sum(dim=1, keepdim=True)
+         has_history = (total_count > 0).to(uniform.dtype)
+@@ -795,4 +845,5 @@
+             if label == 'is_click':
+                 task_context, task_target, base = context, target, uniform
++                task_blocks = primary_block_strata[:, :, 0, :]
+                 task_detail = detail
+                 task_position_detail = position_detail
+@@ -802,4 +853,5 @@
+             else:
+                 task_context, task_target, base = aux_context, aux_target, feedback
++                task_blocks = aux_block_strata[:, :, 1, :] + aux_block_strata[:, :, 2, :]
+                 task_detail = aux_detail
+                 task_position_detail = aux_position_detail
+@@ -833,5 +885,5 @@
+             history_features = torch.cat([base, match_counts.to(base.dtype), signal], dim=-1)
+             correction = correction + self._context_history_correction(
+-                index, adapter_context, history_features)
++                index, adapter_context, history_features, task_blocks, block_counts)
+             pooled = base + has_history * correction
+             features = torch.cat([tower_context, task_target, pooled], dim=-1)

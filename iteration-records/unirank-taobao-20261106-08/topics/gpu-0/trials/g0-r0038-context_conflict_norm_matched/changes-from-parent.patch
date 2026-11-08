@@ -1,0 +1,140 @@
+--- g0-r0031-adapter_context_only/model.py
++++ g0-r0038-context_conflict_norm_matched/model.py
+@@ -1,12 +1,18 @@
+-"""Auxiliary context gradients through tower versus history adapter.
+-
+-Four cells retain identical learned modules, inputs, loss, forward arithmetic,
+-initialization and normalization populations. Independent stop-gradients gate
+-auxiliary context at the task adapter and direct prediction-tower inputs.
+-Click paths, auxiliary scorer/item ownership and running states are inherited.
+-The all-enabled/all-blocked cells bridge round 30; two partial gates isolate
+-where auxiliary supervision shapes shared context. Dense global clipping can
+-still couple task heads indirectly. No full-isolation or novelty claim.
+-Only static source checks are possible here; host tensor checks are required.
++"""Click-referenced auxiliary context conflict removal.
++
++Inherit the validated compressed history / task adapter forward model. A
++single two-output identity separates click context from the summed auxiliary
++adapter context. Backward removes only the auxiliary component opposing the
++click cotangent per example and field. It does not alter task-head gradients,
++losses, learned modules, RNG, Dice populations or host optimizers. Controls
++rotate the reference within fields or match only the projected local norm.
++Eval and the full bridge bypass the custom operator entirely.
++
++Nearest mechanism: Yu et al., Gradient Surgery for Multi-Task Learning,
++NeurIPS2020, section2.3 / algorithm1 (PCGrad). This is a one-sided local
++representation adaptation, not parameter-level PCGrad or a new projection
++principle. Sparse ID accumulation, table aliases and adaptive preconditioning
++prevent any claim of conflict-free parameter updates. Analytic VJP host checks
++are required; ordinary identity finite-difference gradcheck is inappropriate.
+ """
+ import torch
+@@ -17,5 +23,72 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'auxiliary_context_transfer': 'norm_matched'}
++
++
++class _ClickReferencedContext(torch.autograd.Function):
++    """Identity forward; deliberately modified first-order context VJP.
++
++    Both outputs are consumed by the SAME summed four-BCE backward. Click
++    consumes the first output at tower and adapter; the three auxiliary
++    adapters share the second output. Their direct tower context is detached.
++    No task labels are accessed here. No gradient hooks, nested backward,
++    optimizer access, retained graph state or cross-batch storage are used.
++    """
++
++    @staticmethod
++    def forward(ctx, context, field_width, mode):
++        ctx.set_materialize_grads(False)
++        ctx.field_width = field_width
++        ctx.mode = mode
++        ctx.context_dtype = context.dtype
++        return context.view_as(context), context.view_as(context)
++
++    @staticmethod
++    @torch.autograd.function.once_differentiable
++    def backward(ctx, primary_gradient, auxiliary_gradient):
++        # A missing branch contributes zero. With no click signal there is
++        # no reference: retain auxiliary transfer rather than invent one.
++        if auxiliary_gradient is None:
++            return primary_gradient, None, None
++        if primary_gradient is None:
++            return auxiliary_gradient, None, None
++        with torch.autocast(device_type=primary_gradient.device.type, enabled=False):
++            primary = primary_gradient.float().reshape(
++                primary_gradient.shape[0], -1, ctx.field_width)
++            auxiliary = auxiliary_gradient.float().reshape_as(primary)
++            # Coordinate rotation is a deterministic orientation control,
++            # not a task shuffle or an independent random reference.
++            rotated = torch.roll(primary, shifts=max(1, ctx.field_width // 2), dims=-1)
++            primary_norm2 = primary.square().sum(dim=-1, keepdim=True)
++            rotated_norm2 = rotated.square().sum(dim=-1, keepdim=True)
++            aligned_dot = (auxiliary * primary).sum(dim=-1, keepdim=True)
++            rotated_dot = (auxiliary * rotated).sum(dim=-1, keepdim=True)
++            aligned_coefficient = torch.where(
++                primary_norm2 > 1e-30,
++                aligned_dot.clamp_max(0) / primary_norm2.clamp_min(1e-30),
++                torch.zeros_like(aligned_dot))
++            rotated_coefficient = torch.where(
++                rotated_norm2 > 1e-30,
++                rotated_dot.clamp_max(0) / rotated_norm2.clamp_min(1e-30),
++                torch.zeros_like(rotated_dot))
++            projected = auxiliary - aligned_coefficient * primary
++            rotated_projected = auxiliary - rotated_coefficient * rotated
++            auxiliary_norm2 = auxiliary.square().sum(dim=-1, keepdim=True)
++            projected_norm2 = projected.square().sum(dim=-1, keepdim=True)
++            # Match the aligned projection's local norm while retaining the
++            # original auxiliary direction. Clamp only roundoff expansion.
++            gain = (projected_norm2 / auxiliary_norm2.clamp_min(1e-30)).clamp(0, 1).sqrt()
++            gain = torch.where(auxiliary_norm2 > 1e-30, gain, torch.ones_like(gain))
++            norm_matched = auxiliary * gain
++            if ctx.mode == 'conflict':
++                transferred = projected
++            elif ctx.mode == 'rotated':
++                transferred = rotated_projected
++            elif ctx.mode == 'norm_matched':
++                transferred = norm_matched
++            else:
++                raise ValueError('Unknown click-referenced context VJP')
++            result = primary + transferred
++        return result.reshape_as(primary_gradient).to(ctx.context_dtype), None, None
+ 
+ 
+@@ -36,4 +109,5 @@
+                  block_aux_tower_context_grad=True,
+                  block_aux_adapter_context_grad=False,
++                 auxiliary_context_transfer='norm_matched',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -62,4 +136,11 @@
+         self.block_aux_tower_context_grad = block_aux_tower_context_grad
+         self.block_aux_adapter_context_grad = block_aux_adapter_context_grad
++        if (block_aux_tower_context_grad is not True
++                or block_aux_adapter_context_grad is not False):
++            raise ValueError('This study freezes auxiliary tower context off and adapter on')
++        if auxiliary_context_transfer not in ('conflict', 'rotated', 'norm_matched', 'full'):
++            raise ValueError('Unknown click-referenced auxiliary context transfer')
++        self.auxiliary_context_transfer = auxiliary_context_transfer
++        self._context_field_width = embedding_dim
+         if residual_input != 'match_detail':
+             raise ValueError('The original match-detail channel must be retained')
+@@ -752,8 +833,15 @@
+         total_count = grouped_counts[:, :, 0].sum(dim=1, keepdim=True)
+         has_history = (total_count > 0).to(uniform.dtype)
++        # Separate cotangents once, after inherited history construction.
++        # The auxiliary context already equals context under the frozen
++        # source gates. All three auxiliary adapters use one shared output.
++        primary_context = context
++        if self.training and self.auxiliary_context_transfer != 'full':
++            primary_context, aux_context = _ClickReferencedContext.apply(
++                context, self._context_field_width, self.auxiliary_context_transfer)
+         predictions = {}
+         for index, (label, tower) in enumerate(zip(self.feature_map.labels, self.towers)):
+             if label == 'is_click':
+-                task_context, task_target, base = context, target, uniform
++                task_context, task_target, base = primary_context, target, uniform
+                 task_detail = detail
+                 task_position_detail = position_detail

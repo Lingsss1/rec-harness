@@ -1,0 +1,77 @@
+--- g2-r0027-joint_summary_active/model.py
++++ g2-r0028-joint_eval_width11_readout/model.py
+@@ -1,8 +1,9 @@
+-"""Frozen available/norm summary specialization with indexed task adapters.
+-
+-Only dead arithmetic inside _joint_coefficients is removed. All learned
+-modules, initialization, live masks/gates, summary channels, scorer Dice
+-populations and auxiliary gradient ownership inherit the width12 indexed
+-reference. This is an execution optimization, not a new representation.
++"""Evaluate only the three readout strata; preserve seven-stratum training.
++
++This is an execution contrast against g2-r0027-joint_summary_active.
++Training retains the complete Dice population, buffer updates and gradient
++ownership. Evaluation alone omits the four discarded support rows per block.
++All learned modules, initialization and five summary channels are inherited.
++Numerical equivalence and measured savings require host verification.
+ """
+ import torch
+@@ -13,5 +14,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 12, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 11, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached'}
+ 
+ 
+@@ -22,5 +23,5 @@
+                  compression_routes='uf', block_aux_scorer_grad=True,
+                  block_aux_context_grad=False, block_aux_item_grad=True, num_tasks=None,
+-                 residual_input='match_detail', residual_routing='task', residual_hidden=12,
++                 residual_input='match_detail', residual_routing='task', residual_hidden=11,
+                  temporal_detail='position', block_detail='ordinal',
+                  curvature_detail='quadratic', joint_detail='duplicate_match',
+@@ -508,19 +509,29 @@
+         context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._represent(inputs)
+         batch = values.shape[0]
+-        all_values, all_counts = self._compress_with_match(values, mask, auxiliary, match_union)
+-        # All four cells score 70 slots; only uniform slots enter the primary
+-        # readout. Gradient pairs share exact forward populations. Population
+-        # pairs preserve counts/empty rows, but change aligned support means.
+-        primary_weights = self._primary_activation(self._interactions(target, all_values))
+-        all_strata = self._pool_seven(primary_weights, all_values, all_counts)
+-        uniform = all_strata[:, 0, :]
+-        # Auxiliary training retains the original ordered 30-slot population
+-        # and the original scorer/item stop-gradient ownership. No extra
+-        # slots enter its training Dice batch statistics. During evaluation
+-        # Dice acts pointwise, so the first three primary strata are reused.
+-        values = all_values.reshape(batch, 10, 7, self.value_width)[:, :, :3, :].reshape(
+-            batch, 30, self.value_width)
+-        counts = all_counts.reshape(batch, 10, 7)[:, :, :3].reshape(batch, 30)
+-        primary_strata = all_strata[:, :3, :]
++        if self.training:
++            all_values, all_counts = self._compress_with_match(values, mask, auxiliary, match_union)
++            # All four cells score 70 slots; only uniform slots enter the primary
++            # readout. Gradient pairs share exact forward populations. Population
++            # pairs preserve counts/empty rows, but change aligned support means.
++            primary_weights = self._primary_activation(self._interactions(target, all_values))
++            all_strata = self._pool_seven(primary_weights, all_values, all_counts)
++            uniform = all_strata[:, 0, :]
++            # Auxiliary training retains the original ordered 30-slot population
++            # and the original scorer/item stop-gradient ownership. No extra
++            # slots enter its training Dice batch statistics. During evaluation
++            # Dice acts pointwise, so the first three primary strata are reused.
++            values = all_values.reshape(batch, 10, 7, self.value_width)[:, :, :3, :].reshape(
++                batch, 30, self.value_width)
++            counts = all_counts.reshape(batch, 10, 7)[:, :, :3].reshape(batch, 30)
++            primary_strata = all_strata[:, :3, :]
++
++        else:
++            # Evaluation Dice uses frozen running statistics, so scoring
++            # discarded support rows cannot affect retained row activations.
++            # Keep all three readout strata, including empty rows, in order.
++            values, counts = self._compress_both(values, mask, auxiliary)
++            primary_weights = self._primary_activation(self._interactions(target, values))
++            primary_strata = self._pool(primary_weights, values, counts)
++            uniform = primary_strata[:, 0, :]
+ 
+         if self.training:

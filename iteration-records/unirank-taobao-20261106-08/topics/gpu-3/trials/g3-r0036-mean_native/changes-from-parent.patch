@@ -1,0 +1,131 @@
+--- g3-r0035-centered_only/model.py
++++ g3-r0036-mean_native/model.py
+@@ -1,9 +1,10 @@
+-"""Prospective occupied-batch mean/centered product-context attribution.
+-
+-All cells retain the exact inherited forward model and true-label private-task
+-learning at fixed state. A training-only identity-forward custom VJP keeps the
+-auxiliary product-context cotangent, its occupied-row mean, its centered term,
+-or zero. These are first-order attribution interventions, not claimed ordinary
+-gradients of a new scalar objective. Residual context transfer is blocked.
++"""Prospective auxiliary product-context component x magnitude attribution.
++
++The inherited forward model, true-label loss and task-private learning are
++unchanged. An identity-forward custom VJP returns an occupied-row mean or
++centered component, either native or restored to incoming occupied L2 norm.
++Norm equality is per auxiliary task in context-row coordinates before sparse
++scatter, not equality of parameter updates. This surrogate backward is a
++first-order attribution intervention, not a new scalar objective derivative.
+ """
+ import torch
+@@ -14,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'mean', 'product_context_magnitude': 'native'}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -23,16 +24,20 @@
+     """Identity values with an explicit first-order product-context VJP.
+ 
+-    The occupied-row mean and centered terms are orthogonal in context-row
+-    coordinates in exact arithmetic. This is before sparse embedding scatter;
+-    repeated IDs and optimizer state need not preserve that geometry. Projected
+-    modes intentionally are not the derivative of this identity forward.
++    The occupied-row mean and centered terms are orthogonal before sparse
++    embedding scatter. Optional per-task full-norm restoration controls edge
++    energy at common weights, with an explicit relative-norm numerical floor.
++    Repeated IDs, task sums and optimizer state need not preserve this geometry.
++    These modes intentionally are not derivatives of their identity forward.
+     """
+     @staticmethod
+-    def forward(ctx, context, occupied, component):
++    def forward(ctx, context, occupied, component, magnitude):
+         if occupied.shape != (context.shape[0], 1) or occupied.dtype != torch.bool:
+             raise ValueError('Expected history occupancy bool[B,1]')
+         if component not in ('full', 'mean', 'centered', 'blocked'):
+             raise ValueError('Unknown product context component')
++        if magnitude not in ('native', 'full_norm'):
++            raise ValueError('Unknown product context magnitude')
+         ctx.component = component
++        ctx.magnitude = magnitude
+         if component in ('mean', 'centered'):
+             ctx.save_for_backward(occupied)
+@@ -42,11 +47,11 @@
+     def backward(ctx, gradient):
+         if ctx.component == 'full':
+-            return gradient, None, None
++            return gradient, None, None, None
+         if ctx.component == 'blocked':
+-            return torch.zeros_like(gradient), None, None
++            return torch.zeros_like(gradient), None, None, None
+         (occupied,) = ctx.saved_tensors
+         # Explicit FP32 reductions, including under the host BF16 autocast.
+-        # torch.where removes empty rows even in an all-empty batch. No batch
+-        # size rescaling, norm matching, labels, RNG or persistent state.
++        # torch.where removes empty rows even in an all-empty batch. Native
++        # projections use exactly the parent arithmetic. No labels or RNG.
+         with torch.autocast(device_type=gradient.device.type, enabled=False):
+             active = torch.where(occupied, gradient.float(), 0.0)
+@@ -57,5 +62,31 @@
+             else:
+                 result = torch.where(occupied, active - mean, 0.0)
+-        return result.to(dtype=gradient.dtype), None, None
++            if ctx.magnitude == 'full_norm':
++                # Scale before squaring to avoid underflow of tiny raw VJPs.
++                # Normalize the projection first; never form ||G||/||P||,
++                # which can be huge for a nearly degenerate component.
++                source_scale = active.abs().amax()
++                projected_scale = result.abs().amax()
++                source_unit = active / torch.where(
++                    source_scale > 0, source_scale, torch.ones_like(source_scale))
++                projected_unit = result / torch.where(
++                    projected_scale > 0, projected_scale,
++                    torch.ones_like(projected_scale))
++                source_norm = source_scale * source_unit.square().sum().sqrt()
++                projected_unit_norm = projected_unit.square().sum().sqrt()
++                projected_norm = projected_scale * projected_unit_norm
++                relative_norm = projected_norm / torch.where(
++                    source_norm > 0, source_norm, torch.ones_like(source_norm))
++                # Fixed numerical floor, declared before evaluation. A zero
++                # or nearly zero projection has no reliable direction to
++                # restore; returning zero avoids amplifying rounding noise.
++                usable = ((source_norm > 0) & (projected_scale > 0)
++                          & (relative_norm > 1e-6))
++                direction = projected_unit / torch.where(
++                    projected_unit_norm > 0, projected_unit_norm,
++                    torch.ones_like(projected_unit_norm))
++                result = torch.where(usable, direction * source_norm,
++                                     torch.zeros_like(result))
++        return result.to(dtype=gradient.dtype), None, None, None
+ 
+ 
+@@ -80,5 +111,6 @@
+                  block_aux_product_context_grad=False,
+                  product_context_assignment='aligned',
+-                 product_context_component='centered',
++                 product_context_component='mean',
++                 product_context_magnitude='native',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -115,9 +147,12 @@
+         if product_context_assignment != 'aligned':
+             raise ValueError('Component study freezes aligned product assignment')
+-        if product_context_component not in ('full', 'mean', 'centered', 'blocked'):
++        if product_context_component not in ('mean', 'centered'):
+             raise ValueError('Unknown product context component')
+         if block_aux_residual_context_grad is not True:
+             raise ValueError('Component study isolates product-only context transfer')
+         self.product_context_component = product_context_component
++        if product_context_magnitude not in ('native', 'full_norm'):
++            raise ValueError('Unknown product context magnitude')
++        self.product_context_magnitude = product_context_magnitude
+         if (block_aux_tower_context_grad is not True
+                 or block_aux_adapter_context_grad is not False
+@@ -899,5 +934,5 @@
+                 product_context = _ProductContextComponents.apply(
+                     product_context, product_context_occupied,
+-                    self.product_context_component)
++                    self.product_context_component, self.product_context_magnitude)
+             signal = torch.cat([task_detail, task_position_detail, task_block_detail,
+                                 task_curvature_detail, task_joint_detail], dim=-1)

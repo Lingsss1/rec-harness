@@ -1,0 +1,309 @@
+--- g3-r0065-fixed_angle_native_source_bit_negative_bridge/model.py
++++ g3-r0066-fixed_angle_label_cycle_bit_positive/model.py
+@@ -1,10 +1,10 @@
+-"""Occupied-cycle auxiliary bit source at fixed forward architecture.
+-
+-Cross a cyclic permutation of occupied auxiliary cotangent triples with
+-native-source bridges and both external signs. Only the Q orientation bit
+-uses donors; native full-task radius, canonical fixed-angle line, support,
+-true-label joint BCE and all private learning are inherited. Every helper
+-runs in every arm. This is a first-order row-space surrogate VJP, not the
+-ordinary gradient of the reported scalar BCE. No novelty claim is made.
++"""Label-correspondence replacement for the auxiliary orientation bit.
++
++Compute counterfactual auxiliary cotangents at the recipient's unchanged
++probabilities/features using occupied-cycle-permuted training label triples.
++Only the Q bit uses these cotangents. The real true-label cotangents still
++set the radius, line and support; private learning uses true-label BCE.
++Native-bit bridges execute the same extra VJP work. This is a first-order
++row-space surrogate, not the gradient of the reported BCE. No novelty claim.
+ """
+ import torch
+@@ -15,7 +15,8 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle'}
+-
+-# Identical true-label joint loss hook inherited from g3-r0032 sources.
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'aligned', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_label_cycle_bit'}
++
++# Preserve the true-label joint private objective; the hook adds only a
++# zero-value surrogate for the alternate-label bit input in shared backward.
+ AUXILIARY_OBJECTIVE = 'joint'
+ 
+@@ -700,12 +701,35 @@
+ 
+ 
++def _label_source_orientation_bit(click_gradient, gradients, occupied):
++    """Q's sign from counterfactual labels at fixed recipient computation.
++
++Unlike moving a precomputed cotangent, the caller differentiates BCE with
++permuted labels through the original recipient probability graph. Only
++this summary uses that alternate VJP; the native geometry is kept separate.
++Exact-zero Q maps to +1 without an additional validity gate. The helper
++runs in native controls too. Bit disagreement must be measured on the host.
++    """
++    _, _, orthogonal = _click_relative_components(
++        click_gradient, gradients, occupied)
++    replacement = _reassign_orthogonal(click_gradient, orthogonal, occupied)
++    tangent = _tangent_orthogonal(
++        click_gradient, orthogonal, occupied, replacement)
++    with torch.autocast(device_type=click_gradient.device.type, enabled=False):
++        flat = tangent.reshape(-1)
++        index = flat.abs().argmax().reshape(1)
++        pivot = torch.gather(flat, dim=0, index=index).squeeze(0)
++        return torch.where(pivot < 0, -torch.ones_like(pivot),
++                           torch.ones_like(pivot))
++
++
+ def _reduce_context_transfer(click_gradient, gradients, occupied,
+                              parallel_orientation, orthogonal_orientation,
+-                             click_relative_transfer, orthogonal_assignment):
+-    """Cross native versus occupied-cycle source bit with external sign.
+-
+-    All helpers execute in every cell, including the prior paired-source
+-    construction. Native bridges retain the exact inherited selection.
+-    Only the transported bit changes; radius/line/support stay native.
++                             click_relative_transfer, orthogonal_assignment,
++                             label_source_gradients=None):
++    """Cross native versus label-replaced Q bit with external sign.
++
++    All old and new helpers execute in every cell. Counterfactual VJPs enter
++    only the new bit. Native bridges retain the inherited transfer expression.
++    The optional default supports direct fixed-state helper comparisons.
+     """
+     if parallel_orientation != 'aligned' or click_relative_transfer != 'orthogonal_native':
+@@ -713,5 +737,5 @@
+     if orthogonal_orientation not in ('aligned', 'reversed'):
+         raise ValueError('Unknown orthogonal orientation')
+-    if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit', 'nuisance_line_fixed_angle_occupied_cycle_source_bit'):
++    if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit', 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'nuisance_line_fixed_angle_label_cycle_bit'):
+         raise ValueError('Unknown orthogonal assignment')
+     centered, parallel, orthogonal = _click_relative_components(
+@@ -742,5 +766,10 @@
+     cycle_source_bit = _occupied_cycle_source_orientation_bit(
+         click_gradient, gradients, occupied)
++    label_source_bit = _label_source_orientation_bit(
++        click_gradient, (gradients if label_source_gradients is None
++                         else label_source_gradients), occupied)
+     with torch.autocast(device_type=click_gradient.device.type, enabled=False):
++        label_source_oriented = fixed_angle_canonical * label_source_bit
++        label_source_negative = -label_source_oriented
+         cycle_source_oriented = fixed_angle_canonical * cycle_source_bit
+         cycle_source_negative = -cycle_source_oriented
+@@ -794,4 +823,7 @@
+             transfer = (fixed_angle_click_oriented if orthogonal_orientation == 'aligned'
+                         else fixed_angle_click_negative)
++        elif orthogonal_assignment == 'nuisance_line_fixed_angle_label_cycle_bit':
++            transfer = (label_source_oriented if orthogonal_orientation == 'aligned'
++                        else label_source_negative)
+         elif orthogonal_assignment == 'nuisance_line_fixed_angle_occupied_cycle_source_bit':
+             transfer = (cycle_source_oriented if orthogonal_orientation == 'aligned'
+@@ -810,11 +842,61 @@
+ 
+ 
++def source_bit_diagnostics(click_gradient, true_gradients, source_gradients, occupied):
++    """Optional host fixed-state probe; no logging, state or graph mutation.
++
++    Call with detached cotangents from the same real training batch/state.
++    This is not automatically collected by the host's documented API.
++    A null AUC contrast without bit disagreement is an ineffective bit
++    intervention, not evidence that correct labels are unnecessary.
++    """
++    with torch.no_grad():
++        native_bit = _label_source_orientation_bit(
++            click_gradient, true_gradients, occupied)
++        source_bit = _label_source_orientation_bit(
++            click_gradient, source_gradients, occupied)
++        _, _, native_orthogonal = _click_relative_components(
++            click_gradient, true_gradients, occupied)
++        _, _, source_orthogonal = _click_relative_components(
++            click_gradient, source_gradients, occupied)
++        replacement = _reassign_orthogonal(click_gradient, native_orthogonal, occupied)
++        tangent = _tangent_orthogonal(
++            click_gradient, native_orthogonal, occupied, replacement)
++        fixed = _fixed_line_with_orientation(
++            click_gradient, native_orthogonal, occupied, tangent)
++        nuisance = _nuisance_line_with_orientation(
++            click_gradient, native_orthogonal, occupied, tangent, fixed)
++        native_transfer = _fixed_angle_nuisance_line(
++            click_gradient, native_orthogonal, occupied, tangent, nuisance)
++        native_total = _reduce_context_transfer(
++            click_gradient, true_gradients, occupied, 'aligned', 'reversed',
++            'orthogonal_native', 'nuisance_line_fixed_angle', source_gradients)
++        replacement_total = _reduce_context_transfer(
++            click_gradient, true_gradients, occupied, 'aligned', 'reversed',
++            'orthogonal_native', 'nuisance_line_fixed_angle_label_cycle_bit',
++            source_gradients)
++        return {
++            'native_bit': native_bit,
++            'label_replaced_bit': source_bit,
++            'bit_disagreement': native_bit != source_bit,
++            'native_transfer_active': native_transfer.abs().amax() > 0,
++            'native_transfer_radius': native_transfer.square().sum().sqrt(),
++            'occupied_rows': occupied.to(dtype=torch.int64).sum(),
++            'native_orthogonal_radius': native_orthogonal.square().sum().sqrt(),
++            'source_orthogonal_radius_for_bit_only': source_orthogonal.square().sum().sqrt(),
++            'actual_context_vjp_l2_difference': (
++                native_total.to(dtype=torch.float64)
++                - replacement_total.to(dtype=torch.float64)).square().sum().sqrt(),
++        }
++
++
+ class _CollectedContextTransfer(torch.autograd.Function):
+-    """Four identity edges; select transported/canonical direction and sign.
++    """Seven identity edges: click, true auxiliary, alternate-label auxiliary.
+ 
+     Only the first output supplies click's context uses; the other outputs
+     supply cart/fav/buy product contexts. Other auxiliary context edges stay
+     blocked. Private parameters receive the ordinary true-label BCE graph.
+-    No persistent state, extra pass, labels in forward, or RNG is introduced.
++    The last three edges receive a zero-value linear surrogate in the loss
++    hook, transporting detached counterfactual cotangents without training
++    any private module on counterfactual labels. No extra forward is run.
+     Unused cotangents are materialized as zeros by the autograd default.
+     """
+@@ -837,5 +919,5 @@
+         if click_relative_transfer != 'orthogonal_native':
+             raise ValueError('Assignment study requires orthogonal-only transfer')
+-        if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit', 'nuisance_line_fixed_angle_occupied_cycle_source_bit'):
++        if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit', 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'nuisance_line_fixed_angle_label_cycle_bit'):
+             raise ValueError('Unknown orthogonal assignment')
+         ctx.orthogonal_assignment = orthogonal_assignment
+@@ -844,13 +926,15 @@
+         ctx.orthogonal_orientation = orthogonal_orientation
+         ctx.save_for_backward(occupied)
+-        return tuple(context.view_as(context) for _ in range(4))
++        return tuple(context.view_as(context) for _ in range(7))
+ 
+     @staticmethod
+-    def backward(ctx, click_gradient, cart_gradient, fav_gradient, buy_gradient):
++    def backward(ctx, click_gradient, cart_gradient, fav_gradient, buy_gradient,
++                 source_cart_gradient, source_fav_gradient, source_buy_gradient):
+         (occupied,) = ctx.saved_tensors
+         total = _reduce_context_transfer(
+             click_gradient, (cart_gradient, fav_gradient, buy_gradient), occupied,
+             ctx.parallel_orientation, ctx.orthogonal_orientation,
+-            ctx.click_relative_transfer, ctx.orthogonal_assignment)
++            ctx.click_relative_transfer, ctx.orthogonal_assignment,
++            (source_cart_gradient, source_fav_gradient, source_buy_gradient))
+         return total, None, None, None, None, None
+ 
+@@ -880,10 +964,10 @@
+                  product_context_orientation='aligned',
+                  parallel_orientation='aligned',
+-                 orthogonal_orientation='reversed',
++                 orthogonal_orientation='aligned',
+                  centering_scope='aggregate',
+                  click_context_collection='joint',
+                  auxiliary_reduction_precision='float64',
+                  click_relative_transfer='orthogonal_native',
+-                 orthogonal_assignment='nuisance_line_fixed_angle',
++                 orthogonal_assignment='nuisance_line_fixed_angle_label_cycle_bit',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -946,5 +1030,5 @@
+         if click_relative_transfer != 'orthogonal_native':
+             raise ValueError('Assignment study requires orthogonal-only transfer')
+-        if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit', 'nuisance_line_fixed_angle_occupied_cycle_source_bit'):
++        if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit', 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'nuisance_line_fixed_angle_label_cycle_bit'):
+             raise ValueError('Unknown orthogonal assignment')
+         self.orthogonal_assignment = orthogonal_assignment
+@@ -1597,4 +1681,7 @@
+ 
+     def forward(self, inputs):
++        # A transient graph reference only, never a buffer or checkpoint field.
++        # Clear before representing the next batch, including eval batches.
++        self._training_source_bit_context = None
+         context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._represent(inputs)
+         batch = values.shape[0]
+@@ -1605,5 +1692,6 @@
+                 self.orthogonal_orientation, self.click_relative_transfer,
+                 self.orthogonal_assignment)
+-            product_context_by_label = dict(zip(('cart', 'fav', 'buy'), collected_contexts[1:]))
++            self._training_source_bit_context = (collected_contexts, occupied)
++            product_context_by_label = dict(zip(('cart', 'fav', 'buy'), collected_contexts[1:4]))
+             # Other auxiliary context uses are blocked below. Preserve their
+             # forward values, while click uses only the first collection edge.
+@@ -1769,12 +1857,19 @@
+ 
+     def training_loss(self, inputs, probabilities, train_labels):
+-        """Training-only objective; never reads labels in forward.
+-
+-        Keep the four per-task BCE graphs even in click-only mode. Zero-weight
+-        auxiliary terms yield zero gradients rather than removing parameters
+-        or skipping their forward/state updates. The host keeps the original
+-        labels for scoring. A fixed half-batch cyclic shift preserves the
+-        auxiliary label triple and its marginal counts, but does not prove
+-        feature/label independence. It consumes no RNG or persistent state.
++        """True-label joint loss plus a zero-value counterfactual-bit surrogate.
++
++        Differentiate alternate-label auxiliary BCE only to the three true
++        product-context collection outputs, stopping before their shared
++        parent. autograd.grad does not populate optimizer .grad fields. Its
++        detached results enter the three extra collection outputs through
++        exact-zero forward terms. The collection backward uses them only
++        for the bit; ordinary true-label private gradients remain intact.
++
++        One common occupied-cycle permutation preserves auxiliary label
++        triples and their occupied-population prevalence. Probabilities and
++        all recipient feature computations stay fixed. This deterministic
++        permutation is not proof of independence, and labels still enter the
++        native radius/gates and subsequent learned state. All cells execute
++        the extra VJP, including native-bit controls. First derivatives only.
+         """
+         if (probabilities.ndim != 2 or train_labels.ndim != 2
+@@ -1782,22 +1877,42 @@
+                 or probabilities.shape[1] != len(self.feature_map.labels)):
+             raise ValueError('Expected aligned prediction and training-label matrices [B,4]')
+-        if AUXILIARY_OBJECTIVE not in ('joint', 'click_only', 'batch_roll'):
+-            raise ValueError('Unknown auxiliary training objective')
++        if AUXILIARY_OBJECTIVE != 'joint':
++            raise ValueError('Label-bit study freezes true-label joint private learning')
+         if probabilities.shape[0] < 2:
+             raise ValueError('This frozen full-batch training study requires at least two examples')
++        cached = self._training_source_bit_context
++        if not self.training or cached is None:
++            raise ValueError('training_loss requires a fresh gradient-enabled training forward')
++        edges, occupied = cached
++        if probabilities.shape[0] != occupied.shape[0]:
++            raise ValueError('Training context and prediction batch mismatch')
+         # BCE is unsafe inside CUDA autocast. FP32 arithmetic here leaves
+         # gradients into the original probabilities and parameters intact.
+         with torch.autocast(device_type=probabilities.device.type, enabled=False):
+             truth = train_labels.detach().to(dtype=torch.float32)
+-            shifted = torch.roll(truth, shifts=truth.shape[0] // 2, dims=0)
++            donor_rows = _occupied_cycle_donor_rows(occupied)
++            shifted = truth.index_select(0, donor_rows)
+             losses = []
++            source_losses = []
+             for index, label in enumerate(self.feature_map.labels):
+-                target = (shifted[:, index]
+-                          if AUXILIARY_OBJECTIVE == 'batch_roll' and label != 'is_click'
+-                          else truth[:, index])
+                 task_loss = nn.functional.binary_cross_entropy(
+-                    probabilities[:, index].float(), target, reduction='mean')
+-                weight = (0.0 if AUXILIARY_OBJECTIVE == 'click_only'
+-                          and label != 'is_click' else 1.0)
+-                losses.append(weight * task_loss)
+-            return torch.stack(losses).sum()
++                    probabilities[:, index].float(), truth[:, index], reduction='mean')
++                losses.append(1.0 * task_loss)
++                if label != 'is_click':
++                    source_losses.append(nn.functional.binary_cross_entropy(
++                        probabilities[:, index].float(), shifted[:, index], reduction='mean'))
++            source_loss = torch.stack(source_losses).sum()
++            source_gradients = torch.autograd.grad(
++                source_loss, edges[1:4], retain_graph=True,
++                create_graph=False, allow_unused=False)
++            # Subtract identical finite tensor values before multiplication;
++            # the scalar stays exactly true-label BCE without cancellation
++            # between large nonzero dot products. No higher-order graph.
++            surrogate = torch.stack([
++                ((edge.float() - edge.detach().float()) * gradient.detach().float()).sum()
++                for edge, gradient in zip(edges[4:7], source_gradients)
++            ]).sum()
++            result = torch.stack(losses).sum() + surrogate
++        # Release this batch's graph reference after constructing the scalar.
++        self._training_source_bit_context = None
++        return result

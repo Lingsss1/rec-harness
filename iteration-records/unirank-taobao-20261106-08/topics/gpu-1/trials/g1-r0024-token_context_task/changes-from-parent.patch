@@ -1,0 +1,115 @@
+--- g0-r0022-support_rotated_attached/model.py
++++ g1-r0024-token_context_task/model.py
+@@ -1,9 +1,12 @@
+-"""Compression-population and gradient controls for the DIN scorer.
+-
+-The primary readout always uses uniform block means. Extra target-partition
+-rows affect Dice statistics but are never read out. The 2x2 study replaces
+-aligned support with a count-matched rotated duplicate, and optionally stops
+-gradients at support preactivations before each Dice layer. Learned modules,
+-initialization, residual summaries and auxiliary ownership are inherited.
++"""Prospective action-token x residual-routing attribution study.
++
++Parent: g0-r0022-support_rotated_attached. Frozen masks, compression,
++normalization populations, gradient ownership, module shapes and training
++recipe are inherited. Only explicit action-token content and residual-bank
++readout vary. Mask-derived feedback information is deliberately retained.
++Zero-channel cells remove token content; context_code replaces that channel
++with masked brand codes in the SAME action embedding table. Shared routing
++averages the full residual bank while retaining all four task heads.
++No local training or tensor validation has been performed.
+ """
+ import torch
+@@ -14,5 +17,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_channel': 'context_code'}
+ 
+ 
+@@ -28,5 +31,6 @@
+                  match_support='available', match_scaling='norm', coarse_extension='duplicate',
+                  primary_partition='uniform', normalization_support='rotated_duplicate',
+-                 support_gradient='attached', task='binary_classification', **kwargs):
++                 support_gradient='attached', action_channel='context_code',
++                 task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+@@ -63,10 +67,11 @@
+         if match_scaling not in ('norm', 'raw'):
+             raise ValueError('Unknown fifth match-scaling control')
+-        if residual_routing != 'task':
+-            raise ValueError('This replacement study freezes task-specific routing')
+         if residual_routing not in ('task', 'shared'):
+             raise ValueError('Unknown residual parameter-sharing control')
+         if not isinstance(residual_hidden, int) or residual_hidden < 1:
+             raise ValueError('Residual width must be a positive integer')
++        if action_channel not in ('observed', 'zero', 'context_code'):
++            raise ValueError('Unknown historical action-channel intervention')
++        self.action_channel = action_channel
+         self.residual_input = residual_input
+         self.residual_routing = residual_routing
+@@ -103,4 +108,16 @@
+         if self.action_field is None:
+             raise ValueError('Historical action field is required')
++        # Reuse the original action embedding table for the content control.
++        # No module, initialization call, buffer or RNG draw is added.
++        action_spec = feature_map.features[self.action_field]
++        excluded_action_ids = {0}
++        for special in ('padding_idx', 'oov_idx'):
++            if action_spec.get(special) is not None:
++                excluded_action_ids.add(int(action_spec[special]))
++        self.action_replacement_ids = tuple(
++            index for index in range(int(action_spec['vocab_size']))
++            if index not in excluded_action_ids)
++        if action_channel == 'context_code' and not self.action_replacement_ids:
++            raise ValueError('Content replacement requires non-special action rows')
+         self.auxiliary_indices = [list(feature_map.labels).index(label)
+                                   for label in ('cart', 'fav', 'buy')]
+@@ -179,5 +196,5 @@
+         auxiliary = auxiliary & mask.bool()
+         user_emb = self.embedding_layer(user)
+-        item_emb = self.embedding_layer(item)
++        item_emb = self._embed_history_channel(item, mask)
+         target = torch.cat([item_emb[name][:, -1] for name in self.item_fields], dim=-1)
+         keys = torch.cat([item_emb[name][:, :-1] for name in self.item_fields], dim=-1)
+@@ -188,4 +205,39 @@
+             item, values, mask)
+         return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union
++
++    def _embed_history_channel(self, item, mask):
++        """Erase token identity before lookup; never modify visibility masks.
++
++        Task-mask-derived feedback partitions remain present in every cell.
++        Thus zero/context_code remove token content conditional on those
++        partitions; neither is a complete feedback-information deletion.
++        The context control reuses action-table capacity for a fixed brand
++        code. Its table usage/frequency and optimization can still differ.
++        """
++        if self.action_channel == 'observed':
++            return self.embedding_layer(item)
++        coded_item = dict(item)
++        coded_item[self.action_field] = torch.zeros_like(item[self.action_field])
++        if self.action_channel == 'context_code':
++            brand = item['brand'][:, :-1]
++            valid = mask.bool() & (brand > 0)
++            for special in self.match_excluded_ids['brand']:
++                valid = valid & (brand != special)
++            codebook = torch.tensor(self.action_replacement_ids,
++                                    device=brand.device, dtype=torch.long)
++            codes = codebook[brand.remainder(len(self.action_replacement_ids))]
++            codes = torch.where(valid, codes, torch.zeros_like(codes))
++            # Target action remains the unknown zero in all interventions.
++            coded_item[self.action_field] = torch.cat(
++                [codes, torch.zeros_like(item[self.action_field][:, -1:])], dim=1)
++        embedded = self.embedding_layer(coded_item)
++        if self.action_channel == 'zero':
++            # Exact zero even if row zero has no declared padding semantics.
++            embedded[self.action_field] = torch.zeros_like(embedded[self.action_field])
++        else:
++            allowed = torch.cat([valid, torch.zeros_like(valid[:, -1:])], dim=1)
++            embedded[self.action_field] = (embedded[self.action_field]
++                                          * allowed.unsqueeze(-1).to(embedded[self.action_field].dtype))
++        return embedded
+ 
+     def _target_match_summary(self, item, values, mask):

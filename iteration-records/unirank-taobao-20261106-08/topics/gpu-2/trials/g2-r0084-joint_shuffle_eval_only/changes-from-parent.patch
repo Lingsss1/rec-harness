@@ -1,0 +1,199 @@
+--- g3-r0065-fixed_angle_cycle_source_bit_negative/model.py
++++ g2-r0084-joint_shuffle_eval_only/model.py
+@@ -15,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'history_order': 'eval_shuffle', 'history_order_seed': 314159}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -856,5 +856,5 @@
+ 
+ 
+-class Model(MultiTaskModel):
++class _OrderBackbone(MultiTaskModel):
+     def __init__(self, feature_map, model_id='TargetMatchOrderMoment', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+@@ -1802,2 +1802,182 @@
+                 losses.append(weight * task_loss)
+             return torch.stack(losses).sum()
++
++
++# g2-t003: complete-event interventions, applied before every order-sensitive
++# backbone operation. This is an attribution study, with no novelty claim.
++def _joint_reorder_history(item, mask, task_masks, mode, generator=None):
++    """Return fresh event tensors and destination->source history indices.
++
++    Canonical keys are every supplied item/action field followed by all four
++    task memberships. Stable ties therefore denote identical complete events,
++    never an original-position tie breaker for distinguishable events.
++    Invalid positions and the current target remain exactly where supplied.
++    """
++    if mode not in ('supplied', 'shuffle', 'canonical'):
++        raise ValueError('Unknown complete-event ordering')
++    if mask.ndim != 2 or mask.shape[1] != 100 or len(task_masks) != 4:
++        raise ValueError('Expected mask[B,100] and four task masks')
++    batch, length = mask.shape
++    fields = sorted(item)
++    if not fields:
++        raise ValueError('Item/action fields are required')
++    for field in fields:
++        if item[field].shape != (batch, length + 1):
++            raise ValueError('Every item/action field must be [B,101]')
++    if any(m.shape != mask.shape for m in task_masks):
++        raise ValueError('Every task mask must be [B,100]')
++    positions = torch.arange(length, device=mask.device).expand(batch, -1)
++    if mode == 'supplied':
++        return item, mask, task_masks, positions
++    valid = mask.bool()
++    if mode == 'shuffle':
++        if generator is None:
++            raise ValueError('Shuffle requires an isolated explicit generator')
++        # FP64 priorities make accidental ties negligible. All keys are drawn
++        # locally, with no consumption of the host/data-loader RNG stream.
++        priorities = torch.rand((batch, length), device=mask.device,
++                                dtype=torch.float64, generator=generator)
++        priorities = priorities.masked_fill(~valid, float('inf'))
++        sources = priorities.argsort(dim=1, stable=True)
++    else:
++        sources = positions
++        keys = [item[name][:, :-1] for name in fields] + list(task_masks)
++        # Stable least-significant-key sorts implement exact lexicographic
++        # sorting, avoiding overflow, vocabulary-dependent packed keys or hash
++        # collisions. Encoded ID order is arbitrary, not a semantic distance.
++        for key in reversed(keys):
++            ranked = key.gather(1, sources).argsort(dim=1, stable=True)
++            sources = sources.gather(1, ranked)
++        invalid = (~valid).gather(1, sources).to(torch.int64)
++        sources = sources.gather(1, invalid.argsort(dim=1, stable=True))
++    valid_rank = (valid.to(torch.int64).cumsum(dim=1) - 1).clamp_min(0)
++    order = torch.where(valid, sources.gather(1, valid_rank), positions)
++    reordered = {
++        field: torch.cat((item[field][:, :-1].gather(1, order),
++                          item[field][:, -1:]), dim=1)
++        for field in fields
++    }
++    memberships = [m.gather(1, order) for m in task_masks]
++    return reordered, mask, memberships, order
++
++
++class Model(_OrderBackbone):
++    """Capacity-matched complete-event order treatment of the incumbent.
++
++    All learned modules, initialization, losses and surrogate context VJP are
++    inherited. An isolated training augmentation generator is initialized on
++    first use; from-scratch training is reproducible. Its stream is transient:
++    mid-training checkpoint resume is outside this proposal. Eval reconstructs
++    a fixed local seed each call, so checkpoint evaluation and timing repeats
++    use identical treatments without changing model/RNG state. Per-row random
++    patterns repeat across equal-size eval batches; no claim of independent
++    assessment permutations is made. Supplementary eval seeds require a new
++    charged host assessment, not silent internal rescoring.
++    """
++    def __init__(self, feature_map, history_order='supplied',
++                 history_order_seed=314159, **kwargs):
++        if history_order not in ('supplied', 'shuffle', 'canonical', 'eval_shuffle'):
++            raise ValueError('Unknown history-order treatment')
++        if not isinstance(history_order_seed, int) or isinstance(history_order_seed, bool):
++            raise ValueError('Order seed must be an integer')
++        super().__init__(feature_map, **kwargs)
++        self.history_order = history_order
++        self.history_order_seed = history_order_seed
++        self._history_order_generators = {}
++
++    def get_inputs(self, inputs, feature_source=None, return_multi_masks=False):
++        # The inherited _represent requests all four masks. Fail closed if a
++        # future caller attempts to reorder without event task memberships.
++        result = super().get_inputs(inputs, feature_source=feature_source,
++                                    return_multi_masks=return_multi_masks)
++        if not return_multi_masks:
++            if self.history_order != 'supplied':
++                raise ValueError('Order treatment requires all historical masks')
++            return result
++        user, item, mask, task_masks = result
++        mode = self.history_order
++        if mode == 'eval_shuffle':
++            mode = 'supplied' if self.training else 'shuffle'
++        generator = None
++        if mode == 'shuffle':
++            if self.training:
++                device_key = str(mask.device)
++                if device_key not in self._history_order_generators:
++                    generator = torch.Generator(device=mask.device)
++                    generator.manual_seed(self.history_order_seed)
++                    self._history_order_generators[device_key] = generator
++                generator = self._history_order_generators[device_key]
++            else:
++                generator = torch.Generator(device=mask.device)
++                generator.manual_seed(self.history_order_seed + 1)
++        item, mask, task_masks, _ = _joint_reorder_history(
++            item, mask, task_masks, mode, generator)
++        return user, item, mask, task_masks
++
++
++def check_history_order_contract(device='cpu'):
++    """Host-only synthetic treatment gate; no data/training/scoring or I/O.
++
++    Run before expensive trials. Covers empty/single/short/full/noncontiguous
++    masks, duplicate complete events, all fields/memberships, immutable inputs,
++    target/padding preservation, effective shuffling and canonical invariance.
++    Full-model forward/backward and checkpoint gates remain host obligations.
++    """
++    device = torch.device(device)
++    batch, length = 6, 100
++    positions = torch.arange(length, device=device).expand(batch, -1)
++    mask = torch.zeros((batch, length), device=device)
++    lengths = (0, 1, 2, 17, 64, 100)
++    for row, count in enumerate(lengths):
++        if count:
++            selected = (torch.arange(count, device=device) * 37) % length
++            mask[row, selected] = 1
++    token = positions + 1 + torch.arange(batch, device=device)[:, None] * 101
++    fields = ('item_id', 'cate_id', 'campaign_id', 'customer_id',
++              'brand', 'price_bucket', 'action')
++    item = {name: torch.cat((token * 11 + index,
++                            token[:, :1] * 0 + 12345 + index), dim=1)
++            for index, name in enumerate(fields)}
++    task_masks = [((token % (index + 2)) == 0).to(mask.dtype) * mask
++                  for index in range(4)]
++    # An exact duplicate tuple has no meaningful internal ordering.
++    for value in item.values():
++        value[5, 7] = value[5, 3]
++    for value in task_masks:
++        value[5, 7] = value[5, 3]
++    saved_item = {name: value.clone() for name, value in item.items()}
++    saved_tasks = [m.clone() for m in task_masks]
++    saved_mask = mask.clone()
++    generator = torch.Generator(device=device).manual_seed(271828)
++    shuffled, smask, stasks, order = _joint_reorder_history(
++        item, mask, task_masks, 'shuffle', generator)
++    assert torch.equal(order.sort(dim=1).values, positions)
++    assert torch.equal(smask, mask)
++    for name in fields:
++        assert torch.equal(shuffled[name][:, -1], item[name][:, -1])
++        assert torch.equal(shuffled[name][:, :-1][~mask.bool()],
++                           item[name][:, :-1][~mask.bool()])
++        assert torch.equal(shuffled[name][:, :-1], item[name][:, :-1].gather(1, order))
++        assert torch.equal(item[name], saved_item[name])
++    for original, transformed, saved in zip(task_masks, stasks, saved_tasks):
++        assert torch.equal(transformed, original.gather(1, order))
++        assert torch.equal(original, saved)
++    assert torch.equal(mask, saved_mask)
++    changed = (shuffled['item_id'][:, :-1] != item['item_id'][:, :-1]) & mask.bool()
++    eligible = (mask.sum(dim=1, keepdim=True) > 1) & mask.bool()
++    moved_fraction = changed.sum().float() / eligible.sum().clamp_min(1)
++    assert bool(moved_fraction > 0.5)
++    canonical, cmask, ctasks, _ = _joint_reorder_history(item, mask, task_masks, 'canonical')
++    canonical_again, _, ctasks_again, _ = _joint_reorder_history(
++        shuffled, smask, stasks, 'canonical')
++    for name in fields:
++        assert torch.equal(canonical[name], canonical_again[name])
++        assert torch.equal(canonical[name][:, -1], item[name][:, -1])
++        assert torch.equal(canonical[name][:, :-1][~mask.bool()],
++                           item[name][:, :-1][~mask.bool()])
++    for first, second in zip(ctasks, ctasks_again):
++        assert torch.equal(first, second)
++    assert torch.equal(cmask, mask)
++    identity, _, _, identity_order = _joint_reorder_history(item, mask, task_masks, 'supplied')
++    assert identity is item and torch.equal(identity_order, positions)
++    return {'synthetic_contract': 'passed', 'effective_moved_fraction': float(moved_fraction)}

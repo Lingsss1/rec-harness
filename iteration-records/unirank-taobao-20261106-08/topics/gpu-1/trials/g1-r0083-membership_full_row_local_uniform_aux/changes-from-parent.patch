@@ -1,0 +1,230 @@
+--- g1-r0082-membership_full_native_bridge/model.py
++++ g1-r0083-membership_full_row_local_uniform_aux/model.py
+@@ -1,10 +1,11 @@
+-"""Occupied-cycle auxiliary bit source at fixed forward architecture.
+-
+-Cross a cyclic permutation of occupied auxiliary cotangent triples with
+-native-source bridges and both external signs. Only the Q orientation bit
+-uses donors; native full-task radius, canonical fixed-angle line, support,
+-true-label joint BCE and all private learning are inherited. Every helper
+-runs in every arm. This is a first-order row-space surrogate VJP, not the
+-ordinary gradient of the reported scalar BCE. No novelty claim is made.
++"""Joint closure of historical membership routes at fixed learned capacity.
++
++Inherit the primary row-local scorer from g1-r0082 and select its uniform
++history summary for all auxiliary tasks. The feedback scorer still executes
++and owns its unused running buffers, but its result is never read by a task.
++Full/counts membership should therefore have no prediction-relevant path
++at fixed weights or during training. This is a falsification control for
++pathway completeness, not a proposed accuracy improvement or novelty claim.
++The inherited context-transfer backward remains a first-order surrogate VJP.
+ """
+ import torch
+@@ -15,5 +16,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'membership_use': 'full', 'primary_scorer_normalization': 'row_local', 'auxiliary_history_readout': 'uniform'}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -886,4 +887,7 @@
+                  click_relative_transfer='orthogonal_native',
+                  orthogonal_assignment='nuisance_line_fixed_angle_occupied_cycle_source_bit',
++                 membership_use='full',
++                 primary_scorer_normalization='row_local',
++                 auxiliary_history_readout='uniform',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -897,4 +901,19 @@
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
++        if membership_use not in ('full', 'blind', 'counts', 'permuted'):
++            raise ValueError('Unknown membership representation')
++        self.membership_use = membership_use
++        if primary_scorer_normalization != 'row_local':
++            raise ValueError('This source requires primary row-local normalization')
++        if membership_use not in ('full', 'counts'):
++            raise ValueError('This factorial uses full or counts-only membership')
++        if (training_support != 'folded' or inference_support != 'fully_pruned'
++                or auxiliary_train_population != 'primary'
++                or auxiliary_eval_population != 'primary'):
++            raise ValueError('Retain folded train, pruned eval and primary auxiliary bases')
++        self.primary_scorer_normalization = primary_scorer_normalization
++        if auxiliary_history_readout not in ('feedback', 'uniform'):
++            raise ValueError('Unknown auxiliary history readout')
++        self.auxiliary_history_readout = auxiliary_history_readout
+         self.compression_routes = compression_routes
+         if block_aux_scorer_grad is not True:
+@@ -1146,9 +1165,20 @@
+         if mask.ndim != 2 or mask.shape[1] != 100:
+             raise ValueError('Frozen protocol requires 100 history positions')
++        for task_mask in task_masks:
++            if task_mask.shape != mask.shape:
++                raise ValueError('Historical task mask shape mismatch')
++        # Shape validation is shared; the blind representation never consumes
++        # task-mask values. Historical item fields/actions are untouched.
+         auxiliary = torch.zeros_like(mask, dtype=torch.bool)
+-        for index in self.auxiliary_indices:
+-            if task_masks[index].shape != mask.shape:
+-                raise ValueError('Historical task mask shape mismatch')
+-            auxiliary = auxiliary | (task_masks[index] > 0)
++        if self.membership_use != 'blind':
++            if self.membership_use == 'permuted':
++                valid_blocks = mask.bool().reshape(mask.shape[0], 10, 10)
++                # One deterministic valid-rank map for every bit preserves the
++                # entire joint mask-pattern multiset inside each block.
++                task_masks = [self._rotate_valid_membership(
++                    (task_mask > 0).reshape(mask.shape[0], 10, 10),
++                    valid_blocks).reshape_as(mask) for task_mask in task_masks]
++            for index in self.auxiliary_indices:
++                auxiliary = auxiliary | (task_masks[index] > 0)
+         auxiliary = auxiliary & mask.bool()
+         user_emb = self.embedding_layer(user)
+@@ -1401,4 +1431,30 @@
+         return residual, residual.square().sum(dim=(1, 2), keepdim=True)
+ 
++    def _replace_feedback_rows(self, means, counts):
++        """Replace content grouping without adding parameters or scorer rows.
++
++        Rows are [uniform, complement, membership, ...support]. Counts-only
++        retains actual per-block union counts and emptiness, but both nonempty
++        feedback means are the all-valid block mean. Blind uses half/half soft
++        mass independent of supplied membership; both rows cover valid events
++        uniformly. Empty blocks remain exactly zero. The uniform and target-
++        match support rows, values, action alignment and event order survive.
++        """
++        if self.membership_use not in ('blind', 'counts'):
++            return means, counts
++        uniform = means[:, :1, :]
++        total = counts[:, :1]
++        member_count = (total * 0.5 if self.membership_use == 'blind'
++                        else counts[:, 2:3])
++        complement_count = total - member_count
++        replacement_means = torch.cat((
++            uniform,
++            uniform * (complement_count > 0).to(means.dtype).unsqueeze(-1),
++            uniform * (member_count > 0).to(means.dtype).unsqueeze(-1),
++            means[:, 3:, :]), dim=1)
++        replacement_counts = torch.cat((
++            total, complement_count, member_count, counts[:, 3:]), dim=1)
++        return replacement_means, replacement_counts
++
+     def _compress_both(self, values, mask, auxiliary):
+         batch, length, width = values.shape
+@@ -1416,4 +1472,5 @@
+         sums = torch.bmm(assignment, grouped)
+         means = sums / counts.clamp_min(1).unsqueeze(-1)
++        means, counts = self._replace_feedback_rows(means, counts)
+         return means.reshape(batch, groups * 3, width), counts.reshape(batch, groups * 3)
+ 
+@@ -1446,4 +1503,5 @@
+         sums = torch.bmm(assignment, values.reshape(batch * 10, 10, width))
+         means = sums / counts.clamp_min(1).unsqueeze(-1)
++        means, counts = self._replace_feedback_rows(means, counts)
+         return means.reshape(batch, 70, width), counts.reshape(batch, 70)
+ 
+@@ -1467,4 +1525,5 @@
+         sums = torch.bmm(assignment, values.reshape(batch * 10, 10, width))
+         means = sums / counts.clamp_min(1).unsqueeze(-1)
++        means, counts = self._replace_feedback_rows(means, counts)
+         return means.reshape(batch, 50, width), counts.reshape(batch, 50)
+ 
+@@ -1484,15 +1543,30 @@
+             batch, 70, width)
+ 
++    @staticmethod
++    def _row_local_dice(layer, hidden):
++        """Normalize channels within each row; no row-to-row statistics.
++
++        FP32 two-pass biased moments and native epsilon define this new
++        gate. Cast the sigmoid gate back to input dtype, then retain native
++        Dice mixing with the same learned alpha. No bn call, running-state
++        update, cross-row reduction, new parameter, RNG or detach occurs.
++        Primary bn buffers remain registered for state/capacity matching.
++        Affine rows and support expansion are still executed as inherited.
++        """
++        with torch.autocast(device_type=hidden.device.type, enabled=False):
++            work = hidden.float()
++            centered = work - work.mean(dim=-1, keepdim=True)
++            variance = centered.square().mean(dim=-1, keepdim=True)
++            normalized = centered * torch.rsqrt(variance + layer.bn.eps)
++            gate = torch.sigmoid(normalized).to(dtype=hidden.dtype)
++        return gate * hidden + layer.alpha * (1 - gate) * hidden
++
+     def _folded_support_activation(self, interactions, batch):
+-        """Affine maps on 50 rows; the SAME Dice sees all original 70 rows.
+-
+-        After Dice, duplicate support outputs are identical in real
+-        arithmetic. Retain the first five representatives and accumulate
+-        their downstream multiplicities at the next expansion. Autograd
+-        through both gather and selection preserves the derivative of the
+-        tied computation. This relies on the audited Linear/Dice scorer;
+-        stochastic or cross-row layers would require a new derivation.
+-        Native BatchNorm owns its epsilon, biased batch variance, unbiased
+-        running variance, momentum, counter updates and coupled derivatives.
++        """Retain native affine rows and 70-row expansion; gate row-locally.
++
++        Duplicated support rows remain explicit at each gate for comparable
++        execution structure, but no row contributes to another row's moments.
++        Full/counts differ in feedback rows; the uniform rows are identical
++        at fixed weights. Verify this under frozen BF16 before attribution.
+         """
+         hidden = interactions
+@@ -1500,5 +1574,5 @@
+             if isinstance(layer, Dice):
+                 expanded = self._expand_support_rows(hidden.reshape(batch, 50, -1))
+-                expanded = layer(expanded.reshape(batch * 70, -1))
++                expanded = self._row_local_dice(layer, expanded.reshape(batch * 70, -1))
+                 hidden = expanded.reshape(batch, 10, 7, -1)[:, :, :5, :].reshape(
+                     batch * 50, -1)
+@@ -1536,25 +1610,17 @@
+ 
+     def _primary_activation(self, interactions):
+-        """Forward-identical stop-gradient on nonreadout support rows.
+-
+-        Flattened order is batch, block, seven strata. The first three strata
+-        retain the incumbent gradient paths. Before EACH Dice, rows 3..6
+-        become constants for moment estimation in the blocked cell. This
+-        removes their backward contribution to the preceding affine layer
+-        and embedding sources, while preserving their forward activations,
+-        batch moments and running-buffer updates at a fixed parameter state.
+-        Selected rows still differentiate through their own batch moments;
+-        shared scorer parameters and later updates can consequently differ.
+-        No extra scorer pass, parameters, persistent state or RNG is added.
++        """Use the same row-local primary scorer during pruned evaluation.
++
++        The folded training path calls the same helper at both Dice layers.
++        Tower Dice and functional auxiliary scoring do not call this helper.
+         """
+-        if not self.training or self.support_gradient == 'attached':
+-            return self.local_activation(interactions)
+-        retained = (torch.arange(interactions.shape[0], device=interactions.device)
+-                    .remainder(7) < 3).unsqueeze(-1)
+         hidden = interactions
+         for layer in self.local_activation:
+             if isinstance(layer, Dice):
+-                hidden = torch.where(retained, hidden, hidden.detach())
+-            hidden = layer(hidden)
++                hidden = self._row_local_dice(layer, hidden)
++            elif isinstance(layer, nn.Linear):
++                hidden = layer(hidden)
++            else:
++                raise ValueError('Primary scorer requires audited Linear/Dice structure')
+         return hidden
+ 
+@@ -1704,5 +1770,14 @@
+             else:
+                 aux_strata = primary_strata
+-        feedback = aux_strata[:, 1, :] + aux_strata[:, 2, :]
++        # Select the already computed, valid-history uniform base. During
++        # training aux_strata is inherited primary_strata.detach(), retaining
++        # item/scorer ownership. Apply the same choice at evaluation. The
++        # feedback functional scorer and its private buffers still execute
++        # in training, but neither its result nor buffers feed predictions.
++        # Only primary scorer row-locality PLUS this selection closes both
++        # membership paths; either intervention alone leaves another route.
++        feedback = (aux_strata[:, 0, :]
++                    if self.auxiliary_history_readout == 'uniform'
++                    else aux_strata[:, 1, :] + aux_strata[:, 2, :])
+         grouped_counts = counts.reshape(counts.shape[0], 10, 3)
+         total_count = grouped_counts[:, :, 0].sum(dim=1, keepdim=True)

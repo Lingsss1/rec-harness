@@ -1,0 +1,92 @@
+--- g0-r0062-uncentered_transfer/model.py
++++ g0-r0063-uncentered_forward_centered_backward/model.py
+@@ -1,11 +1,13 @@
+-"""Prospective coordinate-centering study; validation outcomes are unmeasured.
+-
+-Keep the incumbent blockwise task product and its live scale derivative.
+-Compare RMS(x) with RMS(x - mean(x)) at the rank16 product, crossed with
+-the auxiliary adapter-context gradient gate. No affine parameters are added.
+-Both normalizations execute in every cell; the host measures actual costs.
+-The signed pooled base, five detail summaries, masking and task routes stay.
+-This is a normalization contrast, with no priority or external transfer claim.
+-Native tensor, BF16, autograd and performance checks belong to the host.
++"""Prospective forward/derivative centering factorial; outcomes unmeasured.
++
++At the existing rank16 task context/history product, choose the forward
++normalizer independently of its upstream vector-Jacobian product (VJP).
++U is live uncentered RMS; C removes the coordinate mean before live RMS.
++Crossed cells deliberately use a surrogate derivative, not the derivative
++of their forward BCE objective. Native U/U and C/C cells are replay controls.
++Both reference normalizers and backward graphs execute in every cell.
++Every learned module, mask, source gate and host training setting is inherited.
++No priority, predictive improvement or externally validated transfer is claimed.
++Native FP32/BF16 execution and all performance checks belong to the host.
+ """
+ import torch
+@@ -16,5 +18,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'product_centering': 'uncentered'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'product_forward': 'uncentered', 'product_backward': 'centered'}
+ 
+ 
+@@ -36,5 +38,5 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16, summary_placement='block',
+-                 product_centering='uncentered',
++                 product_forward='uncentered', product_backward='centered',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -73,9 +75,14 @@
+             raise ValueError('Unknown history projection placement')
+         self.summary_placement = summary_placement
+-        if product_centering not in ('centered', 'uncentered'):
+-            raise ValueError('Unknown product coordinate-centering mode')
+-        self.product_centering = product_centering
++        if product_forward not in ('centered', 'uncentered'):
++            raise ValueError('Unknown product forward normalizer')
++        if product_backward not in ('centered', 'uncentered'):
++            raise ValueError('Unknown product upstream VJP normalizer')
++        self.product_forward = product_forward
++        self.product_backward = product_backward
+         if interaction_rank != 16 or summary_placement != 'block':
+-            raise ValueError('This centering study freezes rank16 block summaries')
++            raise ValueError('This factorial freezes rank16 block summaries')
++        if block_aux_adapter_context_grad is not False:
++            raise ValueError('This factorial fixes auxiliary adapter-context transfer on')
+         if context_fusion != 'product':
+             raise ValueError('This placement study fixes product fusion')
+@@ -725,7 +732,6 @@
+         else:
+             fused = (query + summary) * (2.0 ** -0.5)
+-        # Statistics are per sample and per task, across rank coordinates only.
+-        # Keep the native derivative through BOTH centering and scale. The
+-        # latest stopped-scale trials lost quality; no surrogate is used here.
++        # FP32 statistics run per sample/task over rank coordinates only.
++        # Each reference retains the live derivative through its RMS scale.
+         uncentered = fused * torch.rsqrt(
+             fused.square().mean(dim=-1, keepdim=True) + 1e-4)
+@@ -733,10 +739,18 @@
+         centered = deviation * torch.rsqrt(
+             deviation.square().mean(dim=-1, keepdim=True) + 1e-4)
+-        # Execute both paths forward/backward in every cell. An algebraic zero
+-        # retains the unused graph; measured host costs determine work parity.
+-        if self.product_centering == 'centered':
+-            fused = centered + 0.0 * uncentered
++        forward_value = (centered if self.product_forward == 'centered'
++                         else uncentered)
++        # Keep both reference graphs in every backward; their selected VJP
++        # differs intentionally. Algebraic zeros add no learned capacity.
++        if self.product_backward == 'centered':
++            backward_value = centered + 0.0 * uncentered
+         else:
+-            fused = uncentered + 0.0 * centered
++            backward_value = uncentered + 0.0 * centered
++        # The identical finite values inside parentheses subtract to zero.
++        # Thus the forward is exactly the chosen reference, with no cancellation
++        # against the differently valued reference. Autograd sees only B(x).
++        # Downstream output-matrix gradients still use forward_value F(x).
++        # Crossed cells intentionally do NOT differentiate their forward loss.
++        fused = forward_value.detach() + (backward_value - backward_value.detach())
+         return self.interaction_outputs[index](fused.to(history.dtype))
+ 

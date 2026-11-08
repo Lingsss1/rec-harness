@@ -1,0 +1,98 @@
+--- g1-r0045-match_residual_click_task/model.py
++++ g1-r0046-match_reflect_click_shared/model.py
+@@ -1,10 +1,10 @@
+-"""Complementary projection controls for historical-feedback attribution.
+-
+-Only stopped match-action summary rows 0/4 receive within-stratum deviations
+-A - P(A), where P averages actions within blockwise click/shifted strata.
+-The observed pool, ordinal action summaries, item features, visibility masks,
+-learned modules, initialization and gradient ownership remain inherited.
+-Mean and rotate modes retain the round-44 bridge. This is an attribution
+-experiment; residualization is not removal of all historical feedback.
++"""Energy-preserving reflection controls for historical-feedback attribution.
++
++Only stopped match-action summary rows0/4 receive H(A)=2P(A)-A, where P
++averages authorized valid actions within each blockwise click/shifted stratum.
++H preserves group sums, energy and pairwise distances in exact arithmetic;
++it is an involution, not action removal. Eventwise/downstream-summary norms
++need not match. All learned modules, masks, ordinary consumers and ownership
++are inherited. Rotate/mean/residual modes retain the round45 bridge.
+ """
+ import torch
+@@ -15,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'match', 'match_action_availability': 'both', 'match_action_content': 'observed', 'match_replacement_gradient': 'blocked', 'match_observed_gradient': 'blocked', 'match_action_basis': 'identity', 'match_basis_initialization': 'unchanged', 'summary_rotation_partition': 'click', 'summary_stratum_operator': 'residual'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'shared', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'match', 'match_action_availability': 'both', 'match_action_content': 'observed', 'match_replacement_gradient': 'blocked', 'match_observed_gradient': 'blocked', 'match_action_basis': 'identity', 'match_basis_initialization': 'unchanged', 'summary_rotation_partition': 'click', 'summary_stratum_operator': 'reflect'}
+ 
+ 
+@@ -24,5 +24,5 @@
+                  compression_routes='uf', block_aux_scorer_grad=True,
+                  block_aux_context_grad=False, block_aux_item_grad=True, num_tasks=None,
+-                 residual_input='match_detail', residual_routing='task', residual_hidden=16,
++                 residual_input='match_detail', residual_routing='shared', residual_hidden=16,
+                  temporal_detail='position', block_detail='ordinal',
+                  curvature_detail='quadratic', joint_detail='duplicate_match',
+@@ -37,5 +37,5 @@
+                  match_basis_initialization='unchanged',
+                  summary_rotation_partition='click',
+-                 summary_stratum_operator='residual',
++                 summary_stratum_operator='reflect',
+                  match_replacement_gradient='blocked',
+                  match_observed_gradient='blocked',
+@@ -130,11 +130,11 @@
+             raise ValueError('Unknown historical feedback rotation partition')
+         self.summary_rotation_partition = summary_rotation_partition
+-        if summary_stratum_operator not in ('rotate', 'mean', 'residual'):
++        if summary_stratum_operator not in ('rotate', 'mean', 'residual', 'reflect'):
+             raise ValueError('Unknown within-stratum action operator')
+-        if summary_stratum_operator in ('mean', 'residual'):
++        if summary_stratum_operator in ('mean', 'residual', 'reflect'):
+             if (summary_rotation_partition == 'unrestricted'
+                     or summary_action_alignment != 'rotated'):
+                 raise ValueError('Projection controls require a declared feedback partition')
+-        if summary_stratum_operator == 'residual':
++        if summary_stratum_operator in ('residual', 'reflect'):
+             if (summary_rotation_group != 'match'
+                     or summary_action_group != 'all'
+@@ -144,5 +144,5 @@
+                     or match_observed_gradient != 'blocked'
+                     or match_action_basis != 'identity'):
+-                raise ValueError('Residual controls require the frozen stopped match-action consumer')
++                raise ValueError('Residual/reflection controls require the frozen stopped match-action consumer')
+         self.summary_stratum_operator = summary_stratum_operator
+         self.click_index = list(feature_map.labels).index('is_click')
+@@ -358,5 +358,5 @@
+ 
+     def _stratified_summary_values(self, values, mask, membership):
+-        """Project onto group constants, retain their complement, or rotate.
++        """Project, complement, reflect about group constants, or rotate.
+ 
+         On valid positions, mean computes P(A); residual computes A - P(A)
+@@ -367,4 +367,9 @@
+         lie in the convex hull of the action embeddings. Their norm/scale
+         differs from the mean; this is an explicit interpretation limit.
++        Reflect computes 2P(A)-A without dropping either component. For a
++        fixed valid group its sum, Frobenius energy and pairwise distances
++        are unchanged in exact arithmetic. Applying it twice is identity.
++        Per-event and downstream-summary norms need not be unchanged; the
++        synthetic vectors can lie outside the original embedding hull.
+         Invalid destinations keep their original values but never contribute
+         to valid sources. No source crosses a block, sample or group.
+@@ -378,5 +383,5 @@
+         member = membership.bool().reshape(batch, 10, 10) & valid
+         groups = torch.stack((valid & ~member, member), dim=-2)
+-        if self.summary_stratum_operator in ('mean', 'residual'):
++        if self.summary_stratum_operator in ('mean', 'residual', 'reflect'):
+             # Orthogonal projection onto blockwise group-constant action values.
+             # No new parameters, tokens or events. The observed pool and ordinal
+@@ -395,4 +400,9 @@
+                     # avoids an extra low-precision rounding of the centroid.
+                     projected32 = actions.float() - projected32
++                elif self.summary_stratum_operator == 'reflect':
++                    # Orthogonal reflection on valid group coordinates:
++                    # H=P-(I-P), H^2=I. No energy matching fit, scale or RNG.
++                    # Invalid coordinates are restored by the existing where.
++                    projected32 = 2.0 * projected32 - actions.float()
+             projected = projected32.to(values.dtype).reshape(batch, 10, 10, action_width)
+             original = actions.reshape(batch, 10, 10, action_width)

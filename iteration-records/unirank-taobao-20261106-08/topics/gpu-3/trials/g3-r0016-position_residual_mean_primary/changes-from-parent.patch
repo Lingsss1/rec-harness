@@ -1,0 +1,119 @@
+--- g3-r0015-position_task_primary/model.py
++++ g3-r0016-position_residual_mean_primary/model.py
+@@ -1,19 +1,19 @@
+-"""Position-route task sharing and gradient ownership; prospective, unmeasured.
+-
+-Inherit g3-r0014-position_collapsed without new parameters or RNG draws.
+-Factor 1: task-private position logits or the click row broadcast to all tasks.
+-Factor 2: joint loss gradients or stop only auxiliary position-logit gradients.
+-All cells execute the inherited four projections and both rank contractions.
+-Shared cells allocate all 320 position coefficients but use only the 80 in
+-the click row; allocated capacity is matched, functional capacity is not.
+-The shared joint/primary pair differs only in auxiliary backward ownership
+-at fixed weights. In task/primary, unused auxiliary positional rows remain
+-zero from initialization, while all other auxiliary pathways still train.
+-
+-The self donor still multiplies click gate logits by 1.5. Click coefficient
+-L1 mass is preserved. Context and dense gradient clipping remain indirect
+-task couplings. Rank counts supplied events, not time. Feedback visibility,
+-labels, loss weights and host training are unchanged. No novelty or measured
+-performance claim is made. Tensor/autograd checks belong to the host.
++"""Protected click positional prior with task-private auxiliary residuals.
++
++Prospective factorial: event-aligned versus history-mean click donor, crossed
++with primary-only versus joint gradients into that donor. Auxiliary private
++rows always learn. There are no new parameters, resets or random draws.
++For event donation the forward function class is just a reparameterization
++of task-private linear position rows: W_aux_effective = W_aux + W_click.
++Any benefit concerns training information flow, not added expressive capacity.
++Mean donation retains the signed history mean but removes event alignment;
++it changes donor variance and nonlinear gate operating points as well.
++
++Keep the inherited 320 positional coefficients, primary-owned item/selector
++paths, private auxiliary item tables, additive evidence, other event gates,
++all four unweighted losses and frozen host recipe. Only positional transfer
++changes. Shared context and dense gradient clipping still couple tasks.
++Rank is supplied-event order, not elapsed time. No effectiveness or novelty
++claim is made; tensor/autograd checks and all scoring belong to the host.
+ """
+ import copy
+@@ -25,9 +25,9 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_aux_donor': 'mean', 'position_donor_gradient': 'primary'}
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='HistoryCompositionGate', gpu=-1,
++    def __init__(self, feature_map, model_id='ProtectedPositionResidual', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(128, 32),
+                  tower_hidden_units=(128, 64), routing='task',
+@@ -40,5 +40,5 @@
+                  gate_conditioning='local', conditioning_feedback_identity=False,
+                  position_scope='event', position_feedback_identity=False,
+-                 position_sharing='task', position_aux_gradient='primary',
++                 position_aux_donor='mean', position_donor_gradient='primary',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+@@ -110,10 +110,10 @@
+         if position_scope != 'event' or position_feedback_identity:
+             raise ValueError('Ownership study fixes event position and collapsed feedback')
+-        if position_sharing not in ('task', 'shared'):
+-            raise ValueError('Position sharing must be task or shared')
+-        if position_aux_gradient not in ('joint', 'primary'):
+-            raise ValueError('Position gradient ownership must be joint or primary')
+-        self.position_sharing = position_sharing
+-        self.position_aux_gradient = position_aux_gradient
++        if position_aux_donor not in ('event', 'mean', 'none'):
++            raise ValueError('Position donor must be event, mean or none')
++        if position_donor_gradient not in ('joint', 'primary'):
++            raise ValueError('Position donor gradient must be joint or primary')
++        self.position_aux_donor = position_aux_donor
++        self.position_donor_gradient = position_donor_gradient
+         self.primary_gate_component = primary_gate_component
+         self.gate_transfer_source = gate_transfer_source
+@@ -318,16 +318,31 @@
+         marginal_logits = torch.stack(marginal_logits, dim=-1)
+         result = event_logits if self.position_scope == 'event' else marginal_logits
+-        # Always calculate the shared alternative. Select the click row by
+-        # label rather than assuming FeatureMap task order. Broadcast logits,
+-        # not an average of matrices, so the click gradient scale is retained.
+-        shared_result = (result * self._primary_channel).sum(dim=-1, keepdim=True)
+-        if self.position_sharing == 'shared':
+-            result = shared_result.expand_as(result)
+-        if self.position_aux_gradient == 'primary':
+-            # Only this input-only positional correction loses auxiliary
+-            # gradients; auxiliary predictions, towers, private embeddings,
+-            # score readout rows, and other gate parameters keep learning.
+-            result = torch.where(self._primary_channel, result, result.detach())
+-        return result.masked_fill(~valid.unsqueeze(-1), 0)
++        return self._transfer_position_route(result, mask)
++
++    def _transfer_position_route(self, private_logits, mask):
++        """Use click as an auxiliary prior; private auxiliary rows keep learning.
++
++        Invoked inside the inherited FP32 gate context. Shapes are [B,L,T]
++        and [B,L]. Compute both donors in every factorial cell. A mean donor
++        is a signed masked mean, not coefficient-mass or variance matching.
++        'none' is an executable identity bridge to the prior task/joint
++        reference for host checks, and is not a fifth proposed trial.
++        """
++        valid = mask.bool().unsqueeze(-1)
++        private_logits = private_logits.masked_fill(~valid, 0)
++        click = (private_logits * self._primary_channel).sum(dim=-1, keepdim=True)
++        count = valid.float().sum(dim=1, keepdim=True).clamp_min(1.0)
++        mean_click = click.sum(dim=1, keepdim=True) / count
++        mean_click = mean_click.expand_as(click).masked_fill(~valid, 0)
++        if self.position_aux_donor == 'none':
++            return private_logits
++        donor = click if self.position_aux_donor == 'event' else mean_click
++        if self.position_donor_gradient == 'primary':
++            # Block only auxiliary-to-click positional feedback. The residual
++            # itself is never detached, and its corresponding task still learns.
++            donor = donor.detach()
++        auxiliary = private_logits + donor
++        result = torch.where(self._primary_channel, private_logits, auxiliary)
++        return result.masked_fill(~valid, 0)
+ 
+     def _event_route_gain(self, channels, matches, mask):

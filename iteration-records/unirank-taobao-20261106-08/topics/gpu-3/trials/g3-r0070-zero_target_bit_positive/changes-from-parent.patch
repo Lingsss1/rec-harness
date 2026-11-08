@@ -1,0 +1,188 @@
+--- g3-r0069-fixed_angle_full_source_bit_negative_bridge/model.py
++++ g3-r0070-zero_target_bit_positive/model.py
+@@ -17,8 +17,8 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_decomposed_label_bit', 'source_component': 'full'}
+-
+-# Preserve the true-label joint private objective; the hook adds only a
+-# zero-value surrogate for the decomposed-label bit input in shared backward.
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'aligned', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_decomposed_label_bit', 'source_component': 'zero_target'}
++
++# Preserve true-label joint private learning; only the sign-source VJP
++# receives the zero-target versus true-label intervention.
+ AUXILIARY_OBJECTIVE = 'joint'
+ 
+@@ -703,31 +703,13 @@
+ 
+ 
+-def _occupied_mean_label_targets(train_labels, occupied):
+-    """Mean targets for a training-only source VJP; never used in forward.
+-
+-    For each task t and occupied row i, ybar_it = sum_j m_j*y_jt / sum_j m_j.
+-    Empty rows keep their own true labels, matching the old permutation's
+-    domain. All-empty and singleton-occupied batches therefore keep labels.
+-    No labels, statistics, parameters or RNG state persist across batches.
+-
+-    At fixed probabilities and recipient graph, BCE's VJP is affine in its
+-    target, so this is the uniform-permutation-average auxiliary VJP before
+-    nonlinear Q/pivot extraction (up to arithmetic rounding). It is NOT the
+-    average orientation bit. Batch prevalence, empty-row labels, true native
+-    radius/support and learned state still carry auxiliary-label information.
+-    Float32 matches the inherited BCE path; source precision is not altered.
+-    """
+-    if train_labels.ndim != 2:
+-        raise ValueError('Expected training labels [B,T]')
+-    if (occupied.shape != (train_labels.shape[0], 1)
+-            or occupied.dtype != torch.bool):
+-        raise ValueError('Expected history occupancy bool[B,1]')
+-    with torch.autocast(device_type=train_labels.device.type, enabled=False):
+-        truth = train_labels.detach().to(dtype=torch.float32)
+-        count = occupied.to(dtype=torch.float32).sum().clamp_min(1.0)
+-        totals = torch.where(occupied, truth, torch.zeros_like(truth)).sum(
+-            dim=0, keepdim=True)
+-        means = totals / count
+-        return torch.where(occupied, means.expand_as(truth), truth)
++def _zero_source_targets(probabilities):
++    """Training-only zeros independent of all current auxiliary labels.
++
++    Zero EVERY row, including empty histories. Training-time Dice can couple
++    rows, so retaining true labels on empty rows would leave an explicit
++    label path into occupied source cotangents. No extra forward, statistics,
++    state or RNG. The real objective continues to use true targets everywhere.
++    """
++    return torch.zeros_like(probabilities.detach(), dtype=torch.float32)
+ 
+ 
+@@ -737,5 +719,5 @@
+ Unlike moving a precomputed cotangent, the caller differentiates a source
+ objective through the original recipient probability graph. Its source is
+-a declared linear combination of true/mean BCEs. Only this bit uses that VJP;
++a declared choice of true-label versus all-zero-target BCEs. Only this bit uses that VJP;
+ native true-label geometry is kept separate.
+ Exact-zero Q maps to +1 without an additional validity gate. The helper
+@@ -997,5 +979,5 @@
+                  product_context_orientation='aligned',
+                  parallel_orientation='aligned',
+-                 orthogonal_orientation='reversed',
++                 orthogonal_orientation='aligned',
+                  centering_scope='aggregate',
+                  click_context_collection='joint',
+@@ -1003,5 +985,5 @@
+                  click_relative_transfer='orthogonal_native',
+                  orthogonal_assignment='nuisance_line_fixed_angle_decomposed_label_bit',
+-                 source_component='full',
++                 source_component='zero_target',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -1066,6 +1048,6 @@
+         if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit', 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'nuisance_line_fixed_angle_label_mean_bit', 'nuisance_line_fixed_angle_decomposed_label_bit'):
+             raise ValueError('Unknown orthogonal assignment')
+-        if source_component not in ('mean', 'label_deviation', 'full', 'label_reflected'):
+-            raise ValueError('Unknown auxiliary source decomposition component')
++        if source_component not in ('zero_target', 'full'):
++            raise ValueError('Expected zero_target or full auxiliary bit source')
+         self.source_component = source_component
+         self.orthogonal_assignment = orthogonal_assignment
+@@ -1894,22 +1876,16 @@
+ 
+     def training_loss(self, inputs, probabilities, train_labels):
+-        """True joint BCE plus an exact-zero, first-order source-bit surrogate.
+-
+-        Source VJPs stop at the three true auxiliary collection outputs;
+-        autograd.grad leaves optimizer .grad fields alone. The detached
+-        results enter the extra collection edges only for bit extraction.
+-        Every arm differentiates both true and mean-target BCE graphs with
+-        explicit coefficients. Full=(1,0) yields G=M+D; reflected=(-1,2)
+-        yields M-D. No source gradient trains private modules. The returned
+-        scalar value remains true-label joint BCE, not the source objective.
+-
+-        BCE VJPs are affine in targets at fixed probabilities and recipient
+-        graph. Reflection reverses y-ybar without changing its batch mean
+-        or squared deviation, up to arithmetic rounding. The effective
+-        target 2*ybar-y can lie outside [0,1], so it is never given to BCE.
+-        Instead valid true/mean BCE losses are combined before autograd.grad.
+-        Only source bits change: native true-label geometry and private
+-        learning still contain labels. Nonlinear Q/pivot extraction and
+-        later optimization are not additive; no AUC decomposition follows.
++        """True joint BCE plus an exact-zero source-bit surrogate.
++
++        Differentiate true and all-zero-target BCE scalars through the same
++        recipient graph. Use G_y or G_0 only to extract the global sign bit;
++        every private gradient and the native transfer radius/line/support
++        retain true-label learning. No extra forward or optimizer state.
++
++        Away from probability saturation, sigmoid+BCE has logit derivative
++        p-y, and the zero-target source has derivative p. Numerical clamps
++        in probability BCE remain inherited; inspect saturation on the host.
++        Removing current labels from this one VJP does not remove labels from
++        the whole transfer, learned head Jacobians or training trajectory.
+         """
+         if (probabilities.ndim != 2 or train_labels.ndim != 2
+@@ -1918,5 +1894,5 @@
+             raise ValueError('Expected aligned prediction and training-label matrices [B,4]')
+         if AUXILIARY_OBJECTIVE != 'joint':
+-            raise ValueError('Label-bit study freezes true-label joint private learning')
++            raise ValueError('Bit-source study freezes true-label joint private learning')
+         if probabilities.shape[0] < 2:
+             raise ValueError('This frozen full-batch training study requires at least two examples')
+@@ -1927,11 +1903,10 @@
+         if probabilities.shape[0] != occupied.shape[0]:
+             raise ValueError('Training context and prediction batch mismatch')
+-        # BCE is unsafe inside CUDA autocast. FP32 arithmetic here leaves
+-        # gradients into the original probabilities and parameters intact.
++        # BCE is unsafe inside CUDA autocast. Keep the inherited FP32 path.
+         with torch.autocast(device_type=probabilities.device.type, enabled=False):
+             truth = train_labels.detach().to(dtype=torch.float32)
+-            source_targets = _occupied_mean_label_targets(truth, occupied)
++            source_targets = _zero_source_targets(probabilities)
+             losses = []
+-            source_losses = []
++            zero_source_losses = []
+             source_true_losses = []
+             for index, label in enumerate(self.feature_map.labels):
+@@ -1941,27 +1916,23 @@
+                 if label != 'is_click':
+                     source_true_losses.append(task_loss)
+-                    source_losses.append(nn.functional.binary_cross_entropy(
++                    zero_source_losses.append(nn.functional.binary_cross_entropy(
+                         probabilities[:, index].float(), source_targets[:, index], reduction='mean'))
+             true_auxiliary_loss = torch.stack(source_true_losses).sum()
+-            mean_auxiliary_loss = torch.stack(source_losses).sum()
+-            # Keep both BCE graphs in the extra VJP in every cell, even
+-            # when a coefficient is zero. No data-dependent source switch.
+-            # G=M+D uses (1,0); M-D uses (-1,2). Both graphs
+-            # execute in all cells. Never pass reflected pseudo-labels
+-            # outside [0,1] to BCE: combine valid BCE scalars instead.
+-            true_weight, mean_weight = {
+-                'mean': (0.0, 1.0),
+-                'label_deviation': (1.0, -1.0),
++            zero_auxiliary_loss = torch.stack(zero_source_losses).sum()
++            # Both BCE graphs traverse the additional VJP in every cell,
++            # including the graph with zero coefficient. No private module
++            # is trained on fabricated zero labels; detached cotangents feed
++            # only the source-bit collection edges.
++            true_weight, zero_weight = {
++                'zero_target': (0.0, 1.0),
+                 'full': (1.0, 0.0),
+-                'label_reflected': (-1.0, 2.0),
+             }[self.source_component]
+             source_loss = (true_weight * true_auxiliary_loss
+-                           + mean_weight * mean_auxiliary_loss)
++                           + zero_weight * zero_auxiliary_loss)
+             source_gradients = torch.autograd.grad(
+                 source_loss, edges[1:4], retain_graph=True,
+                 create_graph=False, allow_unused=False)
+-            # Subtract identical finite tensor values before multiplication;
+-            # the scalar stays exactly true-label BCE without cancellation
+-            # between large nonzero dot products. No higher-order graph.
++            # Subtraction before multiplication keeps the surrogate value
++            # exactly zero for finite values, without a higher-order graph.
+             surrogate = torch.stack([
+                 ((edge.float() - edge.detach().float()) * gradient.detach().float()).sum()
+@@ -1969,5 +1940,4 @@
+             ]).sum()
+             result = torch.stack(losses).sum() + surrogate
+-        # Release this batch's graph reference after constructing the scalar.
+         self._training_source_bit_context = None
+         return result

@@ -1,0 +1,67 @@
+--- g1-r0049-match_crossradius_click_task/model.py
++++ g1-r0050-match_pairrms_click_task/model.py
+@@ -17,5 +17,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'match', 'match_action_availability': 'both', 'match_action_content': 'observed', 'match_replacement_gradient': 'blocked', 'match_observed_gradient': 'blocked', 'match_action_basis': 'identity', 'match_basis_initialization': 'unchanged', 'summary_rotation_partition': 'click', 'summary_stratum_operator': 'mean', 'summary_projection_scope': 'history', 'summary_contrast_direction': 'fixed', 'summary_contrast_radius': 'opposite_partition'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'match', 'match_action_availability': 'both', 'match_action_content': 'observed', 'match_replacement_gradient': 'blocked', 'match_observed_gradient': 'blocked', 'match_action_basis': 'identity', 'match_basis_initialization': 'unchanged', 'summary_rotation_partition': 'click', 'summary_stratum_operator': 'mean', 'summary_projection_scope': 'history', 'summary_contrast_direction': 'fixed', 'summary_contrast_radius': 'symmetric_rms'}
+ 
+ 
+@@ -42,5 +42,5 @@
+                  summary_projection_scope='history',
+                  summary_contrast_direction='fixed',
+-                 summary_contrast_radius='opposite_partition',
++                 summary_contrast_radius='symmetric_rms',
+                  match_replacement_gradient='blocked',
+                  match_observed_gradient='blocked',
+@@ -171,11 +171,11 @@
+             raise ValueError('Fixed direction requires the stopped history-mean consumer')
+         self.summary_contrast_direction = summary_contrast_direction
+-        if summary_contrast_radius not in ('same_partition', 'opposite_partition'):
++        if summary_contrast_radius not in ('same_partition', 'opposite_partition', 'symmetric_rms'):
+             raise ValueError('Unknown action-contrast radius source')
+-        if summary_contrast_radius == 'opposite_partition':
++        if summary_contrast_radius in ('opposite_partition', 'symmetric_rms'):
+             if (summary_contrast_direction != 'fixed'
+                     or summary_projection_scope != 'history'
+                     or summary_rotation_partition not in ('click', 'rotated_click')):
+-                raise ValueError('Opposite radius requires fixed-direction history means')
++                raise ValueError('Paired radius requires fixed-direction history means')
+         self.summary_contrast_radius = summary_contrast_radius
+         self.click_index = list(feature_map.labels).index('is_click')
+@@ -350,5 +350,5 @@
+             membership = (task_masks[self.click_index] > 0) & mask.bool()
+             radius_membership = None
+-            if self.summary_contrast_radius == 'opposite_partition':
++            if self.summary_contrast_radius in ('opposite_partition', 'symmetric_rms'):
+                 if self.summary_rotation_partition == 'click':
+                     radius_membership = self._rotate_valid_membership(
+@@ -454,6 +454,26 @@
+                                      / donor_counts32.clamp_min(1))
+                     donor_contrast32 = donor_means32[:, 1:2, :] - donor_means32[:, 0:1, :]
+-                    radius32 = torch.linalg.vector_norm(
+-                        donor_contrast32, dim=-1, keepdim=True)
++                    if self.summary_contrast_radius == 'symmetric_rms':
++                        # Fixed click-first reduction order gives both placement
++                        # cells the identical radius at the same model state.
++                        # This retains both radii as one scalar; it does not
++                        # remove all historical action information.
++                        if self.summary_rotation_partition == 'click':
++                            paired_contrast32 = torch.cat(
++                                (contrast32, donor_contrast32), dim=-1)
++                        else:
++                            paired_contrast32 = torch.cat(
++                                (donor_contrast32, contrast32), dim=-1)
++                            # Use the real-click grouping for the common mean
++                            # in both cells, avoiding reduction-order leakage.
++                            history_mean32 = ((donor_counts32 * donor_means32)
++                                              .sum(dim=1, keepdim=True) / total32)
++                        # vector_norm has a finite zero subgradient; no epsilon,
++                        # fitted calibration, parameters or RNG are introduced.
++                        radius32 = (torch.linalg.vector_norm(
++                            paired_contrast32, dim=-1, keepdim=True) / (2.0 ** 0.5))
++                    else:
++                        radius32 = torch.linalg.vector_norm(
++                            donor_contrast32, dim=-1, keepdim=True)
+                 axis32 = torch.arange(action_width, device=values.device, dtype=torch.float32)
+                 axis32 = (1.0 - 2.0 * axis32.remainder(2)) / (action_width ** 0.5)

@@ -1,0 +1,80 @@
+--- g0-r0039-context_product/model.py
++++ g0-r0048-interleaved_transfer/model.py
+@@ -1,11 +1,8 @@
+-"""Prospective context/history fusion study on the frozen compressed-history model.
+-
+-Append rank-16 task-specific context and compressed-history projections to the
+-incumbent. Product versus sum fusion is crossed with the existing auxiliary
+-adapter-context gradient gate. All four cells have identical learned capacity,
+-initialization order and native Dice populations. New zero output matrices
+-preserve the parent's initial predictions, not its subsequent training path.
+-Fusion uses ordinary differentiable FP32 arithmetic, not a surrogate gradient.
+-No novelty or predictive benefit is established. Host tensor checks are required.
++"""Prospective history-family separation under fixed rank and learned capacity.
++
++Apply tanh separately to two complementary column groups of the inherited
++history projection, then fuse their sum with the inherited context query.
++Semantic versus evenly interleaved grouping is crossed with auxiliary context
++transfer. No predictive improvement or saturation diagnosis is established.
+ """
+ import torch
+@@ -16,5 +13,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'history_partition': 'interleaved'}
+ 
+ 
+@@ -36,4 +33,5 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16,
++                 history_partition='interleaved',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -69,4 +67,7 @@
+         self.context_fusion = context_fusion
+         self.interaction_rank = interaction_rank
++        if history_partition not in ('semantic', 'interleaved'):
++            raise ValueError('Unknown complementary history-column partition')
++        self.history_partition = history_partition
+         if residual_input != 'match_detail':
+             raise ValueError('The original match-detail channel must be retained')
+@@ -221,4 +222,20 @@
+             self.register_buffer(storage_name, buffer.detach().clone())
+             self._auxiliary_state_names[name] = storage_name
++        # Deterministic derived indices consume no RNG and introduce no
++        # learned capacity. Both groups cover every inherited column once.
++        # The first group has exactly value_width columns in both controls.
++        split_width = self.history_projections[0].in_features
++        if split_width != 6 * self.value_width + len(self.match_fields):
++            raise ValueError('Unexpected inherited history feature layout')
++        if self.history_partition == 'semantic':
++            first = torch.arange(self.value_width, dtype=torch.long)
++        else:
++            first = torch.div(torch.arange(self.value_width, dtype=torch.long)
++                              * split_width, self.value_width, rounding_mode='floor')
++        remaining = torch.ones(split_width, dtype=torch.bool)
++        remaining[first] = False
++        second = torch.arange(split_width, dtype=torch.long)[remaining]
++        self.register_buffer('_history_first_columns', first, persistent=False)
++        self.register_buffer('_history_second_columns', second, persistent=False)
+         self.model_to_device()
+ 
+@@ -682,5 +699,16 @@
+         # optimization still differ; equal norms do not imply equal capacity.
+         query = torch.tanh(self.context_queries[index](context).float())
+-        summary = torch.tanh(self.history_projections[index](history).float())
++        # Reuse every column of the SAME bias-free learned matrix once.
++        # Separate tanh prevents one group's preactivation from directly
++        # saturating or cancelling the other before the nonlinearity.
++        # This is a changed function class, despite identical parameter count.
++        projection = self.history_projections[index]
++        first = torch.nn.functional.linear(
++            history.index_select(-1, self._history_first_columns),
++            projection.weight.index_select(-1, self._history_first_columns)).float()
++        second = torch.nn.functional.linear(
++            history.index_select(-1, self._history_second_columns),
++            projection.weight.index_select(-1, self._history_second_columns)).float()
++        summary = (torch.tanh(first) + torch.tanh(second)) * (2.0 ** -0.5)
+         if self.context_fusion == 'product':
+             fused = query * summary

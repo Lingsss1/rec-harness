@@ -1,0 +1,95 @@
+--- g1-r0017-coupled_item15_action16/model.py
++++ g1-r0018-prefix15_replay/model.py
+@@ -1,16 +1,14 @@
+-"""Prospective near-source item capacity and initialization controls.
+-
+-Keep the inherited native scorer, thirty compressed UF slots, feedback masks,
+-source gradient gates and four task towers. Vary only item width (14/15/16)
+-and the declared scratch initialization mode. Context and action stay at 16.
+-Coupled mode copies semantic coordinates from an untrained full16 reference;
+-native mode retains ordinary same-incoming-state native draws. Both modes
+-restore the post-full16 CPU RNG stream, use no trained checkpoint, and discard
+-the temporary CPU reference before host training. No forward change or new
+-architecture claim. Numerical and cost verification remains host-owned.
+-
++"""Prospective coordinate-replacement controls for near-source item capacity.
++
++The 14/15 by prefix/suffix factorial keeps architecture and persistent shapes
++fixed within each width. Coupled scratch initialization retains either the
++first or last coordinates of every item table, with the same semantic columns
++in all four scorer blocks and both tower item blocks. Context/action and shared
++hidden weights/buffers are unchanged. No trained teacher, data-derived choice,
++rescaling, new forward operator or architecture novelty is claimed.
++Numerical, training and scoring checks remain host-owned.
+ """
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'item_embedding_dim': 15, 'action_embedding_dim': 16, 'source_coupled_initialization': True}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'item_embedding_dim': 15, 'action_embedding_dim': 16, 'source_coupled_initialization': True, 'item_coordinate_selection': 'prefix'}
+ 
+ import copy
+@@ -257,5 +255,16 @@
+ 
+ 
+-def _source_columns(item_field_count, context_field_count, item_width, action_width):
++def _item_coordinates(item_width, selection):
++    """Predeclared coordinate replacements; no data or RNG is consulted."""
++    if item_width not in (8, 12, 14, 15, 16):
++        raise ValueError('Unsupported item width')
++    if selection not in ('prefix', 'suffix'):
++        raise ValueError('Selection must be prefix or suffix')
++    start = 0 if selection == 'prefix' else 16 - item_width
++    return list(range(start, start + item_width))
++
++
++def _source_columns(item_field_count, context_field_count, item_width, action_width,
++                    item_coordinate_selection='prefix'):
+     """Map native input coordinates to semantic full16 field/block positions."""
+     if item_width not in (8, 12, 14, 15, 16) or action_width != 16:
+@@ -267,5 +276,5 @@
+     key_columns = [16 * field + coordinate
+                    for field in range(item_field_count)
+-                   for coordinate in range(item_width)]
++                   for coordinate in _item_coordinates(item_width, item_coordinate_selection)]
+     scorer_columns = [block * full_key + column
+                       for block in range(4) for column in key_columns]
+@@ -282,7 +291,11 @@
+     def __init__(self, feature_map, model_id='IntermediateItemCapacity', gpu=-1,
+                  item_embedding_dim=15, action_embedding_dim=16,
+-                 source_coupled_initialization=True, **kwargs):
++                 source_coupled_initialization=True,
++                 item_coordinate_selection='prefix', **kwargs):
+         if not isinstance(source_coupled_initialization, bool):
+             raise ValueError('Initialization coupling must be boolean')
++        # Validate the new factor before constructing any model or consuming RNG.
++        _item_coordinates(item_embedding_dim, item_coordinate_selection)
++        self.item_coordinate_selection = item_coordinate_selection
+         # Both modes pay for the same untrained CPU reference. No data,
+         # checkpoint or trained teacher is involved. Capture the incoming RNG
+@@ -308,5 +321,6 @@
+         scorer_columns, tower_columns = _source_columns(
+             len(self.item_fields), len(self.user_fields),
+-            self.table_widths[self.item_fields[0]], self.action_width)
++            self.table_widths[self.item_fields[0]], self.action_width,
++            self.item_coordinate_selection)
+         source_state = reference.state_dict()
+         target_state = self.state_dict()
+@@ -315,4 +329,8 @@
+         tower_inputs = {'towers.' + str(index) + '.0.weight'
+                         for index in range(self.num_tasks)}
++        item_tables = {'embedding_layer.embedding_layers.' + field + '.weight'
++                       for field in self.item_fields}
++        item_coordinates = _item_coordinates(
++            self.table_widths[self.item_fields[0]], self.item_coordinate_selection)
+         with torch.no_grad():
+             for name, target in target_state.items():
+@@ -321,5 +339,9 @@
+                     if value.ndim != 2 or target.ndim != 2:
+                         raise ValueError('Expected categorical embedding matrices')
+-                    value = value[:, :target.shape[1]]
++                    if name in item_tables:
++                        value = value[:, item_coordinates]
++                    else:
++                        # Context/action retain all sixteen source coordinates.
++                        value = value[:, :target.shape[1]]
+                 elif name == 'local_activation.0.weight':
+                     value = value[:, scorer_columns]

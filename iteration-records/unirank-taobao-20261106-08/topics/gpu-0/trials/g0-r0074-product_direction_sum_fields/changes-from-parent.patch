@@ -1,0 +1,174 @@
+--- g0-r0073-both_sum_bridge/model.py
++++ g0-r0074-product_direction_sum_fields/model.py
+@@ -1,12 +1,12 @@
+-"""Prospective buy context route direction versus magnitude study.
+-
+-At the common context input let r/p be the residual/product route VJPs.
+-Replace r+p by p or r normalized to ||r+p|| per example. A both-route
+-bridge and a raw product bridge share the same split and computation.
+-Every private branch still receives its native loss gradient. Learned
+-state, forward values, summary rule and all other task routes are inherited.
+-This is a first-order training surrogate, not a gradient of the forward
+-function. Matching context norms does not match repeated-ID sparse sums
+-or optimizer steps. All new tensor and empirical checks belong to the host.
++"""Prospective field direction versus allocation factorial for buy context.
++
++Let N be the summed residual/product VJP and P the product-route VJP.
++Cross unit directions of N/P within context fields with N/P field norms,
++restoring the global per-example norm to ||N||. Two new hybrid cells and
++two exact-formula corner bridges preserve all forward and private-branch
++computations. Only the buy context embedding-output VJP changes. This is
++an explicit first-order training surrogate, not the forward derivative.
++No new learned state, loss weights, optimizer changes or input information.
++Host tensor/BF16/autograd checks and all empirical outcomes remain pending.
+ """
+ import torch
+@@ -17,5 +17,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'primary_summary_vjp': 'native', 'cartfav_summary_vjp': 'native', 'buy_summary_vjp': 'removed_restored', 'buy_context_vjp': 'both'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'primary_summary_vjp': 'native', 'cartfav_summary_vjp': 'native', 'buy_summary_vjp': 'removed_restored', 'buy_context_vjp': 'product_sum_fields'}
+ 
+ 
+@@ -81,15 +81,23 @@
+ 
+ class _BuyContextVJP(torch.autograd.Function):
+-    """Split context values, then replace only the buy-to-context VJP.
+-
+-    Both output copies are always used, including in the raw control, so
+-    private branch derivatives and backward work are retained. Work in FP32
+-    before casting the final input derivative. A zero selected direction
+-    falls back to the sum; such rows do not identify a direction effect.
+-    Zero sum norm requests zero update. No ratio clipping or RNG is used.
++    """Separate field direction from field magnitude at a common input.
++
++    N_f = (residual + product)_f; P_f = product_f. Allocation chooses
++    ||N_f|| or ||P_f||*||N||/||P||. Direction chooses unit(N_f) or unit(P_f).
++    Both exact-formula old corners bypass field reconstruction. All four
++    choices are computed in every training cell to match backward work.
++    With zero selected direction, borrow the other field direction; with
++    globally zero P, borrow N's allocation. Globally zero N requests zero.
++    Degenerate fields cannot identify direction; they must be reported as
++    a limitation. Norm matching here does not match sparse repeated-ID
++    sums, combined-task context gradients, clipping or optimizer steps.
+     """
+     @staticmethod
+-    def forward(ctx, context, mode):
++    def forward(ctx, context, mode, field_width):
++        if (context.ndim != 2 or context.shape[-1] == 0
++                or context.shape[-1] % field_width != 0):
++            raise ValueError('Expected concatenated equal-width context fields')
+         ctx.mode = mode
++        ctx.field_width = field_width
+         ctx.input_dtype = context.dtype
+         ctx.set_materialize_grads(False)
+@@ -98,4 +106,5 @@
+     @staticmethod
+     def _row_norm(vector):
++        # Works on [B,C] or [B,F,D]; avoids squaring unscaled large values.
+         scale = vector.abs().amax(dim=-1, keepdim=True)
+         safe_scale = torch.where(scale > 0, scale, torch.ones_like(scale))
+@@ -107,5 +116,5 @@
+     def backward(ctx, residual_grad, product_grad):
+         if residual_grad is None and product_grad is None:
+-            return None, None
++            return None, None, None
+         if residual_grad is None:
+             residual_grad = torch.zeros_like(product_grad)
+@@ -116,25 +125,42 @@
+         total = residual + product
+         total_norm = _BuyContextVJP._row_norm(total)
+-        residual_norm = _BuyContextVJP._row_norm(residual)
+         product_norm = _BuyContextVJP._row_norm(product)
+-        safe_residual = torch.where(residual_norm > 0, residual_norm,
+-                                    torch.ones_like(residual_norm))
+         safe_product = torch.where(product_norm > 0, product_norm,
+                                    torch.ones_like(product_norm))
+-        matched_residual = torch.where(
+-            residual_norm > 0, (residual / safe_residual) * total_norm, total)
++        # Preserve r0073 product_sum_norm exactly, including its fallback
++        # and divide-then-multiply evaluation order, for the P/P corner.
+         matched_product = torch.where(
+             product_norm > 0, (product / safe_product) * total_norm, total)
+-        if ctx.mode == 'product_sum_norm':
++
++        total_fields = total.reshape(total.shape[0], -1, ctx.field_width)
++        product_fields = product.reshape(product.shape[0], -1, ctx.field_width)
++        total_field_norm = _BuyContextVJP._row_norm(total_fields)
++        product_field_norm = _BuyContextVJP._row_norm(product_fields)
++        safe_total_field = torch.where(total_field_norm > 0, total_field_norm,
++                                       torch.ones_like(total_field_norm))
++        safe_product_field = torch.where(product_field_norm > 0, product_field_norm,
++                                         torch.ones_like(product_field_norm))
++        native_unit = total_fields / safe_total_field
++        product_unit = product_fields / safe_product_field
++        sum_direction = torch.where(total_field_norm > 0, native_unit, product_unit)
++        product_direction = torch.where(product_field_norm > 0, product_unit, native_unit)
++        # Normalize fractions before multiplying; no unbounded norm ratio.
++        product_allocation = (product_field_norm / safe_product.unsqueeze(-1)
++                              * total_norm.unsqueeze(-1))
++        product_allocation = torch.where(product_norm.unsqueeze(-1) > 0,
++                                         product_allocation, total_field_norm)
++        product_sum_fields = (product_direction * total_field_norm).reshape_as(total)
++        sum_product_fields = (sum_direction * product_allocation).reshape_as(total)
++        if ctx.mode == 'sum_sum':
++            result = total
++        elif ctx.mode == 'product_sum_fields':
++            result = product_sum_fields
++        elif ctx.mode == 'sum_product_fields':
++            result = sum_product_fields
++        elif ctx.mode == 'product_product':
+             result = matched_product
+-        elif ctx.mode == 'residual_sum_norm':
+-            result = matched_residual
+-        elif ctx.mode == 'both':
+-            result = total
+-        elif ctx.mode == 'product_raw':
+-            result = product
+         else:
+-            raise ValueError('Unknown buy context VJP control')
+-        return result.to(ctx.input_dtype), None
++            raise ValueError('Unknown buy field VJP control')
++        return result.to(ctx.input_dtype), None, None
+ 
+ 
+@@ -158,5 +184,5 @@
+                  primary_summary_vjp='native',
+                  cartfav_summary_vjp='native', buy_summary_vjp='removed_restored',
+-                 buy_context_vjp='both',
++                 buy_context_vjp='product_sum_fields',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -206,7 +232,11 @@
+         self.cartfav_summary_vjp = cartfav_summary_vjp
+         self.buy_summary_vjp = buy_summary_vjp
+-        if buy_context_vjp not in ('product_sum_norm', 'residual_sum_norm',
+-                                   'both', 'product_raw'):
+-            raise ValueError('Unknown buy context VJP control')
++        if buy_context_vjp not in ('sum_sum', 'product_sum_fields',
++                                   'sum_product_fields', 'product_product'):
++            raise ValueError('Unknown buy field VJP control')
++        if (not isinstance(embedding_dim, int) or isinstance(embedding_dim, bool)
++                or embedding_dim < 1):
++            raise ValueError('Context field width must be a positive integer')
++        self.context_field_width = embedding_dim
+         if (primary_summary_vjp != 'native' or cartfav_summary_vjp != 'native'
+                 or buy_summary_vjp != 'removed_restored'):
+@@ -288,4 +318,10 @@
+                             if spec.get('source') not in ('item', 'action')
+                             and spec['type'] != 'meta']
++        if not self.user_fields:
++            raise ValueError('At least one context field is required')
++        for name in self.user_fields:
++            declared_width = feature_map.features[name].get('embedding_dim', embedding_dim)
++            if declared_width != embedding_dim:
++                raise ValueError('This field factorial requires uniform context widths')
+         self.action_field = next((name for name, spec in feature_map.features.items()
+                                   if spec.get('source') == 'action'), None)
+@@ -1025,5 +1061,5 @@
+             if self.training and label == 'buy':
+                 residual_context, product_context = _BuyContextVJP.apply(
+-                    adapter_context, self.buy_context_vjp)
++                    adapter_context, self.buy_context_vjp, self.context_field_width)
+             signal = torch.cat([task_detail, task_position_detail, task_block_detail,
+                                 task_curvature_detail, task_joint_detail], dim=-1)

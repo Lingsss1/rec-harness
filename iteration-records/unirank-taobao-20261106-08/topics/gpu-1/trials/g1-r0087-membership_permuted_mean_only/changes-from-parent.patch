@@ -1,0 +1,70 @@
+--- g1-r0086-membership_full_explicit_bridge/model.py
++++ g1-r0087-membership_permuted_mean_only/model.py
+@@ -1,10 +1,10 @@
+-"""Conditional membership utility through scorer variance gradients.
++"""Conditional membership utility through scorer mean-gradient coupling.
+ 
+ Retain native BatchNorm forward values, running-state updates and evaluation.
+-During primary scorer training only, compare an explicit full input VJP with
+-its variance-coupled, mean-gradient-omitted replacement. The full/counts/
+-valid-rank-permuted arms retain identical learned capacity and host exposure.
+-The explicit full VJP is a numerical bridge, not an assumed exact reproduction
+-of the native mixed-precision backward kernel. No novelty claim is made.
++Compare explicit full and mean-only input VJPs at identical learned capacity.
++Mean-only retains r*(g-mean(g)) and omits the variance-derivative term;
++forward centering and variance scaling both remain. This is a first-order
++surrogate diagnostic, not native mixed-precision gradient equivalence or a
++new information source. Historical actions and host masks remain unchanged.
+ """
+ import torch
+@@ -15,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'membership_use': 'full', 'primary_scorer_normalization': 'native', 'auxiliary_history_readout': 'uniform', 'primary_moment_gradient': 'analytic_full'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'membership_use': 'permuted', 'primary_scorer_normalization': 'native', 'auxiliary_history_readout': 'uniform', 'primary_moment_gradient': 'mean_only'}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -861,8 +861,9 @@
+     For population dimension zero let r=(biased_var(X)+eps)^(-1/2),
+     z=(X-mean(X))*r and g be the incoming normalized-value cotangent.
+-    Explicit full: r*(g-mean(g)-z*mean(g*z)). Variance-only:
+-    r*(g-z*mean(g*z)); it omits the mean derivative while retaining
+-    the variance derivative, including its dependence on centered X.
+-    This does NOT remove forward centering or event content.
++    Explicit full: r*(g-mean(g)-z*mean(g*z)). Mean-only:
++    r*(g-mean(g)); it retains the population-mean derivative while
++    omitting the variance derivative. Variance-only retains the
++    complementary term r*(g-z*mean(g*z)). Detached uses r*g.
++    These controls do NOT remove forward centering, scaling or content.
+ 
+     Detached FP32 moments approximate the native kernel's saved statistics.
+@@ -890,4 +891,5 @@
+             full = (work - mean_component - variance_component) * inverse_std
+             variance_only = (work - variance_component) * inverse_std
++            mean_only = (work - mean_component) * inverse_std
+             diagonal = work * inverse_std
+         if ctx.mode == 'native':
+@@ -897,4 +899,6 @@
+         elif ctx.mode == 'variance_only':
+             local = variance_only
++        elif ctx.mode == 'mean_only':
++            local = mean_only
+         elif ctx.mode == 'detached':
+             local = diagonal
+@@ -934,7 +938,7 @@
+                  click_relative_transfer='orthogonal_native',
+                  orthogonal_assignment='nuisance_line_fixed_angle_occupied_cycle_source_bit',
+-                 membership_use='full',
++                 membership_use='permuted',
+                  primary_scorer_normalization='native',
+-                 primary_moment_gradient='analytic_full',
++                 primary_moment_gradient='mean_only',
+                  auxiliary_history_readout='uniform',
+                  task='binary_classification', **kwargs):
+@@ -963,5 +967,5 @@
+         if primary_scorer_normalization != 'native':
+             raise ValueError('Moment-Jacobian study retains native forward normalization')
+-        if primary_moment_gradient not in ('native', 'detached', 'analytic_full', 'variance_only'):
++        if primary_moment_gradient not in ('native', 'detached', 'analytic_full', 'variance_only', 'mean_only'):
+             raise ValueError('Unknown primary moment gradient')
+         if auxiliary_history_readout != 'uniform':

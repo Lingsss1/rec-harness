@@ -1,0 +1,68 @@
+--- g2-r0059-context_fold_reference/model.py
++++ g2-r0060-factor_budget_96_balanced/model.py
+@@ -1,9 +1,9 @@
+-"""Prediction-time folding of the inherited buy-context affine.
+-
+-Training, Parameters, initialization, gradient ownership and masks are inherited.
+-The folded modes form fresh derived weights each eval call, with no cache or
+-state mutation. Real-arithmetic identities do not imply BF16 equivalence.
+-Full-rank factors are training capacity, not a parameter-reduction claim.
+-Prospective controls and quality/cost gates are recorded in proposal.json.
++"""Marginal factor capacity between rank70 and full112.
++
++A prospective rank112/rank96 by balanced/output-heavy factorial. All forward,
++masking, gradient ownership and inherited random construction stay unchanged.
++The new budgeted_factor mode reduces storage versus the full-rank factored
++parent, while explicitly remaining larger than a single dense context map.
++No training, runtime reduction, quality preservation or novelty is claimed.
+ """
+ import torch
+@@ -14,5 +14,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'full_rank_control', 'owner_context_rank': 112, 'owner_context_scale': 'inherited', 'owner_context_balance': 'balanced', 'owner_context_evaluation': 'native'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'budgeted_factor', 'owner_context_rank': 96, 'owner_context_scale': 'inherited', 'owner_context_balance': 'balanced', 'owner_context_evaluation': 'native'}
+ 
+ 
+@@ -160,6 +160,6 @@
+         if not isinstance(source, _PartitionedAffine):
+             raise ValueError('Expected a packed semantic affine')
+-        if projection not in ('separate', 'rank', 'full_rank_control'):
+-            raise ValueError('Expected separate, reduced-rank or full-rank context')
++        if projection not in ('separate', 'rank', 'full_rank_control', 'budgeted_factor'):
++            raise ValueError('Unknown context parameterization')
+         if scale not in ('inherited', 'frobenius'):
+             raise ValueError('Unknown context initialization scale')
+@@ -176,4 +176,18 @@
+         if projection == 'rank' and rank * (context_width + source.out_features) >= context_width * source.out_features:
+             raise ValueError('Context factors must reduce parameter storage')
++        # This candidate regime is smaller than the full-rank two-factor
++        # parent, but not smaller than one dense map. Keep the inherited
++        # storage-reducing 'rank' regime and its guard unchanged.
++        if projection == 'budgeted_factor':
++            if isinstance(rank, bool) or not isinstance(rank, int):
++                raise ValueError('Factor budget rank must be an integer')
++            ceiling = min(context_width, source.out_features)
++            factor_size = rank * (context_width + source.out_features)
++            if not 1 <= rank < ceiling:
++                raise ValueError('Factor budget must reduce the full factor width')
++            if factor_size < context_width * source.out_features:
++                raise ValueError('Use rank mode for factors smaller than dense')
++            if evaluation != 'native':
++                raise ValueError('Factor-budget contrast fixes native evaluation')
+         if projection == 'full_rank_control' and rank != min(context_width, source.out_features):
+             raise ValueError('Full-rank diagnostic must retain every singular direction')
+@@ -352,5 +366,5 @@
+         if owner_context_evaluation != 'native' and owner_context_projection == 'fused':
+             raise ValueError('Context folding requires an explicit context map')
+-        if owner_context_projection not in ('fused', 'separate', 'rank', 'full_rank_control'):
++        if owner_context_projection not in ('fused', 'separate', 'rank', 'full_rank_control', 'budgeted_factor'):
+             raise ValueError('Unknown context projection')
+         if owner_context_scale not in ('inherited', 'frobenius'):
+@@ -366,5 +380,5 @@
+         if owner_context_projection in ('fused', 'separate') and owner_context_rank != 0:
+             raise ValueError('Only rank context projection accepts positive rank')
+-        if owner_context_projection in ('rank', 'full_rank_control') and owner_context_rank == 0:
++        if owner_context_projection in ('rank', 'full_rank_control', 'budgeted_factor') and owner_context_rank == 0:
+             raise ValueError('Rank context projection requires positive rank')
+         if owner_context_projection != 'fused' and owner_input_partition != 'semantic':

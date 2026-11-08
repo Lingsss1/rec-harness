@@ -1,0 +1,171 @@
+--- g2-r0015-task_union/model.py
++++ g2-r0017-rotated_event/model.py
+@@ -1,17 +1,16 @@
+-"""Task-resolved moments without additional history scoring.
+-
+-Inherit the incumbent's compressed scorer, source gates, age/behavior readout
+-and towers. Add identical zero-output residual heads in all cells. Exact task
+-sums preserve cart/fav/buy membership within each of ten temporal partitions;
+-centroid replacement keeps exact task counts but substitutes the union mean;
+-union replacement duplicates the existing union sums/counts for every task.
+-All cells execute the same task-mask sum operator and the existing 30-slot
+-scorer. No event is scored again. Historical masks can overlap; these are not
+-exclusive groups, current labels, or advertisement conversion attributions.
+-
+-Task summaries are weighted by the existing union-positive slot activation,
+-then exposed as totals, signed last-ten-minus-older sums and counts/100. The
+-new auxiliary paths detach item/action/scorer representations while retaining
+-context gradients. Efficacy, efficiency and originality remain unverified.
++"""Within-slot target-similarity moments correct compressed activation weights.
++
++Prospective factorial: event second moment versus squared slot mean, and
++aligned versus coordinate-rotated target query. All cells retain both first
++moments, counts, age, context, target, and compressed item/action means. The
++new shared 32-unit scorer correction starts at zero; the inherited occupied
++Dice scorer and all towers keep their initialization and buffer ownership.
++Only click loss trains the correction and its item/action inputs. Auxiliary
++losses reuse its detached result, preserving the inherited source gates.
++
++Cosines and their reductions use FP32, not a new precision recipe for the
++learned modules. No extra events, labels, timestamps, learned event encoder,
++full covariance matrix, or history truncation. Efficacy is unmeasured; this
++is not an exact Taylor/Jensen correction or a claimed novel method.
+ """
+ import torch
+@@ -39,4 +38,7 @@
+     'identity_content': 'union',
+     'identity_hidden_units': 32,
++    'moment_timing': 'event',
++    'moment_query': 'rotated',
++    'moment_hidden_units': 32,
+ }
+ 
+@@ -81,5 +83,5 @@
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='TaskResolvedMoments', gpu=-1,
++    def __init__(self, feature_map, model_id='SlotSimilarityMoments', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+@@ -89,5 +91,7 @@
+                  content_order='chronological', temporal_readout='separate',
+                  behavior_readout='separate', residual_hidden_units=32,
+-                 identity_content='union', identity_hidden_units=32, num_tasks=None,
++                 identity_content='union', identity_hidden_units=32,
++                 moment_timing='event', moment_query='rotated',
++                 moment_hidden_units=32, num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -137,4 +141,17 @@
+             raise ValueError('Identity residual width is fixed at 32')
+         self.identity_content = identity_content
++        if identity_content != 'union':
++            raise ValueError('Freeze the union parent for moment attribution')
++        if history_partition != 'recent':
++            raise ValueError('Freeze the recent partition')
++        if moment_timing not in ('event', 'centroid'):
++            raise ValueError('Unknown second-moment replacement')
++        if moment_query not in ('aligned', 'rotated'):
++            raise ValueError('Unknown target-coordinate alignment')
++        if moment_hidden_units != 32 or embedding_dim < 2:
++            raise ValueError('Require width32 and at least two embedding coordinates')
++        self.moment_timing = moment_timing
++        self.moment_query = moment_query
++        self.moment_embedding_dim = embedding_dim
+         widths = (20, 20, 20, 20, 10, 5, 2, 1, 1, 1)
+         if history_partition == 'equal':
+@@ -218,4 +235,16 @@
+                 nn.init.zeros_(head[-1].weight)
+                 nn.init.zeros_(head[-1].bias)
++        # Separate fork preserves all inherited parameters and caller RNG.
++        # Input is C + target + slot item/action mean + two cosine means
++        # + selected second moment + normalized count + age sign.
++        with torch.random.fork_rng(devices=[]):
++            moment_width = (len(self.user_fields) * embedding_dim
++                            + self.key_width + self.value_width
++                            + 3 * len(self.item_fields) + 2)
++            self.moment_correction = nn.Sequential(
++                nn.Linear(moment_width, moment_hidden_units), nn.ReLU(),
++                nn.Linear(moment_hidden_units, 1))
++            nn.init.zeros_(self.moment_correction[-1].weight)
++            nn.init.zeros_(self.moment_correction[-1].bias)
+         self.model_to_device()
+ 
+@@ -372,4 +401,59 @@
+                           counts.flatten(1) / 100.0], dim=-1)
+ 
++    def _similarity_statistics(self, target, raw_values, mask, auxiliary):
++        """[B,30,F] means and second moments; no pooled-vector squaring shortcut.
++
++        Both query views and both timing views are computed in every cell.
++        Fixed coordinate rotation preserves query norm and field identity;
++        it is an imperfect alignment control because embeddings can coadapt.
++        """
++        batch, length, _ = raw_values.shape
++        valid = mask.bool()
++        valid_blocks = self.partition[None, :, :] & valid[:, None, :]
++        member = auxiliary[:, None, :] & valid_blocks
++        assignment = torch.stack((valid_blocks, valid_blocks & ~member, member), dim=2)
++        assignment = assignment.reshape(batch, 30, length)
++        fields = len(self.item_fields)
++        # FP32 cosine bounds avoid scale/overflow confounds in second moments.
++        with torch.autocast(device_type=raw_values.device.type, enabled=False):
++            keys = raw_values[:, :, :self.key_width].float()
++            keys = torch.where(valid[:, :, None], keys, torch.zeros_like(keys))
++            keys = keys.reshape(batch, length, fields, self.moment_embedding_dim)
++            query = target.float().reshape(batch, fields, self.moment_embedding_dim)
++            keys = torch.nn.functional.normalize(keys, p=2, dim=-1, eps=1e-8)
++            query = torch.nn.functional.normalize(query, p=2, dim=-1, eps=1e-8)
++            aligned = (keys * query[:, None, :, :]).sum(dim=-1)
++            rotated_query = torch.roll(query, shifts=1, dims=-1)
++            rotated = (keys * rotated_query[:, None, :, :]).sum(dim=-1)
++            assignment = assignment.float()
++            n = assignment.sum(dim=-1, keepdim=True).clamp_min(1.0)
++            mean_aligned = torch.bmm(assignment, aligned) / n
++            mean_rotated = torch.bmm(assignment, rotated) / n
++            event_aligned = torch.bmm(assignment, aligned.square()) / n
++            event_rotated = torch.bmm(assignment, rotated.square()) / n
++            centroid_aligned = mean_aligned.square()
++            centroid_rotated = mean_rotated.square()
++        return (mean_aligned, mean_rotated, event_aligned, event_rotated,
++                centroid_aligned, centroid_rotated)
++
++    def _moment_weights(self, context, target, raw_values, mask, auxiliary,
++                        values, counts):
++        moments = self._similarity_statistics(target, raw_values, mask, auxiliary)
++        ma, mr, ea, er, ca, cr = moments
++        if self.moment_timing == 'event':
++            second = ea if self.moment_query == 'aligned' else er
++        else:
++            second = ca if self.moment_query == 'aligned' else cr
++        batch, slots, _ = values.shape
++        age = self.age_sign[None, :, None].expand(batch, -1, 3).reshape(batch, slots, 1)
++        inputs = torch.cat([
++            context[:, None, :].expand(-1, slots, -1).float(),
++            target[:, None, :].expand(-1, slots, -1).float(), values.float(),
++            ma, mr, second, counts.float().unsqueeze(-1) / 100.0, age.float()
++        ], dim=-1)
++        correction = self.moment_correction(inputs.reshape(batch * slots, -1))
++        # No new BatchNorm/Dice population; inactive rows cannot change a weight.
++        return correction * (counts > 0).reshape(-1, 1).to(correction.dtype)
++
+     def forward(self, inputs):
+         context, target, raw_values, mask, auxiliary, task_members = self._represent(inputs)
+@@ -380,5 +464,8 @@
+         # scorer rows, input ordering or inherited Dice populations.
+         active = counts > 0
+-        primary_weights = self.local_activation(self._interactions(target, values), active)
++        correction = self._moment_weights(context, target, raw_values, mask,
++                                          auxiliary, values, counts)
++        primary_weights = (self.local_activation(self._interactions(target, values), active)
++                           + correction)
+         primary_strata, primary_readout = self._pool(primary_weights, values, counts)
+         identity = self._identity_readout(primary_weights, identity_sums, identity_counts)
+@@ -403,5 +490,6 @@
+             aux_target = target.detach() if self.block_aux_item_grad else target
+             aux_values = values.detach() if self.block_aux_item_grad else values
+-            aux_weights = self._auxiliary_activation(self._interactions(aux_target, aux_values), active)
++            aux_weights = (self._auxiliary_activation(self._interactions(aux_target, aux_values), active)
++                           + correction.detach())
+             aux_strata, aux_readout = self._pool(aux_weights, aux_values, counts)
+         else:

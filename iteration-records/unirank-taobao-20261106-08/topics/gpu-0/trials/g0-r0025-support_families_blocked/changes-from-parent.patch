@@ -1,0 +1,125 @@
+--- g0-r0022-support_rotated_attached/model.py
++++ g0-r0025-support_families_blocked/model.py
+@@ -1,9 +1,10 @@
+-"""Compression-population and gradient controls for the DIN scorer.
+-
+-The primary readout always uses uniform block means. Extra target-partition
+-rows affect Dice statistics but are never read out. The 2x2 study replaces
+-aligned support with a count-matched rotated duplicate, and optionally stops
+-gradients at support preactivations before each Dice layer. Learned modules,
+-initialization, residual summaries and auxiliary ownership are inherited.
++"""Interaction-family gradient ownership of normalization support.
++
++Primary strata 3..6 affect native Dice statistics but never the readout.
++The 2x2 intervention gates only embedding-side gradients through the direct
++[q,k,action] and relational [q-k,q*k] scorer input families after these terms
++are formed. All scorer parameters and native moment derivatives stay live.
++Forward values, learned construction, initialization, masked compression,
++residual summaries and auxiliary ownership are inherited without changes.
+ """
+ import torch
+@@ -14,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'support_marginal_gradient': False, 'support_relational_gradient': False}
+ 
+ 
+@@ -28,5 +29,6 @@
+                  match_support='available', match_scaling='norm', coarse_extension='duplicate',
+                  primary_partition='uniform', normalization_support='rotated_duplicate',
+-                 support_gradient='attached', task='binary_classification', **kwargs):
++                 support_gradient='attached', support_marginal_gradient=False,
++                 support_relational_gradient=False, task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+@@ -93,4 +95,10 @@
+         self.normalization_support = normalization_support
+         self.support_gradient = support_gradient
++        if normalization_support != 'rotated_duplicate' or support_gradient != 'attached':
++            raise ValueError('This factorial freezes rotated support and native attached Dice')
++        if not isinstance(support_marginal_gradient, bool) or not isinstance(support_relational_gradient, bool):
++            raise ValueError('Support interaction-family gradient switches must be booleans')
++        self.support_marginal_gradient = support_marginal_gradient
++        self.support_relational_gradient = support_relational_gradient
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -500,27 +508,43 @@
+         return torch.cat([query, keys, query - keys, query * keys, action], dim=-1).reshape(batch * slots, -1)
+ 
++    def _primary_interactions(self, target, values):
++        """Stop selected support-input Jacobians AFTER forming interactions.
++
++        Flattening follows [batch, 10 blocks, 7 strata]. Rows 0..2 retain all
++        input derivatives. For rows 3..6, the direct family is [q,k,action]
++        and the relational family is [q-k,q*k]. Detaching a formed term
++        preserves its forward value and its affine-weight gradient, while
++        removing just that term's derivative into the embedding operands.
++        Native Dice and all scorer parameters stay attached. This differs
++        from detaching q or k before constructing every interaction term.
++        Shared embedding tables remain trainable via all other live paths.
++        """
++        batch, slots, _ = values.shape
++        if slots != 70:
++            raise ValueError('Primary support routing requires 70 ordered strata')
++        interactions = self._interactions(target, values)
++        if not self.training or (self.support_marginal_gradient and self.support_relational_gradient):
++            # Exact native both-attached bridge; no extra tensor operations.
++            return interactions
++        retained = (torch.arange(batch * slots, device=values.device)
++                    .remainder(7) < 3).unsqueeze(-1)
++        if not self.support_marginal_gradient and not self.support_relational_gradient:
++            # Derivative-equivalent to detaching both support operands in
++            # r0024; fixed-state forward/buffer and backward parity need
++            # host verification, especially under the frozen BF16 recipe.
++            return torch.where(retained, interactions, interactions.detach())
++        direct, relative, action = torch.split(
++            interactions, [2 * self.key_width, 2 * self.key_width,
++                           self.value_width - self.key_width], dim=-1)
++        if not self.support_marginal_gradient:
++            direct = torch.where(retained, direct, direct.detach())
++            action = torch.where(retained, action, action.detach())
++        if not self.support_relational_gradient:
++            relative = torch.where(retained, relative, relative.detach())
++        return torch.cat([direct, relative, action], dim=-1)
++
+     def _primary_activation(self, interactions):
+-        """Forward-identical stop-gradient on nonreadout support rows.
+-
+-        Flattened order is batch, block, seven strata. The first three strata
+-        retain the incumbent gradient paths. Before EACH Dice, rows 3..6
+-        become constants for moment estimation in the blocked cell. This
+-        removes their backward contribution to the preceding affine layer
+-        and embedding sources, while preserving their forward activations,
+-        batch moments and running-buffer updates at a fixed parameter state.
+-        Selected rows still differentiate through their own batch moments;
+-        shared scorer parameters and later updates can consequently differ.
+-        No extra scorer pass, parameters, persistent state or RNG is added.
+-        """
+-        if not self.training or self.support_gradient == 'attached':
+-            return self.local_activation(interactions)
+-        retained = (torch.arange(interactions.shape[0], device=interactions.device)
+-                    .remainder(7) < 3).unsqueeze(-1)
+-        hidden = interactions
+-        for layer in self.local_activation:
+-            if isinstance(layer, Dice):
+-                hidden = torch.where(retained, hidden, hidden.detach())
+-            hidden = layer(hidden)
+-        return hidden
++        """Keep the complete native scorer graph and state updates attached."""
++        return self.local_activation(interactions)
+ 
+     def _auxiliary_activation(self, interactions):
+@@ -550,8 +574,8 @@
+         batch = values.shape[0]
+         all_values, all_counts = self._compress_with_match(values, mask, auxiliary, match_union)
+-        # All four cells score 70 slots; only uniform slots enter the primary
+-        # readout. Gradient pairs share exact forward populations. Population
+-        # pairs preserve counts/empty rows, but change aligned support means.
+-        primary_weights = self._primary_activation(self._interactions(target, all_values))
++        # All four cells score the identical 70-slot population. Only input
++        # interaction-family gradients of extra support rows vary; readout and all
++        # scorer/normalization derivatives stay attached.
++        primary_weights = self._primary_activation(self._primary_interactions(target, all_values))
+         all_strata = self._pool_seven(primary_weights, all_values, all_counts)
+         uniform = all_strata[:, 0, :]

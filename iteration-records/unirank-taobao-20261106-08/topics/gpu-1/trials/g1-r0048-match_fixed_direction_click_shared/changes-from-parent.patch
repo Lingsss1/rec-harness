@@ -1,0 +1,113 @@
+--- g1-r0047-match_history_mean_click_task/model.py
++++ g1-r0048-match_fixed_direction_click_shared/model.py
+@@ -1,12 +1,12 @@
+-"""History-wide conditional averages for historical-feedback attribution.
+-
+-Only stopped action coordinates in target-match summary rows 0/4 consume
+-history-wide click-group means. The two groups use either true historical
+-click membership or the inherited blockwise count-matched shifted membership.
+-Item coordinates, observed action pools, ordinal summaries and all original
+-history/task masks retain the inherited paths. No learned parameters or RNG
+-are added. Block scope keeps the prior mean operator as a host parity bridge.
+-Global averaging preserves each history/group action sum in exact arithmetic,
+-but removes temporal variation and can reduce energy and summary rank.
++"""Norm-preserving direction collapse of history-wide action centroids.
++
++Two history groups retain their original counts and weighted action mean.
++Their centroid difference is replaced by its norm times one prespecified
++alternating dense unit vector. Only stopped match-action summary rows 0/4
++consume these synthetic values; all original pools, ordinal summaries, item
++paths, masks, learned modules and gradient ownership remain inherited.
++Original-direction mode is an exact r0047 source bridge. No RNG or state is
++added. The intervention removes direction, not all personalized feedback:
++contrast magnitude, common mean and other action consumers are retained.
+ """
+ import torch
+@@ -17,5 +17,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'match', 'match_action_availability': 'both', 'match_action_content': 'observed', 'match_replacement_gradient': 'blocked', 'match_observed_gradient': 'blocked', 'match_action_basis': 'identity', 'match_basis_initialization': 'unchanged', 'summary_rotation_partition': 'click', 'summary_stratum_operator': 'mean', 'summary_projection_scope': 'history'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'shared', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'match', 'match_action_availability': 'both', 'match_action_content': 'observed', 'match_replacement_gradient': 'blocked', 'match_observed_gradient': 'blocked', 'match_action_basis': 'identity', 'match_basis_initialization': 'unchanged', 'summary_rotation_partition': 'click', 'summary_stratum_operator': 'mean', 'summary_projection_scope': 'history', 'summary_contrast_direction': 'fixed'}
+ 
+ 
+@@ -26,5 +26,5 @@
+                  compression_routes='uf', block_aux_scorer_grad=True,
+                  block_aux_context_grad=False, block_aux_item_grad=True, num_tasks=None,
+-                 residual_input='match_detail', residual_routing='task', residual_hidden=16,
++                 residual_input='match_detail', residual_routing='shared', residual_hidden=16,
+                  temporal_detail='position', block_detail='ordinal',
+                  curvature_detail='quadratic', joint_detail='duplicate_match',
+@@ -41,4 +41,5 @@
+                  summary_stratum_operator='mean',
+                  summary_projection_scope='history',
++                 summary_contrast_direction='fixed',
+                  match_replacement_gradient='blocked',
+                  match_observed_gradient='blocked',
+@@ -164,4 +165,9 @@
+                 raise ValueError('History means require the frozen stopped match-action consumer')
+         self.summary_projection_scope = summary_projection_scope
++        if summary_contrast_direction not in ('original', 'fixed'):
++            raise ValueError('Unknown history action-contrast direction')
++        if summary_contrast_direction == 'fixed' and summary_projection_scope != 'history':
++            raise ValueError('Fixed direction requires the stopped history-mean consumer')
++        self.summary_contrast_direction = summary_contrast_direction
+         self.click_index = list(feature_map.labels).index('is_click')
+         self.residual_input = residual_input
+@@ -380,19 +386,22 @@
+ 
+     def _history_stratified_summary_values(self, values, mask, membership):
+-        """Average within each sample's visible click/nonclick history group.
+-
+-        Membership is derived from the supplied historical click mask; the
+-        shifted control moves that membership by the inherited valid-rank
+-        rotation within ten-event blocks before this operator. It preserves
+-        per-block group counts. Neither cell changes the original task masks.
+-        No input outside the same sample's valid history can contribute.
+-
+-        This is a nested coarsening of the blockwise group projection: it
+-        preserves global group sums, removes between-block conditional-mean
+-        variation, and is idempotent in exact arithmetic. It need not preserve
+-        per-block sums, energy, per-event norms or target-match summary rank.
+-        Only raw/scaled match-action rows use it; those local derivatives are
+-        stopped by the unchanged downstream consumer. Every other item,
+-        action, normalization and gradient-ownership path is inherited.
++        """Collapse centroid orientation at fixed weighted mean and distance.
++
++        First compute the exact ancestor group means in FP32. In original
++        mode all subsequent arithmetic is unchanged. Fixed mode replaces
++        d=mu1-mu0 by ||d||*u for a prespecified dense unit vector u, using
++        nu_g=M+(g-p1)*||d||*u. M is the event-weighted whole-history mean.
++        Both occupied groups preserve their total vector, centroid distance
++        and projected Frobenius energy in exact arithmetic. Empty or single
++        occupied groups keep the original means exactly.
++
++        The raw/scaled match coefficients sum to zero, so their summaries
++        factor into a signed geometric coefficient times d. Thus replacing
++        its direction preserves their norms analytically. BF16 coefficient
++        centering and cast errors can leak the unchanged common mean; host
++        certificates must measure this before attribution. Individual event
++        norms, convexity, functional input rank and optimization are not
++        preserved. Only stopped match-action rows consume the intervention.
++        Original masks/values and all other consumers are left unchanged.
+         """
+         batch, length, width = values.shape
+@@ -408,4 +417,19 @@
+             counts32 = weights32.sum(dim=-1, keepdim=True)
+             means32 = torch.bmm(weights32, original.float()) / counts32.clamp_min(1)
++            if self.summary_contrast_direction == 'fixed':
++                total32 = counts32.sum(dim=1, keepdim=True).clamp_min(1)
++                history_mean32 = (counts32 * means32).sum(dim=1, keepdim=True) / total32
++                click_fraction32 = counts32[:, 1:2, :] / total32
++                contrast32 = means32[:, 1:2, :] - means32[:, 0:1, :]
++                # vector_norm has a finite zero subgradient at a zero contrast.
++                # No fitted scale, vocabulary assumptions or random axis.
++                radius32 = torch.linalg.vector_norm(contrast32, dim=-1, keepdim=True)
++                axis32 = torch.arange(action_width, device=values.device, dtype=torch.float32)
++                axis32 = (1.0 - 2.0 * axis32.remainder(2)) / (action_width ** 0.5)
++                group32 = torch.arange(2, device=values.device, dtype=torch.float32).view(1, 2, 1)
++                canonical32 = (history_mean32
++                               + (group32 - click_fraction32) * radius32 * axis32.view(1, 1, -1))
++                both32 = (counts32 > 0).all(dim=1, keepdim=True)
++                means32 = torch.where(both32, canonical32, means32)
+             projected32 = torch.bmm(weights32.transpose(1, 2), means32)
+         projected = projected32.to(values.dtype)

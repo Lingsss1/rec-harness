@@ -1,0 +1,136 @@
+--- g1-r0004-match_terminal_only/model.py
++++ g1-r0005-adaptive_rotated/model.py
+@@ -1,13 +1,12 @@
+-"""Target-relative field matches inside evolving-query history retrieval.
+-
+-Prospective 2x2: internal retrieval bias x terminal pooling bias. Exact
+-same-field matches use only visible target and masked historical IDs. A query
+-selects among five target identity fields using the existing read Q/K; its
+-soft selection weights combine their binary match channels into a bounded
+-additive attention prior. Every globally valid event remains reachable.
+-No new parameters, count input, action restriction or reverse write is added.
+-All arms compute the same prior, including the disabled arm. This is a local
+-mechanism study, not a claim of a novel attention or matching method.
++"""Terminal match alignment crossed with uniform/adaptive field selection.
++
++The candidate replaces query-dependent field selection by uniform weights
++over five same-field match indicators. Content attention remains learned and
++task dependent. Controls rotate only the match indicators among valid events,
++preserving each sample's joint match-pattern multiset at fixed parameters.
++Every arm calculates both selectors and the same rotation; only the selected
++paths differ. Parameter tensors and initialization order match the parent.
++This prospective local contrast makes no novelty or effectiveness claim.
+ """
+ import math
+ import torch
+@@ -26,14 +25,17 @@
+     'event_feedback': False,
+     'internal_match': False,
+     'terminal_match': True,
++    'uniform_match': False,
++    'rotate_match': True,
+     'tower_hidden_units': [128, 64],
+ }
+ 
+ 
+ class CrossAttention(nn.Module):
+     """Pre-normalized attention; a zero null handles empty histories."""
+-    def __init__(self, width, heads):
++    def __init__(self, width, heads, uniform_match=False):
+         super().__init__()
++        self.uniform_match = uniform_match
+         self.heads = heads
+         self.head_width = width // heads
+         self.query_norm = nn.LayerNorm(width)
+@@ -57,7 +59,11 @@
+         field_keys = self.key(self.memory_norm(match_fields)).reshape(
+             batch, count, self.heads, self.head_width).transpose(1, 2)
+         field_scores = torch.matmul(q, field_keys.transpose(-2, -1)) / math.sqrt(self.head_width)
+-        field_weights = torch.softmax(field_scores, dim=-1, dtype=torch.float32)
++        adaptive_weights = torch.softmax(field_scores, dim=-1, dtype=torch.float32)
++        uniform_weights = torch.full_like(adaptive_weights, 1.0 / count)
++        # Both distributions are calculated in all arms. Selecting the
++        # original tensor preserves the adaptive parent's arithmetic exactly.
++        field_weights = uniform_weights if self.uniform_match else adaptive_weights
+         prior = 2.0 * torch.matmul(field_weights, matches.float().transpose(1, 2).unsqueeze(1))
+         return torch.cat([prior, prior.new_zeros(*prior.shape[:-1], 1)], dim=-1)
+ 
+@@ -147,6 +153,8 @@
+                  event_feedback=CONFIG['event_feedback'],
+                  internal_match=CONFIG['internal_match'],
+                  terminal_match=CONFIG['terminal_match'],
++                 uniform_match=CONFIG['uniform_match'],
++                 rotate_match=CONFIG['rotate_match'],
+                  tower_hidden_units=(128, 64), num_tasks=None,
+                  task='binary_classification', **kwargs):
+         labels = feature_map.labels
+@@ -155,7 +163,8 @@
+         if token_dim < 1 or num_heads < 1 or token_dim % num_heads:
+             raise ValueError('token_dim must be divisible by num_heads')
+         if not all(isinstance(flag, bool) for flag in (dynamic_query, raw_values, event_feedback,
+-                                                       internal_match, terminal_match)):
++                                                       internal_match, terminal_match,
++                                                       uniform_match, rotate_match)):
+             raise ValueError('Path controls must be boolean')
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(labels), task=task, **kwargs)
+@@ -164,6 +173,7 @@
+         self.event_feedback = float(event_feedback)
+         self.internal_match = float(internal_match)
+         self.terminal_match = float(terminal_match)
++        self.rotate_match = rotate_match
+         self.token_dim = token_dim
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -196,7 +206,7 @@
+         self.history_position = nn.Parameter(torch.empty(101, token_dim))
+         self.initial_mix = FieldMixer(token_dim, num_heads)
+         # Tied read weights: static/static retrieves the same summary twice.
+-        self.read = CrossAttention(token_dim, num_heads)
++        self.read = CrossAttention(token_dim, num_heads, uniform_match=uniform_match)
+         self.write = CrossAttention(token_dim, num_heads)
+         self.after_read = nn.ModuleList([FieldMixer(token_dim, num_heads)
+                                          for _ in range(2)])
+@@ -216,6 +226,31 @@
+         nn.init.normal_(self.history_position, std=0.02)
+         self.model_to_device()
+ 
++    @staticmethod
++    def _rotate_valid_matches(matches, valid):
++        """Move joint match patterns by half the valid history, within rows.
++
++        Packing by valid rank supports pre-padding and arbitrary mask holes.
++        No invalid value enters the packed history. Length zero, empty rows,
++        and single-event rows remain finite and unchanged. All five channels
++        move together, retaining field counts and cross-field coincidences.
++        Only this address tensor moves: event keys/values and ranks stay put.
++        """
++        batch, length, fields = matches.shape
++        if length == 0:
++            return matches
++        counts = valid.long().sum(dim=1, keepdim=True)
++        ranks = (valid.long().cumsum(dim=1) - 1).clamp_min(0)
++        index = ranks.unsqueeze(-1).expand(batch, length, fields)
++        masked = matches & valid.unsqueeze(-1)
++        packed = matches.new_zeros(batch, length, fields, dtype=torch.float32)
++        packed = packed.scatter_add(1, index, masked.float())
++        shift = torch.div(counts, 2, rounding_mode='floor').clamp_min(1)
++        source_rank = (ranks + shift) % counts.clamp_min(1)
++        source_index = source_rank.unsqueeze(-1).expand(batch, length, fields)
++        rotated = packed.gather(1, source_index).bool()
++        return rotated & valid.unsqueeze(-1)
++
+     def forward(self, inputs):
+         user, item, mask = self.get_inputs(inputs)
+         user_emb = self.embedding_layer(user)
+@@ -230,6 +265,10 @@
+             (item[name][:, :-1] == item[name][:, -1:])
+             & (item[name][:, :-1] > 0) & (item[name][:, -1:] > 0) & valid
+             for name in self.match_fields], dim=-1)
++        # Compute the same alignment control in every arm. Only valid events
++        # of this sample are permuted; no batch identity or labels are used.
++        rotated_matches = self._rotate_valid_matches(matches, valid)
++        matches = rotated_matches if self.rotate_match else matches
+         match_tokens = self.field_projection(torch.stack(
+             [item_emb[name][:, -1] for name in self.match_fields], dim=1))
+         raw_fields = [user_emb[name].reshape(batch, -1) for name in self.user_fields]

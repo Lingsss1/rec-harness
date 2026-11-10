@@ -1,0 +1,131 @@
+--- g2-r0001-uniform_summary/model.py
++++ g2-r0002-feedback_joint/model.py
+@@ -1,10 +1,11 @@
+-"""Prospective information-path study of target-routed history compression.
+-
+-Inherited from g2-r0000-target_early. The new candidate replaces learned
+-slot weights with one; controls remove explicit counts, compressed content,
+-or both. All variants preserve parameter shapes and initialization order.
+-Dormant parameters remain registered, so equal allocated size does not mean
+-equal effective capacity. These are interventions, not measured improvements.
++"""Prospective feedback-pairing study of target-routed history compression.
++
++Keep the incumbent eight uniform mean slots and counts. Add four feedback
++moment channels per slot, using ONLY the supplied historical task masks.
++The joint and factorized variants have identical parameters and compute;
++their difference is E[z*b] versus E[z]*E[b] within each target/recency slot.
++Composition and widened-parent controls retain the same registered modules.
++No new measured outcome or originality claim is implied.
+ """
+ import torch
+ from torch import nn
+@@ -25,6 +26,9 @@
+     'slot_weighting': 'uniform',
+     'include_content': True,
+     'include_counts': True,
++    'feedback_mode': 'joint',
++    'include_feedback_fractions': True,
++    'feedback_dim': 8,
+ }
+ 
+ 
+@@ -37,8 +41,19 @@
+                  recent_window=16,
+                  slot_weighting=CONFIG['slot_weighting'],
+                  include_content=CONFIG['include_content'],
+-                 include_counts=CONFIG['include_counts'], num_tasks=None,
++                 include_counts=CONFIG['include_counts'],
++                 feedback_mode=CONFIG['feedback_mode'],
++                 include_feedback_fractions=CONFIG['include_feedback_fractions'],
++                 feedback_dim=8, num_tasks=None,
+                  task='binary_classification', **kwargs):
++        if feedback_mode not in ('joint', 'factorized', 'zero'):
++            raise ValueError('Unknown feedback moment mode')
++        if not isinstance(include_feedback_fractions, bool):
++            raise ValueError('Feedback fraction switch must be bool')
++        if feedback_dim <= 0:
++            raise ValueError('feedback_dim must be positive')
++        if len(feature_map.labels) != 4:
++            raise ValueError('This study requires the four contracted tasks')
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+         if grouping not in ('target_fields', 'position'):
+@@ -55,6 +70,10 @@
+             raise ValueError('recent_window must be positive')
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
++        self.feedback_mode = feedback_mode
++        self.include_feedback_fractions = include_feedback_fractions
++        self.feedback_dim = feedback_dim
++        self.feedback_tasks = len(feature_map.labels)
+         self.slot_weighting = slot_weighting
+         self.include_content = include_content
+         self.include_counts = include_counts
+@@ -88,8 +107,10 @@
+         layers.append(nn.Linear(dim, 1))
+         self.local_activation = nn.Sequential(*layers)
+         self.slot_projection = nn.Linear(self.value_width, slot_dim, bias=False)
++        self.feedback_projection = nn.Linear(self.key_width, feedback_dim, bias=False)
+         input_width = (width(self.user_fields) + self.key_width
+-                       + self.num_slots * slot_dim + self.num_slots)
++                       + self.num_slots * slot_dim + self.num_slots
++                       + self.num_slots * self.feedback_tasks * (feedback_dim + 1))
+         self.towers = nn.ModuleList()
+         for _ in feature_map.labels:
+             layers = []
+@@ -138,7 +159,11 @@
+             batch, length)
+ 
+     def forward(self, inputs):
+-        user, item, mask = self.get_inputs(inputs)
++        if len(inputs) != 4 or inputs[3] is None:
++            raise ValueError('Historical feedback masks are required by this study')
++        user, item, mask, task_masks = self.get_inputs(inputs, return_multi_masks=True)
++        if len(task_masks) != self.feedback_tasks:
++            raise ValueError('Historical feedback mask count mismatch')
+         user_emb = self.embedding_layer(user)
+         item_emb = self.embedding_layer(item)
+         target = torch.cat([item_emb[n][:, -1] for n in self.item_fields], dim=-1)
+@@ -187,7 +212,41 @@
+         count_features = counts.to(context.dtype) / 100.0
+         if not self.include_counts:
+             count_features = count_features * 0.0
++        # All variants execute this same branch. Masks can overlap: a single
++        # previous exposure may have several feedback types. Never use the
++        # target action or current labels, and never interpret masks as four
++        # mutually exclusive classes. Invalid events are zeroed before sums.
++        feedback = torch.stack([(m > 0) & (mask > 0) for m in task_masks], dim=1)
++        feedback = feedback.to(members.dtype)  # B x 4 x L
++        batch, _, length = members.shape
++        grouped_feedback = members[:, :, None, :] * feedback[:, None, :, :]
++        # Denominator is the number of ALL valid events in the parent slot,
++        # not the number of positive-feedback events. Thus these are joint
++        # moments, with explicit feedback fractions; empty slots remain zero.
++        fractions = grouped_feedback.sum(dim=-1) / counts.clamp(min=1)[:, :, None]
++        projected = self.feedback_projection(keys)
++        if length:
++            joint = torch.bmm(
++                grouped_feedback.reshape(batch, self.num_slots * self.feedback_tasks,
++                                         length).to(projected.dtype), projected)
++            joint = joint.reshape(batch, self.num_slots, self.feedback_tasks,
++                                  self.feedback_dim) / divisor[:, :, None, :]
++            mean_projected = torch.bmm(members.to(projected.dtype), projected) / divisor
++        else:
++            joint = projected.new_zeros((batch, self.num_slots, self.feedback_tasks,
++                                        self.feedback_dim))
++            mean_projected = projected.new_zeros((batch, self.num_slots, self.feedback_dim))
++        factorized = mean_projected[:, :, None, :] * fractions[:, :, :, None]
++        if self.feedback_mode == 'joint':
++            moments = joint
++        elif self.feedback_mode == 'factorized':
++            moments = factorized
++        else:
++            moments = joint * 0.0
++        if not self.include_feedback_fractions:
++            fractions = fractions * 0.0
+         features = torch.cat((context, target, slots.flatten(start_dim=1),
+-                              count_features), dim=-1)
++                              count_features, moments.flatten(start_dim=1),
++                              fractions.flatten(start_dim=1)), dim=-1)
+         return {label + '_pred': torch.sigmoid(tower(features))
+                 for label, tower in zip(self.feature_map.labels, self.towers)}

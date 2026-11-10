@@ -1,0 +1,130 @@
+--- g1-r0009-compact_mean/model.py
++++ g1-r0010-item_mean_action_din/model.py
+@@ -1,15 +1,18 @@
+-"""Pruned mean-history residual on the frozen g0 representation.
+-
+-Local evidence: g1-r0008-mean_residual marginally exceeded adaptive retrieval
+-at one seed. Its uniform wide-value weights have no dependence on queries,
+-event keys, task mixing or token content. Remove that dead forward/backward
+-path, retaining the original low-rank normalized zero-start residual.
+-The DIN-summary arm is an equal-active-capacity replacement control.
+-
+-The historical constructor is replayed before deleting unused modules, solely
+-to preserve active tensor initialization and the caller CPU RNG stream. No
+-retired module remains registered with the optimizer. Numerical equivalence
+-and actual runtime must be checked by the host; no bitwise claim is made.
++"""Item versus historical-action pooling in the compact g0 residual.
++
++Prospective 2x2: choose uniform mean or inherited unnormalized DIN pooling
++independently for the six item fields and the historical action embedding.
++The two endpoint controls replay compact_mean and compact_din. Both summaries
++are calculated in every arm; only their coordinates entering the unchanged
++low-rank normalized zero-start residual differ. No task label enters forward.
++
++Local motivation: compact_mean improves three task AUCs over compact_din but
++reduces purchase AUC. A mixed source may separate broad item context from
++target-weighted historical action composition. This is a falsifiable local
++attribution study, with no claim of a new pooling method or proven mechanism.
++
++Inherited constructor replay preserves active initialization and CPU RNG.
++Host numerical, masking, gradient and cost checks remain necessary.
+ """
+ import math
+ import torch
+@@ -41,7 +44,7 @@
+     'terminal_prior': 'none',
+     'query_memory': 'state_uniform',
+     'retrieval_state': 'content',
+-    'retrieval_summary': 'uniform',
++    'retrieval_summary': 'mean_item_din_action',
+ }
+ 
+ 
+@@ -175,7 +178,7 @@
+     """Initialize as the ancestor, then retain only the active residual maps."""
+ 
+     def __init__(self, value_width, width, heads, tasks, prior, query_memory,
+-                 summary_mode):
++                 summary_mode, item_width):
+         super().__init__()
+         self.query_memory = query_memory
+         self.summary_mode = summary_mode
+@@ -200,26 +203,39 @@
+                      'read', 'after_read', 'final_norm'):
+             delattr(self, name)
+         self.tasks = tasks
++        self.item_width = item_width
+ 
+     def forward(self, values, valid, din_summary):
+         # Keep the ancestor's [B,4,V] residual operation shapes. Each task
+         # receives the same input, but this avoids an additional numerical
+         # change from collapsing four identical linear/LayerNorm operations.
+-        if self.summary_mode == 'din':
+-            summary = din_summary[:, None, :].expand(-1, self.tasks, -1)
+-        else:
+-            # Append a zero null value; it is valid only for empty histories.
+-            # FP32 weights and BF16 bmm mirror the historical pooling route.
+-            values = torch.where(valid.unsqueeze(-1), values,
+-                                 torch.zeros_like(values))
+-            values = torch.cat([values, values.new_zeros(
+-                values.shape[0], 1, values.shape[-1])], dim=1)
+-            extended_valid = torch.cat([valid, ~valid.any(dim=1, keepdim=True)], dim=1)
+-            with torch.autocast(device_type=values.device.type, enabled=False):
+-                weights = extended_valid.float()
+-                weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1.0)
+-                weights = weights[:, None, :].expand(-1, self.tasks, -1).contiguous()
+-            summary = torch.bmm(weights.to(values.dtype), values)
++        # Common pooling work in all four cells. The DIN sum remains signed
++        # and unnormalized; never divide by its learned sum or take softmax.
++        din = din_summary[:, None, :].expand(-1, self.tasks, -1)
++        # Append a zero null value; it is valid only for empty histories.
++        # FP32 weights and BF16 bmm mirror the compact_mean pooling route.
++        values = torch.where(valid.unsqueeze(-1), values,
++                             torch.zeros_like(values))
++        values = torch.cat([values, values.new_zeros(
++            values.shape[0], 1, values.shape[-1])], dim=1)
++        extended_valid = torch.cat([valid, ~valid.any(dim=1, keepdim=True)], dim=1)
++        with torch.autocast(device_type=values.device.type, enabled=False):
++            weights = extended_valid.float()
++            weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1.0)
++            weights = weights[:, None, :].expand(-1, self.tasks, -1).contiguous()
++        mean = torch.bmm(weights.to(values.dtype), values)
++        # The value layout is six concatenated item embeddings, then action.
++        # Keep both endpoints exactly as their ancestor tensor expressions.
++        if self.summary_mode == 'uniform':
++            summary = mean
++        elif self.summary_mode == 'din':
++            summary = din
++        elif self.summary_mode == 'mean_item_din_action':
++            summary = torch.cat([mean[..., :self.item_width],
++                                 din[..., self.item_width:]], dim=-1)
++        else:  # din_item_mean_action, validated by Model.__init__
++            summary = torch.cat([din[..., :self.item_width],
++                                 mean[..., self.item_width:]], dim=-1)
+         summary = self.value_norm(self.value_up(self.value_down(summary)))
+         update = self.output(summary)
+         return torch.where(valid.any(dim=1)[:, None, None], update,
+@@ -418,12 +434,11 @@
+             raise ValueError('Unknown query refinement memory')
+         if retrieval_state not in ('content', 'identity'):
+             raise ValueError('Unknown retrieval-state replacement')
+-        if retrieval_summary not in ('adaptive', 'uniform', 'din'):
++        if retrieval_summary not in ('uniform', 'din', 'mean_item_din_action',
++                                      'din_item_mean_action'):
+             raise ValueError('Unknown retrieval-summary replacement')
+         if (terminal_prior, query_memory, retrieval_state) != ('none', 'state_uniform', 'content'):
+             raise ValueError('Pruned study fixes the ancestor mean-residual settings')
+-        if retrieval_summary not in ('uniform', 'din'):
+-            raise ValueError('Pruned study supports uniform or DIN summaries')
+         self.retrieval_state = retrieval_state
+         self.feedback_content_mode = feedback_content_mode
+         self.content_bank_mode = content_bank_mode
+@@ -528,7 +543,7 @@
+         with torch.random.fork_rng(devices=[]):
+             self.terminal_retrieval = TerminalRetrieval(
+                 self.value_width, token_dim, num_heads, len(feature_map.labels),
+-                terminal_prior, query_memory, retrieval_summary)
++                terminal_prior, query_memory, retrieval_summary, self.key_width)
+         self.model_to_device()
+ 
+     def _feedback_source(self, joint, factorized, total):

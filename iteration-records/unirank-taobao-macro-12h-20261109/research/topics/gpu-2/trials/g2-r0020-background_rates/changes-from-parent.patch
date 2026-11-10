@@ -1,0 +1,92 @@
+--- g2-r0019-content_rates/model.py
++++ g2-r0020-background_rates/model.py
+@@ -1,11 +1,10 @@
+-"""Attribute the small g2 feedback-residual gain on the g0 joint backbone.
+-
+-Cross centered-product versus content replacement with feedback fractions
+-versus repeated exposure counts. The archived incumbent supplies the fourth
+-(centered-product, feedback) cell. Three new standalone cells keep identical
+-modules, initialization, summary work, widths and token count. All inherited
+-feedback summaries are computed before choosing readout inputs. This tests
+-representation and added-readout explanations; it claims no new result.
++"""Test reliability shrinkage on separate rates, preserving content features.
++
++Keep the committed g0 joint backbone and g2 content-only residual. Replace
++only its separate four-rate block by exposure/diversity-smoothed rates or
++visible-user background. All new arms compute the same summaries and keep
++all modules and initialization. Raw mode bridges the archived incumbent.
++The background includes each slot; no independent-prior claim is made.
+ """
+ import math
+ import torch
+@@ -15,7 +14,7 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'moment_mode': 'linear', 'moment_component': 'full', 'residual_mode': 'copy', 'bank_mode': 'relation', 'content_bank_mode': 'relation', 'feedback_content_mode': 'factorized', 'memory_source': 'joint', 'memory_layout': 'collapsed', 'pair_content_source': 'joint', 'pair_count_source': 'joint', 'feedback_dim': 8, 'residual_hidden': 64, 'recent_window': 16, 'feedback_mode': 'product', 'rate_interpolation': 'count', 'shrinkage_strength': 4.0, 'feedback_moment_mode': 'factorized', 'centering_mode': 'user', 'support_mode': 'exposure', 'residual_content_source': 'content', 'residual_rate_source': 'feedback'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'moment_mode': 'linear', 'moment_component': 'full', 'residual_mode': 'copy', 'bank_mode': 'relation', 'content_bank_mode': 'relation', 'feedback_content_mode': 'factorized', 'memory_source': 'joint', 'memory_layout': 'collapsed', 'pair_content_source': 'joint', 'pair_count_source': 'joint', 'feedback_dim': 8, 'residual_hidden': 64, 'recent_window': 16, 'feedback_mode': 'product', 'rate_interpolation': 'count', 'shrinkage_strength': 4.0, 'feedback_moment_mode': 'factorized', 'centering_mode': 'user', 'support_mode': 'exposure', 'residual_content_source': 'content', 'residual_rate_source': 'feedback', 'rate_summary': 'background'}
+ 
+ 
+ class FeedbackMemory(nn.Module):
+@@ -162,6 +161,7 @@
+                  centering_mode='user', support_mode=CONFIG['support_mode'],
+                  residual_content_source=CONFIG['residual_content_source'],
+                  residual_rate_source=CONFIG['residual_rate_source'],
++                 rate_summary=CONFIG['rate_summary'],
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -227,6 +227,11 @@
+             raise ValueError('Unknown residual content source')
+         if residual_rate_source not in ('feedback', 'exposure'):
+             raise ValueError('Unknown residual rate source')
++        if rate_summary not in ('raw', 'smoothed', 'background'):
++            raise ValueError('Unknown separate rate encoding')
++        if residual_content_source != 'content' or residual_rate_source != 'feedback':
++            raise ValueError('Separate-rate study freezes content-only and feedback inputs')
++        self.rate_summary = rate_summary
+         self.residual_content_source = residual_content_source
+         self.residual_rate_source = residual_rate_source
+         self.feedback_dim = feedback_dim
+@@ -709,6 +714,31 @@
+                 + (1.0 - weight[:, :, None]) * background[:, None, :])
+ 
+ 
++    def _select_residual_rates(self, fractions, support, feedback, valid, occupied):
++        """Same-width rate replacement with no additional learned parameters.
++
++        All modes compute both summaries. The inherited interpolation uses
++        support/(support+4), with the same visible-user background including
++        the slot itself. Empty slots are exactly zero in every mode, so a
++        background rate cannot create content in an unoccupied group.
++        Raw mode preserves the archived content_rates input. Feedback was
++        already intersected with valid; overlapping task masks are allowed.
++        """
++        with torch.autocast(device_type=fractions.device.type, enabled=False):
++            total = valid.sum(dim=-1).clamp_min(1)
++            background = feedback.float().sum(dim=-1) / total[:, None]
++            background = background[:, None, :].expand_as(fractions)
++            smoothed = self._residual_rates(
++                fractions.float(), support.float(), feedback.float(), valid)
++            if self.rate_summary == 'smoothed':
++                selected = smoothed
++            elif self.rate_summary == 'background':
++                selected = background
++            else:
++                selected = fractions.float()
++            return selected * occupied.to(selected.dtype)
++
++
+     def _event_covariance(self, keys, members, feedback, fractions, counts):
+         """Within-slot E[(W x) y] - E[W x] E[y], using all-event denominators.
+ 
+@@ -804,6 +834,9 @@
+             # Additional task-feedback removed; repeat already-authorized counts
+             # in the same four columns. Core action embeddings remain intact.
+             fractions = count_features.expand(-1, -1, self.feedback_tasks)
++        if self.residual_rate_source == 'feedback':
++            fractions = self._select_residual_rates(
++                fractions, support, feedback, valid, occupied)
+         raw = torch.cat([moments.flatten(2), fractions.to(projected.dtype),
+                          count_features.to(projected.dtype)], dim=-1)
+         return raw.flatten(1)

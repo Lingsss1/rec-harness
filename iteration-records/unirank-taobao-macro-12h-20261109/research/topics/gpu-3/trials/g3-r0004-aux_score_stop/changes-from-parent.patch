@@ -1,0 +1,85 @@
+--- g3-r0003-private_relevance/model.py
++++ g3-r0004-aux_score_stop/model.py
+@@ -1,11 +1,10 @@
+-"""Prospective early task sharing study; no local effectiveness claim.
++"""Prospective task/branch gradient routing study; performance unmeasured.
+ 
+-Four exact copies of the incumbent nonlinear local-activation trunk receive
+-identical per-event target/item/action interactions. Fixed mixing of their
+-states controls task coupling before the scalar relevance outputs. All three
+-sharing cells have the same parameter shapes and event-level trunk work.
+-Uniform mixing is symmetry-collapsed under this initialization; it is not a
+-full effective-capacity control. Embeddings remain shared across tasks.
++Keep the private-scorer incumbent's parameters, initial function, shared
++embeddings, values and towers. Only stop selected tasks' gradients at the
++input to their relevance trunk. Scorer parameters still learn from all task
++losses; values and direct context/target paths remain attached. This changes
++the learning rule, not the information visible to inference.
+ """
+ import copy
+ import torch
+@@ -22,14 +21,18 @@
+     'task_specific': True,
+     'action_in_score': True,
+     'scorer_sharing': 0.0,
++    'block_click_score_grad': False,
++    'block_aux_score_grad': True,
+ }
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='EarlyTaskSharing', gpu=-1,
++    def __init__(self, feature_map, model_id='ScoreInputGradientRouting', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+-                 task_specific=True, action_in_score=True, scorer_sharing=0.0, num_tasks=None,
++                 task_specific=True, action_in_score=True, scorer_sharing=0.0,
++                 block_click_score_grad=False, block_aux_score_grad=True,
++                 num_tasks=None,
+                  task='binary_classification', **kwargs):
+         labels = list(feature_map.labels)
+         if len(labels) != 4 or set(labels) != {'is_click', 'cart', 'fav', 'buy'}:
+@@ -44,8 +47,13 @@
+         self.action_in_score = bool(action_in_score)
+         if not self.task_specific or not self.action_in_score:
+             raise ValueError('This study retains task/action relevance')
+-        if float(scorer_sharing) not in (0.0, 0.5, 1.0):
+-            raise ValueError('Expected the declared private/partial/uniform cells')
++        if float(scorer_sharing) != 0.0:
++            raise ValueError('Gradient routing study fixes private scorers')
++        if not isinstance(block_click_score_grad, bool) or not isinstance(block_aux_score_grad, bool):
++            raise ValueError('Gradient routing switches must be booleans')
++        self.block_score_input = tuple(
++            block_click_score_grad if label == 'is_click' else block_aux_score_grad
++            for label in labels)
+         if not attention_hidden_units:
+             raise ValueError('A nonlinear scorer trunk is required')
+         self.scorer_sharing = float(scorer_sharing)
+@@ -63,7 +71,7 @@
+         self.key_width = len(self.item_fields) * embedding_dim
+         self.value_width = self.key_width + embedding_dim
+ 
+-        # Every cell allocates the action columns and four score rows.
++        # Keep the incumbent parameter layout and initialization sequence.
+         layers = []
+         width = 4 * self.key_width + embedding_dim
+         for hidden in attention_hidden_units:
+@@ -127,10 +135,16 @@
+         action_input = actions if self.action_in_score else torch.zeros_like(actions)
+         interactions = torch.cat([query, keys, query - keys, query * keys, action_input], dim=-1)
+         flat = interactions.reshape(batch * length, -1)
+-        # Execute all four trunks at every rho, including the uniform control.
++        # Execute the same four private trunks in every factorial cell.
+         # Accumulate their mean in float32 under BF16 autocast. The subtraction
+         # form preserves equal initial states exactly before output arithmetic.
+-        states = torch.stack([trunk(flat) for trunk in self.relevance_trunks], dim=1)
++        # Detach only the scorer INPUT. Never detach scores or pooled values:
++        # every relevance trunk/output row still receives its own task loss.
++        # Label-based switches are independent of feature_map label order.
++        states = torch.stack([
++            trunk(flat.detach() if blocked else flat)
++            for trunk, blocked in zip(self.relevance_trunks, self.block_score_input)
++        ], dim=1)
+         center = states.float().mean(dim=1, keepdim=True).to(states.dtype)
+         mixed = states + self.scorer_sharing * (center - states)
+         columns = []

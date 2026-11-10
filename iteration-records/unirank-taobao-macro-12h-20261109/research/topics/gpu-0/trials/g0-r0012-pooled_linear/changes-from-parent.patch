@@ -1,0 +1,152 @@
+--- g0-r0011-memory_joint_collapsed/model.py
++++ g0-r0012-pooled_linear/model.py
+@@ -1,14 +1,13 @@
+-"""Separately addressable feedback/time memory, with a matched 2x2 contrast.
+-
+-All incumbent factorized feedback and relation paths remain. The added memory
+-has 20 slots: global/four rank bins by four historical feedback masks. Choose
+-actual feedback-selected item content or rate-times-unconditional content;
+-keep four content vectors or broadcast their mean. Individual counts, slot
+-identities, validity, constructors and attention are identical in every arm.
+-Existing field/relation tokens read this memory before their JointBlock.
+-The new residual output starts at zero; inherited initialization is retained.
+-Behavior pooling and proxy cross-attention are related to INFNet. This is a
+-local adaptation and discriminating follow-up, with no originality claim.
++"""Event composition before versus after feedback-memory compression.
++
++Preserve the joint/collapsed memory incumbent and every existing path. Add
++a bias-free residual MLP to its content, before or after weighted pooling.
++The 2x2 contrasts placement (event/pooled) with activation (SiLU/linear).
++The linear pair commutes algebraically, including signed relevance weights.
++All arms have identical parameters, constructors, masks and forward kernels;
++the selected autograd path and measured backward cost can differ.
++Event tokenization is related to pinned TokenFormer; pooled transformation
++to HiFormer, and feedback memory to INFNet. No originality claim is made.
+ """
+ import math
+ import torch
+@@ -36,7 +35,53 @@
+     'feedback_content_mode': 'factorized',
+     'memory_source': 'joint',
+     'memory_layout': 'collapsed',
++    'composition_placement': 'pooled',
++    'composition_activation': 'linear',
++    'composition_hidden': 32,
+ }
++
++
++class MemoryComposition(nn.Module):
++    """Compose fields before compression, with a mass-matched pooled control.
++
++For signed coefficients a_i, C=sum_i a_i*x_i and m=sum_i |a_i|.
++The event path is sum_i a_i*h(x_i); the pooled path is m*h(C/m).
++There are no biases, so h(0)=0. With linear h these paths are identical
++in exact arithmetic. The safe denominator only handles zero/tiny mass;
++both paths use that same denominator and coefficient rescaling.
++"""
++
++    def __init__(self, item_width, hidden, placement, activation):
++        super().__init__()
++        self.placement = placement
++        self.activation = activation
++        self.input = nn.Linear(item_width, hidden, bias=False)
++        self.output = nn.Linear(hidden, item_width, bias=False)
++        nn.init.zeros_(self.output.weight)
++
++    def _transform(self, content):
++        hidden = self.input(content)
++        if self.activation == 'silu':
++            hidden = torch.nn.functional.silu(hidden)
++        return self.output(hidden)
++
++    def forward(self, items, weighted, feedback_fraction):
++        # The caller disables autocast: sums and MLPs here are FP32.
++        coefficients = (weighted * feedback_fraction[:, None, :]
++                        / math.sqrt(7.0))
++        mass = coefficients.abs().sum(dim=-1, keepdim=True)
++        safe_mass = mass.clamp_min(1e-12)
++        normalized = coefficients / safe_mass
++        pooled_items = torch.bmm(normalized, items)
++        event_features = self._transform(items)
++        pooled_features = self._transform(pooled_items)
++        # Execute both paths in every cell. Only the selected branch has
++        # backward work; nominal capacity and forward work are matched.
++        event_update = safe_mass * torch.bmm(normalized, event_features)
++        pooled_update = safe_mass * pooled_features
++        if self.placement == 'event':
++            return event_update
++        return pooled_update
+ 
+ 
+ class FeedbackMemory(nn.Module):
+@@ -47,7 +92,8 @@
+ Overlapping task masks are allowed. No signed-weight normalization is used.
+ """
+ 
+-    def __init__(self, item_width, width, heads, source, layout):
++    def __init__(self, item_width, width, heads, source, layout,
++                 composition_placement, composition_activation, composition_hidden):
+         super().__init__()
+         self.source = source
+         self.layout = layout
+@@ -64,6 +110,11 @@
+         self.output = nn.Linear(width, width, bias=False)
+         nn.init.normal_(self.identity, std=0.02)
+         nn.init.zeros_(self.output.weight)
++        # Append after every inherited initialization and preserve its RNG.
++        with torch.random.fork_rng(devices=[]):
++            self.composition = MemoryComposition(
++                item_width, composition_hidden, composition_placement,
++                composition_activation)
+ 
+     def _summaries(self, values, weights, temporal_masks, valid, task_masks):
+         batch, length, _ = values.shape
+@@ -97,6 +148,14 @@
+             collapsed = content.mean(dim=2, keepdim=True).expand_as(content)
+             if self.layout == 'collapsed':
+                 content = collapsed
++            # Mean over the four possibly overlapping historical feedbacks:
++            # an event with k feedbacks has coefficient k/4, just as in the
++            # inherited joint/collapsed memory. Individual counts stay intact.
++            feedback_fraction = torch.stack(
++                [(task_mask.bool() & valid).float() for task_mask in task_masks],
++                dim=1).mean(dim=1)
++            update = self.composition(items, weighted, feedback_fraction)
++            content = content + update[:, :, None, :]
+             log_counts = torch.log1p(counts) / math.log(101.0)
+         return content, log_counts
+ 
+@@ -175,6 +234,8 @@
+                  moment_component='full', residual_mode='copy', bank_mode='relation',
+                  content_bank_mode='relation', feedback_content_mode='factorized',
+                  memory_source='joint', memory_layout='collapsed',
++                 composition_placement='pooled', composition_activation='linear',
++                 composition_hidden=32,
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -221,6 +282,14 @@
+             raise ValueError('Unknown memory source')
+         if memory_layout not in ('separate', 'collapsed'):
+             raise ValueError('Unknown memory layout')
++        if memory_source != 'joint' or memory_layout != 'collapsed':
++            raise ValueError('Composition study freezes joint/collapsed memory')
++        if composition_placement not in ('event', 'pooled'):
++            raise ValueError('Unknown composition placement')
++        if composition_activation not in ('silu', 'linear'):
++            raise ValueError('Unknown composition activation')
++        if not isinstance(composition_hidden, int) or composition_hidden <= 0:
++            raise ValueError('composition_hidden must be a positive integer')
+         self.feedback_content_mode = feedback_content_mode
+         self.content_bank_mode = content_bank_mode
+         self.bank_mode = bank_mode
+@@ -318,7 +387,8 @@
+         # Every cell has exactly the same added modules and zero-start output.
+         with torch.random.fork_rng(devices=[]):
+             self.feedback_memory = FeedbackMemory(
+-                self.key_width, token_dim, num_heads, memory_source, memory_layout)
++                self.key_width, token_dim, num_heads, memory_source, memory_layout,
++                composition_placement, composition_activation, composition_hidden)
+         self.model_to_device()
+ 
+     def _feedback_source(self, joint, factorized, total):

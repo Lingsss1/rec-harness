@@ -1,0 +1,145 @@
+--- g3-r0012-memory_task_private_linear/model.py
++++ g3-r0016-task_exchange_mean/model.py
+@@ -1,13 +1,12 @@
+-"""Prospective compatibility study: g0 memory representation plus g3 task readout.
+-
+-Keep the complete committed memory-joint/collapsed g0 representation, its
+-masking, initialization, and shared history paths. Append the committed g3
+-residual task-content scorer and shared extra-summary projection. Each head
+-receives its shared DIN sum plus C_t + P(M_t). Cross private/mean routing
+-with linear/copy extra basis as active, parameter/operator-matched controls.
+-All added score outputs and P start at zero, preserving the initial g0
+-function and CPU RNG stream. Host numerical checks and evaluation are pending.
+-This is an integration of two local sources, with no novelty/result claim.
++"""Prospective task-summary exchange, built on the committed R12 incumbent.
++
++Keep its task-private content/rank readouts and complete g0 representation.
++Before JointBlock, existing tokens read a four-slot task-summary memory.
++Only the source changes in the matched control: four private summaries versus
++four copies of their mean, with the direct private readouts held fixed.
++Learned identities keep the mean-source attention active. The zero output map
++preserves the incumbent's initial function and an RNG fork preserves its state.
++No training, improvement, original-method reproduction or novelty is claimed.
+ """
+ import math
+ import torch
+@@ -17,7 +16,7 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'moment_mode': 'linear', 'moment_component': 'full', 'residual_mode': 'copy', 'bank_mode': 'relation', 'content_bank_mode': 'relation', 'feedback_content_mode': 'factorized', 'memory_source': 'joint', 'memory_layout': 'collapsed', 'task_routing': 'private', 'block_click_score_grad': False, 'block_aux_score_grad': False, 'scorer_hidden_width': 64, 'task_extra_basis': 'linear'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'moment_mode': 'linear', 'moment_component': 'full', 'residual_mode': 'copy', 'bank_mode': 'relation', 'content_bank_mode': 'relation', 'feedback_content_mode': 'factorized', 'memory_source': 'joint', 'memory_layout': 'collapsed', 'task_routing': 'private', 'block_click_score_grad': False, 'block_aux_score_grad': False, 'scorer_hidden_width': 64, 'task_extra_basis': 'linear', 'exchange_source': 'mean'}
+ 
+ 
+ class FeedbackMemory(nn.Module):
+@@ -147,6 +146,63 @@
+         return tokens * valid.unsqueeze(-1).to(tokens.dtype)
+ 
+ 
++class TaskSummaryExchange(nn.Module):
++    """Strictly masked one-way read of four already authorized summaries.
++
++    Task identity enters keys AND values, so mean-source attention remains
++    an active learned function. No current feedback is an input. Every memory
++    slot is valid iff history is nonempty, regardless of feedback prevalence.
++    Existing token count and tower dimensions stay fixed.
++    """
++
++    def __init__(self, input_width, width, heads, source):
++        super().__init__()
++        self.source = source
++        self.heads = heads
++        self.head_width = width // heads
++        self.input_projection = nn.Linear(input_width, width, bias=False)
++        self.identity = nn.Parameter(torch.empty(1, 4, width))
++        self.query_norm = nn.LayerNorm(width)
++        self.key_norm = nn.LayerNorm(width)
++        self.query = nn.Linear(width, width, bias=False)
++        self.key = nn.Linear(width, width, bias=False)
++        self.value = nn.Linear(width, width, bias=False)
++        self.output = nn.Linear(width, width, bias=False)
++        nn.init.normal_(self.identity, std=0.02)
++        nn.init.zeros_(self.output.weight)
++
++    def forward(self, tokens, token_valid, summaries, history_present):
++        # Compute mean/broadcast in both arms. FP32 averaging avoids extra
++        # accumulation loss; restored dtype agrees with the inherited readout.
++        center = summaries.float().mean(dim=1, keepdim=True).to(summaries.dtype)
++        mixing = 1.0 if self.source == 'mean' else 0.0
++        source = (1.0 - mixing) * summaries + mixing * center
++        memory = self.input_projection(source)
++        memory = memory + self.identity.to(memory.dtype)
++        memory_valid = history_present[:, None].expand(-1, 4)
++        memory = memory * memory_valid.unsqueeze(-1).to(memory.dtype)
++        batch, count, width = tokens.shape
++        query = self.query(self.query_norm(tokens)).reshape(
++            batch, count, self.heads, self.head_width).transpose(1, 2)
++        key = self.key(self.key_norm(memory)).reshape(
++            batch, 4, self.heads, self.head_width).transpose(1, 2)
++        value = self.value(memory).reshape(
++            batch, 4, self.heads, self.head_width).transpose(1, 2)
++        with torch.autocast(device_type=tokens.device.type, enabled=False):
++            scores = torch.matmul(query.float(), key.float().transpose(-1, -2))
++            scores = scores / math.sqrt(self.head_width)
++            key_mask = memory_valid[:, None, None, :]
++            scores = scores.masked_fill(~key_mask, -1e9)
++            attention = torch.softmax(scores, dim=-1) * key_mask.float()
++            attention = attention / attention.sum(dim=-1, keepdim=True).clamp_min(1e-9)
++        mixed = torch.matmul(attention.to(value.dtype), value)
++        mixed = mixed.transpose(1, 2).reshape(batch, count, width)
++        update = self.output(mixed)
++        active = token_valid & history_present[:, None]
++        update = update * active.unsqueeze(-1).to(update.dtype)
++        return (tokens + update.to(tokens.dtype)) * token_valid.unsqueeze(-1).to(tokens.dtype)
++
++
+ class Model(MultiTaskModel):
+     def __init__(self, feature_map, model_id='MemoryTaskCompatibilityStudy', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+@@ -158,7 +214,7 @@
+                  memory_source='joint', memory_layout='collapsed',
+                  task_routing='private', block_click_score_grad=False,
+                  block_aux_score_grad=False, scorer_hidden_width=64,
+-                 task_extra_basis='linear',
++                 task_extra_basis='linear', exchange_source='mean',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -181,6 +237,8 @@
+             raise ValueError('scorer_hidden_width must be a positive integer')
+         if task_extra_basis not in ('linear', 'copy'):
+             raise ValueError('Extra task summary requires linear or copy basis')
++        if exchange_source not in ('private', 'mean'):
++            raise ValueError('Unknown task-summary exchange source')
+         self.task_routing = task_routing
+         self.task_extra_basis = task_extra_basis
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+@@ -349,6 +407,10 @@
+             self.task_extra_projection = nn.Linear(
+                 self.value_width, self.value_width, bias=False)
+             nn.init.zeros_(self.task_extra_projection.weight)
++        # Append after every inherited initialization and preserve CPU RNG.
++        with torch.random.fork_rng(devices=[]):
++            self.task_exchange = TaskSummaryExchange(
++                self.value_width, token_dim, num_heads, exchange_source)
+         self.model_to_device()
+ 
+     def _task_pool(self, target, keys, actions, values, valid):
+@@ -698,13 +760,16 @@
+         tokens = tokens * token_valid.unsqueeze(-1).to(tokens.dtype)
+         tokens = self.feedback_memory(tokens, token_valid, values, weights,
+                                       content_mask, valid, task_masks)
+-        tokens = self.interaction(tokens, token_valid)
++        # The direct tower readouts remain private in BOTH exchange arms.
+         task_pooled = pooled[:, 0:1] + self._task_pool(target, keys, action, values, valid)
+         # Parent routing is for initial-function/replay diagnostics only. It
+         # still allocates and executes the new scorer family. No proposed
+         # factorial arm uses this path, and private gradients are unused here.
+         if self.task_routing == 'parent':
+             task_pooled = pooled[:, 0:1].expand(-1, self.num_tasks, -1)
++        tokens = self.task_exchange(tokens, token_valid, task_pooled,
++                                    valid.any(dim=-1))
++        tokens = self.interaction(tokens, token_valid)
+         outputs = {}
+         for index, (label, tower) in enumerate(zip(self.feature_map.labels, self.towers)):
+             features = torch.cat([static.flatten(1), task_pooled[:, index],

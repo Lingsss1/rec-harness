@@ -1,0 +1,97 @@
+--- g0-r0005-linear_moment/model.py
++++ g0-r0006-occupancy_timing/model.py
+@@ -1,11 +1,11 @@
+-"""Within-bin position moments for existing temporal/target-relation tokens.
+-
+-Inherits the full relation_content_counts parent. Only a zero-initialized
+-shared projection of a second event-value summary is added. Linear/quadratic
+-coefficients are centered and unit RMS within each temporal bin; copy/zero
+-provide active parameterization and exact-null controls. No elapsed time,
+-new feedback inputs, tokens, loss, or prediction-time labels are introduced.
+-Original-method novelty and predictive usefulness remain unverified.
++"""Separate within-relation weighted-content order from occupancy timing.
++
++Inherits g0-r0005-linear_moment with no new parameters. Within each existing
++temporal/target-relation unit, decompose the linear rank moment M into
++O=mean_rank*weighted_content and W=M-O. Select W, O, M or zero through
++the same inherited projection. All arms calculate both summaries in FP32.
++W includes learned activation variation, not just embedding covariance.
++No raw time, new inputs, tokens, loss or labels. Utility/novelty unverified.
+ """
+ import math
+ import torch
+@@ -26,6 +26,7 @@
+     'content_mode': 'relation',
+     'count_mode': 'relation',
+     'moment_mode': 'linear',
++    'moment_component': 'occupancy',
+ }
+ 
+ 
+@@ -68,6 +69,7 @@
+                  tower_hidden_units=(128, 64), token_dim=32, num_heads=2,
+                  slot_mode='recency', representation_mode='replicas',
+                  content_mode='relation', count_mode='relation', moment_mode='linear',
++                 moment_component='occupancy',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -88,6 +90,11 @@
+             raise ValueError('Unknown explicit count channel')
+         if moment_mode not in ('linear', 'quadratic', 'copy', 'zero'):
+             raise ValueError('Unknown position moment')
++        if moment_mode != 'linear':
++            raise ValueError('Decomposition study freezes the linear rank basis')
++        if moment_component not in ('within', 'occupancy', 'full', 'zero'):
++            raise ValueError('Unknown relation position component')
++        self.moment_component = moment_component
+         if content_mode != 'relation' or count_mode != 'relation':
+             raise ValueError('Position study requires the frozen relation parent')
+         self.moment_mode = moment_mode
+@@ -221,11 +228,18 @@
+         return visible * 0.0
+ 
+     def _position_moments(self, values, weights, relation_masks, temporal_masks):
++        """M=W+O with an unweighted matched-event rank centroid.
++
++        Keep the original temporal basis scale. Centering separately within
++        a relation removes its mean placement, without dividing by signed
++        learned weights or rescaling sparse relations. No-match input is zero;
++        singleton/constant weighted-content W vanishes in exact arithmetic.
++        """
+         batch, length, _ = values.shape
+         if not length:
+             return values.new_zeros((batch, 5, self.group_count, self.value_width))
+-        # FP32 accumulation protects cancellation in centered signed moments.
+-        # The added path has the same bmm/projection shapes in every arm.
++        # Preserve the parent's raw M accumulation for the full replay.
++        # Common forward work in every arm; effective backward work can differ.
+         with torch.autocast(device_type=values.device.type, enabled=False):
+             coefficients = self._moment_coefficients(temporal_masks)
+             moment_weights = (relation_masks.float() * weights.float()[:, None, None, :]
+@@ -233,7 +247,24 @@
+             moments = torch.bmm(moment_weights.flatten(1, 2), values.float())
+             moments = moments.reshape(batch, 5, self.group_count, self.value_width)
+             moments = moments / math.sqrt(self.group_count)
+-        return moments
++            visible = relation_masks.float()
++            centroid = (visible * coefficients[:, :, None, :]).sum(dim=-1, keepdim=True)
++            centroid = centroid / visible.sum(dim=-1, keepdim=True).clamp_min(1.0)
++            content_weights = visible * weights.float()[:, None, None, :]
++            content = torch.bmm(content_weights.flatten(1, 2), values.float())
++            content = content.reshape(batch, 5, self.group_count, self.value_width)
++            content = content / math.sqrt(self.group_count)
++            occupancy = centroid * content
++            within = moments - occupancy
++            if self.moment_component == 'full':
++                result = moments
++            elif self.moment_component == 'within':
++                result = within
++            elif self.moment_component == 'occupancy':
++                result = occupancy
++            else:
++                result = moments * 0.0
++        return result
+ 
+     def forward(self, inputs):
+         if len(inputs) != 4 or inputs[3] is None:

@@ -1,0 +1,141 @@
+--- g3-r0012-memory_task_private_linear/model.py
++++ g3-r0013-static_context_mean/model.py
+@@ -1,13 +1,14 @@
+-"""Prospective compatibility study: g0 memory representation plus g3 task readout.
+-
+-Keep the complete committed memory-joint/collapsed g0 representation, its
+-masking, initialization, and shared history paths. Append the committed g3
+-residual task-content scorer and shared extra-summary projection. Each head
+-receives its shared DIN sum plus C_t + P(M_t). Cross private/mean routing
+-with linear/copy extra basis as active, parameter/operator-matched controls.
+-All added score outputs and P start at zero, preserving the initial g0
+-function and CPU RNG stream. Host numerical checks and evaluation are pending.
+-This is an integration of two local sources, with no novelty/result claim.
++"""Prospective feedback-memory conditioning of task relevance scorers.
++
++Inherit the committed g3-r0012 private/linear compatibility architecture.
++Condition its shared scorer preactivation on the mean of six target-field
++query tokens, before or after the existing masked feedback-memory read.
++A zero-start bias-free token_dim -> scorer_hidden_width map preserves the
++initial inherited function, parameter states, and CPU RNG stream.
++Cross memory/static source with private/mean task routing. All four arms own
++identical parameters and execute both source summaries and the same operators.
++The g0 memory, relation/moment paths, joint block and prediction heads remain.
++Numerical host checks are pending; no new training results or novelty claimed.
+ """
+ import math
+ import torch
+@@ -17,7 +18,7 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'moment_mode': 'linear', 'moment_component': 'full', 'residual_mode': 'copy', 'bank_mode': 'relation', 'content_bank_mode': 'relation', 'feedback_content_mode': 'factorized', 'memory_source': 'joint', 'memory_layout': 'collapsed', 'task_routing': 'private', 'block_click_score_grad': False, 'block_aux_score_grad': False, 'scorer_hidden_width': 64, 'task_extra_basis': 'linear'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'moment_mode': 'linear', 'moment_component': 'full', 'residual_mode': 'copy', 'bank_mode': 'relation', 'content_bank_mode': 'relation', 'feedback_content_mode': 'factorized', 'memory_source': 'joint', 'memory_layout': 'collapsed', 'task_routing': 'mean', 'block_click_score_grad': False, 'block_aux_score_grad': False, 'scorer_hidden_width': 64, 'task_extra_basis': 'linear', 'scorer_context_source': 'static'}
+ 
+ 
+ class FeedbackMemory(nn.Module):
+@@ -148,7 +149,7 @@
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='MemoryTaskCompatibilityStudy', gpu=-1,
++    def __init__(self, feature_map, model_id='MemoryConditionedTaskScorerStudy', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), token_dim=32, num_heads=2,
+                  slot_mode='recency', representation_mode='replicas',
+@@ -156,9 +157,9 @@
+                  moment_component='full', residual_mode='copy', bank_mode='relation',
+                  content_bank_mode='relation', feedback_content_mode='factorized',
+                  memory_source='joint', memory_layout='collapsed',
+-                 task_routing='private', block_click_score_grad=False,
++                 task_routing='mean', block_click_score_grad=False,
+                  block_aux_score_grad=False, scorer_hidden_width=64,
+-                 task_extra_basis='linear',
++                 task_extra_basis='linear', scorer_context_source='static',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -181,6 +182,9 @@
+             raise ValueError('scorer_hidden_width must be a positive integer')
+         if task_extra_basis not in ('linear', 'copy'):
+             raise ValueError('Extra task summary requires linear or copy basis')
++        if scorer_context_source not in ('memory', 'static'):
++            raise ValueError('Scorer context requires memory or static source')
++        self.scorer_context_source = scorer_context_source
+         self.task_routing = task_routing
+         self.task_extra_basis = task_extra_basis
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+@@ -349,17 +353,25 @@
+             self.task_extra_projection = nn.Linear(
+                 self.value_width, self.value_width, bias=False)
+             nn.init.zeros_(self.task_extra_projection.weight)
++        # Append only after ALL inherited initialization. Both context sources
++        # have the same zero-start map and preserve the host CPU RNG stream.
++        # There is no bias: a zero source always gives a zero preactivation.
++        with torch.random.fork_rng(devices=[]):
++            self.task_context_projection = nn.Linear(
++                token_dim, scorer_hidden_width, bias=False)
++            nn.init.zeros_(self.task_context_projection.weight)
+         self.model_to_device()
+ 
+-    def _task_pool(self, target, keys, actions, values, valid):
+-        """Keep content and augment it with a projected second summary.
+-
+-        Scorers see target, visible item fields and historical actions. Their
+-        inputs and values train in every arm. Routing is applied to scores
+-        before both summaries. Extra rank uses visible order, not timestamps.
+-        At zero P every arm starts at its inherited content-source function.
+-        Initially zero scorer outputs also make P's gradient zero; the host
+-        must check learning after scorer outputs become nonzero.
++    def _task_pool(self, target, keys, actions, values, valid, scorer_context):
++        """Retain inherited content and projected rank summaries.
++
++        Scorers see target, visible item fields and historical actions, with
++        a context shift before shared-trunk Dice. Routing still precedes both
++        summaries. Rank uses visible order rather than timestamps. Wc=0
++        preserves the corresponding R12 function at arbitrary inherited state.
++        Inherited scorer outputs and P, as well as the new context map, start
++        at zero. Scorer outputs must open before context/trunk/P gradients
++        can become nonzero; validate gradient connectivity in a cloned state.
+         """
+         batch, length, _ = keys.shape
+         if not length:
+@@ -368,7 +380,13 @@
+         actions = actions.masked_fill(~valid.unsqueeze(-1), 0)
+         interactions = torch.cat([query, keys, query - keys, query * keys, actions], dim=-1)
+         flat = interactions.reshape(batch * length, -1)
+-        hidden = self.task_trunk(flat)
++        # Keep the inherited Dice input shape [B*L,H] and all event masks.
++        # A sample-level history-conditioned shift is broadcast to its events;
++        # it can change the nonlinear relevance function without L new maps.
++        hidden = self.task_trunk[0](flat).reshape(batch, length, -1)
++        context_bias = self.task_context_projection(scorer_context).to(hidden.dtype)
++        hidden = hidden + context_bias[:, None, :]
++        hidden = self.task_trunk[1](hidden.reshape(batch * length, -1))
+         columns = [scorer(hidden) for scorer in self.task_scorers]
+         scores = torch.cat(columns, dim=-1).reshape(batch, length, self.num_tasks)
+         scores = scores.masked_fill(~valid.unsqueeze(-1), 0)
+@@ -696,10 +714,22 @@
+         static_valid = torch.ones((batch, self.static_count), dtype=torch.bool, device=valid.device)
+         token_valid = torch.cat([static_valid, group_valid], dim=1)
+         tokens = tokens * token_valid.unsqueeze(-1).to(tokens.dtype)
++        # Static query tokens include the SAME field projection and identity
++        # as their post-memory counterparts. Only this source selection differs
++        # across controls. Both means execute, including in the static arms.
++        target_start = len(self.user_fields)
++        static_task_context = tokens[:, target_start:self.static_count].float().mean(dim=1)
++        static_task_context = static_task_context.to(tokens.dtype)
+         tokens = self.feedback_memory(tokens, token_valid, values, weights,
+                                       content_mask, valid, task_masks)
++        memory_task_context = tokens[:, target_start:self.static_count].float().mean(dim=1)
++        memory_task_context = memory_task_context.to(tokens.dtype)
++        scorer_context = (memory_task_context if self.scorer_context_source == 'memory'
++                          else static_task_context)
++        # Shared prediction representation follows the unchanged g0 path.
+         tokens = self.interaction(tokens, token_valid)
+-        task_pooled = pooled[:, 0:1] + self._task_pool(target, keys, action, values, valid)
++        task_pooled = pooled[:, 0:1] + self._task_pool(
++            target, keys, action, values, valid, scorer_context)
+         # Parent routing is for initial-function/replay diagnostics only. It
+         # still allocates and executes the new scorer family. No proposed
+         # factorial arm uses this path, and private gradients are unused here.

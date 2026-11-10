@@ -1,0 +1,106 @@
+--- g0-r0007-duplicate_full/model.py
++++ g0-r0008-rotated_bank/model.py
+@@ -1,12 +1,12 @@
+-"""Untie relation occupancy timing from the inherited full rank moment.
+-
+-M=W+O, with O=mean matched rank * weighted content. The parent uses A*M;
+-this study uses A*M+B*O (candidate), A*M+B*M (duplicate control), or A*M
+-(zero-input control). All arms add the same zero-initialized bias-free B.
+-A*M+B*O equals A*W+(A+B)*O: the two component maps can differ without
+-new event information, tokens or loss. The duplicate adds optimization
+-capacity without expanding the linear summary span. Novelty and utility
+-remain unverified. No filesystem, network or training operations occur here.
++"""Relation-consistent compression of inherited target-relation rank summaries.
++
++Keep the duplicate-full parent A*M+B*M and add C[r]*M before JointBlock.
++Relation sharing uses one C per target-match relation across all five time
++bins. Rotated sharing uses C[(r+t)%7] with equal parameters and nominal bank
++usage. Shared uses the mean bank; zero retains only the parent function.
++All new maps start at zero. No new information, tokens, loss, or host recipe.
++This is an unverified local adaptation of heterogeneous parameter sharing,
++not a new-method priority claim or a reproduction of HiFormer.
+ """
+ import math
+ import torch
+@@ -29,6 +29,7 @@
+     'moment_mode': 'linear',
+     'moment_component': 'full',
+     'residual_mode': 'copy',
++    'bank_mode': 'rotated',
+ }
+ 
+ 
+@@ -71,7 +72,7 @@
+                  tower_hidden_units=(128, 64), token_dim=32, num_heads=2,
+                  slot_mode='recency', representation_mode='replicas',
+                  content_mode='relation', count_mode='relation', moment_mode='linear',
+-                 moment_component='full', residual_mode='copy',
++                 moment_component='full', residual_mode='copy', bank_mode='rotated',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -100,6 +101,11 @@
+             raise ValueError('This study retains the full parent moment')
+         if residual_mode not in ('occupancy', 'copy', 'zero'):
+             raise ValueError('Unknown residual summary')
++        if residual_mode != 'copy':
++            raise ValueError('Relation-bank study freezes the duplicate-full parent')
++        if bank_mode not in ('relation', 'rotated', 'shared', 'zero'):
++            raise ValueError('Unknown relation bank sharing rule')
++        self.bank_mode = bank_mode
+         self.residual_mode = residual_mode
+         self.moment_component = moment_component
+         if content_mode != 'relation' or count_mode != 'relation':
+@@ -173,7 +179,42 @@
+         with torch.random.fork_rng(devices=[]):
+             self.residual_projection = nn.Linear(self.value_width, token_dim, bias=False)
+             nn.init.zeros_(self.residual_projection.weight)
++        # Append after every inherited initialization; zeros consume no RNG.
++        # All arms own exactly seven [value_width, token_dim] matrices.
++        self.relation_bank = nn.Parameter(
++            torch.zeros(self.group_count, self.value_width, token_dim))
++        self.register_buffer('bank_routes', torch.tensor(
++            self._bank_assignments(), dtype=torch.long))
+         self.model_to_device()
++
++    def _bank_assignments(self):
++        """Seven banks, five uses each; rotate by window only in the control.
++
++        A single global bank relabeling cannot undo the rotated assignment:
++        relation r uses bank r in the global bin and r+t in window t.
++        Only parameter sharing changes. No tokens, values or masks move.
++        """
++        return tuple(tuple((relation + window) % self.group_count
++                           if self.bank_mode == 'rotated' else relation
++                           for relation in range(self.group_count))
++                     for window in range(5))
++
++    def _project_relation_bank(self, moments):
++        """Project existing M with C[r], a balanced rotation, or a shared mean.
++
++        Zero weights start every arm at the duplicate-full parent function.
++        The primary capacity-matched contrast is relation versus rotated.
++        Shared has equal nominal capacity but a smaller functional subspace;
++        zero is a replay check with an inactive path, not an active control.
++        """
++        bank = self.relation_bank
++        if self.bank_mode == 'shared':
++            bank = bank.mean(dim=0, keepdim=True).expand(self.group_count, -1, -1)
++        routed = bank[self.bank_routes].to(moments.dtype)
++        projected = torch.einsum('btgv,tgvd->btgd', moments, routed)
++        if self.bank_mode == 'zero':
++            projected = projected * 0.0
++        return projected
+ 
+     def _slot_masks(self, valid):
+         """Global plus four rank quartiles, or five global copies."""
+@@ -356,6 +397,9 @@
+         slot_tokens = slot_tokens + moment_tokens
+         residual_tokens = self.residual_projection(residual.to(slot_tokens.dtype))
+         slot_tokens = slot_tokens + residual_tokens
++        # Preserve temporal/relation identities and all existing summary paths.
++        bank_tokens = self._project_relation_bank(moments.to(slot_tokens.dtype))
++        slot_tokens = slot_tokens + bank_tokens
+         slot_tokens = slot_tokens.flatten(1, 2)
+         # Validity is temporal in EVERY arm, so group occupancy is not leaked
+         # by the attention mask when the explicit count input is ablated.

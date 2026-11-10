@@ -1,0 +1,91 @@
+--- g3-r0012-memory_task_private_linear/model.py
++++ g3-r0015-task_shared_trunk210/model.py
+@@ -1,14 +1,15 @@
+-"""Prospective compatibility study: g0 memory representation plus g3 task readout.
+-
+-Keep the complete committed memory-joint/collapsed g0 representation, its
+-masking, initialization, and shared history paths. Append the committed g3
+-residual task-content scorer and shared extra-summary projection. Each head
+-receives its shared DIN sum plus C_t + P(M_t). Cross private/mean routing
+-with linear/copy extra basis as active, parameter/operator-matched controls.
+-All added score outputs and P start at zero, preserving the initial g0
+-function and CPU RNG stream. Host numerical checks and evaluation are pending.
+-This is an integration of two local sources, with no novelty/result claim.
++"""Prospective task-specific versus shared residual-scorer hidden layers.
++
++Retain the committed memory-joint representation and private linear-moment
++readout. Four width-64 task trunks are compared with one shared width-210
++trunk at nearly equal parameter and dense matrix-operation counts. Private
++trunks are independent deep copies of the initialized inherited trunk; this
++preserves the parent's initial function, common states and CPU RNG stream.
++Only the residual scorer trunk is separated; embeddings and all other paths
++remain shared. No gradient-conflict, effectiveness or novelty claim is made.
++Numerical, memory and timing checks belong to the authorized host.
+ """
++import copy
+ import math
+ import torch
+ from torch import nn
+@@ -17,7 +18,7 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'moment_mode': 'linear', 'moment_component': 'full', 'residual_mode': 'copy', 'bank_mode': 'relation', 'content_bank_mode': 'relation', 'feedback_content_mode': 'factorized', 'memory_source': 'joint', 'memory_layout': 'collapsed', 'task_routing': 'private', 'block_click_score_grad': False, 'block_aux_score_grad': False, 'scorer_hidden_width': 64, 'task_extra_basis': 'linear'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'moment_mode': 'linear', 'moment_component': 'full', 'residual_mode': 'copy', 'bank_mode': 'relation', 'content_bank_mode': 'relation', 'feedback_content_mode': 'factorized', 'memory_source': 'joint', 'memory_layout': 'collapsed', 'task_routing': 'private', 'block_click_score_grad': False, 'block_aux_score_grad': False, 'scorer_hidden_width': 210, 'task_extra_basis': 'linear', 'scorer_trunk_mode': 'shared'}
+ 
+ 
+ class FeedbackMemory(nn.Module):
+@@ -157,8 +158,8 @@
+                  content_bank_mode='relation', feedback_content_mode='factorized',
+                  memory_source='joint', memory_layout='collapsed',
+                  task_routing='private', block_click_score_grad=False,
+-                 block_aux_score_grad=False, scorer_hidden_width=64,
+-                 task_extra_basis='linear',
++                 block_aux_score_grad=False, scorer_hidden_width=210,
++                 task_extra_basis='linear', scorer_trunk_mode='shared',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -181,6 +182,11 @@
+             raise ValueError('scorer_hidden_width must be a positive integer')
+         if task_extra_basis not in ('linear', 'copy'):
+             raise ValueError('Extra task summary requires linear or copy basis')
++        if scorer_trunk_mode not in ('private', 'shared'):
++            raise ValueError('Unknown residual scorer trunk sharing')
++        if task_routing != 'private' or task_extra_basis != 'linear':
++            raise ValueError('Trunk study freezes private score routing and linear basis')
++        self.scorer_trunk_mode = scorer_trunk_mode
+         self.task_routing = task_routing
+         self.task_extra_basis = task_extra_basis
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+@@ -349,6 +355,13 @@
+             self.task_extra_projection = nn.Linear(
+                 self.value_width, self.value_width, bias=False)
+             nn.init.zeros_(self.task_extra_projection.weight)
++        # Independent Parameter storage and Dice buffers, with identical
++        # starting values. No random draws or extra reset touch the parent.
++        # The first task retains task_trunk; the remaining tasks own clones.
++        self.private_trunks = nn.ModuleList()
++        if self.scorer_trunk_mode == 'private':
++            self.private_trunks.extend([
++                copy.deepcopy(self.task_trunk) for _ in feature_map.labels[1:]])
+         self.model_to_device()
+ 
+     def _task_pool(self, target, keys, actions, values, valid):
+@@ -368,8 +381,14 @@
+         actions = actions.masked_fill(~valid.unsqueeze(-1), 0)
+         interactions = torch.cat([query, keys, query - keys, query * keys, actions], dim=-1)
+         flat = interactions.reshape(batch * length, -1)
+-        hidden = self.task_trunk(flat)
+-        columns = [scorer(hidden) for scorer in self.task_scorers]
++        if self.scorer_trunk_mode == 'private':
++            # Each trunk runs once, with the same sanitized event inputs.
++            trunks = [self.task_trunk] + list(self.private_trunks)
++            columns = [scorer(trunk(flat))
++                       for trunk, scorer in zip(trunks, self.task_scorers)]
++        else:
++            hidden = self.task_trunk(flat)
++            columns = [scorer(hidden) for scorer in self.task_scorers]
+         scores = torch.cat(columns, dim=-1).reshape(batch, length, self.num_tasks)
+         scores = scores.masked_fill(~valid.unsqueeze(-1), 0)
+         # Same score/routing arithmetic in all factorial cells. FP32 averaging

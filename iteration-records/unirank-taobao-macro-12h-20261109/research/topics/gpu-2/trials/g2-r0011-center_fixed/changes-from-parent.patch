@@ -1,0 +1,84 @@
+--- g2-r0009-joint_count/model.py
++++ g2-r0011-center_fixed/model.py
+@@ -1,10 +1,10 @@
+-"""Prospective event-feedback covariance in the existing residual branch.
+-
+-Factorial: joint versus factorized moments x count versus fixed shrinkage.
+-Every arm computes the same event moments, with the covariance multiplier
+-set to one or zero. All registered modules, initializations, backbone,
+-raw fractions, counts and output widths match the frozen residual source.
+-No training, effectiveness, reliability calibration or novelty is claimed.
++"""Prospective user-background centering of shrunk joint feedback moments.
++
++Factorial: centered versus absolute joint moments x count versus fixed mixing.
++All arms compute the same background offset; only a scalar multiplier changes.
++Raw fractions, counts, all registered modules and initialization stay matched.
++The background is the same visible history, not an independent prior or a
++causal counterfactual. This is an untested representation hypothesis.
+ """
+ import math
+ import torch
+@@ -14,7 +14,7 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'feedback_dim': 8, 'residual_hidden': 64, 'recent_window': 16, 'feedback_mode': 'product', 'rate_interpolation': 'count', 'shrinkage_strength': 4.0, 'moment_mode': 'joint'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'feedback_dim': 8, 'residual_hidden': 64, 'recent_window': 16, 'feedback_mode': 'product', 'rate_interpolation': 'fixed', 'shrinkage_strength': 4.0, 'moment_mode': 'joint', 'centering_mode': 'user'}
+ 
+ 
+ class JointBlock(nn.Module):
+@@ -60,6 +60,7 @@
+                  feedback_mode=CONFIG['feedback_mode'],
+                  rate_interpolation=CONFIG['rate_interpolation'],
+                  shrinkage_strength=4.0, moment_mode=CONFIG['moment_mode'],
++                 centering_mode=CONFIG['centering_mode'],
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -90,6 +91,9 @@
+             raise ValueError('This factorial study requires product feedback')
+         if moment_mode not in ('joint', 'factorized'):
+             raise ValueError('Unknown event-feedback moment replacement')
++        if centering_mode not in ('user', 'none'):
++            raise ValueError('Unknown joint-moment centering')
++        self.centering_mode = centering_mode
+         self.moment_mode = moment_mode
+         self.feedback_mode = feedback_mode
+         self.rate_interpolation = rate_interpolation
+@@ -260,6 +264,25 @@
+                           * fractions[:, :, :, None])
+             return covariance * (counts > 0)[:, :, None, None].to(covariance.dtype)
+ 
++    def _center_moments(self, moments, projected, feedback, valid):
++        """Subtract the visible-user background moment in FP32.
++
++        Shapes: moments [B,8,4,D], projected [B,8,D], feedback [B,4,L].
++        Feedback is already intersected with valid by the caller, and empty
++        slots have zero projected content. In exact arithmetic the centered
++        joint feature is alpha * (E[Wx*y | slot] - E[Wx | slot] * b_user).
++        BF16 projection/mean rounding makes that identity approximate.
++        Both modes compute the offset; none is the matched zero multiplier.
++        No detach: the inherited projection learns through this transform.
++        """
++        with torch.autocast(device_type=projected.device.type, enabled=False):
++            total = valid.sum(dim=-1).clamp_min(1)
++            background = feedback.float().sum(dim=-1) / total[:, None]
++            offset = (projected.float()[:, :, None, :]
++                      * background[:, None, :, None])
++            centering = 1.0 if self.centering_mode == 'user' else 0.0
++            return moments.float() - centering * offset
++
+     def _residual_features(self, clean_item, valid, task_masks, keys):
+         batch, length = valid.shape
+         members = self._feedback_membership(clean_item, valid).float()
+@@ -290,8 +313,8 @@
+             local_weight = local_weight * 0.0 + 0.5
+         coupling = 1.0 if self.moment_mode == 'joint' else 0.0
+         with torch.autocast(device_type=keys.device.type, enabled=False):
+-            moments = (moments.float() + coupling * local_weight[:, :, None, None]
+-                       * covariance).to(projected.dtype)
++            moments = moments.float() + coupling * local_weight[:, :, None, None] * covariance
++            moments = self._center_moments(moments, projected, feedback, valid).to(projected.dtype)
+         count_features = counts.unsqueeze(-1) / 100.0
+         if self.feedback_mode == 'content':
+             # Additional task-feedback removed; repeat already-authorized counts

@@ -1,0 +1,172 @@
+--- g1-r0001-lowrank_static/model.py
++++ g1-r0004-match_internal_only/model.py
+@@ -1,12 +1,13 @@
+-"""Wide historical values with evolving field/event routing.
+-
+-Prospective 2x2: uncompressed versus learned low-rank historical values,
+-crossed with an enabled versus suppressed field-to-event write. This inherits
+-the local exchange implementation; it is not a new-method priority claim.
+-The final route uses evolved task queries and event keys, but its values are
+-only the original visible historical field/action embeddings. A value bypass
+-does not undo the compressed routing keys. Both value paths are computed in
+-all arms, with equal registered parameters and forward operation counts.
++"""Target-relative field matches inside evolving-query history retrieval.
++
++Prospective 2x2: internal retrieval bias x terminal pooling bias. Exact
++same-field matches use only visible target and masked historical IDs. A query
++selects among five target identity fields using the existing read Q/K; its
++soft selection weights combine their binary match channels into a bounded
++additive attention prior. Every globally valid event remains reachable.
++No new parameters, count input, action restriction or reverse write is added.
++All arms compute the same prior, including the disabled arm. This is a local
++mechanism study, not a claim of a novel attention or matching method.
+ """
+ import math
+ import torch
+@@ -23,6 +24,8 @@
+     'dynamic_query': True,
+     'raw_values': False,
+     'event_feedback': False,
++    'internal_match': True,
++    'terminal_match': False,
+     'tower_hidden_units': [128, 64],
+ }
+ 
+@@ -41,7 +44,25 @@
+         self.value = nn.Linear(width, width, bias=False)
+         self.output = nn.Linear(width, width, bias=False)
+ 
+-    def forward(self, query, memory, key_mask=None):
++    def _match_bias(self, q, match_fields, matches):
++        """Return [B,H,Q,L+1] prior in [0,2], using existing projections.
++
++        q is the already normalized/projected query, [B,H,Q,D/H].
++        match_fields contains original target field tokens [B,F,D].
++        matches is [B,L,F], zero on invalid history positions. Softmax is
++        over fields, not events; an absent match therefore contributes zero.
++        The null column is zero even when LayerNorm has learned a bias.
++        """
++        batch, count, width = match_fields.shape
++        field_keys = self.key(self.memory_norm(match_fields)).reshape(
++            batch, count, self.heads, self.head_width).transpose(1, 2)
++        field_scores = torch.matmul(q, field_keys.transpose(-2, -1)) / math.sqrt(self.head_width)
++        field_weights = torch.softmax(field_scores, dim=-1, dtype=torch.float32)
++        prior = 2.0 * torch.matmul(field_weights, matches.float().transpose(1, 2).unsqueeze(1))
++        return torch.cat([prior, prior.new_zeros(*prior.shape[:-1], 1)], dim=-1)
++
++    def forward(self, query, memory, key_mask=None,
++                match_fields=None, matches=None, match_gain=0.0):
+         batch, queries, width = query.shape
+         query = self.query_norm(query)
+         memory = self.memory_norm(memory)
+@@ -61,13 +82,19 @@
+                                     self.head_width).transpose(1, 2)
+         v = self.value(memory).reshape(batch, length, self.heads,
+                                       self.head_width).transpose(1, 2)
++        if matches is not None:
++            if key_mask is None or match_fields is None:
++                raise ValueError('Match addressing requires target fields and a history mask')
++            attention_mask = match_gain * self._match_bias(q, match_fields, matches)
++            attention_mask = attention_mask.masked_fill(~valid[:, None, None, :], float('-inf'))
+         attended = F.scaled_dot_product_attention(
+             q, k, v, attn_mask=attention_mask, dropout_p=0.0, is_causal=False)
+         attended = attended.transpose(1, 2).contiguous().reshape(batch, queries, width)
+         return self.output(attended)
+ 
+ 
+-    def pool_values(self, query, memory, values, key_mask):
++    def pool_values(self, query, memory, values, key_mask,
++                    match_fields=None, matches=None, match_gain=0.0):
+         """Route wide values with the same learned Q/K as the narrow reads.
+ 
+         Average attention heads before aggregation, so each original field
+@@ -92,6 +119,8 @@
+         k = self.key(memory).reshape(batch, length, self.heads,
+                                      self.head_width).transpose(1, 2)
+         logits = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_width)
++        if matches is not None:
++            logits = logits.float() + match_gain * self._match_bias(q, match_fields, matches)
+         logits = logits.masked_fill(~valid[:, None, None, :], float('-inf'))
+         weights = torch.softmax(logits, dim=-1, dtype=torch.float32).mean(dim=1)
+         return torch.bmm(weights.to(values.dtype), values)
+@@ -111,11 +140,13 @@
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='WideValueExchange', gpu=-1,
++    def __init__(self, feature_map, model_id='TargetMatchExchange', gpu=-1,
+                  embedding_dim=16, token_dim=32, num_heads=2,
+                  dynamic_query=CONFIG['dynamic_query'],
+                  raw_values=CONFIG['raw_values'],
+                  event_feedback=CONFIG['event_feedback'],
++                 internal_match=CONFIG['internal_match'],
++                 terminal_match=CONFIG['terminal_match'],
+                  tower_hidden_units=(128, 64), num_tasks=None,
+                  task='binary_classification', **kwargs):
+         labels = feature_map.labels
+@@ -123,13 +154,16 @@
+             raise ValueError('Task count mismatch')
+         if token_dim < 1 or num_heads < 1 or token_dim % num_heads:
+             raise ValueError('token_dim must be divisible by num_heads')
+-        if not all(isinstance(flag, bool) for flag in (dynamic_query, raw_values, event_feedback)):
++        if not all(isinstance(flag, bool) for flag in (dynamic_query, raw_values, event_feedback,
++                                                       internal_match, terminal_match)):
+             raise ValueError('Path controls must be boolean')
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(labels), task=task, **kwargs)
+         self.dynamic_query = float(dynamic_query)
+         self.raw_values = float(raw_values)
+         self.event_feedback = float(event_feedback)
++        self.internal_match = float(internal_match)
++        self.terminal_match = float(terminal_match)
+         self.token_dim = token_dim
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -139,6 +173,12 @@
+                             and spec['type'] != 'meta']
+         self.action_field = next((name for name, spec in feature_map.features.items()
+                                   if spec.get('source') == 'action'), None)
++        # Price buckets are deliberately excluded: this study addresses item
++        # identity/semantic membership rather than coarse price coincidences.
++        self.match_fields = [name for name in self.item_fields if name in
++                             ('item_id', 'cate_id', 'campaign_id', 'customer_id', 'brand')]
++        if len(self.match_fields) != 5:
++            raise ValueError('Requires the five frozen item identity fields')
+         self.field_count = len(self.user_fields) + len(self.item_fields)
+         if not self.item_fields or self.field_count == 0:
+             raise ValueError('Requires item and non-sequential feature fields')
+@@ -184,6 +224,14 @@
+         if length > 100:
+             raise ValueError('History exceeds the frozen 100-event contract')
+         valid = mask.bool()
++        # Target action is never accessed. Zero IDs do not create matches;
++        # nonzero shared unknown codes remain a benchmark vocabulary caveat.
++        matches = torch.stack([
++            (item[name][:, :-1] == item[name][:, -1:])
++            & (item[name][:, :-1] > 0) & (item[name][:, -1:] > 0) & valid
++            for name in self.match_fields], dim=-1)
++        match_tokens = self.field_projection(torch.stack(
++            [item_emb[name][:, -1] for name in self.match_fields], dim=1))
+         raw_fields = [user_emb[name].reshape(batch, -1) for name in self.user_fields]
+         raw_fields += [item_emb[name][:, -1] for name in self.item_fields]
+         field_inputs = torch.stack(raw_fields, dim=1)
+@@ -208,7 +256,8 @@
+             # Scalar path interventions keep parameter shapes, initial weights,
+             # module order and forward operation counts identical in all arms.
+             query = query_seed + self.dynamic_query * (fields - query_seed)
+-            evidence = self.read(query, events, valid)
++            evidence = self.read(query, events, valid, match_tokens, matches,
++                                 self.internal_match)
+             fields = mixer(fields + 0.5 * evidence)
+             if round_index == 0 and length > 0:
+                 delta = self.write(events, fields)
+@@ -217,7 +266,8 @@
+ 
+         fields = self.final_norm(fields)
+         task_states = fields[:, self.field_count:]
+-        wide_summary = self.read.pool_values(task_states, events, event_inputs, valid)
++        wide_summary = self.read.pool_values(task_states, events, event_inputs, valid,
++                                             match_tokens, matches, self.terminal_match)
+         # Linear compression commutes with weighted summation. This is the
+         # same low-rank value replacement as encoding every event first,
+         # implemented after pooling to avoid an extra sequence-wide matmul.

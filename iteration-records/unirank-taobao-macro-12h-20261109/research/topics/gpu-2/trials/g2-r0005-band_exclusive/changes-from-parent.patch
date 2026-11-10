@@ -1,0 +1,146 @@
+--- g2-r0004-count_shrink/model.py
++++ g2-r0005-band_exclusive/model.py
+@@ -1,10 +1,12 @@
+-"""Prospective count-conditioned shrinkage of compressed feedback products.
+-
+-Only the product gate changes: sparse slots interpolate toward the same
+-user's visible-history feedback rate. Raw slot fractions remain explicit.
+-Fixed and reversed-count mixtures share all registered modules and columns.
+-The host must check forward/backward, masking, BF16 quality and cost.
+-This is an untested hypothesis; no originality or measured gain is claimed.
++"""Prospective factorial study of the background in compressed feedback gates.
++
++Two factors: all-history versus same-ordinal-band background, and including
++versus excluding the slot's own events. Only the product gate changes;
++registered parameters, initialization order and raw readout inputs are fixed.
++No-background slots fall back to their own rate. Bands are positions, not
++elapsed time. All feedback is from the host-masked released prefix only.
++Host forward/backward, masking, BF16 and cost checks remain required.
++No local quality gain, independent prior or originality is claimed.
+ """
+ import math
+ import torch
+@@ -31,6 +33,8 @@
+     'feedback_dim': 8,
+     'rate_interpolation': 'count',
+     'shrinkage_strength': 4.0,
++    'background_scope': 'band',
++    'exclude_slot': True,
+ }
+ 
+ 
+@@ -48,8 +52,16 @@
+                  include_feedback_fractions=CONFIG['include_feedback_fractions'],
+                  feedback_dim=8,
+                  rate_interpolation=CONFIG['rate_interpolation'],
+-                 shrinkage_strength=CONFIG['shrinkage_strength'], num_tasks=None,
++                 shrinkage_strength=CONFIG['shrinkage_strength'],
++                 background_scope=CONFIG['background_scope'],
++                 exclude_slot=CONFIG['exclude_slot'], num_tasks=None,
+                  task='binary_classification', **kwargs):
++        if background_scope not in ('global', 'band'):
++            raise ValueError('Unknown background scope')
++        if not isinstance(exclude_slot, bool):
++            raise ValueError('exclude_slot must be bool')
++        if rate_interpolation != 'count':
++            raise ValueError('This factorial study holds count interpolation fixed')
+         if feedback_mode not in ('factorized', 'content', 'global'):
+             raise ValueError('Unknown feedback product replacement')
+         if not isinstance(include_feedback_fractions, bool):
+@@ -82,6 +94,8 @@
+             raise ValueError('recent_window must be positive')
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
++        self.background_scope = background_scope
++        self.exclude_slot = exclude_slot
+         self.feedback_mode = feedback_mode
+         self.rate_interpolation = rate_interpolation
+         self.shrinkage_strength = float(shrinkage_strength)
+@@ -172,26 +186,45 @@
+         return self.local_activation(interactions.reshape(batch * length, -1)).reshape(
+             batch, length)
+ 
+-    def _interpolate_rates(self, fractions, counts, feedback, mask):
+-        """Convex mixture using only the contracted masked prefix.
+-
+-        n/(n+4) trusts high-occupancy local rates more. The fixed control
+-        uses 1/2 everywhere; reverse uses 4/(n+4). Strength four is fixed
+-        prospectively, not fitted to validation. The global rate includes
+-        the current slot; this is shrinkage, not an independent prior.
+-        Empty slots contribute zero after the existing content mask.
++    def _interpolate_rates(self, fractions, counts, feedback, mask, slot_feedback):
++        """Blend local rates with an inclusive or complementary background.
++
++        The eight slots are old[0:4], recent[4:8]. Both global and band
++        sufficient statistics are computed in every arm; no new learned
++        modules or event projections are introduced. Exclusion removes the
++        complete disjoint slot, rather than a single event. This prevents
++        self-inclusion but does not make correlated user events independent.
++        Empty backgrounds fall back to the local rate, never the other band.
+         """
+-        total = (mask > 0).sum(dim=-1).clamp(min=1)
+-        global_rate = feedback.sum(dim=-1) / total[:, None]
+-        strength = self.shrinkage_strength
+-        # Execute the same small slot-sized arithmetic in all replacements.
+-        weight = counts / (counts + strength)
+-        if self.rate_interpolation == 'fixed':
+-            weight = weight * 0.0 + 0.5
+-        elif self.rate_interpolation == 'reverse':
+-            weight = 1.0 - weight
++        valid = mask > 0
++        total = valid.sum(dim=-1).to(counts.dtype)
++        global_successes = feedback.sum(dim=-1)
++        length = mask.shape[-1]
++        boundary = max(length - self.recent_window, 0)
++        band_counts = torch.stack((valid[:, :boundary].sum(dim=-1),
++                                   valid[:, boundary:].sum(dim=-1)), dim=1)
++        band_counts = band_counts.to(counts.dtype).repeat_interleave(4, dim=1)
++        band_successes = torch.stack((feedback[:, :, :boundary].sum(dim=-1),
++                                      feedback[:, :, boundary:].sum(dim=-1)), dim=1)
++        band_successes = band_successes.repeat_interleave(4, dim=1)
++        if self.background_scope == 'global':
++            background_count = total[:, None].expand(-1, self.num_slots)
++            background_success = global_successes[:, None, :].expand(
++                -1, self.num_slots, -1)
++        else:
++            background_count = band_counts
++            background_success = band_successes
++        if self.exclude_slot:
++            # slot_feedback is the raw masked integer success count, before
++            # division. Never reconstruct it from rounded fractions.
++            background_count = (background_count - counts).clamp(min=0)
++            background_success = (background_success - slot_feedback).clamp(min=0)
++        background_rate = background_success / background_count.clamp(min=1)[:, :, None]
++        background_rate = torch.where((background_count > 0)[:, :, None],
++                                      background_rate, fractions)
++        weight = counts / (counts + self.shrinkage_strength)
+         return (weight[:, :, None] * fractions
+-                + (1.0 - weight[:, :, None]) * global_rate[:, None, :])
++                + (1.0 - weight[:, :, None]) * background_rate)
+ 
+     def forward(self, inputs):
+         if len(inputs) != 4 or inputs[3] is None:
+@@ -238,9 +271,11 @@
+         feedback = torch.stack([(m > 0) & (mask > 0) for m in task_masks], dim=1)
+         feedback = feedback.to(members.dtype)  # B x 4 x L
+         if keys.shape[1]:
+-            fractions = torch.bmm(members, feedback.transpose(1, 2)) / divisor
+-        else:
+-            fractions = members.new_zeros((batch, self.num_slots, self.feedback_tasks))
++            slot_feedback = torch.bmm(members, feedback.transpose(1, 2)).float()
++            fractions = slot_feedback / divisor
++        else:
++            slot_feedback = members.new_zeros((batch, self.num_slots, self.feedback_tasks))
++            fractions = slot_feedback / divisor
+         # Reassociation is valid because feedback_projection is bias-free and
+         # the routing/denominator do not depend on learned embeddings:
+         # W(mean_s x) == mean_s(Wx) in exact arithmetic. BF16 is not bitwise
+@@ -249,7 +284,7 @@
+         projected = projected * occupied.to(projected.dtype)
+         expanded = projected[:, :, None, :].expand(-1, -1, self.feedback_tasks, -1)
+         if self.feedback_mode == 'factorized':
+-            gate = self._interpolate_rates(fractions, counts, feedback, mask)
++            gate = self._interpolate_rates(fractions, counts, feedback, mask, slot_feedback)
+         elif self.feedback_mode == 'content':
+             # Identical learned projection and input columns, no product with
+             # feedback rates. Explicit slot fractions remain below.

@@ -1,0 +1,168 @@
+--- g1-r0008-mean_residual/model.py
++++ g1-r0009-compact_din/model.py
+@@ -1,13 +1,15 @@
+-"""Replacement controls for the source of the g0/g1 hybrid gain.
+-
+-The committed g0 representation, towers, masks, initialization and all branch
+-parameters are retained. Controls replace only retrieval-state content or the
+-wide-value summary supplied to the existing low-rank normalized residual.
+-All narrow reads and event-attention scores are still computed. Thus nominal
+-capacity and common forward work are matched, but functional capacity and
+-backward cost differ; no efficiency improvement is claimed without pruning
+-and a separate measured comparison. This is an attribution study, not a new
+-attention method or an external-model reproduction.
++"""Pruned mean-history residual on the frozen g0 representation.
++
++Local evidence: g1-r0008-mean_residual marginally exceeded adaptive retrieval
++at one seed. Its uniform wide-value weights have no dependence on queries,
++event keys, task mixing or token content. Remove that dead forward/backward
++path, retaining the original low-rank normalized zero-start residual.
++The DIN-summary arm is an equal-active-capacity replacement control.
++
++The historical constructor is replayed before deleting unused modules, solely
++to preserve active tensor initialization and the caller CPU RNG stream. No
++retired module remains registered with the optimizer. Numerical equivalence
++and actual runtime must be checked by the host; no bitwise claim is made.
+ """
+ import math
+ import torch
+@@ -39,7 +41,7 @@
+     'terminal_prior': 'none',
+     'query_memory': 'state_uniform',
+     'retrieval_state': 'content',
+-    'retrieval_summary': 'uniform',
++    'retrieval_summary': 'din',
+ }
+ 
+ 
+@@ -170,11 +172,7 @@
+ 
+ 
+ class TerminalRetrieval(nn.Module):
+-    """Four evolving queries refine against g0 state, then pool raw events.
+-
+-    g0 tokens and events are read-only on this path. The historical event
+-    memory is retained as an exact implementation control, not a new arm.
+-    """
++    """Initialize as the ancestor, then retain only the active residual maps."""
+ 
+     def __init__(self, value_width, width, heads, tasks, prior, query_memory,
+                  summary_mode):
+@@ -195,32 +193,33 @@
+         nn.init.normal_(self.task_identity, std=0.02)
+         nn.init.zeros_(self.output.weight)
+ 
+-    def forward(self, tokens, token_valid, values, valid, match_fields, matches,
+-                din_summary):
+-        denominator = token_valid.sum(dim=1, keepdim=True).clamp_min(1)
+-        seed = (tokens * token_valid.unsqueeze(-1).to(tokens.dtype)).sum(dim=1)
+-        seed = seed / denominator.to(tokens.dtype)
+-        states = seed[:, None, :] + self.task_identity.to(seed.dtype)
+-        rank = valid.long().cumsum(dim=1)
+-        events = self.event_projection(values) + self.history_position[rank]
+-        events = torch.where(valid.unsqueeze(-1), events, torch.zeros_like(events))
+-        for mixer in self.after_read:
+-            if self.query_memory == 'events':
+-                evidence = self.read(states, events, valid)
+-            else:
+-                evidence = self.read.read_state(
+-                    states, tokens, token_valid,
+-                    uniform=self.query_memory == 'state_uniform')
+-            states = mixer(states + 0.5 * evidence)
+-        states = self.final_norm(states)
+-        summary = self.read.pool_values(
+-            states, events, values, valid, match_fields, matches,
+-            pooling='uniform' if self.summary_mode == 'uniform' else 'adaptive')
++        # Replay precisely the ancestor initialization above, then prune.
++        # These modules cannot influence either replacement summary. Deletion
++        # also removes their parameters from dense clipping and AdamW groups.
++        for name in ('event_projection', 'history_position', 'task_identity',
++                     'read', 'after_read', 'final_norm'):
++            delattr(self, name)
++        self.tasks = tasks
++
++    def forward(self, values, valid, din_summary):
++        # Keep the ancestor's [B,4,V] residual operation shapes. Each task
++        # receives the same input, but this avoids an additional numerical
++        # change from collapsing four identical linear/LayerNorm operations.
+         if self.summary_mode == 'din':
+-            # An active residual reparameterization of already available DIN
+-            # content, with no new event selection. Queries remain in graph
+-            # with zero gradient; value_down/up and output remain trainable.
+-            summary = summary * 0.0 + din_summary[:, None, :].expand_as(summary)
++            summary = din_summary[:, None, :].expand(-1, self.tasks, -1)
++        else:
++            # Append a zero null value; it is valid only for empty histories.
++            # FP32 weights and BF16 bmm mirror the historical pooling route.
++            values = torch.where(valid.unsqueeze(-1), values,
++                                 torch.zeros_like(values))
++            values = torch.cat([values, values.new_zeros(
++                values.shape[0], 1, values.shape[-1])], dim=1)
++            extended_valid = torch.cat([valid, ~valid.any(dim=1, keepdim=True)], dim=1)
++            with torch.autocast(device_type=values.device.type, enabled=False):
++                weights = extended_valid.float()
++                weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1.0)
++                weights = weights[:, None, :].expand(-1, self.tasks, -1).contiguous()
++            summary = torch.bmm(weights.to(values.dtype), values)
+         summary = self.value_norm(self.value_up(self.value_down(summary)))
+         update = self.output(summary)
+         return torch.where(valid.any(dim=1)[:, None, None], update,
+@@ -421,6 +420,10 @@
+             raise ValueError('Unknown retrieval-state replacement')
+         if retrieval_summary not in ('adaptive', 'uniform', 'din'):
+             raise ValueError('Unknown retrieval-summary replacement')
++        if (terminal_prior, query_memory, retrieval_state) != ('none', 'state_uniform', 'content'):
++            raise ValueError('Pruned study fixes the ancestor mean-residual settings')
++        if retrieval_summary not in ('uniform', 'din'):
++            raise ValueError('Pruned study supports uniform or DIN summaries')
+         self.retrieval_state = retrieval_state
+         self.feedback_content_mode = feedback_content_mode
+         self.content_bank_mode = content_bank_mode
+@@ -520,16 +523,12 @@
+         with torch.random.fork_rng(devices=[]):
+             self.feedback_memory = FeedbackMemory(
+                 self.key_width, token_dim, num_heads, memory_source, memory_layout)
+-        # Added after all g0 initialization; identical module shapes/RNG in
+-        # every prior arm. Never reset inherited modules after this point.
++        # Added after all g0 initialization. Replay ancestor initialization
++        # before pruning; never reset inherited modules after this point.
+         with torch.random.fork_rng(devices=[]):
+             self.terminal_retrieval = TerminalRetrieval(
+                 self.value_width, token_dim, num_heads, len(feature_map.labels),
+                 terminal_prior, query_memory, retrieval_summary)
+-        self.terminal_fields = [name for name in self.item_fields if name in
+-                                ('item_id', 'cate_id', 'campaign_id', 'customer_id', 'brand')]
+-        if len(self.terminal_fields) != 5:
+-            raise ValueError('Requires the five frozen identity fields')
+         self.model_to_device()
+ 
+     def _feedback_source(self, joint, factorized, total):
+@@ -839,27 +838,7 @@
+         tokens = self.feedback_memory(tokens, token_valid, values, weights,
+                                       content_mask, valid, task_masks)
+         tokens = self.interaction(tokens, token_valid)
+-        matches = []
+-        for name in self.terminal_fields:
+-            history, target_id = clean_item[name][:, :-1], clean_item[name][:, -1:]
+-            match = (history == target_id) & (history > 0) & (target_id > 0) & valid
+-            padding = self.match_padding[name]
+-            if padding is not None:
+-                match = match & (history != padding) & (target_id != padding)
+-            matches.append(match)
+-        matches = torch.stack(matches, dim=-1)
+-        match_fields = self.field_projection(torch.stack(
+-            [item_emb[name][:, -1] for name in self.terminal_fields], dim=1))
+-        # Replace only the residual branch's token content. Intact final g0
+-        # tokens still enter the original towers in every arm. Token presence
+-        # and its history-length information are preserved in this control.
+-        retrieval_tokens = tokens
+-        if self.retrieval_state == 'identity':
+-            retrieval_tokens = self.token_identity.to(tokens.dtype).expand_as(tokens)
+-            retrieval_tokens = retrieval_tokens * token_valid.unsqueeze(-1).to(tokens.dtype)
+-        updates = self.terminal_retrieval(
+-            retrieval_tokens, token_valid, values, valid, match_fields, matches,
+-            din_summary=pooled[:, 0])
++        updates = self.terminal_retrieval(values, valid, din_summary=pooled[:, 0])
+         return {label + '_pred': torch.sigmoid(tower(torch.cat(
+                     [static.flatten(1), pooled[:, 0] + updates[:, index],
+                      tokens.flatten(1), log_counts], dim=-1)))

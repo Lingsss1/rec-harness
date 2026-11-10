@@ -1,0 +1,158 @@
+--- g0-r0000-recency_slots/model.py
++++ g0-r0001-replica_recency/model.py
+@@ -1,9 +1,11 @@
+-"""Controlled history representation study under the frozen host protocol.
+-
+-DIN local activation is inherited from baseline_reference.py. Field tokens and
+-five history slots interact in one small attention block. Only slot construction
+-changes across behavior, counts, pooled, and recency conditions. This is an
+-experimental adaptation, not a reproduction or originality claim.
++"""Prospective field-group x temporal-summary representation study.
++
++Inherited: g0-r0000-recency_slots DIN scorer, embeddings, raw static/global
++bypasses, masked JointBlock, and four towers. Intervention: each of five
++summaries becomes three field-group tokens or three whole-summary replicas.
++The 2x2 design crosses this replacement with recency versus global pooling.
++HiFormer already uses post-pooling field tokenization. This is a local adapted
++hypothesis, with no original-method reproduction or verified novelty claim.
+ """
+ import math
+ import torch
+@@ -20,6 +22,7 @@
+     'token_dim': 32,
+     'num_heads': 2,
+     'slot_mode': 'recency',
++    'representation_mode': 'replicas',
+ }
+ 
+ 
+@@ -57,22 +60,25 @@
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='BehaviorSlotStudy', gpu=-1,
++    def __init__(self, feature_map, model_id='FieldTimeSummaryStudy', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), token_dim=32, num_heads=2,
+-                 slot_mode='recency', num_tasks=None,
++                 slot_mode='recency', representation_mode='replicas', num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+         if list(feature_map.labels) != ['is_click', 'cart', 'fav', 'buy']:
+             raise ValueError('This study requires the frozen four-task order')
+-        if slot_mode not in ('behavior', 'counts', 'pooled', 'recency'):
++        if slot_mode not in ('pooled', 'recency'):
+             raise ValueError('Unknown slot construction')
+         if token_dim <= 0 or num_heads <= 0 or token_dim % num_heads:
+             raise ValueError('token_dim must be divisible by num_heads')
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
++        if representation_mode not in ('grouped', 'replicas'):
++            raise ValueError('Unknown history representation')
+         self.slot_mode = slot_mode
++        self.representation_mode = representation_mode
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+                             if spec.get('source') == 'item' and spec['type'] != 'meta']
+@@ -86,7 +92,26 @@
+         self.key_width = len(self.item_fields) * embedding_dim
+         self.value_width = self.key_width + embedding_dim
+         self.static_count = len(self.user_fields) + len(self.item_fields)
+-        self.token_count = self.static_count + 5
++        # All four arms have the same fifteen history tokens and parameters.
++        self.group_count = 3
++        self.token_count = self.static_count + 5 * self.group_count
++        groups = ({'item_id', 'campaign_id', 'customer_id'},
++                  {'cate_id', 'brand'}, {'price_bucket', self.action_field})
++        value_fields = self.item_fields + [self.action_field]
++        if set(value_fields) != set().union(*groups) or len(value_fields) != 7:
++            raise ValueError('Expected the frozen six item fields plus action')
++        # Coordinate masks select disjoint semantic field groups. No learned
++        # field-specific projection parameters are added relative to replicas.
++        selection = torch.zeros(self.group_count, self.value_width)
++        for field_index, name in enumerate(value_fields):
++            group_index = next(i for i, group in enumerate(groups) if name in group)
++            selection[group_index, field_index * embedding_dim:
++                      (field_index + 1) * embedding_dim] = 1.0
++        if representation_mode == 'replicas':
++            # Preserve total pre-projection squared content norm across the
++            # three copies, matching the disjoint decomposition's norm.
++            selection.fill_(1.0 / math.sqrt(self.group_count))
++        self.register_buffer('content_selection', selection)
+         layers = []
+         width = 4 * self.key_width
+         for hidden in attention_hidden_units:
+@@ -114,31 +139,18 @@
+         nn.init.normal_(self.token_identity, std=0.02)
+         self.model_to_device()
+ 
+-    def _slot_masks(self, valid, task_masks):
+-        """Return content masks and counts, intersecting visible history."""
++    def _slot_masks(self, valid):
++        """Global plus four rank quartiles, or five global copies."""
+         all_events = valid[:, None, :]
+-        behavior = torch.stack([m.bool() & valid for m in task_masks], dim=1)
+-        behavior = torch.cat([all_events, behavior], dim=1)
+-        if self.slot_mode == 'behavior':
+-            content = behavior
+-            counts = behavior.sum(dim=-1)
+-        elif self.slot_mode == 'counts':
+-            # Keep semantic counts/occupancy but remove semantic assignment:
+-            # use global content, scaled to the corresponding group's count.
++        if self.slot_mode == 'pooled':
+             content = all_events.expand(-1, 5, -1)
+-            counts = behavior.sum(dim=-1)
+-        elif self.slot_mode == 'pooled':
+-            content = all_events.expand(-1, 5, -1)
+-            counts = content.sum(dim=-1)
+         else:
+-            # Four equal-rank bins in the visible prefix, oldest to newest.
+             ranks = valid.long().cumsum(dim=-1) - 1
+             length = valid.long().sum(dim=-1, keepdim=True).clamp_min(1)
+             bins = torch.div(4 * ranks, length, rounding_mode='floor').clamp(0, 3)
+             parts = [(bins == index) & valid for index in range(4)]
+             content = torch.cat([all_events, torch.stack(parts, dim=1)], dim=1)
+-            counts = content.sum(dim=-1)
+-        return content, counts
++        return content, content.sum(dim=-1)
+ 
+     def forward(self, inputs):
+         if len(inputs) != 4 or inputs[3] is None:
+@@ -166,7 +178,7 @@
+         action = item_emb[self.action_field][:, :-1]
+         values = torch.cat([keys, action], dim=-1)
+         values = values * valid.unsqueeze(-1).to(values.dtype)
+-        content_mask, counts = self._slot_masks(valid, task_masks)
++        content_mask, counts = self._slot_masks(valid)
+         if length:
+             query = target[:, None, :].expand(-1, length, -1)
+             interactions = torch.cat([query, keys, query - keys, query * keys], dim=-1)
+@@ -176,18 +188,22 @@
+             pooled = torch.bmm(weighted_masks, values)
+         else:
+             pooled = target.new_zeros((batch, 5, self.value_width))
+-        if self.slot_mode == 'counts':
+-            proportions = counts.float() / counts[:, :1].clamp_min(1).float()
+-            pooled = pooled * proportions.unsqueeze(-1).to(pooled.dtype)
+         slot_valid = counts > 0
+         pooled = pooled * slot_valid.unsqueeze(-1).to(pooled.dtype)
+         log_counts = torch.log1p(counts.float()) / math.log(101.0)
+         log_counts = log_counts.to(pooled.dtype)
+-        slot_tokens = self.slot_projection(torch.cat([pooled, log_counts.unsqueeze(-1)], dim=-1))
++        # [B, five temporal slots, three groups, value_width]. The selection
++        # changes only content assignment; all trainable dimensions are shared.
++        grouped = (pooled[:, :, None, :]
++                   * self.content_selection[None, None, :, :].to(pooled.dtype))
++        group_counts = log_counts[:, :, None, None].expand(-1, -1, self.group_count, 1)
++        slot_tokens = self.slot_projection(torch.cat([grouped, group_counts], dim=-1))
++        slot_tokens = slot_tokens.flatten(1, 2)
++        group_valid = slot_valid[:, :, None].expand(-1, -1, self.group_count).flatten(1)
+         tokens = torch.cat([self.field_projection(static), slot_tokens], dim=1)
+         tokens = tokens + self.token_identity.to(tokens.dtype)
+         static_valid = torch.ones((batch, self.static_count), dtype=torch.bool, device=valid.device)
+-        token_valid = torch.cat([static_valid, slot_valid], dim=1)
++        token_valid = torch.cat([static_valid, group_valid], dim=1)
+         tokens = tokens * token_valid.unsqueeze(-1).to(tokens.dtype)
+         tokens = self.interaction(tokens, token_valid)
+         features = torch.cat([static.flatten(1), pooled[:, 0], tokens.flatten(1), log_counts], dim=-1)

@@ -1,0 +1,162 @@
+--- g2-r0011-center_count/model.py
++++ g2-r0015-relation_background/model.py
+@@ -1,10 +1,12 @@
+-"""Prospective user-background centering of shrunk joint feedback moments.
+-
+-Factorial: centered versus absolute joint moments x count versus fixed mixing.
+-All arms compute the same background offset; only a scalar multiplier changes.
+-Raw fractions, counts, all registered modules and initialization stay matched.
+-The background is the same visible history, not an independent prior or a
+-causal counterfactual. This is an untested representation hypothesis.
++"""Prospective crossed partial pooling of historical feedback backgrounds.
++
++Four matched backgrounds: user, recency, relation, and crossed. Parent rates
++include the local slot and use strength-four smoothing to the same visible
++user rate. Relation parents share category-match or brand-match STATE (which
++includes the nonmatch state); recency is prefix position, not elapsed time.
++Use the selected background in BOTH shrinkage and centering. Raw fractions,
++counts, event covariance, modules, RNG construction, and core stay inherited.
++No effectiveness or originality is established by this implementation.
+ """
+ import math
+ import torch
+@@ -14,7 +16,7 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'feedback_dim': 8, 'residual_hidden': 64, 'recent_window': 16, 'feedback_mode': 'product', 'rate_interpolation': 'count', 'shrinkage_strength': 4.0, 'moment_mode': 'joint', 'centering_mode': 'user'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'feedback_dim': 8, 'residual_hidden': 64, 'recent_window': 16, 'feedback_mode': 'product', 'rate_interpolation': 'count', 'shrinkage_strength': 4.0, 'moment_mode': 'joint', 'centering_mode': 'user', 'background_mode': 'relation'}
+ 
+ 
+ class JointBlock(nn.Module):
+@@ -61,6 +63,7 @@
+                  rate_interpolation=CONFIG['rate_interpolation'],
+                  shrinkage_strength=4.0, moment_mode=CONFIG['moment_mode'],
+                  centering_mode=CONFIG['centering_mode'],
++                 background_mode=CONFIG['background_mode'],
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -93,6 +96,9 @@
+             raise ValueError('Unknown event-feedback moment replacement')
+         if centering_mode not in ('user', 'none'):
+             raise ValueError('Unknown joint-moment centering')
++        if background_mode not in ('user', 'recency', 'relation', 'crossed'):
++            raise ValueError('Unknown feedback background')
++        self.background_mode = background_mode
+         self.centering_mode = centering_mode
+         self.moment_mode = moment_mode
+         self.feedback_mode = feedback_mode
+@@ -223,19 +229,54 @@
+         group = 2 * matches[0].long() + matches[1].long() + 4 * recent.long()
+         return torch.stack([(group == i) & valid for i in range(self.feedback_slots)], dim=1)
+ 
+-    def _residual_rates(self, fractions, counts, feedback, valid):
+-        """Count or fixed convex mixing with the same visible-user background.
+-
+-        This background includes each slot; it is not an independent prior.
+-        Raw local fractions are retained in both product variants.
++    def _feedback_background(self, fractions, counts, feedback, valid):
++        """Matched 2x2 recency x relation partial-pooling backgrounds.
++
++        Slot order is r*4 + category_bit*2 + brand_bit. Rates have shape
++        [B,2,2,2,4]. Every parent includes its child; these are overlapping
++        descriptive statistics, never independent priors or counterfactuals.
++        All modes calculate all backgrounds, without learned parameters.
++        Parent pseudo-count four is fixed from the source shrinkage strength.
+         """
+-        total = valid.sum(dim=-1).clamp_min(1)
+-        background = feedback.sum(dim=-1) / total[:, None]
++        with torch.autocast(device_type=fractions.device.type, enabled=False):
++            batch = counts.shape[0]
++            total = valid.sum(dim=-1).clamp_min(1)
++            user = feedback.float().sum(dim=-1) / total[:, None]
++            prior = user[:, None, None, None, :]
++            n = counts.float().reshape(batch, 2, 2, 2, 1)
++            successes = (fractions.float() * counts.float().unsqueeze(-1))
++            successes = successes.reshape(batch, 2, 2, 2, self.feedback_tasks)
++            strength = self.shrinkage_strength
++
++            def parent_rate(axes):
++                parent_n = n.sum(dim=axes, keepdim=True)
++                parent_y = successes.sum(dim=axes, keepdim=True)
++                return (parent_y + strength * prior) / (parent_n + strength)
++
++            by_recency = parent_rate((2, 3))
++            by_category = parent_rate((1, 3))
++            by_brand = parent_rate((1, 2))
++            by_recency_category = parent_rate((3,))
++            by_recency_brand = parent_rate((2,))
++            backgrounds = {
++                'user': prior,
++                'recency': by_recency,
++                'relation': 0.5 * (by_category + by_brand),
++                'crossed': 0.5 * (by_recency_category + by_recency_brand),
++            }
++            # No mode-specific tensor work: all backgrounds are expanded.
++            expanded = {name: value.expand(batch, 2, 2, 2, self.feedback_tasks)
++                        .reshape(batch, self.feedback_slots, self.feedback_tasks)
++                        for name, value in backgrounds.items()}
++            return expanded[self.background_mode]
++
++    def _residual_rates(self, fractions, counts, background):
++        """Count/fixed mixing with the selected inclusive background."""
+         weight = counts / (counts + self.shrinkage_strength)
+         if self.rate_interpolation == 'fixed':
+             weight = weight * 0.0 + 0.5
+         return (weight[:, :, None] * fractions
+-                + (1.0 - weight[:, :, None]) * background[:, None, :])
++                + (1.0 - weight[:, :, None]) * background)
+ 
+     def _event_covariance(self, keys, members, feedback, fractions, counts):
+         """Within-slot E[(W x) y] - E[W x] E[y], using all-event denominators.
+@@ -264,22 +305,16 @@
+                           * fractions[:, :, :, None])
+             return covariance * (counts > 0)[:, :, None, None].to(covariance.dtype)
+ 
+-    def _center_moments(self, moments, projected, feedback, valid):
+-        """Subtract the visible-user background moment in FP32.
+-
+-        Shapes: moments [B,8,4,D], projected [B,8,D], feedback [B,4,L].
+-        Feedback is already intersected with valid by the caller, and empty
+-        slots have zero projected content. In exact arithmetic the centered
+-        joint feature is alpha * (E[Wx*y | slot] - E[Wx | slot] * b_user).
+-        BF16 projection/mean rounding makes that identity approximate.
+-        Both modes compute the offset; none is the matched zero multiplier.
+-        No detach: the inherited projection learns through this transform.
++    def _center_moments(self, moments, projected, background):
++        """Use exactly the same slot background as in rate interpolation.
++
++        In exact arithmetic, centered joint moments equal
++        alpha_s * (E[Wx*y | s] - E[Wx | s] * background_s).
++        The inherited centering_mode='user' means centering is enabled;
++        background_mode now chooses its reference. Accumulate in FP32.
+         """
+         with torch.autocast(device_type=projected.device.type, enabled=False):
+-            total = valid.sum(dim=-1).clamp_min(1)
+-            background = feedback.float().sum(dim=-1) / total[:, None]
+-            offset = (projected.float()[:, :, None, :]
+-                      * background[:, None, :, None])
++            offset = projected.float()[:, :, None, :] * background[:, :, :, None]
+             centering = 1.0 if self.centering_mode == 'user' else 0.0
+             return moments.float() - centering * offset
+ 
+@@ -299,7 +334,8 @@
+         occupied = (counts > 0).unsqueeze(-1)
+         projected = self.feedback_projection(mean_keys)
+         projected = projected * occupied.to(projected.dtype)
+-        gate = self._residual_rates(fractions, counts, feedback, valid)
++        background = self._feedback_background(fractions, counts, feedback, valid)
++        gate = self._residual_rates(fractions, counts, background)
+         if self.feedback_mode != 'product':
+             # Active content parameters and unchanged readout width in controls.
+             gate = torch.ones_like(gate)
+@@ -314,7 +350,7 @@
+         coupling = 1.0 if self.moment_mode == 'joint' else 0.0
+         with torch.autocast(device_type=keys.device.type, enabled=False):
+             moments = moments.float() + coupling * local_weight[:, :, None, None] * covariance
+-            moments = self._center_moments(moments, projected, feedback, valid).to(projected.dtype)
++            moments = self._center_moments(moments, projected, background).to(projected.dtype)
+         count_features = counts.unsqueeze(-1) / 100.0
+         if self.feedback_mode == 'content':
+             # Additional task-feedback removed; repeat already-authorized counts

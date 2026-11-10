@@ -1,0 +1,73 @@
+--- g2-r0009-joint_count/model.py
++++ g2-r0010-direct_fixed/model.py
+@@ -1,10 +1,9 @@
+-"""Prospective event-feedback covariance in the existing residual branch.
+-
+-Factorial: joint versus factorized moments x count versus fixed shrinkage.
+-Every arm computes the same event moments, with the covariance multiplier
+-set to one or zero. All registered modules, initializations, backbone,
+-raw fractions, counts and output widths match the frozen residual source.
+-No training, effectiveness, reliability calibration or novelty is claimed.
++"""Prospective direct-feedback rate conditioning in the frozen joint residual.
++
++Two-by-two: raw or occupied-slot smoothed direct rates, crossed with count
++or fixed interpolation. Products, covariance, registered parameters and
++initialization order are inherited unchanged. All arms compute the same
++extra occupied-rate multiplication. No effectiveness or novelty claimed.
+ """
+ import math
+ import torch
+@@ -14,7 +13,7 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'feedback_dim': 8, 'residual_hidden': 64, 'recent_window': 16, 'feedback_mode': 'product', 'rate_interpolation': 'count', 'shrinkage_strength': 4.0, 'moment_mode': 'joint'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'feedback_dim': 8, 'residual_hidden': 64, 'recent_window': 16, 'feedback_mode': 'product', 'rate_interpolation': 'fixed', 'shrinkage_strength': 4.0, 'moment_mode': 'joint', 'direct_rate_mode': 'smoothed'}
+ 
+ 
+ class JointBlock(nn.Module):
+@@ -60,6 +59,7 @@
+                  feedback_mode=CONFIG['feedback_mode'],
+                  rate_interpolation=CONFIG['rate_interpolation'],
+                  shrinkage_strength=4.0, moment_mode=CONFIG['moment_mode'],
++                 direct_rate_mode=CONFIG['direct_rate_mode'],
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -90,6 +90,9 @@
+             raise ValueError('This factorial study requires product feedback')
+         if moment_mode not in ('joint', 'factorized'):
+             raise ValueError('Unknown event-feedback moment replacement')
++        if direct_rate_mode not in ('raw', 'smoothed'):
++            raise ValueError('Unknown direct feedback rate replacement')
++        self.direct_rate_mode = direct_rate_mode
+         self.moment_mode = moment_mode
+         self.feedback_mode = feedback_mode
+         self.rate_interpolation = rate_interpolation
+@@ -233,6 +236,16 @@
+         return (weight[:, :, None] * fractions
+                 + (1.0 - weight[:, :, None]) * background[:, None, :])
+ 
++    def _direct_feedback_rates(self, fractions, gate, occupied):
++        """Change direct columns only; empty slots stay zero in both arms.
++
++        Gate is the already-computed convex local/visible-user mixture.
++        Raw arms select original fractions exactly, while still computing
++        the same occupied-rate product. No new parameters or randomness.
++        """
++        smoothed = gate * occupied.to(gate.dtype)
++        return smoothed if self.direct_rate_mode == 'smoothed' else fractions
++
+     def _event_covariance(self, keys, members, feedback, fractions, counts):
+         """Within-slot E[(W x) y] - E[W x] E[y], using all-event denominators.
+ 
+@@ -297,7 +310,8 @@
+             # Additional task-feedback removed; repeat already-authorized counts
+             # in the same four columns. Core action embeddings remain intact.
+             fractions = count_features.expand(-1, -1, self.feedback_tasks)
+-        raw = torch.cat([moments.flatten(2), fractions.to(projected.dtype),
++        direct_rates = self._direct_feedback_rates(fractions, gate, occupied)
++        raw = torch.cat([moments.flatten(2), direct_rates.to(projected.dtype),
+                          count_features.to(projected.dtype)], dim=-1)
+         return raw.flatten(1)
+ 

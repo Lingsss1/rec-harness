@@ -1,0 +1,237 @@
+--- g0-r0011-memory_joint_separate/model.py
++++ g1-r0006-hybrid_none/model.py
+@@ -1,4 +1,12 @@
+-"""Separately addressable feedback/time memory, with a matched 2x2 contrast.
++"""g0 representation with g1-inspired evolving-query terminal retrieval.
++
++The committed g0 representation and towers are preserved. Four task queries
++seeded by the final g0 state make two narrow reads, then pool wide values with
++a terminal same-field match prior as in the committed g1 source. A zero-start
++output adds that evidence to each tower's existing global pooled-value slice.
++All four arms own and execute the same new modules. Only terminal prior
++routing changes: adaptive, uniform, cyclically rotated, or none. This is a
++compatibility experiment and local adaptation, with no originality claim.
+ 
+ All incumbent factorized feedback and relation paths remain. The added memory
+ has 20 slots: global/four rank bins by four historical feedback masks. Choose
+@@ -13,6 +21,7 @@
+ import math
+ import torch
+ from torch import nn
++from torch.nn import functional as F
+ from unirank.pytorch.models import MultiTaskModel
+ from unirank.pytorch.layers import FeatureEmbeddingDict
+ from unirank.pytorch.layers.activations import Dice
+@@ -36,7 +45,145 @@
+     'feedback_content_mode': 'factorized',
+     'memory_source': 'joint',
+     'memory_layout': 'separate',
++    'terminal_prior': 'none',
+ }
++
++
++class TaskRead(nn.Module):
++    """Shared g1-style Q/K for narrow reads and terminal wide-value pooling."""
++
++    def __init__(self, width, heads, prior):
++        super().__init__()
++        self.heads = heads
++        self.head_width = width // heads
++        self.prior = prior
++        self.query_norm = nn.LayerNorm(width)
++        self.memory_norm = nn.LayerNorm(width)
++        self.query = nn.Linear(width, width, bias=False)
++        self.key = nn.Linear(width, width, bias=False)
++        self.value = nn.Linear(width, width, bias=False)
++        self.output = nn.Linear(width, width, bias=False)
++
++    def _project(self, tensor, layer):
++        batch, count, width = tensor.shape
++        return layer(tensor).reshape(
++            batch, count, self.heads, self.head_width).transpose(1, 2)
++
++    def _memory(self, memory, valid):
++        # Append null AFTER normalization, avoiding learned LN bias evidence.
++        memory = self.memory_norm(memory)
++        memory = torch.where(valid.unsqueeze(-1), memory, torch.zeros_like(memory))
++        memory = torch.cat([memory, memory.new_zeros(memory.shape[0], 1,
++                                                    memory.shape[-1])], dim=1)
++        valid = torch.cat([valid, ~valid.any(dim=1, keepdim=True)], dim=1)
++        return memory, valid
++
++    def forward(self, query, memory, valid):
++        batch, count, width = query.shape
++        query = self._project(self.query_norm(query), self.query)
++        memory, valid = self._memory(memory, valid)
++        key = self._project(memory, self.key)
++        value = self._project(memory, self.value)
++        mixed = F.scaled_dot_product_attention(
++            query, key, value, attn_mask=valid[:, None, None, :],
++            dropout_p=0.0, is_causal=False)
++        mixed = mixed.transpose(1, 2).contiguous().reshape(batch, count, width)
++        return self.output(mixed)
++
++    def _match_bias(self, query, match_fields, matches):
++        field_keys = self._project(self.memory_norm(match_fields), self.key)
++        # All routes are calculated in all arms, including the no-prior arm.
++        with torch.autocast(device_type=query.device.type, enabled=False):
++            scores = torch.matmul(query.float(), field_keys.float().transpose(-2, -1))
++            adaptive = torch.softmax(scores / math.sqrt(self.head_width), dim=-1)
++            uniform = adaptive * 0.0 + 1.0 / matches.shape[-1]
++            rotated = torch.roll(adaptive, shifts=1, dims=-1)
++            evidence = matches.float().transpose(1, 2).unsqueeze(1)
++            adaptive_bias = 2.0 * torch.matmul(adaptive, evidence)
++            uniform_bias = 2.0 * torch.matmul(uniform, evidence)
++            rotated_bias = 2.0 * torch.matmul(rotated, evidence)
++            if self.prior == 'adaptive':
++                bias = adaptive_bias
++            elif self.prior == 'uniform':
++                bias = uniform_bias
++            elif self.prior == 'rotated':
++                bias = rotated_bias
++            else:
++                bias = adaptive_bias * 0.0
++        return torch.cat([bias, bias.new_zeros(*bias.shape[:-1], 1)], dim=-1)
++
++    def pool_values(self, query, memory, values, valid, match_fields, matches):
++        query = self._project(self.query_norm(query), self.query)
++        memory, extended_valid = self._memory(memory, valid)
++        key = self._project(memory, self.key)
++        values = torch.where(valid.unsqueeze(-1), values, torch.zeros_like(values))
++        values = torch.cat([values, values.new_zeros(values.shape[0], 1,
++                                                    values.shape[-1])], dim=1)
++        bias = self._match_bias(query, match_fields, matches)
++        with torch.autocast(device_type=query.device.type, enabled=False):
++            logits = torch.matmul(query.float(), key.float().transpose(-2, -1))
++            logits = logits / math.sqrt(self.head_width) + bias
++            logits = logits.masked_fill(~extended_valid[:, None, None, :], float('-inf'))
++            weights = torch.softmax(logits, dim=-1).mean(dim=1)
++        return torch.bmm(weights.to(values.dtype), values)
++
++
++class TaskMixer(nn.Module):
++    def __init__(self, width, heads):
++        super().__init__()
++        self.attention = TaskRead(width, heads, 'none')
++        self.ffn_norm = nn.LayerNorm(width)
++        self.ffn = nn.Sequential(nn.Linear(width, 2 * width), nn.GELU(),
++                                 nn.Linear(2 * width, width))
++
++    def forward(self, states):
++        valid = torch.ones(states.shape[:2], dtype=torch.bool, device=states.device)
++        states = states + 0.5 * self.attention(states, states, valid)
++        return states + 0.5 * self.ffn(self.ffn_norm(states))
++
++
++class TerminalRetrieval(nn.Module):
++    """Only four task queries retain sequence-wide reads within the cost cap.
++
++    Queries derive from the g0 final valid-token mean, rather than reproducing
++    g1's full field stream. Events are read-only as in g1's committed setting.
++    The low-rank value path and nonaffine normalization follow g1; an extra
++    zero-start residual output preserves the exact g0 starting function.
++    """
++
++    def __init__(self, value_width, width, heads, tasks, prior):
++        super().__init__()
++        self.event_projection = nn.Linear(value_width, width, bias=False)
++        self.history_position = nn.Parameter(torch.empty(101, width))
++        self.task_identity = nn.Parameter(torch.empty(1, tasks, width))
++        self.read = TaskRead(width, heads, prior)
++        self.after_read = nn.ModuleList([TaskMixer(width, heads) for _ in range(2)])
++        self.final_norm = nn.LayerNorm(width)
++        self.value_down = nn.Linear(value_width, width, bias=False)
++        self.value_up = nn.Linear(width, value_width, bias=False)
++        self.value_norm = nn.LayerNorm(value_width, elementwise_affine=False)
++        self.output = nn.Linear(value_width, value_width, bias=False)
++        nn.init.normal_(self.history_position, std=0.02)
++        nn.init.normal_(self.task_identity, std=0.02)
++        nn.init.zeros_(self.output.weight)
++
++    def forward(self, tokens, token_valid, values, valid, match_fields, matches):
++        denominator = token_valid.sum(dim=1, keepdim=True).clamp_min(1)
++        seed = (tokens * token_valid.unsqueeze(-1).to(tokens.dtype)).sum(dim=1)
++        seed = seed / denominator.to(tokens.dtype)
++        states = seed[:, None, :] + self.task_identity.to(seed.dtype)
++        rank = valid.long().cumsum(dim=1)
++        events = self.event_projection(values) + self.history_position[rank]
++        events = torch.where(valid.unsqueeze(-1), events, torch.zeros_like(events))
++        for mixer in self.after_read:
++            states = mixer(states + 0.5 * self.read(states, events, valid))
++        states = self.final_norm(states)
++        summary = self.read.pool_values(states, events, values, valid,
++                                        match_fields, matches)
++        summary = self.value_norm(self.value_up(self.value_down(summary)))
++        update = self.output(summary)
++        return torch.where(valid.any(dim=1)[:, None, None], update,
++                           torch.zeros_like(update))
+ 
+ 
+ class FeedbackMemory(nn.Module):
+@@ -175,6 +322,7 @@
+                  moment_component='full', residual_mode='copy', bank_mode='relation',
+                  content_bank_mode='relation', feedback_content_mode='factorized',
+                  memory_source='joint', memory_layout='separate',
++                 terminal_prior=CONFIG['terminal_prior'],
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -221,6 +369,8 @@
+             raise ValueError('Unknown memory source')
+         if memory_layout not in ('separate', 'collapsed'):
+             raise ValueError('Unknown memory layout')
++        if terminal_prior not in ('adaptive', 'uniform', 'rotated', 'none'):
++            raise ValueError('Unknown terminal match prior')
+         self.feedback_content_mode = feedback_content_mode
+         self.content_bank_mode = content_bank_mode
+         self.bank_mode = bank_mode
+@@ -319,6 +469,16 @@
+         with torch.random.fork_rng(devices=[]):
+             self.feedback_memory = FeedbackMemory(
+                 self.key_width, token_dim, num_heads, memory_source, memory_layout)
++        # Added after all g0 initialization; identical module shapes/RNG in
++        # every prior arm. Never reset inherited modules after this point.
++        with torch.random.fork_rng(devices=[]):
++            self.terminal_retrieval = TerminalRetrieval(
++                self.value_width, token_dim, num_heads, len(feature_map.labels),
++                terminal_prior)
++        self.terminal_fields = [name for name in self.item_fields if name in
++                                ('item_id', 'cate_id', 'campaign_id', 'customer_id', 'brand')]
++        if len(self.terminal_fields) != 5:
++            raise ValueError('Requires the five frozen identity fields')
+         self.model_to_device()
+ 
+     def _feedback_source(self, joint, factorized, total):
+@@ -543,6 +703,8 @@
+             raise ValueError('Expected four historical task masks')
+         valid = mask.bool()
+         batch, length = valid.shape
++        if length > 100:
++            raise ValueError('History exceeds the frozen 100-event contract')
+         # Sanitize padded IDs before embedding and before batch-coupled Dice.
+         # Exclude the current action even if an upstream caller changes it.
+         clean_item = {}
+@@ -626,6 +788,20 @@
+         tokens = self.feedback_memory(tokens, token_valid, values, weights,
+                                       content_mask, valid, task_masks)
+         tokens = self.interaction(tokens, token_valid)
+-        features = torch.cat([static.flatten(1), pooled[:, 0], tokens.flatten(1), log_counts], dim=-1)
+-        return {label + '_pred': torch.sigmoid(tower(features))
+-                for label, tower in zip(self.feature_map.labels, self.towers)}
++        matches = []
++        for name in self.terminal_fields:
++            history, target_id = clean_item[name][:, :-1], clean_item[name][:, -1:]
++            match = (history == target_id) & (history > 0) & (target_id > 0) & valid
++            padding = self.match_padding[name]
++            if padding is not None:
++                match = match & (history != padding) & (target_id != padding)
++            matches.append(match)
++        matches = torch.stack(matches, dim=-1)
++        match_fields = self.field_projection(torch.stack(
++            [item_emb[name][:, -1] for name in self.terminal_fields], dim=1))
++        updates = self.terminal_retrieval(tokens, token_valid, values, valid,
++                                           match_fields, matches)
++        return {label + '_pred': torch.sigmoid(tower(torch.cat(
++                    [static.flatten(1), pooled[:, 0] + updates[:, index],
++                     tokens.flatten(1), log_counts], dim=-1)))
++                for index, (label, tower) in enumerate(zip(self.feature_map.labels, self.towers))}

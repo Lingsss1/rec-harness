@@ -1,0 +1,91 @@
+--- g2-r0011-center_count/model.py
++++ g2-r0014-target_factorized/model.py
+@@ -1,10 +1,10 @@
+-"""Prospective user-background centering of shrunk joint feedback moments.
+-
+-Factorial: centered versus absolute joint moments x count versus fixed mixing.
+-All arms compute the same background offset; only a scalar multiplier changes.
+-Raw fractions, counts, all registered modules and initialization stay matched.
+-The background is the same visible history, not an independent prior or a
+-causal counterfactual. This is an untested representation hypothesis.
++"""Prospective target-conditioned projection of historical feedback moments.
++
++Factorial: target versus history conditioning x joint versus factorized moment.
++Only residual content is modulated; counts, fractions and the core stay fixed.
++All arms share parameter construction, initial state and operation shapes.
++The diagonal modulation is shared across events: this is a conditional linear
++projection, not a new event selector. No effectiveness or novelty is asserted.
+ """
+ import math
+ import torch
+@@ -14,7 +14,7 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'feedback_dim': 8, 'residual_hidden': 64, 'recent_window': 16, 'feedback_mode': 'product', 'rate_interpolation': 'count', 'shrinkage_strength': 4.0, 'moment_mode': 'joint', 'centering_mode': 'user'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'feedback_dim': 8, 'residual_hidden': 64, 'recent_window': 16, 'feedback_mode': 'product', 'rate_interpolation': 'count', 'shrinkage_strength': 4.0, 'moment_mode': 'factorized', 'centering_mode': 'user', 'conditioning_mode': 'target'}
+ 
+ 
+ class JointBlock(nn.Module):
+@@ -61,6 +61,7 @@
+                  rate_interpolation=CONFIG['rate_interpolation'],
+                  shrinkage_strength=4.0, moment_mode=CONFIG['moment_mode'],
+                  centering_mode=CONFIG['centering_mode'],
++                 conditioning_mode=CONFIG['conditioning_mode'],
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -93,6 +94,9 @@
+             raise ValueError('Unknown event-feedback moment replacement')
+         if centering_mode not in ('user', 'none'):
+             raise ValueError('Unknown joint-moment centering')
++        if conditioning_mode not in ('target', 'history', 'none'):
++            raise ValueError('Unknown residual content conditioning')
++        self.conditioning_mode = conditioning_mode
+         self.centering_mode = centering_mode
+         self.moment_mode = moment_mode
+         self.feedback_mode = feedback_mode
+@@ -283,8 +287,33 @@
+             centering = 1.0 if self.centering_mode == 'user' else 0.0
+             return moments.float() - centering * offset
+ 
+-    def _residual_features(self, clean_item, valid, task_masks, keys):
++    def _condition_keys(self, keys, target, valid):
++        """Bounded diagonal conditioning before the existing bias-free map.
++
++        For each sample, z_i = W diag(1 + tanh(q)) x_i. Target and history
++        arms select q from the current item or the masked history mean.
++        The history control adds the same nonlinear scaling without looking
++        at the target. Both references and both gates are always computed.
++        No new parameters or random draws; no detached embedding gradients.
++        'none' is an unscored calibration mode for archived-source parity.
++        """
++        divisor = valid.sum(dim=-1, keepdim=True).clamp_min(1)
++        # Forward already masks keys; repeat masking so this helper's reference
++        # and output are independently invariant to finite padding payloads.
++        clean_keys = keys.masked_fill(~valid.unsqueeze(-1), 0)
++        history = clean_keys.sum(dim=1) / divisor.to(keys.dtype)
++        target_gate = torch.tanh(target.float()).to(keys.dtype)
++        history_gate = torch.tanh(history.float()).to(keys.dtype)
++        target_weight = 1.0 if self.conditioning_mode == 'target' else 0.0
++        history_weight = 1.0 if self.conditioning_mode == 'history' else 0.0
++        gate = 1.0 + target_weight * target_gate + history_weight * history_gate
++        return clean_keys * gate.unsqueeze(1)
++
++    def _residual_features(self, clean_item, valid, task_masks, keys, target):
+         batch, length = valid.shape
++        # The same transformed keys feed both means and covariance. Otherwise
++        # the joint arm would combine moments from inconsistent content maps.
++        keys = self._condition_keys(keys, target, valid)
+         members = self._feedback_membership(clean_item, valid).float()
+         counts = members.sum(dim=-1)
+         divisor = counts.clamp_min(1).unsqueeze(-1)
+@@ -396,7 +425,7 @@
+         tokens = tokens * token_valid.unsqueeze(-1).to(tokens.dtype)
+         tokens = self.interaction(tokens, token_valid)
+         features = torch.cat([static.flatten(1), pooled[:, 0], tokens.flatten(1), log_counts], dim=-1)
+-        residual_features = self._residual_features(clean_item, valid, task_masks, keys)
++        residual_features = self._residual_features(clean_item, valid, task_masks, keys, target)
+         residual = self.feedback_residual(residual_features)
+         # No residual bias for empty histories, in train or eval mode.
+         residual = residual * valid.any(dim=-1, keepdim=True).to(residual.dtype)

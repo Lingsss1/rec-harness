@@ -1,0 +1,142 @@
+--- g0-r0003-relation_content_counts/model.py
++++ g0-r0005-zero_moment/model.py
+@@ -1,11 +1,11 @@
+-"""Target-relation summaries: content x explicit-count factorial study.
+-
+-Inherited from g0-r0002-replica_seven: all trainable modules, initialization
+-order, five temporal summaries, raw bypasses, interaction and task towers.
+-Seven units now optionally select global or equal-target-field history events
+-BEFORE pooling, retaining each selected event's complete item/action value.
+-The count switch controls only the explicit count channel; content magnitude
+-can still carry count information. This is not a claim of a novel mechanism.
++"""Within-bin position moments for existing temporal/target-relation tokens.
++
++Inherits the full relation_content_counts parent. Only a zero-initialized
++shared projection of a second event-value summary is added. Linear/quadratic
++coefficients are centered and unit RMS within each temporal bin; copy/zero
++provide active parameterization and exact-null controls. No elapsed time,
++new feedback inputs, tokens, loss, or prediction-time labels are introduced.
++Original-method novelty and predictive usefulness remain unverified.
+ """
+ import math
+ import torch
+@@ -25,6 +25,7 @@
+     'representation_mode': 'replicas',
+     'content_mode': 'relation',
+     'count_mode': 'relation',
++    'moment_mode': 'zero',
+ }
+ 
+ 
+@@ -66,7 +67,8 @@
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), token_dim=32, num_heads=2,
+                  slot_mode='recency', representation_mode='replicas',
+-                 content_mode='relation', count_mode='relation', num_tasks=None,
++                 content_mode='relation', count_mode='relation', moment_mode='zero',
++                 num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+@@ -84,6 +86,11 @@
+             raise ValueError('Unknown summary content')
+         if count_mode not in ('relation', 'temporal'):
+             raise ValueError('Unknown explicit count channel')
++        if moment_mode not in ('linear', 'quadratic', 'copy', 'zero'):
++            raise ValueError('Unknown position moment')
++        if content_mode != 'relation' or count_mode != 'relation':
++            raise ValueError('Position study requires the frozen relation parent')
++        self.moment_mode = moment_mode
+         self.slot_mode = slot_mode
+         self.representation_mode = representation_mode
+         self.content_mode = content_mode
+@@ -101,7 +108,7 @@
+         self.key_width = len(self.item_fields) * embedding_dim
+         self.value_width = self.key_width + embedding_dim
+         self.static_count = len(self.user_fields) + len(self.item_fields)
+-        # All four arms have 35 summary tokens and identical parameters.
++        # All moment arms keep the parent's 35 summary tokens and equal parameters.
+         value_fields = self.item_fields + [self.action_field]
+         expected = {'item_id', 'cate_id', 'campaign_id', 'customer_id',
+                     'brand', 'price_bucket', 'action'}
+@@ -141,6 +148,12 @@
+             self.towers.append(nn.Sequential(*tower))
+         self.reset_parameters()
+         nn.init.normal_(self.token_identity, std=0.02)
++        # Append AFTER every inherited initialization. The new path starts at
++        # exactly zero, and its constructor cannot advance the parent's CPU
++        # RNG stream (including any later host sampling using that stream).
++        with torch.random.fork_rng(devices=[]):
++            self.moment_projection = nn.Linear(self.value_width, token_dim, bias=False)
++            nn.init.zeros_(self.moment_projection.weight)
+         self.model_to_device()
+ 
+     def _slot_masks(self, valid):
+@@ -174,6 +187,53 @@
+             relations.append(match)
+         relations = torch.stack(relations, dim=1)
+         return temporal_masks[:, :, None, :] & relations[:, None, :, :]
++
++    def _moment_coefficients(self, temporal_masks):
++        """Relative valid rank, independent of padding IDs and absolute offsets.
++
++        Center BEFORE restricting by a target relation, so a relation present
++        only late versus early in a bin remains distinguishable. RMS is over
++        that temporal bin, not over relation occupancy. The global bin also
++        carries a global moment. No real timestamp/delay is inferred.
++        """
++        visible = temporal_masks.float()
++        ranks = temporal_masks.long().cumsum(dim=-1).float() - 1.0
++        counts = visible.sum(dim=-1, keepdim=True)
++        safe_counts = counts.clamp_min(1.0)
++        centered = (2.0 * ranks - counts + 1.0) * visible
++        linear_rms = (centered.square().sum(dim=-1, keepdim=True)
++                      / safe_counts).sqrt().clamp_min(1e-6)
++        linear = centered / linear_rms
++        squared = centered.square()
++        quadratic = (squared - squared.sum(dim=-1, keepdim=True)
++                     / safe_counts) * visible
++        quadratic_rms = (quadratic.square().sum(dim=-1, keepdim=True)
++                         / safe_counts).sqrt().clamp_min(1e-6)
++        quadratic = quadratic / quadratic_rms
++        # Always calculate both bases in all arms. In particular, a reversed
++        # linear basis is NOT a distinct mechanism; its sign is absorbable.
++        if self.moment_mode == 'linear':
++            return linear
++        if self.moment_mode == 'quadratic':
++            return quadratic
++        if self.moment_mode == 'copy':
++            return visible
++        return visible * 0.0
++
++    def _position_moments(self, values, weights, relation_masks, temporal_masks):
++        batch, length, _ = values.shape
++        if not length:
++            return values.new_zeros((batch, 5, self.group_count, self.value_width))
++        # FP32 accumulation protects cancellation in centered signed moments.
++        # The added path has the same bmm/projection shapes in every arm.
++        with torch.autocast(device_type=values.device.type, enabled=False):
++            coefficients = self._moment_coefficients(temporal_masks)
++            moment_weights = (relation_masks.float() * weights.float()[:, None, None, :]
++                              * coefficients[:, :, None, :])
++            moments = torch.bmm(moment_weights.flatten(1, 2), values.float())
++            moments = moments.reshape(batch, 5, self.group_count, self.value_width)
++            moments = moments / math.sqrt(self.group_count)
++        return moments
+ 
+     def forward(self, inputs):
+         if len(inputs) != 4 or inputs[3] is None:
+@@ -235,6 +295,13 @@
+         else:
+             group_counts = log_counts[:, :, None, None].expand(-1, -1, self.group_count, 1)
+         slot_tokens = self.slot_projection(torch.cat([grouped, group_counts], dim=-1))
++        # The inherited content/count projection and token validity remain
++        # intact. The second summary enters the SAME token, before interaction.
++        if not length:
++            weights = target.new_zeros((batch, 0))
++        moments = self._position_moments(values, weights, relation_masks, content_mask)
++        moment_tokens = self.moment_projection(moments.to(slot_tokens.dtype))
++        slot_tokens = slot_tokens + moment_tokens
+         slot_tokens = slot_tokens.flatten(1, 2)
+         # Validity is temporal in EVERY arm, so group occupancy is not leaked
+         # by the attention mask when the explicit count input is ablated.

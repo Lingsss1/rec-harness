@@ -1,0 +1,103 @@
+--- g0-r0008-relation_bank/model.py
++++ g0-r0009-rotated_content/model.py
+@@ -1,12 +1,12 @@
+-"""Relation-consistent compression of inherited target-relation rank summaries.
+-
+-Keep the duplicate-full parent A*M+B*M and add C[r]*M before JointBlock.
+-Relation sharing uses one C per target-match relation across all five time
+-bins. Rotated sharing uses C[(r+t)%7] with equal parameters and nominal bank
+-usage. Shared uses the mean bank; zero retains only the parent function.
+-All new maps start at zero. No new information, tokens, loss, or host recipe.
+-This is an unverified local adaptation of heterogeneous parameter sharing,
+-not a new-method priority claim or a reproduction of HiFormer.
++"""Relation-specific content compression conditional on the fixed rank bank.
++
++Keep the inherited token P[S,count]+A*M+B*M+C[r]*M. Add D[r]*S,
++where S is the existing weighted target-match content summary. The rotated
++control uses D[(r+t)%7]*S; the duplicate-moment control uses D[r]*M;
++the zero control disables only D. All four arms own the same zero-initialized
++bank and execute the same contraction shape. No new summary information is
++introduced. Heterogeneous compression is an unverified local adaptation,
++not a new-method priority claim or an original HiFormer reproduction.
+ """
+ import math
+ import torch
+@@ -30,6 +30,7 @@
+     'moment_component': 'full',
+     'residual_mode': 'copy',
+     'bank_mode': 'relation',
++    'content_bank_mode': 'rotated',
+ }
+ 
+ 
+@@ -73,6 +74,7 @@
+                  slot_mode='recency', representation_mode='replicas',
+                  content_mode='relation', count_mode='relation', moment_mode='linear',
+                  moment_component='full', residual_mode='copy', bank_mode='relation',
++                 content_bank_mode='rotated',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -105,6 +107,11 @@
+             raise ValueError('Relation-bank study freezes the duplicate-full parent')
+         if bank_mode not in ('relation', 'rotated', 'shared', 'zero'):
+             raise ValueError('Unknown relation bank sharing rule')
++        if bank_mode != 'relation':
++            raise ValueError('Content study freezes the relation-specific rank bank')
++        if content_bank_mode not in ('relation', 'rotated', 'moment', 'zero'):
++            raise ValueError('Unknown content bank intervention')
++        self.content_bank_mode = content_bank_mode
+         self.bank_mode = bank_mode
+         self.residual_mode = residual_mode
+         self.moment_component = moment_component
+@@ -185,7 +192,40 @@
+             torch.zeros(self.group_count, self.value_width, token_dim))
+         self.register_buffer('bank_routes', torch.tensor(
+             self._bank_assignments(), dtype=torch.long))
++        # Append AFTER all inherited initialization; zeros consume no RNG.
++        # Same nominal parameter count and contraction in every new arm.
++        self.content_bank = nn.Parameter(
++            torch.zeros(self.group_count, self.value_width, token_dim))
++        self.register_buffer('content_bank_routes', torch.tensor(
++            self._content_bank_assignments(), dtype=torch.long))
+         self.model_to_device()
++
++    def _content_bank_assignments(self):
++        """Balance five uses per bank; vary sharing, never token positions."""
++        return tuple(tuple((relation + window) % self.group_count
++                           if self.content_bank_mode == 'rotated' else relation
++                           for relation in range(self.group_count))
++                     for window in range(5))
++
++    def _content_bank_input(self, grouped, moments):
++        """S versus already available M; both have scale 1/sqrt(7)."""
++        if self.content_bank_mode == 'moment':
++            return moments
++        return grouped
++
++    def _project_content_bank(self, grouped, moments):
++        """Bias-free residual on an existing summary, before JointBlock.
++
++        Moment is a redundant active parameterization of the parent's C[r]*M:
++        equal nominal parameters, but smaller functional capacity than D[r]*S.
++        Zero is an inactive-path replay, not an active capacity control.
++        """
++        source = self._content_bank_input(grouped, moments)
++        routed = self.content_bank[self.content_bank_routes].to(source.dtype)
++        projected = torch.einsum('btgv,tgvd->btgd', source, routed)
++        if self.content_bank_mode == 'zero':
++            projected = projected * 0.0
++        return projected
+ 
+     def _bank_assignments(self):
+         """Seven banks, five uses each; rotate by window only in the control.
+@@ -400,6 +440,9 @@
+         # Preserve temporal/relation identities and all existing summary paths.
+         bank_tokens = self._project_relation_bank(moments.to(slot_tokens.dtype))
+         slot_tokens = slot_tokens + bank_tokens
++        content_tokens = self._project_content_bank(
++            grouped.to(slot_tokens.dtype), moments.to(slot_tokens.dtype))
++        slot_tokens = slot_tokens + content_tokens
+         slot_tokens = slot_tokens.flatten(1, 2)
+         # Validity is temporal in EVERY arm, so group occupancy is not leaked
+         # by the attention mask when the explicit count input is ablated.

@@ -1,0 +1,145 @@
+--- g1-r0006-hybrid_none/model.py
++++ g1-r0007-state_adaptive_none/model.py
+@@ -1,22 +1,18 @@
+-"""g0 representation with g1-inspired evolving-query terminal retrieval.
+-
+-The committed g0 representation and towers are preserved. Four task queries
+-seeded by the final g0 state make two narrow reads, then pool wide values with
+-a terminal same-field match prior as in the committed g1 source. A zero-start
+-output adds that evidence to each tower's existing global pooled-value slice.
+-All four arms own and execute the same new modules. Only terminal prior
+-routing changes: adaptive, uniform, cyclically rotated, or none. This is a
+-compatibility experiment and local adaptation, with no originality claim.
+-
+-All incumbent factorized feedback and relation paths remain. The added memory
+-has 20 slots: global/four rank bins by four historical feedback masks. Choose
+-actual feedback-selected item content or rate-times-unconditional content;
+-keep four content vectors or broadcast their mean. Individual counts, slot
+-identities, validity, constructors and attention are identical in every arm.
+-Existing field/relation tokens read this memory before their JointBlock.
+-The new residual output starts at zero; inherited initialization is retained.
+-Behavior pooling and proxy cross-attention are related to INFNet. This is a
+-local adaptation and discriminating follow-up, with no originality claim.
++"""Structured-state query refinement on the committed g0/g1 hybrid.
++
++Two narrow query-refinement reads address the final g0 field/relation tokens,
++not the raw event stream. The final wide-value read still addresses exactly
++the masked raw events. Learned versus uniform structured-state addressing is
++crossed with adaptive versus absent terminal field-match prior. No modules,
++parameters, inherited representations, task towers or training loss are added.
++The existing zero-start output preserves the inherited g0 starting function.
++
++Exact historical event-memory behavior remains available as query_memory=
++'events' for host parity checks. This is a local compatibility follow-up, not
++an originality claim or a reproduction of a complete external architecture.
++Strict masks and null handling follow the imported hybrid. Uniform routing is
++an active content control with a different functional restriction, not equal
++expressive capacity. Effective backward cost must be measured on the host.
+ """
+ import math
+ import torch
+@@ -46,6 +42,7 @@
+     'memory_source': 'joint',
+     'memory_layout': 'separate',
+     'terminal_prior': 'none',
++    'query_memory': 'state_adaptive',
+ }
+ 
+ 
+@@ -87,6 +84,32 @@
+         mixed = F.scaled_dot_product_attention(
+             query, key, value, attn_mask=valid[:, None, None, :],
+             dropout_p=0.0, is_causal=False)
++        mixed = mixed.transpose(1, 2).contiguous().reshape(batch, count, width)
++        return self.output(mixed)
++
++    def read_state(self, query, memory, valid, uniform=False):
++        """Read intact g0 tokens using shared Q/K/V and exact key masks.
++
++        Both arms calculate learned and uniform weights. Uniform is over
++        valid tokens, never padded tokens; the null is used only if empty.
++        Q/K remain active in terminal pooling and task mixing in every arm.
++        FP32 logits/softmax are common to both structured-memory controls.
++        """
++        batch, count, width = query.shape
++        query = self._project(self.query_norm(query), self.query)
++        memory, extended_valid = self._memory(memory, valid)
++        key = self._project(memory, self.key)
++        value = self._project(memory, self.value)
++        with torch.autocast(device_type=query.device.type, enabled=False):
++            logits = torch.matmul(query.float(), key.float().transpose(-2, -1))
++            logits = logits / math.sqrt(self.head_width)
++            logits = logits.masked_fill(~extended_valid[:, None, None, :], float('-inf'))
++            adaptive = torch.softmax(logits, dim=-1)
++            key_weights = extended_valid.float()
++            key_weights = key_weights / key_weights.sum(dim=-1, keepdim=True).clamp_min(1.0)
++            uniform_weights = adaptive * 0.0 + key_weights[:, None, None, :]
++            weights = uniform_weights if uniform else adaptive
++        mixed = torch.matmul(weights.to(value.dtype), value)
+         mixed = mixed.transpose(1, 2).contiguous().reshape(batch, count, width)
+         return self.output(mixed)
+ 
+@@ -143,16 +166,15 @@
+ 
+ 
+ class TerminalRetrieval(nn.Module):
+-    """Only four task queries retain sequence-wide reads within the cost cap.
+-
+-    Queries derive from the g0 final valid-token mean, rather than reproducing
+-    g1's full field stream. Events are read-only as in g1's committed setting.
+-    The low-rank value path and nonaffine normalization follow g1; an extra
+-    zero-start residual output preserves the exact g0 starting function.
++    """Four evolving queries refine against g0 state, then pool raw events.
++
++    g0 tokens and events are read-only on this path. The historical event
++    memory is retained as an exact implementation control, not a new arm.
+     """
+ 
+-    def __init__(self, value_width, width, heads, tasks, prior):
++    def __init__(self, value_width, width, heads, tasks, prior, query_memory):
+         super().__init__()
++        self.query_memory = query_memory
+         self.event_projection = nn.Linear(value_width, width, bias=False)
+         self.history_position = nn.Parameter(torch.empty(101, width))
+         self.task_identity = nn.Parameter(torch.empty(1, tasks, width))
+@@ -176,7 +198,13 @@
+         events = self.event_projection(values) + self.history_position[rank]
+         events = torch.where(valid.unsqueeze(-1), events, torch.zeros_like(events))
+         for mixer in self.after_read:
+-            states = mixer(states + 0.5 * self.read(states, events, valid))
++            if self.query_memory == 'events':
++                evidence = self.read(states, events, valid)
++            else:
++                evidence = self.read.read_state(
++                    states, tokens, token_valid,
++                    uniform=self.query_memory == 'state_uniform')
++            states = mixer(states + 0.5 * evidence)
+         states = self.final_norm(states)
+         summary = self.read.pool_values(states, events, values, valid,
+                                         match_fields, matches)
+@@ -323,6 +351,7 @@
+                  content_bank_mode='relation', feedback_content_mode='factorized',
+                  memory_source='joint', memory_layout='separate',
+                  terminal_prior=CONFIG['terminal_prior'],
++                 query_memory=CONFIG['query_memory'],
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -371,6 +400,8 @@
+             raise ValueError('Unknown memory layout')
+         if terminal_prior not in ('adaptive', 'uniform', 'rotated', 'none'):
+             raise ValueError('Unknown terminal match prior')
++        if query_memory not in ('events', 'state_adaptive', 'state_uniform'):
++            raise ValueError('Unknown query refinement memory')
+         self.feedback_content_mode = feedback_content_mode
+         self.content_bank_mode = content_bank_mode
+         self.bank_mode = bank_mode
+@@ -474,7 +505,7 @@
+         with torch.random.fork_rng(devices=[]):
+             self.terminal_retrieval = TerminalRetrieval(
+                 self.value_width, token_dim, num_heads, len(feature_map.labels),
+-                terminal_prior)
++                terminal_prior, query_memory)
+         self.terminal_fields = [name for name in self.item_fields if name in
+                                 ('item_id', 'cate_id', 'campaign_id', 'customer_id', 'brand')]
+         if len(self.terminal_fields) != 5:

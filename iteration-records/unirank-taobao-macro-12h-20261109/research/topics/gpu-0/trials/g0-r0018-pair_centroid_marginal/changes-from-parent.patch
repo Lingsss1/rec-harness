@@ -1,0 +1,104 @@
+--- g0-r0017-pair_rank_occupancy/model.py
++++ g0-r0018-pair_centroid_marginal/model.py
+@@ -1,9 +1,9 @@
+-"""Decompose pair-rank information into placement and within-pair variation.
+-
+-All inherited paths remain unchanged. Replace only the input of the existing
+-zero-start pair-rank bank: W=M-mu*S, O=mu*S, or full M. The unweighted pair
+-centroid mu uses the parent's temporal rank basis and valid pair support.
+-This is a prospective local mechanism test, not an originality claim.
++"""Replace conjunctive placement with marginal-relation placement.
++
++The existing pair-rank bank receives mu*S_pair. Only the source of mu changes:
++exact conjunctive-event centroid or symmetric marginal-relation centroids.
++True pair content/counts, all parameters, routing and inherited paths remain.
++Both centroids are computed in both arms; no efficiency or novelty is claimed.
+ """
+ import math
+ import torch
+@@ -35,6 +35,7 @@
+     'pair_count_source': 'joint',
+     'pair_rank_source': 'joint',
+     'pair_rank_component': 'occupancy',
++    'pair_centroid_source': 'marginal',
+ }
+ 
+ 
+@@ -176,6 +177,7 @@
+                  memory_source='joint', memory_layout='collapsed',
+                  pair_content_source='joint', pair_count_source='joint',
+                  pair_rank_source='joint', pair_rank_component='occupancy',
++                 pair_centroid_source='marginal',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -232,6 +234,11 @@
+             raise ValueError('Unknown pair rank component')
+         if pair_rank_source != 'joint':
+             raise ValueError('Pair decomposition requires the joint rank source')
++        if pair_rank_component != 'occupancy':
++            raise ValueError('Centroid-source study freezes the occupancy component')
++        if pair_centroid_source not in ('joint', 'marginal'):
++            raise ValueError('Unknown pair centroid source')
++        self.pair_centroid_source = pair_centroid_source
+         self.pair_rank_component = pair_rank_component
+         self.pair_rank_source = pair_rank_source
+         self.pair_content_source = pair_content_source
+@@ -447,7 +454,7 @@
+             marginal = 0.5 * ((right_count / support) * left_moment
+                               + (left_count / support) * right_moment)
+             joint_moment = self._select_pair_rank_component(
+-                joint_moment, joint_content, joint_mask, coefficients)
++                joint_moment, joint_content, joint_mask, coefficients, relation_masks)
+             if self.pair_rank_source == 'marginal':
+                 source = marginal
+             elif self.pair_rank_source == 'copy':
+@@ -463,25 +470,32 @@
+         return torch.einsum('btpd,pg->btgd', projected,
+                             self.pair_routes.to(projected.dtype))
+ 
+-    def _select_pair_rank_component(self, moment, content, pair_mask, coefficients):
+-        """M=W+O on joint pair support, without signed normalization.
+-
+-        mu is the unweighted pair centroid in the original temporal basis.
+-        Empty support yields zero; a singleton has W=0 in exact arithmetic.
+-        W also vanishes for constant weighted content on the pair support.
+-        All cells compute both components; full returns the original tensor.
+-        Called inside the inherited FP32 autocast-disabled summary block.
++    def _select_pair_rank_component(self, moment, content, pair_mask,
++                                    coefficients, relation_masks):
++        """Select placement source while retaining identical true pair content.
++
++        q is the inherited temporal-bin centered, unit-RMS valid rank basis.
++        mu_rs = sum(1_rs*q)/max(n_rs,1).
++        mu_marg = (sum(1_r*q)/max(n_r,1)
++                   + sum(1_s*q)/max(n_s,1))/2.
++        The marginal rule is a symmetric replacement, not an independence
++        model or an unbiased estimator of the joint centroid. Neither uses
++        learned-weight normalization. Empty pair content makes either output
++        zero, even when nonempty marginals have different centroids.
++        Both arms compute both sources inside the inherited FP32 block.
+         """
+         count = pair_mask.sum(dim=-1, keepdim=True).float()
+-        centroid = (pair_mask * coefficients[:, :, None, :]).sum(
++        joint_centroid = (pair_mask * coefficients[:, :, None, :]).sum(
+             dim=-1, keepdim=True) / count.clamp_min(1.0)
+-        occupancy = centroid * content
+-        within = moment - occupancy
+-        if self.pair_rank_component == 'within':
+-            return within
+-        if self.pair_rank_component == 'occupancy':
+-            return occupancy
+-        return moment
++        relation_count = relation_masks.sum(dim=-1, keepdim=True).float()
++        relation_centroid = (relation_masks * coefficients[:, :, None, :]).sum(
++            dim=-1, keepdim=True) / relation_count.clamp_min(1.0)
++        marginal_centroid = 0.5 * (
++            relation_centroid.index_select(2, self.pair_left)
++            + relation_centroid.index_select(2, self.pair_right))
++        centroid = (joint_centroid if self.pair_centroid_source == 'joint'
++                    else marginal_centroid)
++        return centroid * content
+ 
+     def _feedback_source(self, joint, factorized, total):
+         if self.feedback_content_mode == 'factorized':

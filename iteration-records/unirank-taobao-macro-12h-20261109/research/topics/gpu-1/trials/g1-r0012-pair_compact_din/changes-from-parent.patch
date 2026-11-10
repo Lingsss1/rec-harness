@@ -1,0 +1,378 @@
+--- g0-r0017-pair_rank_occupancy/model.py
++++ g1-r0012-pair_compact_din/model.py
+@@ -1,41 +1,225 @@
+-"""Decompose pair-rank information into placement and within-pair variation.
+-
+-All inherited paths remain unchanged. Replace only the input of the existing
+-zero-start pair-rank bank: W=M-mu*S, O=mu*S, or full M. The unweighted pair
+-centroid mu uses the parent's temporal rank basis and valid pair support.
+-This is a prospective local mechanism test, not an originality claim.
++"""Prospective transfer of the committed compact residual to pair occupancy.
++
++representation_source selects the entire committed source bundle: pair banks
++with collapsed feedback memory, or no pair banks with separate feedback memory.
++aggregation_mode adds the exact g1 compact uniform/DIN residual, or omits it.
++No task-adaptive retrieval is introduced; all four task updates share the same
++summary and residual maps. Host execution is required for numerical claims.
+ """
+ import math
+ import torch
+ from torch import nn
++from torch.nn import functional as F
+ from unirank.pytorch.models import MultiTaskModel
+ from unirank.pytorch.layers import FeatureEmbeddingDict
+ from unirank.pytorch.layers.activations import Dice
+ 
+ 
+-CONFIG = {
+-    'embedding_dim': 16,
+-    'attention_hidden_units': [64, 32],
+-    'tower_hidden_units': [128, 64],
+-    'token_dim': 32,
+-    'num_heads': 2,
+-    'slot_mode': 'recency',
+-    'representation_mode': 'replicas',
+-    'content_mode': 'relation',
+-    'count_mode': 'relation',
+-    'moment_mode': 'linear',
+-    'moment_component': 'full',
+-    'residual_mode': 'copy',
+-    'bank_mode': 'relation',
+-    'content_bank_mode': 'relation',
+-    'feedback_content_mode': 'factorized',
+-    'memory_source': 'joint',
+-    'memory_layout': 'collapsed',
+-    'pair_content_source': 'joint',
+-    'pair_count_source': 'joint',
+-    'pair_rank_source': 'joint',
+-    'pair_rank_component': 'occupancy',
+-}
++CONFIG = {'embedding_dim': 16,
++ 'attention_hidden_units': [64, 32],
++ 'tower_hidden_units': [128, 64],
++ 'token_dim': 32,
++ 'num_heads': 2,
++ 'slot_mode': 'recency',
++ 'representation_mode': 'replicas',
++ 'content_mode': 'relation',
++ 'count_mode': 'relation',
++ 'moment_mode': 'linear',
++ 'moment_component': 'full',
++ 'residual_mode': 'copy',
++ 'bank_mode': 'relation',
++ 'content_bank_mode': 'relation',
++ 'feedback_content_mode': 'factorized',
++ 'memory_source': 'joint',
++ 'memory_layout': 'collapsed',
++ 'pair_content_source': 'joint',
++ 'pair_count_source': 'joint',
++ 'pair_rank_source': 'joint',
++ 'pair_rank_component': 'occupancy',
++ 'representation_source': 'pair_occupancy',
++ 'aggregation_mode': 'din'}
++
++
++class TaskRead(nn.Module):
++    """Shared g1-style Q/K for narrow reads and terminal wide-value pooling."""
++
++    def __init__(self, width, heads, prior):
++        super().__init__()
++        self.heads = heads
++        self.head_width = width // heads
++        self.prior = prior
++        self.query_norm = nn.LayerNorm(width)
++        self.memory_norm = nn.LayerNorm(width)
++        self.query = nn.Linear(width, width, bias=False)
++        self.key = nn.Linear(width, width, bias=False)
++        self.value = nn.Linear(width, width, bias=False)
++        self.output = nn.Linear(width, width, bias=False)
++
++    def _project(self, tensor, layer):
++        batch, count, width = tensor.shape
++        return layer(tensor).reshape(
++            batch, count, self.heads, self.head_width).transpose(1, 2)
++
++    def _memory(self, memory, valid):
++        # Append null AFTER normalization, avoiding learned LN bias evidence.
++        memory = self.memory_norm(memory)
++        memory = torch.where(valid.unsqueeze(-1), memory, torch.zeros_like(memory))
++        memory = torch.cat([memory, memory.new_zeros(memory.shape[0], 1,
++                                                    memory.shape[-1])], dim=1)
++        valid = torch.cat([valid, ~valid.any(dim=1, keepdim=True)], dim=1)
++        return memory, valid
++
++    def forward(self, query, memory, valid):
++        batch, count, width = query.shape
++        query = self._project(self.query_norm(query), self.query)
++        memory, valid = self._memory(memory, valid)
++        key = self._project(memory, self.key)
++        value = self._project(memory, self.value)
++        mixed = F.scaled_dot_product_attention(
++            query, key, value, attn_mask=valid[:, None, None, :],
++            dropout_p=0.0, is_causal=False)
++        mixed = mixed.transpose(1, 2).contiguous().reshape(batch, count, width)
++        return self.output(mixed)
++
++    def read_state(self, query, memory, valid, uniform=False):
++        """Read intact g0 tokens using shared Q/K/V and exact key masks.
++
++        Both arms calculate learned and uniform weights. Uniform is over
++        valid tokens, never padded tokens; the null is used only if empty.
++        Q/K remain active in terminal pooling and task mixing in every arm.
++        FP32 logits/softmax are common to both structured-memory controls.
++        """
++        batch, count, width = query.shape
++        query = self._project(self.query_norm(query), self.query)
++        memory, extended_valid = self._memory(memory, valid)
++        key = self._project(memory, self.key)
++        value = self._project(memory, self.value)
++        with torch.autocast(device_type=query.device.type, enabled=False):
++            logits = torch.matmul(query.float(), key.float().transpose(-2, -1))
++            logits = logits / math.sqrt(self.head_width)
++            logits = logits.masked_fill(~extended_valid[:, None, None, :], float('-inf'))
++            adaptive = torch.softmax(logits, dim=-1)
++            key_weights = extended_valid.float()
++            key_weights = key_weights / key_weights.sum(dim=-1, keepdim=True).clamp_min(1.0)
++            uniform_weights = adaptive * 0.0 + key_weights[:, None, None, :]
++            weights = uniform_weights if uniform else adaptive
++        mixed = torch.matmul(weights.to(value.dtype), value)
++        mixed = mixed.transpose(1, 2).contiguous().reshape(batch, count, width)
++        return self.output(mixed)
++
++    def _match_bias(self, query, match_fields, matches):
++        field_keys = self._project(self.memory_norm(match_fields), self.key)
++        # All routes are calculated in all arms, including the no-prior arm.
++        with torch.autocast(device_type=query.device.type, enabled=False):
++            scores = torch.matmul(query.float(), field_keys.float().transpose(-2, -1))
++            adaptive = torch.softmax(scores / math.sqrt(self.head_width), dim=-1)
++            uniform = adaptive * 0.0 + 1.0 / matches.shape[-1]
++            rotated = torch.roll(adaptive, shifts=1, dims=-1)
++            evidence = matches.float().transpose(1, 2).unsqueeze(1)
++            adaptive_bias = 2.0 * torch.matmul(adaptive, evidence)
++            uniform_bias = 2.0 * torch.matmul(uniform, evidence)
++            rotated_bias = 2.0 * torch.matmul(rotated, evidence)
++            if self.prior == 'adaptive':
++                bias = adaptive_bias
++            elif self.prior == 'uniform':
++                bias = uniform_bias
++            elif self.prior == 'rotated':
++                bias = rotated_bias
++            else:
++                bias = adaptive_bias * 0.0
++        return torch.cat([bias, bias.new_zeros(*bias.shape[:-1], 1)], dim=-1)
++
++    def pool_values(self, query, memory, values, valid, match_fields, matches,
++                    pooling='adaptive'):
++        query = self._project(self.query_norm(query), self.query)
++        memory, extended_valid = self._memory(memory, valid)
++        key = self._project(memory, self.key)
++        values = torch.where(valid.unsqueeze(-1), values, torch.zeros_like(values))
++        values = torch.cat([values, values.new_zeros(values.shape[0], 1,
++                                                    values.shape[-1])], dim=1)
++        bias = self._match_bias(query, match_fields, matches)
++        with torch.autocast(device_type=query.device.type, enabled=False):
++            logits = torch.matmul(query.float(), key.float().transpose(-2, -1))
++            logits = logits / math.sqrt(self.head_width) + bias
++            logits = logits.masked_fill(~extended_valid[:, None, None, :], float('-inf'))
++            adaptive = torch.softmax(logits, dim=-1)
++            # The null is valid only for empty history and carries zero value.
++            # Preserve adaptive computation/graph in the replacement control.
++            uniform = extended_valid.float()
++            uniform = uniform / uniform.sum(dim=-1, keepdim=True).clamp_min(1.0)
++            uniform = adaptive * 0.0 + uniform[:, None, None, :]
++            weights = (uniform if pooling == 'uniform' else adaptive).mean(dim=1)
++        return torch.bmm(weights.to(values.dtype), values)
++
++
++class TaskMixer(nn.Module):
++    def __init__(self, width, heads):
++        super().__init__()
++        self.attention = TaskRead(width, heads, 'none')
++        self.ffn_norm = nn.LayerNorm(width)
++        self.ffn = nn.Sequential(nn.Linear(width, 2 * width), nn.GELU(),
++                                 nn.Linear(2 * width, width))
++
++    def forward(self, states):
++        valid = torch.ones(states.shape[:2], dtype=torch.bool, device=states.device)
++        states = states + 0.5 * self.attention(states, states, valid)
++        return states + 0.5 * self.ffn(self.ffn_norm(states))
++
++
++class TerminalRetrieval(nn.Module):
++    """Initialize as the ancestor, then retain only the active residual maps."""
++
++    def __init__(self, value_width, width, heads, tasks, prior, query_memory,
++                 summary_mode):
++        super().__init__()
++        self.query_memory = query_memory
++        self.summary_mode = summary_mode
++        self.event_projection = nn.Linear(value_width, width, bias=False)
++        self.history_position = nn.Parameter(torch.empty(101, width))
++        self.task_identity = nn.Parameter(torch.empty(1, tasks, width))
++        self.read = TaskRead(width, heads, prior)
++        self.after_read = nn.ModuleList([TaskMixer(width, heads) for _ in range(2)])
++        self.final_norm = nn.LayerNorm(width)
++        self.value_down = nn.Linear(value_width, width, bias=False)
++        self.value_up = nn.Linear(width, value_width, bias=False)
++        self.value_norm = nn.LayerNorm(value_width, elementwise_affine=False)
++        self.output = nn.Linear(value_width, value_width, bias=False)
++        nn.init.normal_(self.history_position, std=0.02)
++        nn.init.normal_(self.task_identity, std=0.02)
++        nn.init.zeros_(self.output.weight)
++
++        # Replay precisely the ancestor initialization above, then prune.
++        # These modules cannot influence either replacement summary. Deletion
++        # also removes their parameters from dense clipping and AdamW groups.
++        for name in ('event_projection', 'history_position', 'task_identity',
++                     'read', 'after_read', 'final_norm'):
++            delattr(self, name)
++        self.tasks = tasks
++
++    def forward(self, values, valid, din_summary):
++        # Keep the ancestor's [B,4,V] residual operation shapes. Each task
++        # receives the same input, but this avoids an additional numerical
++        # change from collapsing four identical linear/LayerNorm operations.
++        if self.summary_mode == 'din':
++            summary = din_summary[:, None, :].expand(-1, self.tasks, -1)
++        else:
++            # Append a zero null value; it is valid only for empty histories.
++            # FP32 weights and BF16 bmm mirror the historical pooling route.
++            values = torch.where(valid.unsqueeze(-1), values,
++                                 torch.zeros_like(values))
++            values = torch.cat([values, values.new_zeros(
++                values.shape[0], 1, values.shape[-1])], dim=1)
++            extended_valid = torch.cat([valid, ~valid.any(dim=1, keepdim=True)], dim=1)
++            with torch.autocast(device_type=values.device.type, enabled=False):
++                weights = extended_valid.float()
++                weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1.0)
++                weights = weights[:, None, :].expand(-1, self.tasks, -1).contiguous()
++            summary = torch.bmm(weights.to(values.dtype), values)
++        summary = self.value_norm(self.value_up(self.value_down(summary)))
++        update = self.output(summary)
++        return torch.where(valid.any(dim=1)[:, None, None], update,
++                           torch.zeros_like(update))
++
+ 
+ 
+ class FeedbackMemory(nn.Module):
+@@ -176,6 +360,7 @@
+                  memory_source='joint', memory_layout='collapsed',
+                  pair_content_source='joint', pair_count_source='joint',
+                  pair_rank_source='joint', pair_rank_component='occupancy',
++                 representation_source='pair_occupancy', aggregation_mode='din',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -232,6 +417,16 @@
+             raise ValueError('Unknown pair rank component')
+         if pair_rank_source != 'joint':
+             raise ValueError('Pair decomposition requires the joint rank source')
++        if representation_source not in ('pair_occupancy', 'separate_base'):
++            raise ValueError('Unknown committed representation bundle')
++        expected_layout = ('collapsed' if representation_source == 'pair_occupancy'
++                           else 'separate')
++        if memory_layout != expected_layout:
++            raise ValueError('Representation bundle requires its committed memory layout')
++        if aggregation_mode not in ('uniform', 'din', 'none'):
++            raise ValueError('Unknown compact aggregation replacement')
++        self.pair_enabled = representation_source == 'pair_occupancy'
++        self.aggregation_mode = aggregation_mode
+         self.pair_rank_component = pair_rank_component
+         self.pair_rank_source = pair_rank_source
+         self.pair_content_source = pair_content_source
+@@ -334,27 +529,35 @@
+         with torch.random.fork_rng(devices=[]):
+             self.feedback_memory = FeedbackMemory(
+                 self.key_width, token_dim, num_heads, memory_source, memory_layout)
+-        # No constructor or random draw follows inherited initialization.
+-        # Relation zero is global; pair indices address only the six fields.
+-        pairs = [(left + 1, right + 1)
+-                 for left in range(len(self.match_fields))
+-                 for right in range(left + 1, len(self.match_fields))]
+-        self.pair_bank = nn.Parameter(
+-            torch.zeros(len(pairs), self.value_width + 1, token_dim))
+-        self.register_buffer('pair_left', torch.tensor(
+-            [left for left, right in pairs], dtype=torch.long))
+-        self.register_buffer('pair_right', torch.tensor(
+-            [right for left, right in pairs], dtype=torch.long))
+-        routes = torch.zeros(len(pairs), self.group_count)
+-        scale = 1.0 / math.sqrt(len(self.match_fields) - 1)
+-        for index, (left, right) in enumerate(pairs):
+-            routes[index, left] = scale
+-            routes[index, right] = scale
+-        self.register_buffer('pair_routes', routes)
+-        # Appended after all inherited initialization: zeros consume no RNG.
+-        # Every source cell has the same 15 x value_width x token_dim bank.
+-        self.pair_rank_bank = nn.Parameter(
+-            torch.zeros(len(pairs), self.value_width, token_dim))
++        if self.pair_enabled:
++            # Pair construction below consumes no random draws.
++            # Relation zero is global; pair indices address only the six fields.
++            pairs = [(left + 1, right + 1)
++                     for left in range(len(self.match_fields))
++                     for right in range(left + 1, len(self.match_fields))]
++            self.pair_bank = nn.Parameter(
++                torch.zeros(len(pairs), self.value_width + 1, token_dim))
++            self.register_buffer('pair_left', torch.tensor(
++                [left for left, right in pairs], dtype=torch.long))
++            self.register_buffer('pair_right', torch.tensor(
++                [right for left, right in pairs], dtype=torch.long))
++            routes = torch.zeros(len(pairs), self.group_count)
++            scale = 1.0 / math.sqrt(len(self.match_fields) - 1)
++            for index, (left, right) in enumerate(pairs):
++                routes[index, left] = scale
++                routes[index, right] = scale
++            self.register_buffer('pair_routes', routes)
++            # Appended after all inherited initialization: zeros consume no RNG.
++            # Every source cell has the same 15 x value_width x token_dim bank.
++            self.pair_rank_bank = nn.Parameter(
++                torch.zeros(len(pairs), self.value_width, token_dim))
++        # Match the committed compact-source initializer, after all source
++        # initialization. Pair buffers/zero banks above consume no RNG.
++        if self.aggregation_mode != 'none':
++            with torch.random.fork_rng(devices=[]):
++                self.terminal_retrieval = TerminalRetrieval(
++                    self.value_width, token_dim, num_heads, len(feature_map.labels),
++                    'none', 'state_uniform', aggregation_mode)
+         self.model_to_device()
+ 
+     def _pair_tokens(self, values, weights, relation_masks, relation_counts,
+@@ -705,6 +908,8 @@
+             raise ValueError('Expected four historical task masks')
+         valid = mask.bool()
+         batch, length = valid.shape
++        if length > 100:
++            raise ValueError('History exceeds the frozen 100-event contract')
+         # Sanitize padded IDs before embedding and before batch-coupled Dice.
+         # Exclude the current action even if an upstream caller changes it.
+         clean_item = {}
+@@ -775,9 +980,10 @@
+         feedback_tokens = self._feedback_content_tokens(
+             values, weights, relation_masks, valid, task_masks)
+         slot_tokens = slot_tokens + feedback_tokens.to(slot_tokens.dtype)
+-        pair_tokens = self._pair_tokens(values, weights, relation_masks,
+-                                        relation_counts, content_mask)
+-        slot_tokens = slot_tokens + pair_tokens.to(slot_tokens.dtype)
++        if self.pair_enabled:
++            pair_tokens = self._pair_tokens(values, weights, relation_masks,
++                                            relation_counts, content_mask)
++            slot_tokens = slot_tokens + pair_tokens.to(slot_tokens.dtype)
+         slot_tokens = slot_tokens.flatten(1, 2)
+         # Validity is temporal in EVERY arm, so group occupancy is not leaked
+         # by the attention mask when the explicit count input is ablated.
+@@ -791,6 +997,12 @@
+         tokens = self.feedback_memory(tokens, token_valid, values, weights,
+                                       content_mask, valid, task_masks)
+         tokens = self.interaction(tokens, token_valid)
+-        features = torch.cat([static.flatten(1), pooled[:, 0], tokens.flatten(1), log_counts], dim=-1)
+-        return {label + '_pred': torch.sigmoid(tower(features))
+-                for label, tower in zip(self.feature_map.labels, self.towers)}
++        if self.aggregation_mode == 'none':
++            features = torch.cat([static.flatten(1), pooled[:, 0], tokens.flatten(1), log_counts], dim=-1)
++            return {label + '_pred': torch.sigmoid(tower(features))
++                    for label, tower in zip(self.feature_map.labels, self.towers)}
++        updates = self.terminal_retrieval(values, valid, din_summary=pooled[:, 0])
++        return {label + '_pred': torch.sigmoid(tower(torch.cat(
++                    [static.flatten(1), pooled[:, 0] + updates[:, index],
++                     tokens.flatten(1), log_counts], dim=-1)))
++                for index, (label, tower) in enumerate(zip(self.feature_map.labels, self.towers))}

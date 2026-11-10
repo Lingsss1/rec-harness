@@ -1,0 +1,143 @@
+--- g3-r0000-task_action_relevance/model.py
++++ g3-r0002-self_detached/model.py
+@@ -1,9 +1,10 @@
+-"""Prospective task/action relevance study; no local effectiveness claim.
++"""Prospective task representation exchange, with no measured efficacy claim.
+ 
+-DIN-style shared local activation trunk, four score channels and four towers.
+-The 2x2 controls change routing and action input, with identical module shapes.
+-Channel order always follows feature_map.labels. Only historical actions enter
+-the scorer or values; the current target action is never consumed.
++A 2x2 design compares peer versus self donor representations and detached
++versus joint donor gradients. Core architecture and initialization follow the
++empirical incumbent. Transfer output layers start at zero, so initial logits
++match that core. Detachment only blocks the additional donor path; embeddings
++and the history scorer remain shared. No current labels enter forward.
+ """
+ import torch
+ from torch import nn
+@@ -18,14 +19,18 @@
+     'attention_normalization': 'none',
+     'task_specific': True,
+     'action_in_score': True,
++    'peer_transfer': False,
++    'detach_donors': True,
++    'transfer_width': 32,
+ }
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='TaskActionRelevance', gpu=-1,
++    def __init__(self, feature_map, model_id='TaskEvidenceExchange', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+-                 task_specific=True, action_in_score=True, num_tasks=None,
++                 task_specific=True, action_in_score=True, peer_transfer=False,
++                 detach_donors=True, transfer_width=32, num_tasks=None,
+                  task='binary_classification', **kwargs):
+         labels = list(feature_map.labels)
+         if len(labels) != 4 or set(labels) != {'is_click', 'cart', 'fav', 'buy'}:
+@@ -38,6 +43,13 @@
+                          num_tasks=len(labels), task=task, **kwargs)
+         self.task_specific = bool(task_specific)
+         self.action_in_score = bool(action_in_score)
++        if not self.task_specific or not self.action_in_score:
++            raise ValueError('This study retains task/action relevance')
++        if not tower_hidden_units or transfer_width < 1:
++            raise ValueError('Expected a hidden task representation and positive transfer width')
++        self.peer_transfer = bool(peer_transfer)
++        self.detach_donors = bool(detach_donors)
++        self.transfer_width = int(transfer_width)
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+                             if spec.get('source') == 'item' and spec['type'] != 'meta']
+@@ -78,6 +90,28 @@
+         with torch.no_grad():
+             score.weight.copy_(score.weight[:1].clone().expand_as(score.weight))
+             score.bias.copy_(score.bias[:1].clone().expand_as(score.bias))
++        # Construct added modules AFTER resetting/equalizing the incumbent.
++        # This preserves its parameter RNG draws. Do not reset the whole model
++        # again: that would reinitialize the core differently from the parent.
++        # Restore CPU RNG after adding adapters, preserving any later host
++        # random draws as well as the inherited core initialization.
++        with torch.random.fork_rng(devices=[]):
++            hidden_width = tower_hidden_units[-1]
++            self.donor_projections = nn.ModuleList([
++                nn.Linear(hidden_width, self.transfer_width) for _ in labels
++            ])
++            self.receiver_queries = nn.ModuleList([
++                nn.Linear(hidden_width, self.transfer_width) for _ in labels
++            ])
++            self.transfer_outputs = nn.ModuleList([
++                nn.Linear(self.transfer_width, 1) for _ in labels
++            ])
++            for layer in list(self.donor_projections) + list(self.receiver_queries):
++                nn.init.xavier_normal_(layer.weight)
++                nn.init.zeros_(layer.bias)
++            for layer in self.transfer_outputs:
++                nn.init.zeros_(layer.weight)
++                nn.init.zeros_(layer.bias)
+         self.model_to_device()
+ 
+     def _represent(self, inputs):
+@@ -88,8 +122,9 @@
+         keys = torch.cat([item_emb[name][:, :-1] for name in self.item_fields], dim=-1)
+         actions = item_emb[self.action_field][:, :-1]
+         valid = mask.to(torch.bool)
+-        # Mask before Dice and after scoring. Padding IDs cannot enter the
+-        # normalization statistics or pooled values. Padding count is retained.
++        # Mask keys/actions before Dice and scores after it. The target query
++        # at padded positions still affects Dice statistics; this inherited
++        # limitation is held fixed. Padding IDs cannot affect pooled values.
+         keys = keys.masked_fill(~valid.unsqueeze(-1), 0)
+         actions = actions.masked_fill(~valid.unsqueeze(-1), 0)
+         values = torch.cat([keys, actions], dim=-1)
+@@ -116,11 +151,46 @@
+         # All-masked histories give zero summaries without softmax.
+         return torch.bmm(scores.transpose(1, 2), values)
+ 
++    def _transfer(self, hidden):
++        # hidden is a list of task tower activations, each [B,H]. Every receiver
++        # uses three donor slots and the same projections in all four cells.
++        # Self controls replace source representations, preserving active
++        # adapters, their identities, parameter count and dense arithmetic.
++        residuals = []
++        for receiver in range(self.num_tasks):
++            query = torch.tanh(self.receiver_queries[receiver](hidden[receiver]))
++            tokens = []
++            for donor in range(self.num_tasks):
++                if donor == receiver:
++                    continue
++                source = hidden[donor] if self.peer_transfer else hidden[receiver]
++                if self.detach_donors:
++                    source = source.detach()
++                # Stop only at the donor activation: these trainable adapters
++                # still receive recipient loss gradients in detached cells.
++                tokens.append(torch.tanh(self.donor_projections[donor](source)))
++            tokens = torch.stack(tokens, dim=1)  # B,3,D
++            scores = (tokens.float() * query.float()[:, None, :]).sum(dim=-1)
++            scores = scores / (self.transfer_width ** 0.5)
++            weights = torch.softmax(scores, dim=1).to(tokens.dtype)
++            message = (weights[:, :, None] * tokens).sum(dim=1)
++            residuals.append(self.transfer_outputs[receiver](message))
++        return residuals
++
+     def forward(self, inputs):
+         context, target, keys, actions, values, valid = self._represent(inputs)
+         pooled = self._pool(target, keys, actions, values, valid)
++        hidden = []
++        for index, tower in enumerate(self.towers):
++            features = torch.cat([context, target, pooled[:, index]], dim=-1)
++            # Reuse the existing modules in their original order, including
++            # Dice, and execute each tower prefix exactly once.
++            for layer in list(tower.children())[:-1]:
++                features = layer(features)
++            hidden.append(features)
++        residuals = self._transfer(hidden)
+         outputs = {}
+         for index, (label, tower) in enumerate(zip(self.feature_map.labels, self.towers)):
+-            features = torch.cat([context, target, pooled[:, index]], dim=-1)
+-            outputs[label + '_pred'] = torch.sigmoid(tower(features))
++            logits = tower[-1](hidden[index]) + residuals[index]
++            outputs[label + '_pred'] = torch.sigmoid(logits)
+         return outputs

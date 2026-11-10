@@ -1,0 +1,112 @@
+--- g2-r0011-center_count/model.py
++++ g2-r0012-context_add_fixed/model.py
+@@ -1,10 +1,12 @@
+-"""Prospective user-background centering of shrunk joint feedback moments.
+-
+-Factorial: centered versus absolute joint moments x count versus fixed mixing.
+-All arms compute the same background offset; only a scalar multiplier changes.
+-Raw fractions, counts, all registered modules and initialization stay matched.
+-The background is the same visible history, not an independent prior or a
+-causal counterfactual. This is an untested representation hypothesis.
++"""Prospective context interaction with centered history-feedback features.
++
++Factorial: explicit hidden context/history product versus additive main effects,
++crossed with count versus fixed mixing. All four arms have identical modules,
++initialization and arithmetic shapes; only two scalar switches differ.
++The context branch reads current user/context/target embeddings, never action
++or current labels. Its zero initialization preserves the source residual at
++initialization. This is an untested information-flow hypothesis, not a novelty
++claim or an empirical result. The visible-user background is not a causal prior.
+ """
+ import math
+ import torch
+@@ -14,7 +16,7 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'feedback_dim': 8, 'residual_hidden': 64, 'recent_window': 16, 'feedback_mode': 'product', 'rate_interpolation': 'count', 'shrinkage_strength': 4.0, 'moment_mode': 'joint', 'centering_mode': 'user'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'feedback_dim': 8, 'residual_hidden': 64, 'recent_window': 16, 'feedback_mode': 'product', 'rate_interpolation': 'fixed', 'shrinkage_strength': 4.0, 'moment_mode': 'joint', 'centering_mode': 'user', 'context_mode': 'additive'}
+ 
+ 
+ class JointBlock(nn.Module):
+@@ -51,7 +53,7 @@
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='ResidualHistoryFeedback', gpu=-1,
++    def __init__(self, feature_map, model_id='ContextFeedbackInteraction', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), token_dim=32, num_heads=2,
+                  slot_mode='recency', representation_mode='replicas',
+@@ -61,6 +63,7 @@
+                  rate_interpolation=CONFIG['rate_interpolation'],
+                  shrinkage_strength=4.0, moment_mode=CONFIG['moment_mode'],
+                  centering_mode=CONFIG['centering_mode'],
++                 context_mode=CONFIG['context_mode'],
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -93,6 +96,9 @@
+             raise ValueError('Unknown event-feedback moment replacement')
+         if centering_mode not in ('user', 'none'):
+             raise ValueError('Unknown joint-moment centering')
++        if context_mode not in ('cross', 'additive'):
++            raise ValueError('Unknown context-feedback interaction')
++        self.context_mode = context_mode
+         self.centering_mode = centering_mode
+         self.moment_mode = moment_mode
+         self.feedback_mode = feedback_mode
+@@ -168,6 +174,17 @@
+             nn.Linear(residual_hidden, self.feedback_tasks))
+         nn.init.zeros_(self.feedback_residual[-1].weight)
+         nn.init.zeros_(self.feedback_residual[-1].bias)
++        # Append after ALL inherited initialization: source modules consume
++        # exactly their original RNG sequence. Restore CPU RNG after the new
++        # constructor so subsequent host sampling is not shifted either.
++        # This new layer is explicitly constructed on CPU then moved below.
++        # Zero context makes both fusion modes equal to the source initially,
++        # including with a nonzero feedback readout loaded for a local check.
++        with torch.random.fork_rng(devices=[]):
++            self.feedback_context = nn.Linear(self.static_count * embedding_dim,
++                                              residual_hidden, device='cpu')
++        nn.init.zeros_(self.feedback_context.weight)
++        nn.init.zeros_(self.feedback_context.bias)
+         self.model_to_device()
+ 
+     def _slot_masks(self, valid):
+@@ -323,6 +340,26 @@
+         raw = torch.cat([moments.flatten(2), fractions.to(projected.dtype),
+                          count_features.to(projected.dtype)], dim=-1)
+         return raw.flatten(1)
++
++    def _contextual_residual(self, residual_features, static):
++        """Main effects h + c, plus h*c in the interaction arm.
++
++        h = SiLU(W_history r + b_history); c = tanh(W_context x + b_context).
++        c is bounded, so its multiplicative gain 1+c lies in [0,2].
++        The additive arm keeps the same active parameters, current information
++        and direct context main effect. Both compute the product, and differ
++        only in its fixed multiplier. Empty-history masking is applied by the
++        caller after the shared output layer, including its learned bias.
++        """
++        hidden = self.feedback_residual[1](
++            self.feedback_residual[0](residual_features))
++        context = torch.tanh(self.feedback_context(static.flatten(1)))
++        coupling = 1.0 if self.context_mode == 'cross' else 0.0
++        with torch.autocast(device_type=hidden.device.type, enabled=False):
++            hidden32, context32 = hidden.float(), context.float()
++            product = hidden32 * context32
++            fused = hidden32 + context32 + coupling * product
++        return self.feedback_residual[2](fused.to(hidden.dtype))
+ 
+     def forward(self, inputs):
+         if len(inputs) != 4 or inputs[3] is None:
+@@ -397,7 +434,7 @@
+         tokens = self.interaction(tokens, token_valid)
+         features = torch.cat([static.flatten(1), pooled[:, 0], tokens.flatten(1), log_counts], dim=-1)
+         residual_features = self._residual_features(clean_item, valid, task_masks, keys)
+-        residual = self.feedback_residual(residual_features)
++        residual = self._contextual_residual(residual_features, static)
+         # No residual bias for empty histories, in train or eval mode.
+         residual = residual * valid.any(dim=-1, keepdim=True).to(residual.dtype)
+         logits = torch.cat([tower(features) for tower in self.towers], dim=-1) + residual

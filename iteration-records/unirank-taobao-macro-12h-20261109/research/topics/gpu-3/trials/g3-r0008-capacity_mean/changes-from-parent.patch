@@ -1,0 +1,142 @@
+--- g3-r0007-linear_grad_open/model.py
++++ g3-r0008-capacity_mean/model.py
+@@ -1,12 +1,13 @@
+-"""Residual scorer-input gradient factorial on the committed moment model.
+-
+-Only the two scorer-input detach defaults differ among factorial cells.
+-Forward arithmetic, parameter layout, initialization and all inherited
+-shared moment/value/direct paths are unchanged. This does not isolate all
+-gradients from a task. Read proposal.json for prospective hypotheses,
+-contrasts, limits and required host numerical checks. No new result claimed.
++"""Prospective scorer-sharing study, with inherited linear-moment tokens.
++
++One action-aware first layer is evaluated once per event. Four independent
++nonlinear heads produce residual relevance scores for private or mean routing.
++Widths 64 and 210 cross routing with compact and near-parent scorer capacity.
++Distinct head hidden weights keep the mean control active; zero output layers
++preserve the inherited g0 function initially. All scorer-input gradients are
++open, as in the committed g3-r0007-linear_grad_open comparison source.
++No performance, speedup, gradient-isolation, or originality claim is established.
+ """
+-import copy
+ import math
+ import torch
+ from torch import nn
+@@ -15,7 +16,7 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'moment_mode': 'linear', 'task_routing': 'private', 'block_click_score_grad': False, 'block_aux_score_grad': False}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'moment_mode': 'linear', 'task_routing': 'mean', 'block_click_score_grad': False, 'block_aux_score_grad': False, 'scorer_hidden_width': 210}
+ 
+ class JointBlock(nn.Module):
+     """Pre-norm attention with invalid slots excluded as keys and outputs."""
+@@ -51,13 +52,13 @@
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='MomentPrivateReadoutStudy', gpu=-1,
++    def __init__(self, feature_map, model_id='SharedScorerMomentStudy', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), token_dim=32, num_heads=2,
+                  slot_mode='recency', representation_mode='replicas',
+                  content_mode='relation', count_mode='relation', moment_mode='linear',
+-                 task_routing='private', block_click_score_grad=False,
+-                 block_aux_score_grad=False,
++                 task_routing='mean', block_click_score_grad=False,
++                 block_aux_score_grad=False, scorer_hidden_width=210,
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -72,8 +73,12 @@
+             raise ValueError('Unknown task readout routing')
+         if not isinstance(block_click_score_grad, bool) or not isinstance(block_aux_score_grad, bool):
+             raise ValueError('Scorer-input stop switches must be booleans')
+-        if not attention_hidden_units:
+-            raise ValueError('A nonlinear relevance scorer is required')
++        if block_click_score_grad or block_aux_score_grad:
++            raise ValueError('Shared-trunk study requires open scorer-input gradients')
++        if len(attention_hidden_units) != 2:
++            raise ValueError('Shared-trunk study requires two relevance hidden layers')
++        if not isinstance(scorer_hidden_width, int) or isinstance(scorer_hidden_width, bool) or scorer_hidden_width <= 0:
++            raise ValueError('scorer_hidden_width must be a positive integer')
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         if representation_mode != 'replicas':
+@@ -88,9 +93,6 @@
+             raise ValueError('Position study requires the frozen relation parent')
+         self.moment_mode = moment_mode
+         self.task_routing = task_routing
+-        self.block_score_input = tuple(
+-            block_click_score_grad if label == 'is_click' else block_aux_score_grad
+-            for label in feature_map.labels)
+         self.slot_mode = slot_mode
+         self.representation_mode = representation_mode
+         self.content_mode = content_mode
+@@ -154,35 +156,38 @@
+         with torch.random.fork_rng(devices=[]):
+             self.moment_projection = nn.Linear(self.value_width, token_dim, bias=False)
+             nn.init.zeros_(self.moment_projection.weight)
+-        # Append after all inherited initialization; keep the parent's RNG
+-        # state, towers, token identities and shared relevance scorer intact.
+-        # Deepcopy includes independent Dice parameters AND running buffers.
+-        # Distinct hidden weights make the mean control's capacity active.
+-        # Zero output layers preserve the parent function in every cell.
++        # Only the residual scorer architecture changes. Keep every inherited
++        # initialization and the host CPU RNG stream intact. Separate head
++        # hidden weights and Dice buffers avoid a redundant symmetric mean.
++        # All output layers start at zero; the trunk learns after they open.
+         with torch.random.fork_rng(devices=[]):
+-            scorers = []
+-            for _ in feature_map.labels:
+-                scorer = copy.deepcopy(self.local_activation)
+-                original = scorer[0]
+-                expanded = nn.Linear(original.in_features + embedding_dim,
+-                                     original.out_features)
+-                scorer[0] = expanded
++            self.task_trunk = nn.Sequential(
++                nn.Linear(4 * self.key_width + embedding_dim, scorer_hidden_width),
++                Dice(scorer_hidden_width))
++            self.task_scorers = nn.ModuleList([
++                nn.Sequential(nn.Linear(scorer_hidden_width, attention_hidden_units[1]),
++                              Dice(attention_hidden_units[1]),
++                              nn.Linear(attention_hidden_units[1], 1))
++                for _ in feature_map.labels])
++            for module in self.task_trunk.modules():
++                if isinstance(module, nn.Linear):
++                    nn.init.xavier_normal_(module.weight)
++                    nn.init.zeros_(module.bias)
++            for scorer in self.task_scorers:
+                 for module in scorer.modules():
+                     if isinstance(module, nn.Linear):
+                         nn.init.xavier_normal_(module.weight)
+                         nn.init.zeros_(module.bias)
+                 nn.init.zeros_(scorer[-1].weight)
+                 nn.init.zeros_(scorer[-1].bias)
+-                scorers.append(scorer)
+-            self.task_scorers = nn.ModuleList(scorers)
+         self.model_to_device()
+ 
+     def _task_pool(self, target, keys, actions, values, valid):
+         """Task scores use no task mask or current feedback label.
+ 
+-        Only the selected scorer INPUT is detached. Its weights/output and
+-        all value paths still train. With mean routing, each scorer receives
+-        multiple task losses; the stop is branch-specific, not loss-specific.
++        The shared first layer executes once. Each nonlinear head has its own
++        parameters and Dice buffers. All scorer inputs and value paths train.
++        Mean routing sends the same computed score mean to all four towers.
+         """
+         batch, length, _ = keys.shape
+         if not length:
+@@ -191,8 +196,8 @@
+         actions = actions.masked_fill(~valid.unsqueeze(-1), 0)
+         interactions = torch.cat([query, keys, query - keys, query * keys, actions], dim=-1)
+         flat = interactions.reshape(batch * length, -1)
+-        columns = [scorer(flat.detach() if blocked else flat)
+-                   for scorer, blocked in zip(self.task_scorers, self.block_score_input)]
++        hidden = self.task_trunk(flat)
++        columns = [scorer(hidden) for scorer in self.task_scorers]
+         scores = torch.cat(columns, dim=-1).reshape(batch, length, self.num_tasks)
+         scores = scores.masked_fill(~valid.unsqueeze(-1), 0)
+         # Same score/routing arithmetic in all factorial cells. FP32 averaging

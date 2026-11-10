@@ -1,0 +1,106 @@
+--- g3-r0000-task_action_relevance/model.py
++++ g3-r0003-partial_relevance/model.py
+@@ -1,10 +1,13 @@
+-"""Prospective task/action relevance study; no local effectiveness claim.
++"""Prospective early task sharing study; no local effectiveness claim.
+ 
+-DIN-style shared local activation trunk, four score channels and four towers.
+-The 2x2 controls change routing and action input, with identical module shapes.
+-Channel order always follows feature_map.labels. Only historical actions enter
+-the scorer or values; the current target action is never consumed.
++Four exact copies of the incumbent nonlinear local-activation trunk receive
++identical per-event target/item/action interactions. Fixed mixing of their
++states controls task coupling before the scalar relevance outputs. All three
++sharing cells have the same parameter shapes and event-level trunk work.
++Uniform mixing is symmetry-collapsed under this initialization; it is not a
++full effective-capacity control. Embeddings remain shared across tasks.
+ """
++import copy
+ import torch
+ from torch import nn
+ from unirank.pytorch.models import MultiTaskModel
+@@ -18,14 +21,15 @@
+     'attention_normalization': 'none',
+     'task_specific': True,
+     'action_in_score': True,
++    'scorer_sharing': 0.5,
+ }
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='TaskActionRelevance', gpu=-1,
++    def __init__(self, feature_map, model_id='EarlyTaskSharing', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+-                 task_specific=True, action_in_score=True, num_tasks=None,
++                 task_specific=True, action_in_score=True, scorer_sharing=0.5, num_tasks=None,
+                  task='binary_classification', **kwargs):
+         labels = list(feature_map.labels)
+         if len(labels) != 4 or set(labels) != {'is_click', 'cart', 'fav', 'buy'}:
+@@ -38,6 +42,13 @@
+                          num_tasks=len(labels), task=task, **kwargs)
+         self.task_specific = bool(task_specific)
+         self.action_in_score = bool(action_in_score)
++        if not self.task_specific or not self.action_in_score:
++            raise ValueError('This study retains task/action relevance')
++        if float(scorer_sharing) not in (0.0, 0.5, 1.0):
++            raise ValueError('Expected the declared private/partial/uniform cells')
++        if not attention_hidden_units:
++            raise ValueError('A nonlinear scorer trunk is required')
++        self.scorer_sharing = float(scorer_sharing)
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+                             if spec.get('source') == 'item' and spec['type'] != 'meta']
+@@ -78,6 +89,14 @@
+         with torch.no_grad():
+             score.weight.copy_(score.weight[:1].clone().expand_as(score.weight))
+             score.bias.copy_(score.bias[:1].clone().expand_as(score.bias))
++        # Clone only AFTER the incumbent's construction/reset/equalization.
++        # Deepcopy draws no RNG and copies Dice buffers to independent storage.
++        # Never reset the expanded model: that would alter its initial function.
++        trunk = nn.Sequential(*list(self.local_activation.children())[:-1])
++        self.score_output = self.local_activation[-1]
++        self.relevance_trunks = nn.ModuleList(
++            [trunk] + [copy.deepcopy(trunk) for _ in range(self.num_tasks - 1)])
++        del self.local_activation
+         self.model_to_device()
+ 
+     def _represent(self, inputs):
+@@ -88,8 +107,9 @@
+         keys = torch.cat([item_emb[name][:, :-1] for name in self.item_fields], dim=-1)
+         actions = item_emb[self.action_field][:, :-1]
+         valid = mask.to(torch.bool)
+-        # Mask before Dice and after scoring. Padding IDs cannot enter the
+-        # normalization statistics or pooled values. Padding count is retained.
++        # Zero history IDs/actions before Dice and mask scores afterward.
++        # Target queries at padding positions still affect Dice statistics;
++        # this inherited behavior is held fixed, not padding-free normalization.
+         keys = keys.masked_fill(~valid.unsqueeze(-1), 0)
+         actions = actions.masked_fill(~valid.unsqueeze(-1), 0)
+         values = torch.cat([keys, actions], dim=-1)
+@@ -106,11 +126,20 @@
+         query = target[:, None, :].expand(-1, length, -1)
+         action_input = actions if self.action_in_score else torch.zeros_like(actions)
+         interactions = torch.cat([query, keys, query - keys, query * keys, action_input], dim=-1)
+-        scores = self.local_activation(interactions.reshape(batch * length, -1))
+-        scores = scores.reshape(batch, length, self.num_tasks)
+-        if not self.task_specific:
+-            # Every row gets gradients, but averaging reduces effective capacity.
+-            scores = scores.mean(dim=-1, keepdim=True).expand(-1, -1, self.num_tasks)
++        flat = interactions.reshape(batch * length, -1)
++        # Execute all four trunks at every rho, including the uniform control.
++        # Accumulate their mean in float32 under BF16 autocast. The subtraction
++        # form preserves equal initial states exactly before output arithmetic.
++        states = torch.stack([trunk(flat) for trunk in self.relevance_trunks], dim=1)
++        center = states.float().mean(dim=1, keepdim=True).to(states.dtype)
++        mixed = states + self.scorer_sharing * (center - states)
++        columns = []
++        for index in range(self.num_tasks):
++            # Functional linear keeps autocast consistent with the parent.
++            columns.append(torch.nn.functional.linear(
++                mixed[:, index], self.score_output.weight[index:index + 1],
++                self.score_output.bias[index:index + 1]))
++        scores = torch.cat(columns, dim=-1).reshape(batch, length, self.num_tasks)
+         scores = scores.masked_fill(~valid.unsqueeze(-1), 0)
+         # Four summaries cost O(B * T * L * value_width), with no L^2 term.
+         # All-masked histories give zero summaries without softmax.

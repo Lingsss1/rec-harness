@@ -1,0 +1,168 @@
+--- g0-r0002-replica_seven/model.py
++++ g0-r0003-replica_control/model.py
+@@ -1,10 +1,11 @@
+-"""Prospective atomic-field versus coordinate-partition representation study.
+-
+-Inherited from g0-r0001-grouped_recency: embeddings, DIN summary weights,
+-global/rank-quartile pooling, raw bypasses, JointBlock and four task towers.
+-Each of five summaries becomes seven tokens. Only the fixed content-selection
+-buffer differs across the three matched arms. Fieldwise pooled tokenization
+-has prior precedent in the pinned HiFormer implementation; novelty unverified.
++"""Target-relation summaries: content x explicit-count factorial study.
++
++Inherited from g0-r0002-replica_seven: all trainable modules, initialization
++order, five temporal summaries, raw bypasses, interaction and task towers.
++Seven units now optionally select global or equal-target-field history events
++BEFORE pooling, retaining each selected event's complete item/action value.
++The count switch controls only the explicit count channel; content magnitude
++can still carry count information. This is not a claim of a novel mechanism.
+ """
+ import math
+ import torch
+@@ -22,6 +23,8 @@
+     'num_heads': 2,
+     'slot_mode': 'recency',
+     'representation_mode': 'replicas',
++    'content_mode': 'replicas',
++    'count_mode': 'temporal',
+ }
+ 
+ 
+@@ -59,10 +62,11 @@
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='AtomicSummaryStudy', gpu=-1,
++    def __init__(self, feature_map, model_id='TargetRelationStudy', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), token_dim=32, num_heads=2,
+-                 slot_mode='recency', representation_mode='replicas', num_tasks=None,
++                 slot_mode='recency', representation_mode='replicas',
++                 content_mode='replicas', count_mode='temporal', num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+@@ -74,10 +78,16 @@
+             raise ValueError('token_dim must be divisible by num_heads')
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+-        if representation_mode not in ('fields', 'coordinates', 'replicas'):
+-            raise ValueError('Unknown history representation')
++        if representation_mode != 'replicas':
++            raise ValueError('This factorial study starts from replica_seven')
++        if content_mode not in ('relation', 'replicas'):
++            raise ValueError('Unknown summary content')
++        if count_mode not in ('relation', 'temporal'):
++            raise ValueError('Unknown explicit count channel')
+         self.slot_mode = slot_mode
+         self.representation_mode = representation_mode
++        self.content_mode = content_mode
++        self.count_mode = count_mode
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+                             if spec.get('source') == 'item' and spec['type'] != 'meta']
+@@ -91,7 +101,7 @@
+         self.key_width = len(self.item_fields) * embedding_dim
+         self.value_width = self.key_width + embedding_dim
+         self.static_count = len(self.user_fields) + len(self.item_fields)
+-        # All three arms have 35 summary tokens and identical parameters.
++        # All four arms have 35 summary tokens and identical parameters.
+         value_fields = self.item_fields + [self.action_field]
+         expected = {'item_id', 'cate_id', 'campaign_id', 'customer_id',
+                     'brand', 'price_bucket', 'action'}
+@@ -99,21 +109,13 @@
+             raise ValueError('Expected the frozen six item fields plus action')
+         self.group_count = len(value_fields)
+         self.token_count = self.static_count + 5 * self.group_count
++        # Keep the parent's nonrandom buffer and module construction order.
+         selection = torch.zeros(self.group_count, self.value_width)
+-        if representation_mode == 'fields':
+-            # Preserve each complete embedding field as one representation unit.
+-            for field_index in range(self.group_count):
+-                selection[field_index, field_index * embedding_dim:
+-                          (field_index + 1) * embedding_dim] = 1.0
+-        elif representation_mode == 'coordinates':
+-            # Deterministic equal-size partition, without intact field units.
+-            # Every coordinate occurs exactly once; no RNG or sample lookup.
+-            for coordinate in range(self.value_width):
+-                selection[coordinate % self.group_count, coordinate] = 1.0
+-        else:
+-            # Equal total pre-projection squared content norm to both partitions.
+-            selection.fill_(1.0 / math.sqrt(self.group_count))
++        selection.fill_(1.0 / math.sqrt(self.group_count))
+         self.register_buffer('content_selection', selection)
++        self.match_fields = list(self.item_fields)
++        self.match_padding = {name: feature_map.features[name].get('padding_idx', 0)
++                              for name in self.match_fields}
+         layers = []
+         width = 4 * self.key_width
+         for hidden in attention_hidden_units:
+@@ -153,6 +155,25 @@
+             parts = [(bins == index) & valid for index in range(4)]
+             content = torch.cat([all_events, torch.stack(parts, dim=1)], dim=1)
+         return content, content.sum(dim=-1)
++
++    def _relation_masks(self, clean_item, valid, temporal_masks):
++        """[B,5,7,L]: global plus six overlapping encoded-field matches.
++
++        Zero/padding IDs never create equality evidence. Equality of any other
++        encoded ID is not guaranteed to establish true entity identity (OOV or
++        publisher missing-value codes may coincide). No action/label matching.
++        """
++        relations = [valid]
++        for name in self.match_fields:
++            history = clean_item[name][:, :-1]
++            target = clean_item[name][:, -1:]
++            match = (history == target) & (history > 0) & (target > 0) & valid
++            padding = self.match_padding[name]
++            if padding is not None:
++                match = match & (history != padding) & (target != padding)
++            relations.append(match)
++        relations = torch.stack(relations, dim=1)
++        return temporal_masks[:, :, None, :] & relations[:, None, :, :]
+ 
+     def forward(self, inputs):
+         if len(inputs) != 4 or inputs[3] is None:
+@@ -181,6 +202,8 @@
+         values = torch.cat([keys, action], dim=-1)
+         values = values * valid.unsqueeze(-1).to(values.dtype)
+         content_mask, counts = self._slot_masks(valid)
++        relation_masks = self._relation_masks(clean_item, valid, content_mask)
++        relation_counts = relation_masks.sum(dim=-1)
+         if length:
+             query = target[:, None, :].expand(-1, length, -1)
+             interactions = torch.cat([query, keys, query - keys, query * keys], dim=-1)
+@@ -194,13 +217,28 @@
+         pooled = pooled * slot_valid.unsqueeze(-1).to(pooled.dtype)
+         log_counts = torch.log1p(counts.float()) / math.log(101.0)
+         log_counts = log_counts.to(pooled.dtype)
+-        # [B, five temporal slots, seven units, value_width]. The selection
+-        # changes only content assignment; all trainable dimensions are shared.
+-        grouped = (pooled[:, :, None, :]
+-                   * self.content_selection[None, None, :, :].to(pooled.dtype))
+-        group_counts = log_counts[:, :, None, None].expand(-1, -1, self.group_count, 1)
++        if self.content_mode == 'relation':
++            if length:
++                relation_weights = (relation_masks.to(weights.dtype)
++                                    * weights[:, None, None, :])
++                grouped = torch.bmm(relation_weights.flatten(1, 2), values)
++                grouped = grouped.reshape(batch, 5, self.group_count, self.value_width)
++                grouped = grouped / math.sqrt(self.group_count)
++            else:
++                grouped = pooled.new_zeros((batch, 5, self.group_count, self.value_width))
++        else:
++            grouped = (pooled[:, :, None, :]
++                       * self.content_selection[None, None, :, :].to(pooled.dtype))
++        if self.count_mode == 'relation':
++            group_counts = torch.log1p(relation_counts.float()) / math.log(101.0)
++            group_counts = group_counts.to(pooled.dtype).unsqueeze(-1)
++        else:
++            group_counts = log_counts[:, :, None, None].expand(-1, -1, self.group_count, 1)
+         slot_tokens = self.slot_projection(torch.cat([grouped, group_counts], dim=-1))
+         slot_tokens = slot_tokens.flatten(1, 2)
++        # Validity is temporal in EVERY arm, so group occupancy is not leaked
++        # by the attention mask when the explicit count input is ablated.
++        # A no-match relation has zero content but an active identity token.
+         group_valid = slot_valid[:, :, None].expand(-1, -1, self.group_count).flatten(1)
+         tokens = torch.cat([self.field_projection(static), slot_tokens], dim=1)
+         tokens = tokens + self.token_identity.to(tokens.dtype)

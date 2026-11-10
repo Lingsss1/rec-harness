@@ -1,0 +1,103 @@
+--- g1-r0009-compact_mean/model.py
++++ g1-r0011-mean_compute_control/model.py
+@@ -1,15 +1,16 @@
+-"""Pruned mean-history residual on the frozen g0 representation.
+-
+-Local evidence: g1-r0008-mean_residual marginally exceeded adaptive retrieval
+-at one seed. Its uniform wide-value weights have no dependence on queries,
+-event keys, task mixing or token content. Remove that dead forward/backward
+-path, retaining the original low-rank normalized zero-start residual.
+-The DIN-summary arm is an equal-active-capacity replacement control.
+-
+-The historical constructor is replayed before deleting unused modules, solely
+-to preserve active tensor initialization and the caller CPU RNG stream. No
+-retired module remains registered with the optimizer. Numerical equivalence
+-and actual runtime must be checked by the host; no bitwise claim is made.
++"""Fixed fusion of complete mean and DIN summaries at inherited capacity.
++
++Prospective study: g1-t001-coherent-summary-blend in proposal.json.
++Mean and signed DIN endpoints have different four-task trade-offs, while
++item/action coordinate splices did not beat the complete mean endpoint.
++Test equal fusion AFTER separate normalization through shared low-rank maps.
++The uniform control computes the same two transforms with coefficients (1,0).
++No external-method reproduction, novelty or new performance is claimed.
++
++All g0 representation/interaction/readout code and compact ancestor parameter
++initialization are inherited. Existing parameters are shared across summary
++sources. Numerical equivalence, active gradients, masking and cost are host
++preflight requirements; the coding environment has no tensor runtime.
+ """
+ import math
+ import torch
+@@ -202,26 +203,37 @@
+         self.tasks = tasks
+ 
+     def forward(self, values, valid, din_summary):
+-        # Keep the ancestor's [B,4,V] residual operation shapes. Each task
+-        # receives the same input, but this avoids an additional numerical
+-        # change from collapsing four identical linear/LayerNorm operations.
+-        if self.summary_mode == 'din':
+-            summary = din_summary[:, None, :].expand(-1, self.tasks, -1)
++        # Both arms compute complete seven-field summaries and both shared
++        # transforms. No item/action coordinates are spliced. Keep inherited
++        # [B,4,V] operation shapes and the zero null for an empty history.
++        values = torch.where(valid.unsqueeze(-1), values,
++                             torch.zeros_like(values))
++        values = torch.cat([values, values.new_zeros(
++            values.shape[0], 1, values.shape[-1])], dim=1)
++        extended_valid = torch.cat([valid, ~valid.any(dim=1, keepdim=True)], dim=1)
++        with torch.autocast(device_type=values.device.type, enabled=False):
++            weights = extended_valid.float()
++            weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1.0)
++            weights = weights[:, None, :].expand(-1, self.tasks, -1).contiguous()
++        mean_summary = torch.bmm(weights.to(values.dtype), values)
++        target_summary = din_summary[:, None, :].expand(-1, self.tasks, -1)
++        mean_direction = self.value_norm(
++            self.value_up(self.value_down(mean_summary)))
++        target_direction = self.value_norm(
++            self.value_up(self.value_down(target_summary)))
++        # Separate normalization prevents unnormalized signed DIN magnitude
++        # from deciding the fixed fusion weights. No second normalization.
++        # The zero-weight arm stays in the graph; every map is shared and
++        # active through the mean path, with no extra trainable parameter.
++        if self.summary_mode == 'coherent_blend':
++            din_fraction = 0.5
++        elif self.summary_mode == 'din':
++            din_fraction = 1.0
+         else:
+-            # Append a zero null value; it is valid only for empty histories.
+-            # FP32 weights and BF16 bmm mirror the historical pooling route.
+-            values = torch.where(valid.unsqueeze(-1), values,
+-                                 torch.zeros_like(values))
+-            values = torch.cat([values, values.new_zeros(
+-                values.shape[0], 1, values.shape[-1])], dim=1)
+-            extended_valid = torch.cat([valid, ~valid.any(dim=1, keepdim=True)], dim=1)
+-            with torch.autocast(device_type=values.device.type, enabled=False):
+-                weights = extended_valid.float()
+-                weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1.0)
+-                weights = weights[:, None, :].expand(-1, self.tasks, -1).contiguous()
+-            summary = torch.bmm(weights.to(values.dtype), values)
+-        summary = self.value_norm(self.value_up(self.value_down(summary)))
+-        update = self.output(summary)
++            din_fraction = 0.0
++        direction = ((1.0 - din_fraction) * mean_direction
++                     + din_fraction * target_direction)
++        update = self.output(direction)
+         return torch.where(valid.any(dim=1)[:, None, None], update,
+                            torch.zeros_like(update))
+ 
+@@ -418,12 +430,10 @@
+             raise ValueError('Unknown query refinement memory')
+         if retrieval_state not in ('content', 'identity'):
+             raise ValueError('Unknown retrieval-state replacement')
+-        if retrieval_summary not in ('adaptive', 'uniform', 'din'):
+-            raise ValueError('Unknown retrieval-summary replacement')
++        if retrieval_summary not in ('uniform', 'din', 'coherent_blend'):
++            raise ValueError('Unknown complete-summary source')
+         if (terminal_prior, query_memory, retrieval_state) != ('none', 'state_uniform', 'content'):
+             raise ValueError('Pruned study fixes the ancestor mean-residual settings')
+-        if retrieval_summary not in ('uniform', 'din'):
+-            raise ValueError('Pruned study supports uniform or DIN summaries')
+         self.retrieval_state = retrieval_state
+         self.feedback_content_mode = feedback_content_mode
+         self.content_bank_mode = content_bank_mode

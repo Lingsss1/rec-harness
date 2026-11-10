@@ -1,0 +1,105 @@
+--- g0-r0001-grouped_recency/model.py
++++ g0-r0002-coordinate_partition/model.py
+@@ -1,11 +1,10 @@
+-"""Prospective field-group x temporal-summary representation study.
+-
+-Inherited: g0-r0000-recency_slots DIN scorer, embeddings, raw static/global
+-bypasses, masked JointBlock, and four towers. Intervention: each of five
+-summaries becomes three field-group tokens or three whole-summary replicas.
+-The 2x2 design crosses this replacement with recency versus global pooling.
+-HiFormer already uses post-pooling field tokenization. This is a local adapted
+-hypothesis, with no original-method reproduction or verified novelty claim.
++"""Prospective atomic-field versus coordinate-partition representation study.
++
++Inherited from g0-r0001-grouped_recency: embeddings, DIN summary weights,
++global/rank-quartile pooling, raw bypasses, JointBlock and four task towers.
++Each of five summaries becomes seven tokens. Only the fixed content-selection
++buffer differs across the three matched arms. Fieldwise pooled tokenization
++has prior precedent in the pinned HiFormer implementation; novelty unverified.
+ """
+ import math
+ import torch
+@@ -22,7 +21,7 @@
+     'token_dim': 32,
+     'num_heads': 2,
+     'slot_mode': 'recency',
+-    'representation_mode': 'grouped',
++    'representation_mode': 'coordinates',
+ }
+ 
+ 
+@@ -60,10 +59,10 @@
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='FieldTimeSummaryStudy', gpu=-1,
++    def __init__(self, feature_map, model_id='AtomicSummaryStudy', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), token_dim=32, num_heads=2,
+-                 slot_mode='recency', representation_mode='grouped', num_tasks=None,
++                 slot_mode='recency', representation_mode='coordinates', num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+@@ -75,7 +74,7 @@
+             raise ValueError('token_dim must be divisible by num_heads')
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+-        if representation_mode not in ('grouped', 'replicas'):
++        if representation_mode not in ('fields', 'coordinates', 'replicas'):
+             raise ValueError('Unknown history representation')
+         self.slot_mode = slot_mode
+         self.representation_mode = representation_mode
+@@ -92,24 +91,27 @@
+         self.key_width = len(self.item_fields) * embedding_dim
+         self.value_width = self.key_width + embedding_dim
+         self.static_count = len(self.user_fields) + len(self.item_fields)
+-        # All four arms have the same fifteen history tokens and parameters.
+-        self.group_count = 3
++        # All three arms have 35 summary tokens and identical parameters.
++        value_fields = self.item_fields + [self.action_field]
++        expected = {'item_id', 'cate_id', 'campaign_id', 'customer_id',
++                    'brand', 'price_bucket', 'action'}
++        if set(value_fields) != expected or len(value_fields) != 7:
++            raise ValueError('Expected the frozen six item fields plus action')
++        self.group_count = len(value_fields)
+         self.token_count = self.static_count + 5 * self.group_count
+-        groups = ({'item_id', 'campaign_id', 'customer_id'},
+-                  {'cate_id', 'brand'}, {'price_bucket', self.action_field})
+-        value_fields = self.item_fields + [self.action_field]
+-        if set(value_fields) != set().union(*groups) or len(value_fields) != 7:
+-            raise ValueError('Expected the frozen six item fields plus action')
+-        # Coordinate masks select disjoint semantic field groups. No learned
+-        # field-specific projection parameters are added relative to replicas.
+         selection = torch.zeros(self.group_count, self.value_width)
+-        for field_index, name in enumerate(value_fields):
+-            group_index = next(i for i, group in enumerate(groups) if name in group)
+-            selection[group_index, field_index * embedding_dim:
+-                      (field_index + 1) * embedding_dim] = 1.0
+-        if representation_mode == 'replicas':
+-            # Preserve total pre-projection squared content norm across the
+-            # three copies, matching the disjoint decomposition's norm.
++        if representation_mode == 'fields':
++            # Preserve each complete embedding field as one representation unit.
++            for field_index in range(self.group_count):
++                selection[field_index, field_index * embedding_dim:
++                          (field_index + 1) * embedding_dim] = 1.0
++        elif representation_mode == 'coordinates':
++            # Deterministic equal-size partition, without intact field units.
++            # Every coordinate occurs exactly once; no RNG or sample lookup.
++            for coordinate in range(self.value_width):
++                selection[coordinate % self.group_count, coordinate] = 1.0
++        else:
++            # Equal total pre-projection squared content norm to both partitions.
+             selection.fill_(1.0 / math.sqrt(self.group_count))
+         self.register_buffer('content_selection', selection)
+         layers = []
+@@ -192,7 +194,7 @@
+         pooled = pooled * slot_valid.unsqueeze(-1).to(pooled.dtype)
+         log_counts = torch.log1p(counts.float()) / math.log(101.0)
+         log_counts = log_counts.to(pooled.dtype)
+-        # [B, five temporal slots, three groups, value_width]. The selection
++        # [B, five temporal slots, seven units, value_width]. The selection
+         # changes only content assignment; all trainable dimensions are shared.
+         grouped = (pooled[:, :, None, :]
+                    * self.content_selection[None, None, :, :].to(pooled.dtype))

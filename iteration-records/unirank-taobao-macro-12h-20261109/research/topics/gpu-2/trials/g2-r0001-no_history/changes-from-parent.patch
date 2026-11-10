@@ -1,0 +1,94 @@
+--- g2-r0000-target_early/model.py
++++ g2-r0001-no_history/model.py
+@@ -1,9 +1,10 @@
+-"""Eight disjoint history slots: a prospective 2x2 compression study.
++"""Prospective information-path study of target-routed history compression.
+ 
+-Only the released history mask, item fields, action embeddings, and target
+-fields are used. Category/brand equality is a representation choice, not
+-advertisement-specific conversion attribution. No empirical gain is claimed.
+-All four standalone variants have identical parameter shapes and init order.
++Inherited from g2-r0000-target_early. The new candidate replaces learned
++slot weights with one; controls remove explicit counts, compressed content,
++or both. All variants preserve parameter shapes and initialization order.
++Dormant parameters remain registered, so equal allocated size does not mean
++equal effective capacity. These are interventions, not measured improvements.
+ """
+ import torch
+ from torch import nn
+@@ -21,6 +22,9 @@
+     'grouping': 'target_fields',
+     'compression': 'early',
+     'recent_window': 16,
++    'slot_weighting': 'learned',
++    'include_content': False,
++    'include_counts': False,
+ }
+ 
+ 
+@@ -30,7 +34,10 @@
+                  attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64),
+                  grouping=CONFIG['grouping'], compression=CONFIG['compression'],
+-                 recent_window=16, num_tasks=None,
++                 recent_window=16,
++                 slot_weighting=CONFIG['slot_weighting'],
++                 include_content=CONFIG['include_content'],
++                 include_counts=CONFIG['include_counts'], num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+@@ -38,10 +45,19 @@
+             raise ValueError('Unknown grouping')
+         if compression not in ('early', 'late'):
+             raise ValueError('Unknown compression timing')
++        if slot_weighting not in ('learned', 'uniform'):
++            raise ValueError('Unknown slot weighting')
++        if not isinstance(include_content, bool) or not isinstance(include_counts, bool):
++            raise ValueError('Information-path switches must be bool')
++        if slot_weighting == 'uniform' and compression != 'early':
++            raise ValueError('Uniform weighting is defined only for early compression')
+         if recent_window <= 0:
+             raise ValueError('recent_window must be positive')
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
++        self.slot_weighting = slot_weighting
++        self.include_content = include_content
++        self.include_counts = include_counts
+         self.grouping = grouping
+         self.compression = compression
+         self.recent_window = recent_window
+@@ -144,7 +160,12 @@
+         elif self.compression == 'early':
+             mean_keys = torch.bmm(members.to(keys.dtype), keys) / divisor
+             mean_values = torch.bmm(members.to(values.dtype), values) / divisor
+-            weights = self._score(target, mean_keys)
++            # Target dependence remains in deterministic membership and readout.
++            # Keep local_activation registered for identical initialization order,
++            # but bypass its computation for the ungated candidate.
++            weights = (self._score(target, mean_keys)
++                       if self.slot_weighting == 'learned'
++                       else torch.ones_like(counts, dtype=mean_values.dtype))
+             slot_values = mean_values * weights[:, :, None]
+         else:
+             weights = self._score(target, keys) * (mask > 0).to(keys.dtype)
+@@ -156,8 +177,17 @@
+         slots = self.slot_projection(slot_values)
+         # Retain signed local activation outputs; no extra slot nonlinearity.
+         slots = slots * occupied.to(slots.dtype)
+-        # Counts preserve exposure frequency discarded by slot means.
++        # These removals are applied after identical parent computations to
++        # isolate information paths without reallocating tower input columns.
++        # Controls deliberately retain upstream work; they are not optimized
++        # deployment implementations. Removing explicit counts does not remove
++        # occupancy or finite-sample information implicit in the mean content.
++        if not self.include_content:
++            slots = slots * 0.0
++        count_features = counts.to(context.dtype) / 100.0
++        if not self.include_counts:
++            count_features = count_features * 0.0
+         features = torch.cat((context, target, slots.flatten(start_dim=1),
+-                              counts.to(context.dtype) / 100.0), dim=-1)
++                              count_features), dim=-1)
+         return {label + '_pred': torch.sigmoid(tower(features))
+                 for label, tower in zip(self.feature_map.labels, self.towers)}

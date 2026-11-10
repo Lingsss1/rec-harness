@@ -1,0 +1,146 @@
+--- g0-r0011-memory_joint_collapsed/model.py
++++ g0-r0013-pair_joint_content/model.py
+@@ -1,14 +1,13 @@
+-"""Separately addressable feedback/time memory, with a matched 2x2 contrast.
+-
+-All incumbent factorized feedback and relation paths remain. The added memory
+-has 20 slots: global/four rank bins by four historical feedback masks. Choose
+-actual feedback-selected item content or rate-times-unconditional content;
+-keep four content vectors or broadcast their mean. Individual counts, slot
+-identities, validity, constructors and attention are identical in every arm.
+-Existing field/relation tokens read this memory before their JointBlock.
+-The new residual output starts at zero; inherited initialization is retained.
+-Behavior pooling and proxy cross-attention are related to INFNet. This is a
+-local adaptation and discriminating follow-up, with no originality claim.
++"""Same-event target-field conjunctions, with a content/count 2x2 control.
++
++The incumbent summarizes six item-field matches separately. Add summaries of
++all 15 unordered match pairs in the same five temporal bins. The joint source
++uses same-event intersections. The factorized source uses only the parent's
++marginal counts and content sums. Content and count sources vary independently.
++Each pair has an equal-size zero-start projection and contributes to its two
++existing relation tokens; no new downstream tokens or attention keys are added.
++All inherited modules, initialization, masks, task heads and loss are retained.
++This is an untested local representation hypothesis, not a novelty claim.
+ """
+ import math
+ import torch
+@@ -36,6 +35,8 @@
+     'feedback_content_mode': 'factorized',
+     'memory_source': 'joint',
+     'memory_layout': 'collapsed',
++    'pair_content_source': 'joint',
++    'pair_count_source': 'factorized',
+ }
+ 
+ 
+@@ -175,6 +176,7 @@
+                  moment_component='full', residual_mode='copy', bank_mode='relation',
+                  content_bank_mode='relation', feedback_content_mode='factorized',
+                  memory_source='joint', memory_layout='collapsed',
++                 pair_content_source='joint', pair_count_source='factorized',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -221,6 +223,12 @@
+             raise ValueError('Unknown memory source')
+         if memory_layout not in ('separate', 'collapsed'):
+             raise ValueError('Unknown memory layout')
++        if pair_content_source not in ('joint', 'factorized'):
++            raise ValueError('Unknown pair content source')
++        if pair_count_source not in ('joint', 'factorized'):
++            raise ValueError('Unknown pair count source')
++        self.pair_content_source = pair_content_source
++        self.pair_count_source = pair_count_source
+         self.feedback_content_mode = feedback_content_mode
+         self.content_bank_mode = content_bank_mode
+         self.bank_mode = bank_mode
+@@ -319,7 +327,78 @@
+         with torch.random.fork_rng(devices=[]):
+             self.feedback_memory = FeedbackMemory(
+                 self.key_width, token_dim, num_heads, memory_source, memory_layout)
++        # No constructor or random draw follows inherited initialization.
++        # Relation zero is global; pair indices address only the six fields.
++        pairs = [(left + 1, right + 1)
++                 for left in range(len(self.match_fields))
++                 for right in range(left + 1, len(self.match_fields))]
++        self.pair_bank = nn.Parameter(
++            torch.zeros(len(pairs), self.value_width + 1, token_dim))
++        self.register_buffer('pair_left', torch.tensor(
++            [left for left, right in pairs], dtype=torch.long))
++        self.register_buffer('pair_right', torch.tensor(
++            [right for left, right in pairs], dtype=torch.long))
++        routes = torch.zeros(len(pairs), self.group_count)
++        scale = 1.0 / math.sqrt(len(self.match_fields) - 1)
++        for index, (left, right) in enumerate(pairs):
++            routes[index, left] = scale
++            routes[index, right] = scale
++        self.register_buffer('pair_routes', routes)
+         self.model_to_device()
++
++    def _pair_tokens(self, values, weights, relation_masks, relation_counts):
++        """Conjunctive content/counts versus symmetric marginal estimates.
++
++        Let n be temporal support, n_r a relation count, and S_r the parent's
++        signed content sum (scaled by sqrt(7)). The marginal estimates are
++        n_rs=n_r*n_s/n and S_rs=(n_s*S_r+n_r*S_s)/(2*n).
++        These controls use only information already in the parent. They are
++        approximations, not asserted data-generating independence models.
++        All arms compute both sources; parameters and contractions match.
++        """
++        batch, length, _ = values.shape
++        if not length:
++            return values.new_zeros((batch, 5, self.group_count,
++                                     self.pair_bank.shape[-1]))
++        with torch.autocast(device_type=values.device.type, enabled=False):
++            left = relation_masks.index_select(2, self.pair_left)
++            right = relation_masks.index_select(2, self.pair_right)
++            joint_mask = left & right
++            joint_count = joint_mask.sum(dim=-1, keepdim=True).float()
++            pair_weights = joint_mask.float() * weights.float()[:, None, None, :]
++            joint_content = torch.bmm(pair_weights.flatten(1, 2), values.float())
++            joint_content = joint_content.reshape(
++                batch, 5, self.pair_bank.shape[0], self.value_width)
++            joint_content = joint_content / math.sqrt(self.group_count)
++            counts = relation_counts.float().unsqueeze(-1)
++            support = counts[:, :, :1, :].clamp_min(1.0)
++            left_count = counts.index_select(2, self.pair_left)
++            right_count = counts.index_select(2, self.pair_right)
++            factorized_count = left_count * right_count / support
++            # Recompute marginal sums in the SAME FP32 arithmetic as joint
++            # sums, rather than granting the joint arm higher precision than
++            # the parent's BF16 grouped tensor. This adds no sample inputs.
++            marginal_weights = relation_masks.float() * weights.float()[:, None, None, :]
++            marginal_content = torch.bmm(marginal_weights.flatten(1, 2), values.float())
++            marginal_content = marginal_content.reshape(
++                batch, 5, self.group_count, self.value_width)
++            marginal_content = marginal_content / math.sqrt(self.group_count)
++            left_content = marginal_content.index_select(2, self.pair_left)
++            right_content = marginal_content.index_select(2, self.pair_right)
++            factorized_content = 0.5 * (
++                (right_count / support) * left_content
++                + (left_count / support) * right_content)
++            content = (joint_content if self.pair_content_source == 'joint'
++                       else factorized_content)
++            count = (joint_count if self.pair_count_source == 'joint'
++                     else factorized_count)
++            log_count = torch.log1p(count) / math.log(101.0)
++            source = torch.cat([content, log_count], dim=-1)
++        # Summary accumulation is FP32. Projection follows host BF16 autocast,
++        # like the incumbent content banks. No signed denominator is used.
++        projected = torch.einsum('btpv,pvd->btpd', source, self.pair_bank)
++        return torch.einsum('btpd,pg->btgd', projected,
++                            self.pair_routes.to(projected.dtype))
+ 
+     def _feedback_source(self, joint, factorized, total):
+         if self.feedback_content_mode == 'factorized':
+@@ -613,6 +692,9 @@
+         feedback_tokens = self._feedback_content_tokens(
+             values, weights, relation_masks, valid, task_masks)
+         slot_tokens = slot_tokens + feedback_tokens.to(slot_tokens.dtype)
++        pair_tokens = self._pair_tokens(values, weights, relation_masks,
++                                        relation_counts)
++        slot_tokens = slot_tokens + pair_tokens.to(slot_tokens.dtype)
+         slot_tokens = slot_tokens.flatten(1, 2)
+         # Validity is temporal in EVERY arm, so group occupancy is not leaked
+         # by the attention mask when the explicit count input is ablated.

@@ -1,0 +1,135 @@
+--- g1-r0001-lowrank_static/model.py
++++ g1-r0002-value_feedback_only/model.py
+@@ -1,12 +1,13 @@
+-"""Wide historical values with evolving field/event routing.
+-
+-Prospective 2x2: uncompressed versus learned low-rank historical values,
+-crossed with an enabled versus suppressed field-to-event write. This inherits
+-the local exchange implementation; it is not a new-method priority claim.
+-The final route uses evolved task queries and event keys, but its values are
+-only the original visible historical field/action embeddings. A value bypass
+-does not undo the compressed routing keys. Both value paths are computed in
+-all arms, with equal registered parameters and forward operation counts.
++"""Separate field-to-event feedback into routing keys and message values.
++
++Prospective 2x2: apply the inherited reverse write to retrieval keys, message
++values, both, or neither. The candidate anchors keys to their initial visible
++event representation while values can absorb the evolved field state. This
++is a local mechanism contrast, not a verified novelty claim. Static keys are
++still learned and receive gradients; no stop-gradient operation is applied.
++The final task pool always reads the inherited low-rank raw-event values,
++using the selected key stream. All arms compute the same write and register
++the same parameters. Standalone copies differ only in literal CONFIG flags.
+ """
+ import math
+ import torch
+@@ -22,7 +23,8 @@
+     'num_heads': 2,
+     'dynamic_query': True,
+     'raw_values': False,
+-    'event_feedback': False,
++    'key_feedback': False,
++    'value_feedback': True,
+     'tower_hidden_units': [128, 64],
+ }
+ 
+@@ -41,17 +43,23 @@
+         self.value = nn.Linear(width, width, bias=False)
+         self.output = nn.Linear(width, width, bias=False)
+ 
+-    def forward(self, query, memory, key_mask=None):
++    def forward(self, query, memory, key_mask=None, value_memory=None):
+         batch, queries, width = query.shape
+         query = self.query_norm(query)
+         memory = self.memory_norm(memory)
++        # Share the original normalization and projection parameters between
++        # streams. Only their input representations are intervened on.
++        values = memory if value_memory is None else self.memory_norm(value_memory)
+         attention_mask = None
+         if key_mask is not None:
+             valid = key_mask.bool()
+             memory = torch.where(valid.unsqueeze(-1), memory,
+                                  torch.zeros_like(memory))
++            values = torch.where(valid.unsqueeze(-1), values,
++                                 torch.zeros_like(values))
+             # Append after normalization so LN biases cannot affect the null.
+             memory = torch.cat([memory, memory.new_zeros(batch, 1, width)], dim=1)
++            values = torch.cat([values, values.new_zeros(batch, 1, width)], dim=1)
+             valid = torch.cat([valid, ~valid.any(dim=1, keepdim=True)], dim=1)
+             attention_mask = valid[:, None, None, :]
+         length = memory.shape[1]
+@@ -59,7 +67,7 @@
+                                       self.head_width).transpose(1, 2)
+         k = self.key(memory).reshape(batch, length, self.heads,
+                                     self.head_width).transpose(1, 2)
+-        v = self.value(memory).reshape(batch, length, self.heads,
++        v = self.value(values).reshape(batch, length, self.heads,
+                                       self.head_width).transpose(1, 2)
+         attended = F.scaled_dot_product_attention(
+             q, k, v, attn_mask=attention_mask, dropout_p=0.0, is_causal=False)
+@@ -111,11 +119,12 @@
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='WideValueExchange', gpu=-1,
++    def __init__(self, feature_map, model_id='SplitFeedbackExchange', gpu=-1,
+                  embedding_dim=16, token_dim=32, num_heads=2,
+                  dynamic_query=CONFIG['dynamic_query'],
+                  raw_values=CONFIG['raw_values'],
+-                 event_feedback=CONFIG['event_feedback'],
++                 key_feedback=CONFIG['key_feedback'],
++                 value_feedback=CONFIG['value_feedback'],
+                  tower_hidden_units=(128, 64), num_tasks=None,
+                  task='binary_classification', **kwargs):
+         labels = feature_map.labels
+@@ -123,13 +132,15 @@
+             raise ValueError('Task count mismatch')
+         if token_dim < 1 or num_heads < 1 or token_dim % num_heads:
+             raise ValueError('token_dim must be divisible by num_heads')
+-        if not all(isinstance(flag, bool) for flag in (dynamic_query, raw_values, event_feedback)):
++        if not all(isinstance(flag, bool) for flag in
++                   (dynamic_query, raw_values, key_feedback, value_feedback)):
+             raise ValueError('Path controls must be boolean')
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(labels), task=task, **kwargs)
+         self.dynamic_query = float(dynamic_query)
+         self.raw_values = float(raw_values)
+-        self.event_feedback = float(event_feedback)
++        self.key_feedback = float(key_feedback)
++        self.value_feedback = float(value_feedback)
+         self.token_dim = token_dim
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -203,21 +214,28 @@
+         rank = valid.long().cumsum(dim=1)
+         events = self.event_projection(event_inputs) + self.history_position[rank]
+         events = torch.where(valid.unsqueeze(-1), events, torch.zeros_like(events))
++        event_keys = events
++        event_values = events
+ 
+         for round_index, mixer in enumerate(self.after_read):
+             # Scalar path interventions keep parameter shapes, initial weights,
+             # module order and forward operation counts identical in all arms.
+             query = query_seed + self.dynamic_query * (fields - query_seed)
+-            evidence = self.read(query, events, valid)
++            evidence = self.read(query, event_keys, valid,
++                                 value_memory=event_values)
+             fields = mixer(fields + 0.5 * evidence)
+             if round_index == 0 and length > 0:
+                 delta = self.write(events, fields)
+-                events = events + 0.5 * self.event_feedback * delta
+-                events = torch.where(valid.unsqueeze(-1), events, torch.zeros_like(events))
++                event_keys = events + 0.5 * self.key_feedback * delta
++                event_values = events + 0.5 * self.value_feedback * delta
++                event_keys = torch.where(valid.unsqueeze(-1), event_keys,
++                                         torch.zeros_like(event_keys))
++                event_values = torch.where(valid.unsqueeze(-1), event_values,
++                                           torch.zeros_like(event_values))
+ 
+         fields = self.final_norm(fields)
+         task_states = fields[:, self.field_count:]
+-        wide_summary = self.read.pool_values(task_states, events, event_inputs, valid)
++        wide_summary = self.read.pool_values(task_states, event_keys, event_inputs, valid)
+         # Linear compression commutes with weighted summation. This is the
+         # same low-rank value replacement as encoding every event first,
+         # implemented after pooling to avoid an extra sequence-wide matmul.

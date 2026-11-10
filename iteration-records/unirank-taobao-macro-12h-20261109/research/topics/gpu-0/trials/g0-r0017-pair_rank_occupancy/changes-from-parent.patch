@@ -1,0 +1,85 @@
+--- g0-r0016-pair_rank_joint/model.py
++++ g0-r0017-pair_rank_occupancy/model.py
+@@ -1,11 +1,9 @@
+-"""Rank-sensitive same-event conjunction summaries with matched source controls.
+-
+-Retain the g0-r0013 pair-content/count incumbent in full. A separate zero-start
+-bank projects the first rank moment of pair-match content, its symmetric
+-marginal estimate, or a copy of existing joint content. A fourth cell disables
+-the new update. All sources are computed in every arm; no tokens or masks are
+-added. Rank is relative valid-event order, not elapsed time. This is an
+-untested local hypothesis; no priority or original-method reproduction claim.
++"""Decompose pair-rank information into placement and within-pair variation.
++
++All inherited paths remain unchanged. Replace only the input of the existing
++zero-start pair-rank bank: W=M-mu*S, O=mu*S, or full M. The unweighted pair
++centroid mu uses the parent's temporal rank basis and valid pair support.
++This is a prospective local mechanism test, not an originality claim.
+ """
+ import math
+ import torch
+@@ -36,6 +34,7 @@
+     'pair_content_source': 'joint',
+     'pair_count_source': 'joint',
+     'pair_rank_source': 'joint',
++    'pair_rank_component': 'occupancy',
+ }
+ 
+ 
+@@ -176,7 +175,7 @@
+                  content_bank_mode='relation', feedback_content_mode='factorized',
+                  memory_source='joint', memory_layout='collapsed',
+                  pair_content_source='joint', pair_count_source='joint',
+-                 pair_rank_source='joint',
++                 pair_rank_source='joint', pair_rank_component='occupancy',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -229,6 +228,11 @@
+             raise ValueError('Unknown pair count source')
+         if pair_rank_source not in ('joint', 'marginal', 'copy', 'zero'):
+             raise ValueError('Unknown pair rank source')
++        if pair_rank_component not in ('within', 'occupancy', 'full'):
++            raise ValueError('Unknown pair rank component')
++        if pair_rank_source != 'joint':
++            raise ValueError('Pair decomposition requires the joint rank source')
++        self.pair_rank_component = pair_rank_component
+         self.pair_rank_source = pair_rank_source
+         self.pair_content_source = pair_content_source
+         self.pair_count_source = pair_count_source
+@@ -442,6 +446,8 @@
+             right_moment = marginal_moment.index_select(2, self.pair_right)
+             marginal = 0.5 * ((right_count / support) * left_moment
+                               + (left_count / support) * right_moment)
++            joint_moment = self._select_pair_rank_component(
++                joint_moment, joint_content, joint_mask, coefficients)
+             if self.pair_rank_source == 'marginal':
+                 source = marginal
+             elif self.pair_rank_source == 'copy':
+@@ -456,6 +462,26 @@
+             projected = projected * 0.0
+         return torch.einsum('btpd,pg->btgd', projected,
+                             self.pair_routes.to(projected.dtype))
++
++    def _select_pair_rank_component(self, moment, content, pair_mask, coefficients):
++        """M=W+O on joint pair support, without signed normalization.
++
++        mu is the unweighted pair centroid in the original temporal basis.
++        Empty support yields zero; a singleton has W=0 in exact arithmetic.
++        W also vanishes for constant weighted content on the pair support.
++        All cells compute both components; full returns the original tensor.
++        Called inside the inherited FP32 autocast-disabled summary block.
++        """
++        count = pair_mask.sum(dim=-1, keepdim=True).float()
++        centroid = (pair_mask * coefficients[:, :, None, :]).sum(
++            dim=-1, keepdim=True) / count.clamp_min(1.0)
++        occupancy = centroid * content
++        within = moment - occupancy
++        if self.pair_rank_component == 'within':
++            return within
++        if self.pair_rank_component == 'occupancy':
++            return occupancy
++        return moment
+ 
+     def _feedback_source(self, joint, factorized, total):
+         if self.feedback_content_mode == 'factorized':

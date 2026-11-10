@@ -9,3 +9,4 @@
 | [Amazon 四类别同预算迭代](amazon-aligned-20261022-27/README.md) | 2026 年 10 月 22 至 27 日；MLEvolve、MLE-STAR、Self-EvolveRec、RecHarness；459 条试验记录 | 9 次搜索完成、5 次中断；另 2 次仅准备/预检；含原预算单模型重评与去集成重跑 |
 | [BERT4Rec 三方法完整实验](amazon-bert4rec-20261029-31/README.md) | 2026 年 10 月 29 至 31 日；RecHarness、Self-EvolveRec、MLE-STAR；221 个候选、2,133 次调用 | 三次搜索均完成；每项 43,200 GPU 秒；含逐数据集结果、源码差异、恢复证据及 token 用量 |
 | [UniRank 固定模型跨数据集测试](unirank-generalization-20261108-09/README.md) | 2026年11月8日至9日，QK-Video、KuaiRand、TAAC-25、MerRec；候选与DIN共8组，17项任务对照 | 四数据集平均AUC均改善；TAAC转化、MerRec加购等三项任务AUC退步；单种子，报告参数量和实测成本 |
+| [UniRank 淘宝 12h 平均AUC研究](unirank-taobao-macro-12h-20261109/README.md) | 2026-11-09，74轮、267次课题训练、85次Agent调用、11个动态课题 | 按四任务平均AUC选择；最终前三测试与成本、全部源码/上下文/对照及逐轮保留模型；g3-r0006四数据集已完成，最终g3-r0018泛化运行中快照 |

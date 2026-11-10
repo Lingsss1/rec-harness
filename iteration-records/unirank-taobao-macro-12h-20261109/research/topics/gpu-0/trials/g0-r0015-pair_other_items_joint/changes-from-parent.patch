@@ -1,0 +1,90 @@
+--- g0-r0013-pair_joint_both/model.py
++++ g0-r0015-pair_other_items_joint/model.py
+@@ -35,7 +35,8 @@
+     'feedback_content_mode': 'factorized',
+     'memory_source': 'joint',
+     'memory_layout': 'collapsed',
+-    'pair_content_source': 'joint',
++    'pair_other_item_source': 'joint',
++    'pair_action_source': 'factorized',
+     'pair_count_source': 'joint',
+ }
+ 
+@@ -176,7 +177,8 @@
+                  moment_component='full', residual_mode='copy', bank_mode='relation',
+                  content_bank_mode='relation', feedback_content_mode='factorized',
+                  memory_source='joint', memory_layout='collapsed',
+-                 pair_content_source='joint', pair_count_source='joint',
++                 pair_other_item_source='joint', pair_action_source='factorized',
++                 pair_count_source='joint',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -223,11 +225,14 @@
+             raise ValueError('Unknown memory source')
+         if memory_layout not in ('separate', 'collapsed'):
+             raise ValueError('Unknown memory layout')
+-        if pair_content_source not in ('joint', 'factorized'):
+-            raise ValueError('Unknown pair content source')
+-        if pair_count_source not in ('joint', 'factorized'):
+-            raise ValueError('Unknown pair count source')
+-        self.pair_content_source = pair_content_source
++        if pair_other_item_source not in ('joint', 'factorized'):
++            raise ValueError('Unknown other-item content source')
++        if pair_action_source not in ('joint', 'factorized'):
++            raise ValueError('Unknown historical-action content source')
++        if pair_count_source != 'joint':
++            raise ValueError('This study fixes pair counts to joint')
++        self.pair_other_item_source = pair_other_item_source
++        self.pair_action_source = pair_action_source
+         self.pair_count_source = pair_count_source
+         self.feedback_content_mode = feedback_content_mode
+         self.content_bank_mode = content_bank_mode
+@@ -344,6 +349,18 @@
+             routes[index, left] = scale
+             routes[index, right] = scale
+         self.register_buffer('pair_routes', routes)
++        # Coordinate masks use the same ordering as values in forward:
++        # item_fields (six blocks) followed by the historical action block.
++        # Neither mask is learned, and these allocations consume no RNG.
++        defining = torch.zeros(len(pairs), self.value_width, dtype=torch.bool)
++        for index, (left, right) in enumerate(pairs):
++            for relation in (left, right):
++                start = (relation - 1) * embedding_dim
++                defining[index, start:start + embedding_dim] = True
++        self.register_buffer('pair_defining_coordinates', defining)
++        action_coordinates = torch.zeros(self.value_width, dtype=torch.bool)
++        action_coordinates[self.key_width:] = True
++        self.register_buffer('pair_action_coordinates', action_coordinates)
+         self.model_to_device()
+ 
+     def _pair_tokens(self, values, weights, relation_masks, relation_counts):
+@@ -354,6 +371,9 @@
+         n_rs=n_r*n_s/n and S_rs=(n_s*S_r+n_r*S_s)/(2*n).
+         These controls use only information already in the parent. They are
+         approximations, not asserted data-generating independence models.
++        Pair-defining blocks always use joint content. The remaining four
++        item blocks and the one historical-action block independently use
++        joint or factorized content. Pair counts are joint in every cell.
+         All arms compute both sources; parameters and contractions match.
+         """
+         batch, length, _ = values.shape
+@@ -388,8 +408,17 @@
+             factorized_content = 0.5 * (
+                 (right_count / support) * left_content
+                 + (left_count / support) * right_content)
+-            content = (joint_content if self.pair_content_source == 'joint'
++            other_items = (joint_content
++                           if self.pair_other_item_source == 'joint'
++                           else factorized_content)
++            actions = (joint_content if self.pair_action_source == 'joint'
+                        else factorized_content)
++            # Exact selection rather than subtract/re-add preserves the two
++            # inherited corners in FP32, including cancellation-heavy sums.
++            other = torch.where(self.pair_action_coordinates[None, None, None],
++                                actions, other_items)
++            content = torch.where(self.pair_defining_coordinates[None, None],
++                                  joint_content, other)
+             count = (joint_count if self.pair_count_source == 'joint'
+                      else factorized_count)
+             log_count = torch.log1p(count) / math.log(101.0)

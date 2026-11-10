@@ -1,0 +1,166 @@
+--- g2-r0002-feedback_factorized/model.py
++++ g2-r0003-pooled_global/model.py
+@@ -1,11 +1,10 @@
+-"""Prospective feedback-pairing study of target-routed history compression.
+-
+-Keep the incumbent eight uniform mean slots and counts. Add four feedback
+-moment channels per slot, using ONLY the supplied historical task masks.
+-The joint and factorized variants have identical parameters and compute;
+-their difference is E[z*b] versus E[z]*E[b] within each target/recency slot.
+-Composition and widened-parent controls retain the same registered modules.
+-No new measured outcome or originality claim is implied.
++"""Prospective slot-level content-feedback product attribution study.
++
++The bias-free item projection is applied to eight masked slot means.
++Local products, content-only replacement and global-rate products share
++registered modules and tower columns. Legacy source is a separate control.
++FP32 equivalence and BF16 quality/cost must be checked by the host.
++No training, measured gain or originality claim is implied by this module.
+ """
+ import torch
+ from torch import nn
+@@ -26,7 +25,7 @@
+     'slot_weighting': 'uniform',
+     'include_content': True,
+     'include_counts': True,
+-    'feedback_mode': 'factorized',
++    'feedback_mode': 'global',
+     'include_feedback_fractions': True,
+     'feedback_dim': 8,
+ }
+@@ -46,8 +45,8 @@
+                  include_feedback_fractions=CONFIG['include_feedback_fractions'],
+                  feedback_dim=8, num_tasks=None,
+                  task='binary_classification', **kwargs):
+-        if feedback_mode not in ('joint', 'factorized', 'zero'):
+-            raise ValueError('Unknown feedback moment mode')
++        if feedback_mode not in ('factorized', 'content', 'global'):
++            raise ValueError('Unknown feedback product replacement')
+         if not isinstance(include_feedback_fractions, bool):
+             raise ValueError('Feedback fraction switch must be bool')
+         if feedback_dim <= 0:
+@@ -66,6 +65,8 @@
+             raise ValueError('Information-path switches must be bool')
+         if slot_weighting == 'uniform' and compression != 'early':
+             raise ValueError('Uniform weighting is defined only for early compression')
++        if grouping != 'target_fields' or compression != 'early' or slot_weighting != 'uniform':
++            raise ValueError('This matched study requires uniform early target-field slots')
+         if recent_window <= 0:
+             raise ValueError('recent_window must be positive')
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+@@ -171,7 +172,8 @@
+         values = keys
+         if self.action_field:
+             values = torch.cat((values, item_emb[self.action_field][:, :-1]), dim=-1)
+-        # Zero invalid payloads BEFORE nonlinear scoring and reductions.
++        # Arbitrary valid-vocabulary payloads at masked positions have no path
++        # into content, membership, counts or feedback statistics.
+         valid = (mask > 0)[:, :, None]
+         keys = keys * valid.to(keys.dtype)
+         values = values * valid.to(values.dtype)
+@@ -179,70 +181,52 @@
+         members = self._membership(item, mask)
+         counts = members.sum(dim=-1)
+         divisor = counts.clamp(min=1)[:, :, None]
+-        if keys.shape[1] == 0:
+-            slot_values = target.new_zeros((target.shape[0], self.num_slots,
+-                                           self.value_width))
+-        elif self.compression == 'early':
++        batch = mask.shape[0]
++        if keys.shape[1]:
+             mean_keys = torch.bmm(members.to(keys.dtype), keys) / divisor
+             mean_values = torch.bmm(members.to(values.dtype), values) / divisor
+-            # Target dependence remains in deterministic membership and readout.
+-            # Keep local_activation registered for identical initialization order,
+-            # but bypass its computation for the ungated candidate.
+-            weights = (self._score(target, mean_keys)
+-                       if self.slot_weighting == 'learned'
+-                       else torch.ones_like(counts, dtype=mean_values.dtype))
+-            slot_values = mean_values * weights[:, :, None]
+-        else:
+-            weights = self._score(target, keys) * (mask > 0).to(keys.dtype)
+-            weighted_values = values * weights[:, :, None]
+-            slot_values = torch.bmm(members.to(weighted_values.dtype),
+-                                    weighted_values) / divisor
++        else:
++            mean_keys = keys.new_zeros((batch, self.num_slots, self.key_width))
++            mean_values = values.new_zeros((batch, self.num_slots, self.value_width))
+         occupied = (counts > 0)[:, :, None]
+-        slot_values = slot_values * occupied.to(slot_values.dtype)
+-        slots = self.slot_projection(slot_values)
+-        # Retain signed local activation outputs; no extra slot nonlinearity.
++        mean_keys = mean_keys * occupied.to(mean_keys.dtype)
++        mean_values = mean_values * occupied.to(mean_values.dtype)
++        slots = self.slot_projection(mean_values)
+         slots = slots * occupied.to(slots.dtype)
+-        # These removals are applied after identical parent computations to
+-        # isolate information paths without reallocating tower input columns.
+-        # Controls deliberately retain upstream work; they are not optimized
+-        # deployment implementations. Removing explicit counts does not remove
+-        # occupancy or finite-sample information implicit in the mean content.
+         if not self.include_content:
+             slots = slots * 0.0
+         count_features = counts.to(context.dtype) / 100.0
+         if not self.include_counts:
+             count_features = count_features * 0.0
+-        # All variants execute this same branch. Masks can overlap: a single
+-        # previous exposure may have several feedback types. Never use the
+-        # target action or current labels, and never interpret masks as four
+-        # mutually exclusive classes. Invalid events are zeroed before sums.
++
++        # Historical feedback masks may overlap; none is a current label.
++        # The denominator is ALL valid events in the slot, not positives.
+         feedback = torch.stack([(m > 0) & (mask > 0) for m in task_masks], dim=1)
+         feedback = feedback.to(members.dtype)  # B x 4 x L
+-        batch, _, length = members.shape
+-        grouped_feedback = members[:, :, None, :] * feedback[:, None, :, :]
+-        # Denominator is the number of ALL valid events in the parent slot,
+-        # not the number of positive-feedback events. Thus these are joint
+-        # moments, with explicit feedback fractions; empty slots remain zero.
+-        fractions = grouped_feedback.sum(dim=-1) / counts.clamp(min=1)[:, :, None]
+-        projected = self.feedback_projection(keys)
+-        if length:
+-            joint = torch.bmm(
+-                grouped_feedback.reshape(batch, self.num_slots * self.feedback_tasks,
+-                                         length).to(projected.dtype), projected)
+-            joint = joint.reshape(batch, self.num_slots, self.feedback_tasks,
+-                                  self.feedback_dim) / divisor[:, :, None, :]
+-            mean_projected = torch.bmm(members.to(projected.dtype), projected) / divisor
+-        else:
+-            joint = projected.new_zeros((batch, self.num_slots, self.feedback_tasks,
+-                                        self.feedback_dim))
+-            mean_projected = projected.new_zeros((batch, self.num_slots, self.feedback_dim))
+-        factorized = mean_projected[:, :, None, :] * fractions[:, :, :, None]
+-        if self.feedback_mode == 'joint':
+-            moments = joint
+-        elif self.feedback_mode == 'factorized':
+-            moments = factorized
+-        else:
+-            moments = joint * 0.0
++        if keys.shape[1]:
++            fractions = torch.bmm(members, feedback.transpose(1, 2)) / divisor
++        else:
++            fractions = members.new_zeros((batch, self.num_slots, self.feedback_tasks))
++        # Reassociation is valid because feedback_projection is bias-free and
++        # the routing/denominator do not depend on learned embeddings:
++        # W(mean_s x) == mean_s(Wx) in exact arithmetic. BF16 is not bitwise
++        # associative. Verify shared-state outputs and gradients on the host.
++        projected = self.feedback_projection(mean_keys)
++        projected = projected * occupied.to(projected.dtype)
++        expanded = projected[:, :, None, :].expand(-1, -1, self.feedback_tasks, -1)
++        if self.feedback_mode == 'factorized':
++            gate = fractions
++        elif self.feedback_mode == 'content':
++            # Identical learned projection and input columns, no product with
++            # feedback rates. Explicit slot fractions remain below.
++            gate = torch.ones_like(fractions)
++        else:
++            global_count = (mask > 0).sum(dim=-1).clamp(min=1)
++            global_fraction = feedback.sum(dim=-1) / global_count[:, None]
++            gate = global_fraction[:, None, :].expand(-1, self.num_slots, -1)
++        # All pooled variants execute the same product shape. Local fractions
++        # remain explicit even when the PRODUCT uses a different gate.
++        moments = expanded * gate[:, :, :, None]
+         if not self.include_feedback_fractions:
+             fractions = fractions * 0.0
+         features = torch.cat((context, target, slots.flatten(start_dim=1),

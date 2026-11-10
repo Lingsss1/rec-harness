@@ -1,0 +1,101 @@
+--- g2-r0003-pooled_local/model.py
++++ g2-r0004-fixed_blend/model.py
+@@ -1,11 +1,12 @@
+-"""Prospective slot-level content-feedback product attribution study.
+-
+-The bias-free item projection is applied to eight masked slot means.
+-Local products, content-only replacement and global-rate products share
+-registered modules and tower columns. Legacy source is a separate control.
+-FP32 equivalence and BF16 quality/cost must be checked by the host.
+-No training, measured gain or originality claim is implied by this module.
++"""Prospective count-conditioned shrinkage of compressed feedback products.
++
++Only the product gate changes: sparse slots interpolate toward the same
++user's visible-history feedback rate. Raw slot fractions remain explicit.
++Fixed and reversed-count mixtures share all registered modules and columns.
++The host must check forward/backward, masking, BF16 quality and cost.
++This is an untested hypothesis; no originality or measured gain is claimed.
+ """
++import math
+ import torch
+ from torch import nn
+ from torch.nn import functional as F
+@@ -28,6 +29,8 @@
+     'feedback_mode': 'factorized',
+     'include_feedback_fractions': True,
+     'feedback_dim': 8,
++    'rate_interpolation': 'fixed',
++    'shrinkage_strength': 4.0,
+ }
+ 
+ 
+@@ -43,7 +46,9 @@
+                  include_counts=CONFIG['include_counts'],
+                  feedback_mode=CONFIG['feedback_mode'],
+                  include_feedback_fractions=CONFIG['include_feedback_fractions'],
+-                 feedback_dim=8, num_tasks=None,
++                 feedback_dim=8,
++                 rate_interpolation=CONFIG['rate_interpolation'],
++                 shrinkage_strength=CONFIG['shrinkage_strength'], num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if feedback_mode not in ('factorized', 'content', 'global'):
+             raise ValueError('Unknown feedback product replacement')
+@@ -51,6 +56,12 @@
+             raise ValueError('Feedback fraction switch must be bool')
+         if feedback_dim <= 0:
+             raise ValueError('feedback_dim must be positive')
++        if rate_interpolation not in ('count', 'fixed', 'reverse'):
++            raise ValueError('Unknown rate interpolation control')
++        if not math.isfinite(shrinkage_strength) or shrinkage_strength <= 0:
++            raise ValueError('shrinkage_strength must be finite and positive')
++        if feedback_mode != 'factorized':
++            raise ValueError('This study changes only the factorized product gate')
+         if len(feature_map.labels) != 4:
+             raise ValueError('This study requires the four contracted tasks')
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -72,6 +83,8 @@
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         self.feedback_mode = feedback_mode
++        self.rate_interpolation = rate_interpolation
++        self.shrinkage_strength = float(shrinkage_strength)
+         self.include_feedback_fractions = include_feedback_fractions
+         self.feedback_dim = feedback_dim
+         self.feedback_tasks = len(feature_map.labels)
+@@ -159,6 +172,27 @@
+         return self.local_activation(interactions.reshape(batch * length, -1)).reshape(
+             batch, length)
+ 
++    def _interpolate_rates(self, fractions, counts, feedback, mask):
++        """Convex mixture using only the contracted masked prefix.
++
++        n/(n+4) trusts high-occupancy local rates more. The fixed control
++        uses 1/2 everywhere; reverse uses 4/(n+4). Strength four is fixed
++        prospectively, not fitted to validation. The global rate includes
++        the current slot; this is shrinkage, not an independent prior.
++        Empty slots contribute zero after the existing content mask.
++        """
++        total = (mask > 0).sum(dim=-1).clamp(min=1)
++        global_rate = feedback.sum(dim=-1) / total[:, None]
++        strength = self.shrinkage_strength
++        # Execute the same small slot-sized arithmetic in all replacements.
++        weight = counts / (counts + strength)
++        if self.rate_interpolation == 'fixed':
++            weight = weight * 0.0 + 0.5
++        elif self.rate_interpolation == 'reverse':
++            weight = 1.0 - weight
++        return (weight[:, :, None] * fractions
++                + (1.0 - weight[:, :, None]) * global_rate[:, None, :])
++
+     def forward(self, inputs):
+         if len(inputs) != 4 or inputs[3] is None:
+             raise ValueError('Historical feedback masks are required by this study')
+@@ -215,7 +249,7 @@
+         projected = projected * occupied.to(projected.dtype)
+         expanded = projected[:, :, None, :].expand(-1, -1, self.feedback_tasks, -1)
+         if self.feedback_mode == 'factorized':
+-            gate = fractions
++            gate = self._interpolate_rates(fractions, counts, feedback, mask)
+         elif self.feedback_mode == 'content':
+             # Identical learned projection and input columns, no product with
+             # feedback rates. Explicit slot fractions remain below.

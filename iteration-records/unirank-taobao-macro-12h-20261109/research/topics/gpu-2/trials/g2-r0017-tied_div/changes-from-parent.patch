@@ -1,0 +1,114 @@
+--- g2-r0016-diversity_factorized/model.py
++++ g2-r0017-tied_div/model.py
+@@ -1,10 +1,11 @@
+-"""Prospective advertisement-diversity support for feedback shrinkage.
+-
+-Factorial: diversity versus exposure support x joint versus factorized moments.
+-All arms compute the same identity histogram; only reliability support changes.
+-Exposure-weighted moments, raw fractions/counts and initialization stay matched.
+-Inverse concentration is a reliability heuristic, not an independence estimate.
+-No history event is removed. Efficacy and cost require host evaluation.
++"""Prospective component-specific reliability for centered feedback moments.
++
++A 2 x 2 replacement study independently assigns diversity or exposure support
++for the local rate contrast and within-slot event-feedback covariance. All arms
++retain the same event moments, raw feedback fractions, counts and parameters.
++Diversity is inverse encoded-ad concentration, not an independence estimate.
++Tied-support arms reproduce the previous joint formulas; mixed arms test the
++observed support-by-moment crossover. Host evaluation determines utility.
+ """
+ import math
+ import torch
+@@ -14,7 +15,7 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'feedback_dim': 8, 'residual_hidden': 64, 'recent_window': 16, 'feedback_mode': 'product', 'rate_interpolation': 'count', 'shrinkage_strength': 4.0, 'moment_mode': 'factorized', 'centering_mode': 'user', 'support_mode': 'diversity'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'feedback_dim': 8, 'residual_hidden': 64, 'recent_window': 16, 'feedback_mode': 'product', 'rate_interpolation': 'count', 'shrinkage_strength': 4.0, 'moment_mode': 'joint', 'centering_mode': 'user', 'support_mode': 'diversity', 'covariance_support_mode': 'diversity'}
+ 
+ 
+ class JointBlock(nn.Module):
+@@ -62,6 +63,7 @@
+                  shrinkage_strength=4.0, moment_mode=CONFIG['moment_mode'],
+                  centering_mode=CONFIG['centering_mode'],
+                  support_mode=CONFIG['support_mode'],
++                 covariance_support_mode=CONFIG['covariance_support_mode'],
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -96,7 +98,10 @@
+             raise ValueError('Unknown joint-moment centering')
+         if support_mode not in ('diversity', 'exposure'):
+             raise ValueError('Unknown feedback reliability support')
++        if covariance_support_mode not in ('diversity', 'exposure'):
++            raise ValueError('Unknown covariance reliability support')
+         self.support_mode = support_mode
++        self.covariance_support_mode = covariance_support_mode
+         self.centering_mode = centering_mode
+         self.moment_mode = moment_mode
+         self.feedback_mode = feedback_mode
+@@ -123,7 +128,7 @@
+         self.key_width = len(self.item_fields) * embedding_dim
+         self.value_width = self.key_width + embedding_dim
+         self.static_count = len(self.user_fields) + len(self.item_fields)
+-        # All four arms have 35 summary tokens and identical parameters.
++        # All support assignments have 35 summary tokens and identical parameters.
+         value_fields = self.item_fields + [self.action_field]
+         expected = {'item_id', 'cate_id', 'campaign_id', 'customer_id',
+                     'brand', 'price_bucket', 'action'}
+@@ -228,7 +233,7 @@
+         return torch.stack([(group == i) & valid for i in range(self.feedback_slots)], dim=1)
+ 
+     def _reliability_support(self, clean_item, valid, members, counts):
+-        """Return n^2 / sum_i n_i^2, or the original exposure count n.
++        """Return n^2 / sum_i n_i^2 for component-specific support selection.
+ 
+         Histograms are slot-local and use only historical advertisement IDs.
+         Sorting once and scattering into at most L run bins avoids an L x L
+@@ -260,7 +265,18 @@
+                 sorted_members)
+             collisions = histogram.square().sum(dim=-1)
+             diversity = counts.float().square() / collisions.clamp_min(1.0)
+-        return diversity if self.support_mode == 'diversity' else counts
++        return diversity
++
++    def _component_supports(self, diversity, counts):
++        """Choose rate and covariance supports without modules or RNG changes.
++
++        Each support is slot-local [B,8]. Both choices are computed in every
++        arm. Keep exposure denominators, raw counts and fractions unchanged.
++        """
++        rate_support = diversity if self.support_mode == 'diversity' else counts
++        covariance_support = (diversity if self.covariance_support_mode == 'diversity'
++                              else counts)
++        return rate_support, covariance_support
+ 
+     def _residual_rates(self, fractions, support, feedback, valid):
+         """Support or fixed convex mixing with the same visible-user background.
+@@ -326,7 +342,8 @@
+         batch, length = valid.shape
+         members = self._feedback_membership(clean_item, valid).float()
+         counts = members.sum(dim=-1)
+-        support = self._reliability_support(clean_item, valid, members, counts)
++        diversity = self._reliability_support(clean_item, valid, members, counts)
++        support, covariance_support = self._component_supports(diversity, counts)
+         divisor = counts.clamp_min(1).unsqueeze(-1)
+         feedback = torch.stack([(m > 0) & valid for m in task_masks], dim=1).float()
+         if length:
+@@ -344,11 +361,12 @@
+             # Active content parameters and unchanged readout width in controls.
+             gate = torch.ones_like(gate)
+         moments = projected[:, :, None, :] * gate[:, :, :, None].to(projected.dtype)
+-        # Factorized arms perform the same arithmetic, then suppress only
+-        # the covariance. Thus parameters, initialization and operation shapes
+-        # are shared. They also calibrate equality to the archived products.
++        # Retain both moment paths and operation shapes. A factorized setting
++        # suppresses covariance only, permitting archived-incumbent calibration.
++        # The proposed 2 x 2 suite uses joint moments in every arm.
+         covariance = self._event_covariance(keys, members, feedback, fractions, counts)
+-        local_weight = support / (support + self.shrinkage_strength)
++        # Rate interpolation and covariance reliability are independent factors.
++        local_weight = covariance_support / (covariance_support + self.shrinkage_strength)
+         if self.rate_interpolation == 'fixed':
+             local_weight = local_weight * 0.0 + 0.5
+         coupling = 1.0 if self.moment_mode == 'joint' else 0.0

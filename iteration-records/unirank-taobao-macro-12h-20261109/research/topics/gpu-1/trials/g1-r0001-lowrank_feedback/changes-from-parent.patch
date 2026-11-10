@@ -1,0 +1,137 @@
+--- g1-r0000-exchange_full/model.py
++++ g1-r0001-lowrank_feedback/model.py
+@@ -1,8 +1,12 @@
+-"""Two-round field/history exchange and its two-by-two path controls.
+-
+-This is a local mechanism study, not a reproduction or a novelty claim.
+-Updated historical states are per-impression model activations that may depend
+-on the current target, not extra observations or reusable user-side caches.
++"""Wide historical values with evolving field/event routing.
++
++Prospective 2x2: uncompressed versus learned low-rank historical values,
++crossed with an enabled versus suppressed field-to-event write. This inherits
++the local exchange implementation; it is not a new-method priority claim.
++The final route uses evolved task queries and event keys, but its values are
++only the original visible historical field/action embeddings. A value bypass
++does not undo the compressed routing keys. Both value paths are computed in
++all arms, with equal registered parameters and forward operation counts.
+ """
+ import math
+ import torch
+@@ -17,6 +21,7 @@
+     'token_dim': 32,
+     'num_heads': 2,
+     'dynamic_query': True,
++    'raw_values': False,
+     'event_feedback': True,
+     'tower_hidden_units': [128, 64],
+ }
+@@ -62,6 +67,36 @@
+         return self.output(attended)
+ 
+ 
++    def pool_values(self, query, memory, values, key_mask):
++        """Route wide values with the same learned Q/K as the narrow reads.
++
++        Average attention heads before aggregation, so each original field
++        keeps its own embedding coordinates. The null is valid only for an
++        empty history; it makes all-padding and zero-length batches finite.
++        The final read has only one query per task, not one per field.
++        """
++        batch, queries, width = query.shape
++        valid = key_mask.bool()
++        query = self.query_norm(query)
++        memory = self.memory_norm(memory)
++        memory = torch.where(valid.unsqueeze(-1), memory,
++                             torch.zeros_like(memory))
++        values = torch.where(valid.unsqueeze(-1), values,
++                             torch.zeros_like(values))
++        memory = torch.cat([memory, memory.new_zeros(batch, 1, width)], dim=1)
++        values = torch.cat([values, values.new_zeros(batch, 1, values.shape[-1])], dim=1)
++        valid = torch.cat([valid, ~valid.any(dim=1, keepdim=True)], dim=1)
++        length = memory.shape[1]
++        q = self.query(query).reshape(batch, queries, self.heads,
++                                      self.head_width).transpose(1, 2)
++        k = self.key(memory).reshape(batch, length, self.heads,
++                                     self.head_width).transpose(1, 2)
++        logits = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_width)
++        logits = logits.masked_fill(~valid[:, None, None, :], float('-inf'))
++        weights = torch.softmax(logits, dim=-1, dtype=torch.float32).mean(dim=1)
++        return torch.bmm(weights.to(values.dtype), values)
++
++
+ class FieldMixer(nn.Module):
+     def __init__(self, width, heads):
+         super().__init__()
+@@ -76,9 +111,10 @@
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='FieldHistoryExchange', gpu=-1,
++    def __init__(self, feature_map, model_id='WideValueExchange', gpu=-1,
+                  embedding_dim=16, token_dim=32, num_heads=2,
+                  dynamic_query=CONFIG['dynamic_query'],
++                 raw_values=CONFIG['raw_values'],
+                  event_feedback=CONFIG['event_feedback'],
+                  tower_hidden_units=(128, 64), num_tasks=None,
+                  task='binary_classification', **kwargs):
+@@ -87,11 +123,12 @@
+             raise ValueError('Task count mismatch')
+         if token_dim < 1 or num_heads < 1 or token_dim % num_heads:
+             raise ValueError('token_dim must be divisible by num_heads')
+-        if not isinstance(dynamic_query, bool) or not isinstance(event_feedback, bool):
++        if not all(isinstance(flag, bool) for flag in (dynamic_query, raw_values, event_feedback)):
+             raise ValueError('Path controls must be boolean')
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(labels), task=task, **kwargs)
+         self.dynamic_query = float(dynamic_query)
++        self.raw_values = float(raw_values)
+         self.event_feedback = float(event_feedback)
+         self.token_dim = token_dim
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+@@ -108,6 +145,12 @@
+         self.field_projection = nn.Linear(embedding_dim, token_dim, bias=False)
+         event_width = (len(self.item_fields) + int(self.action_field is not None)) * embedding_dim
+         self.event_projection = nn.Linear(event_width, token_dim, bias=False)
++        # Independent value compression avoids tying this replacement to the
++        # routing-key projection. These modules exist and run in every arm.
++        self.value_down = nn.Linear(event_width, token_dim, bias=False)
++        self.value_up = nn.Linear(token_dim, event_width, bias=False)
++        # Equalize pooled-value scale without trainable normalization capacity.
++        self.value_norm = nn.LayerNorm(event_width, elementwise_affine=False)
+         self.field_identity = nn.Parameter(torch.empty(1, self.field_count + len(labels), token_dim))
+         # Valid rank is derived only from the prefix mask, with no timestamps.
+         self.history_position = nn.Parameter(torch.empty(101, token_dim))
+@@ -119,7 +162,7 @@
+                                          for _ in range(2)])
+         self.final_norm = nn.LayerNorm(token_dim)
+         self.towers = nn.ModuleList()
+-        readout_width = self.field_count * embedding_dim + 2 * token_dim + 1
++        readout_width = self.field_count * embedding_dim + 2 * token_dim + 1 + event_width
+         for _ in labels:
+             tower = []
+             width = readout_width
+@@ -173,9 +216,21 @@
+                 events = torch.where(valid.unsqueeze(-1), events, torch.zeros_like(events))
+ 
+         fields = self.final_norm(fields)
++        task_states = fields[:, self.field_count:]
++        wide_summary = self.read.pool_values(task_states, events, event_inputs, valid)
++        # Linear compression commutes with weighted summation. This is the
++        # same low-rank value replacement as encoding every event first,
++        # implemented after pooling to avoid an extra sequence-wide matmul.
++        reconstructed = self.value_up(self.value_down(wide_summary))
++        wide_summary = self.value_norm(wide_summary)
++        reconstructed = self.value_norm(reconstructed)
++        summary = (self.raw_values * wide_summary
++                   + (1.0 - self.raw_values) * reconstructed)
++        # Keep empty-history evidence exactly zero, independently of biases.
++        summary = torch.where(valid.any(dim=1)[:, None, None], summary,
++                              torch.zeros_like(summary))
+         global_state = fields[:, :self.field_count].mean(dim=1)
+         count = torch.log1p(valid.sum(dim=1, keepdim=True).float()) / math.log(101.0)
+         common = torch.cat([raw_skip, global_state, count.to(raw_skip.dtype)], dim=-1)
+-        task_states = fields[:, self.field_count:]
+-        return {label + '_pred': torch.sigmoid(tower(torch.cat([common, task_states[:, index]], dim=-1)))
++        return {label + '_pred': torch.sigmoid(tower(torch.cat([common, task_states[:, index], summary[:, index]], dim=-1)))
+                 for index, (label, tower) in enumerate(zip(self.feature_map.labels, self.towers))}

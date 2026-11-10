@@ -1,0 +1,114 @@
+--- g0-r0013-pair_joint_both/model.py
++++ g0-r0014-pair_full_joint_replay/model.py
+@@ -1,13 +1,11 @@
+-"""Same-event target-field conjunctions, with a content/count 2x2 control.
+-
+-The incumbent summarizes six item-field matches separately. Add summaries of
+-all 15 unordered match pairs in the same five temporal bins. The joint source
+-uses same-event intersections. The factorized source uses only the parent's
+-marginal counts and content sums. Content and count sources vary independently.
+-Each pair has an equal-size zero-start projection and contributes to its two
+-existing relation tokens; no new downstream tokens or attention keys are added.
+-All inherited modules, initialization, masks, task heads and loss are retained.
+-This is an untested local representation hypothesis, not a novelty claim.
++"""Partition the value binding of same-event target-field pair summaries.
++
++For each pair, its two defining item blocks and its four other item blocks
++plus historical action independently use joint or marginal content. Joint
++pair counts remain fixed. Four cells share summaries, coordinate selection,
++all parameters, token identities/masks/routes and frozen host training.
++The homogeneous corners replay the prior content factorial at joint counts.
++This is an untested local attribution study, not a claim of originality.
+ """
+ import math
+ import torch
+@@ -35,7 +33,8 @@
+     'feedback_content_mode': 'factorized',
+     'memory_source': 'joint',
+     'memory_layout': 'collapsed',
+-    'pair_content_source': 'joint',
++    'pair_defining_source': 'joint',
++    'pair_other_source': 'joint',
+     'pair_count_source': 'joint',
+ }
+ 
+@@ -176,7 +175,8 @@
+                  moment_component='full', residual_mode='copy', bank_mode='relation',
+                  content_bank_mode='relation', feedback_content_mode='factorized',
+                  memory_source='joint', memory_layout='collapsed',
+-                 pair_content_source='joint', pair_count_source='joint',
++                 pair_defining_source='joint', pair_other_source='joint',
++                 pair_count_source='joint',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -223,11 +223,14 @@
+             raise ValueError('Unknown memory source')
+         if memory_layout not in ('separate', 'collapsed'):
+             raise ValueError('Unknown memory layout')
+-        if pair_content_source not in ('joint', 'factorized'):
+-            raise ValueError('Unknown pair content source')
+-        if pair_count_source not in ('joint', 'factorized'):
+-            raise ValueError('Unknown pair count source')
+-        self.pair_content_source = pair_content_source
++        if pair_defining_source not in ('joint', 'factorized'):
++            raise ValueError('Unknown pair defining-coordinate source')
++        if pair_other_source not in ('joint', 'factorized'):
++            raise ValueError('Unknown pair other-coordinate source')
++        if pair_count_source != 'joint':
++            raise ValueError('Coordinate study freezes joint pair counts')
++        self.pair_defining_source = pair_defining_source
++        self.pair_other_source = pair_other_source
+         self.pair_count_source = pair_count_source
+         self.feedback_content_mode = feedback_content_mode
+         self.content_bank_mode = content_bank_mode
+@@ -344,6 +347,16 @@
+             routes[index, left] = scale
+             routes[index, right] = scale
+         self.register_buffer('pair_routes', routes)
++        # Fixed coordinate partition, constructed without any RNG draws.
++        # Pair indices are relation indices (zero is the global relation).
++        # Values concatenate item_fields in exactly this order, then action.
++        # The action block is always in the complementary coordinate group.
++        defining = torch.zeros(len(pairs), self.value_width, dtype=torch.bool)
++        for index, (left, right) in enumerate(pairs):
++            for relation in (left, right):
++                start = (relation - 1) * embedding_dim
++                defining[index, start:start + embedding_dim] = True
++        self.register_buffer('pair_defining_coordinates', defining)
+         self.model_to_device()
+ 
+     def _pair_tokens(self, values, weights, relation_masks, relation_counts):
+@@ -352,8 +365,11 @@
+         Let n be temporal support, n_r a relation count, and S_r the parent's
+         signed content sum (scaled by sqrt(7)). The marginal estimates are
+         n_rs=n_r*n_s/n and S_rs=(n_s*S_r+n_r*S_s)/(2*n).
+-        These controls use only information already in the parent. They are
++        These controls use only the parent's marginal summaries. They are
+         approximations, not asserted data-generating independence models.
++        Independently select J or F for the two pair-defining item blocks
++        versus the other four item blocks plus action. Do not zero a block:
++        every coordinate remains active, and the joint count is held fixed.
+         All arms compute both sources; parameters and contractions match.
+         """
+         batch, length, _ = values.shape
+@@ -388,8 +404,17 @@
+             factorized_content = 0.5 * (
+                 (right_count / support) * left_content
+                 + (left_count / support) * right_content)
+-            content = (joint_content if self.pair_content_source == 'joint'
+-                       else factorized_content)
++            defining_content = (joint_content
++                                if self.pair_defining_source == 'joint'
++                                else factorized_content)
++            other_content = (joint_content
++                             if self.pair_other_source == 'joint'
++                             else factorized_content)
++            # Broadcast [1,1,pairs,value_width] over batch and temporal bins.
++            # Homogeneous corners copy the original FP32 source exactly;
++            # torch.where introduces no subtract/re-add cancellation.
++            content = torch.where(self.pair_defining_coordinates[None, None],
++                                  defining_content, other_content)
+             count = (joint_count if self.pair_count_source == 'joint'
+                      else factorized_count)
+             log_count = torch.log1p(count) / math.log(101.0)

@@ -1,0 +1,220 @@
+--- g0-r0011-memory_joint_collapsed/model.py
++++ g3-r0012-memory_task_mean_copy/model.py
+@@ -1,14 +1,13 @@
+-"""Separately addressable feedback/time memory, with a matched 2x2 contrast.
+-
+-All incumbent factorized feedback and relation paths remain. The added memory
+-has 20 slots: global/four rank bins by four historical feedback masks. Choose
+-actual feedback-selected item content or rate-times-unconditional content;
+-keep four content vectors or broadcast their mean. Individual counts, slot
+-identities, validity, constructors and attention are identical in every arm.
+-Existing field/relation tokens read this memory before their JointBlock.
+-The new residual output starts at zero; inherited initialization is retained.
+-Behavior pooling and proxy cross-attention are related to INFNet. This is a
+-local adaptation and discriminating follow-up, with no originality claim.
++"""Prospective compatibility study: g0 memory representation plus g3 task readout.
++
++Keep the complete committed memory-joint/collapsed g0 representation, its
++masking, initialization, and shared history paths. Append the committed g3
++residual task-content scorer and shared extra-summary projection. Each head
++receives its shared DIN sum plus C_t + P(M_t). Cross private/mean routing
++with linear/copy extra basis as active, parameter/operator-matched controls.
++All added score outputs and P start at zero, preserving the initial g0
++function and CPU RNG stream. Host numerical checks and evaluation are pending.
++This is an integration of two local sources, with no novelty/result claim.
+ """
+ import math
+ import torch
+@@ -18,25 +17,7 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+ 
+-CONFIG = {
+-    'embedding_dim': 16,
+-    'attention_hidden_units': [64, 32],
+-    'tower_hidden_units': [128, 64],
+-    'token_dim': 32,
+-    'num_heads': 2,
+-    'slot_mode': 'recency',
+-    'representation_mode': 'replicas',
+-    'content_mode': 'relation',
+-    'count_mode': 'relation',
+-    'moment_mode': 'linear',
+-    'moment_component': 'full',
+-    'residual_mode': 'copy',
+-    'bank_mode': 'relation',
+-    'content_bank_mode': 'relation',
+-    'feedback_content_mode': 'factorized',
+-    'memory_source': 'joint',
+-    'memory_layout': 'collapsed',
+-}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'moment_mode': 'linear', 'moment_component': 'full', 'residual_mode': 'copy', 'bank_mode': 'relation', 'content_bank_mode': 'relation', 'feedback_content_mode': 'factorized', 'memory_source': 'joint', 'memory_layout': 'collapsed', 'task_routing': 'mean', 'block_click_score_grad': False, 'block_aux_score_grad': False, 'scorer_hidden_width': 64, 'task_extra_basis': 'copy'}
+ 
+ 
+ class FeedbackMemory(nn.Module):
+@@ -167,7 +148,7 @@
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='TargetRelationStudy', gpu=-1,
++    def __init__(self, feature_map, model_id='MemoryTaskCompatibilityStudy', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), token_dim=32, num_heads=2,
+                  slot_mode='recency', representation_mode='replicas',
+@@ -175,6 +156,9 @@
+                  moment_component='full', residual_mode='copy', bank_mode='relation',
+                  content_bank_mode='relation', feedback_content_mode='factorized',
+                  memory_source='joint', memory_layout='collapsed',
++                 task_routing='mean', block_click_score_grad=False,
++                 block_aux_score_grad=False, scorer_hidden_width=64,
++                 task_extra_basis='copy',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -185,6 +169,20 @@
+             raise ValueError('Unknown slot construction')
+         if token_dim <= 0 or num_heads <= 0 or token_dim % num_heads:
+             raise ValueError('token_dim must be divisible by num_heads')
++        if task_routing not in ('private', 'mean', 'parent'):
++            raise ValueError('Unknown task readout routing')
++        if not isinstance(block_click_score_grad, bool) or not isinstance(block_aux_score_grad, bool):
++            raise ValueError('Scorer-input stop switches must be booleans')
++        if block_click_score_grad or block_aux_score_grad:
++            raise ValueError('Shared-trunk study requires open scorer-input gradients')
++        if len(attention_hidden_units) != 2:
++            raise ValueError('Shared-trunk study requires two relevance hidden layers')
++        if not isinstance(scorer_hidden_width, int) or isinstance(scorer_hidden_width, bool) or scorer_hidden_width <= 0:
++            raise ValueError('scorer_hidden_width must be a positive integer')
++        if task_extra_basis not in ('linear', 'copy'):
++            raise ValueError('Extra task summary requires linear or copy basis')
++        self.task_routing = task_routing
++        self.task_extra_basis = task_extra_basis
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         if representation_mode != 'replicas':
+@@ -319,7 +317,81 @@
+         with torch.random.fork_rng(devices=[]):
+             self.feedback_memory = FeedbackMemory(
+                 self.key_width, token_dim, num_heads, memory_source, memory_layout)
++        # Only the residual scorer architecture changes. Keep every inherited
++        # initialization and the host CPU RNG stream intact. Separate head
++        # hidden weights and Dice buffers avoid a redundant symmetric mean.
++        # All output layers start at zero; the trunk learns after they open.
++        with torch.random.fork_rng(devices=[]):
++            self.task_trunk = nn.Sequential(
++                nn.Linear(4 * self.key_width + embedding_dim, scorer_hidden_width),
++                Dice(scorer_hidden_width))
++            self.task_scorers = nn.ModuleList([
++                nn.Sequential(nn.Linear(scorer_hidden_width, attention_hidden_units[1]),
++                              Dice(attention_hidden_units[1]),
++                              nn.Linear(attention_hidden_units[1], 1))
++                for _ in feature_map.labels])
++            for module in self.task_trunk.modules():
++                if isinstance(module, nn.Linear):
++                    nn.init.xavier_normal_(module.weight)
++                    nn.init.zeros_(module.bias)
++            for scorer in self.task_scorers:
++                for module in scorer.modules():
++                    if isinstance(module, nn.Linear):
++                        nn.init.xavier_normal_(module.weight)
++                        nn.init.zeros_(module.bias)
++                nn.init.zeros_(scorer[-1].weight)
++                nn.init.zeros_(scorer[-1].bias)
++        # Append after every inherited module initialization. This changes
++        # neither inherited states nor the host CPU sampling RNG stream.
++        # One shared map preserves identical extra capacity in both routing
++        # arms; zero bias is structural, so empty history stays exactly zero.
++        with torch.random.fork_rng(devices=[]):
++            self.task_extra_projection = nn.Linear(
++                self.value_width, self.value_width, bias=False)
++            nn.init.zeros_(self.task_extra_projection.weight)
+         self.model_to_device()
++
++    def _task_pool(self, target, keys, actions, values, valid):
++        """Keep content and augment it with a projected second summary.
++
++        Scorers see target, visible item fields and historical actions. Their
++        inputs and values train in every arm. Routing is applied to scores
++        before both summaries. Extra rank uses visible order, not timestamps.
++        At zero P every arm starts at its inherited content-source function.
++        Initially zero scorer outputs also make P's gradient zero; the host
++        must check learning after scorer outputs become nonzero.
++        """
++        batch, length, _ = keys.shape
++        if not length:
++            return target.new_zeros((batch, self.num_tasks, self.value_width))
++        query = target[:, None, :].expand(-1, length, -1)
++        actions = actions.masked_fill(~valid.unsqueeze(-1), 0)
++        interactions = torch.cat([query, keys, query - keys, query * keys, actions], dim=-1)
++        flat = interactions.reshape(batch * length, -1)
++        hidden = self.task_trunk(flat)
++        columns = [scorer(hidden) for scorer in self.task_scorers]
++        scores = torch.cat(columns, dim=-1).reshape(batch, length, self.num_tasks)
++        scores = scores.masked_fill(~valid.unsqueeze(-1), 0)
++        # Same score/routing arithmetic in all factorial cells. FP32 averaging
++        # avoids an unnecessary BF16 accumulation loss. Explicit broadcasting
++        # makes mean routing exactly task-independent, including under BF16.
++        center = scores.float().mean(dim=-1, keepdim=True).to(scores.dtype)
++        mixing = 1.0 if self.task_routing == 'mean' else 0.0
++        scores = (1.0 - mixing) * scores + mixing * center
++        # Content path keeps the R9 content control's FP32 arithmetic.
++        # Both summaries and the dense projection execute in every arm.
++        # Protect signed cancellation and projection/addition from BF16
++        # autocast, then restore the inherited value dtype once at the end.
++        with torch.autocast(device_type=values.device.type, enabled=False):
++            content_basis = valid.float()
++            extra_basis = self._moment_coefficients(
++                valid[:, None, :], mode=self.task_extra_basis).squeeze(1)
++            content_weights = scores.float() * content_basis[:, :, None]
++            extra_weights = scores.float() * extra_basis[:, :, None]
++            content = torch.bmm(content_weights.transpose(1, 2), values.float())
++            extra = torch.bmm(extra_weights.transpose(1, 2), values.float())
++            result = content + self.task_extra_projection(extra)
++        return result.to(values.dtype)
+ 
+     def _feedback_source(self, joint, factorized, total):
+         if self.feedback_content_mode == 'factorized':
+@@ -455,7 +527,7 @@
+         relations = torch.stack(relations, dim=1)
+         return temporal_masks[:, :, None, :] & relations[:, None, :, :]
+ 
+-    def _moment_coefficients(self, temporal_masks):
++    def _moment_coefficients(self, temporal_masks, mode=None):
+         """Relative valid rank, independent of padding IDs and absolute offsets.
+ 
+         Center BEFORE restricting by a target relation, so a relation present
+@@ -479,11 +551,12 @@
+         quadratic = quadratic / quadratic_rms
+         # Always calculate both bases in all arms. In particular, a reversed
+         # linear basis is NOT a distinct mechanism; its sign is absorbable.
+-        if self.moment_mode == 'linear':
++        mode = self.moment_mode if mode is None else mode
++        if mode == 'linear':
+             return linear
+-        if self.moment_mode == 'quadratic':
++        if mode == 'quadratic':
+             return quadratic
+-        if self.moment_mode == 'copy':
++        if mode == 'copy':
+             return visible
+         return visible * 0.0
+ 
+@@ -626,6 +699,15 @@
+         tokens = self.feedback_memory(tokens, token_valid, values, weights,
+                                       content_mask, valid, task_masks)
+         tokens = self.interaction(tokens, token_valid)
+-        features = torch.cat([static.flatten(1), pooled[:, 0], tokens.flatten(1), log_counts], dim=-1)
+-        return {label + '_pred': torch.sigmoid(tower(features))
+-                for label, tower in zip(self.feature_map.labels, self.towers)}
++        task_pooled = pooled[:, 0:1] + self._task_pool(target, keys, action, values, valid)
++        # Parent routing is for initial-function/replay diagnostics only. It
++        # still allocates and executes the new scorer family. No proposed
++        # factorial arm uses this path, and private gradients are unused here.
++        if self.task_routing == 'parent':
++            task_pooled = pooled[:, 0:1].expand(-1, self.num_tasks, -1)
++        outputs = {}
++        for index, (label, tower) in enumerate(zip(self.feature_map.labels, self.towers)):
++            features = torch.cat([static.flatten(1), task_pooled[:, index],
++                                  tokens.flatten(1), log_counts], dim=-1)
++            outputs[label + '_pred'] = torch.sigmoid(tower(features))
++        return outputs

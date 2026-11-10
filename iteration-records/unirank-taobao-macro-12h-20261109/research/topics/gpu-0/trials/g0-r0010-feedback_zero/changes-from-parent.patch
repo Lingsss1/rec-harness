@@ -1,0 +1,122 @@
+--- g0-r0009-relation_content/model.py
++++ g0-r0010-feedback_zero/model.py
+@@ -1,12 +1,13 @@
+-"""Relation-specific content compression conditional on the fixed rank bank.
+-
+-Keep the inherited token P[S,count]+A*M+B*M+C[r]*M. Add D[r]*S,
+-where S is the existing weighted target-match content summary. The rotated
+-control uses D[(r+t)%7]*S; the duplicate-moment control uses D[r]*M;
+-the zero control disables only D. All four arms own the same zero-initialized
+-bank and execute the same contraction shape. No new summary information is
+-introduced. Heterogeneous compression is an unverified local adaptation,
+-not a new-method priority claim or an original HiFormer reproduction.
++"""Feedback-bound item summaries within the inherited time/relation tokens.
++
++For relation/bin R and historical feedback mask m_a, H_a=sum(R*m_a*w*x),
++F_a=(sum(R*m_a)/max(1,sum(R)))*sum(R*w*x), all scaled by 1/sqrt(7).
++Only item content x is used in this new path; action embeddings remain in
++all inherited paths. Joint uses H, factorized uses F, duplicate uses the
++unconditional item summary, and zero disables the computed residual.
++The same four zero-initialized feedback maps are shared across relations
++and bins. All summaries are fused into the existing 35 tokens before the
++unchanged interaction. This is a local adaptation, with no priority claim.
+ """
+ import math
+ import torch
+@@ -31,6 +32,7 @@
+     'residual_mode': 'copy',
+     'bank_mode': 'relation',
+     'content_bank_mode': 'relation',
++    'feedback_content_mode': 'zero',
+ }
+ 
+ 
+@@ -74,7 +76,7 @@
+                  slot_mode='recency', representation_mode='replicas',
+                  content_mode='relation', count_mode='relation', moment_mode='linear',
+                  moment_component='full', residual_mode='copy', bank_mode='relation',
+-                 content_bank_mode='relation',
++                 content_bank_mode='relation', feedback_content_mode='zero',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -111,6 +113,11 @@
+             raise ValueError('Content study freezes the relation-specific rank bank')
+         if content_bank_mode not in ('relation', 'rotated', 'moment', 'zero'):
+             raise ValueError('Unknown content bank intervention')
++        if content_bank_mode != 'relation':
++            raise ValueError('Feedback study freezes relation-specific content maps')
++        if feedback_content_mode not in ('joint', 'factorized', 'duplicate', 'zero'):
++            raise ValueError('Unknown feedback-content intervention')
++        self.feedback_content_mode = feedback_content_mode
+         self.content_bank_mode = content_bank_mode
+         self.bank_mode = bank_mode
+         self.residual_mode = residual_mode
+@@ -198,7 +205,57 @@
+             torch.zeros(self.group_count, self.value_width, token_dim))
+         self.register_buffer('content_bank_routes', torch.tensor(
+             self._content_bank_assignments(), dtype=torch.long))
++        # Append after all inherited initialization, without consuming RNG.
++        # Four maps shared over every bin/relation; only item fields enter.
++        self.feedback_content_bank = nn.Parameter(
++            torch.zeros(4, self.key_width, token_dim))
+         self.model_to_device()
++
++    def _feedback_source(self, joint, factorized, total):
++        if self.feedback_content_mode == 'factorized':
++            return factorized
++        if self.feedback_content_mode == 'duplicate':
++            return total
++        return joint
++
++    def _feedback_content_tokens(self, values, weights, relation_masks,
++                                 valid, task_masks):
++        """Preserve item-feedback binding or replace it by its marginals.
++
++        Rates use unweighted counts, never a signed-weight denominator.
++        Task masks can overlap and are intersected with valid history.
++        All arms execute every summary and contraction; effective backward
++        cost differs. Accumulate one feedback at a time to avoid materializing
++        [B,5,7,4,key_width]. FP32 avoids cancellation/overflow in sums.
++        """
++        batch, length, _ = values.shape
++        output = values.new_zeros((batch, 5, self.group_count,
++                                   self.feedback_content_bank.shape[-1]),
++                                  dtype=torch.float32)
++        if not length:
++            return output
++        with torch.autocast(device_type=values.device.type, enabled=False):
++            relation = relation_masks.float()
++            counts = relation.sum(dim=-1, keepdim=True)
++            item_values = values[..., :self.key_width].float()
++            weighted = relation * weights.float()[:, None, None, :]
++            total = torch.bmm(weighted.flatten(1, 2), item_values)
++            total = total.reshape(batch, 5, self.group_count, self.key_width)
++            total = total / math.sqrt(self.group_count)
++            for index, task_mask in enumerate(task_masks):
++                feedback = (task_mask.bool() & valid).float()[:, None, None, :]
++                selected = relation * feedback
++                rate = selected.sum(dim=-1, keepdim=True) / counts.clamp_min(1.0)
++                joint = torch.bmm((weighted * feedback).flatten(1, 2), item_values)
++                joint = joint.reshape(batch, 5, self.group_count, self.key_width)
++                joint = joint / math.sqrt(self.group_count)
++                factorized = rate * total
++                source = self._feedback_source(joint, factorized, total)
++                projected = torch.matmul(source, self.feedback_content_bank[index].float())
++                if self.feedback_content_mode == 'zero':
++                    projected = projected * 0.0
++                output = output + projected
++        return output
+ 
+     def _content_bank_assignments(self):
+         """Balance five uses per bank; vary sharing, never token positions."""
+@@ -443,6 +500,9 @@
+         content_tokens = self._project_content_bank(
+             grouped.to(slot_tokens.dtype), moments.to(slot_tokens.dtype))
+         slot_tokens = slot_tokens + content_tokens
++        feedback_tokens = self._feedback_content_tokens(
++            values, weights, relation_masks, valid, task_masks)
++        slot_tokens = slot_tokens + feedback_tokens.to(slot_tokens.dtype)
+         slot_tokens = slot_tokens.flatten(1, 2)
+         # Validity is temporal in EVERY arm, so group occupancy is not leaked
+         # by the attention mask when the explicit count input is ablated.

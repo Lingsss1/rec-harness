@@ -1,0 +1,221 @@
+--- g1-r0001-lowrank_static/model.py
++++ g1-r0003-routing_counts/model.py
+@@ -1,12 +1,15 @@
+-"""Wide historical values with evolving field/event routing.
+-
+-Prospective 2x2: uncompressed versus learned low-rank historical values,
+-crossed with an enabled versus suppressed field-to-event write. This inherits
+-the local exchange implementation; it is not a new-method priority claim.
+-The final route uses evolved task queries and event keys, but its values are
+-only the original visible historical field/action embeddings. A value bypass
+-does not undo the compressed routing keys. Both value paths are computed in
+-all arms, with equal registered parameters and forward operation counts.
++"""Prospective behavior routing x behavior count factorial.
++
++Inherits g1-r0001-lowrank_static. Each evolving task query blends a global
++history read with a read restricted to its historical positive-action mask.
++Field queries still read the full history; the following field/task mixer
++distributes task evidence before the next retrieval. Historical action counts
++can separately enter the initial task tokens. Neither switch changes model
++shapes, initialization order, or forward work across the four study arms.
++
++This is a local adaptation of established task-aware interaction and history
++intensity ideas, not a priority claim or an INFNet reproduction. Task masks
++can overlap; they are not treated as a partition. No current labels are used.
+ """
+ import math
+ import torch
+@@ -23,6 +26,8 @@
+     'dynamic_query': True,
+     'raw_values': False,
+     'event_feedback': False,
++    'behavior_routing': True,
++    'composition_counts': True,
+     'tower_hidden_units': [128, 64],
+ }
+ 
+@@ -41,19 +46,38 @@
+         self.value = nn.Linear(width, width, bias=False)
+         self.output = nn.Linear(width, width, bias=False)
+ 
++    @staticmethod
++    def masked_memory(memory, key_mask):
++        """Support either B,L shared masks or B,Q,L query-specific masks.
++
++        A null key is enabled separately for each empty query. Invalid keys
++        are excluded from the denominator, rather than just zeroing values.
++        """
++        valid = key_mask.bool()
++        if valid.ndim == 2:
++            memory_valid = valid
++            attention_valid = valid[:, None, :]
++        elif valid.ndim == 3:
++            memory_valid = valid.any(dim=1)
++            attention_valid = valid
++        else:
++            raise ValueError('Expected B,L or B,Q,L history mask')
++        memory = torch.where(memory_valid.unsqueeze(-1), memory,
++                             torch.zeros_like(memory))
++        memory = torch.cat([memory, memory.new_zeros(memory.shape[0], 1,
++                                                    memory.shape[-1])], dim=1)
++        attention_valid = torch.cat(
++            [attention_valid, ~attention_valid.any(dim=-1, keepdim=True)], dim=-1)
++        return memory, memory_valid, attention_valid[:, None, :, :]
++
+     def forward(self, query, memory, key_mask=None):
+         batch, queries, width = query.shape
+         query = self.query_norm(query)
+         memory = self.memory_norm(memory)
+         attention_mask = None
+         if key_mask is not None:
+-            valid = key_mask.bool()
+-            memory = torch.where(valid.unsqueeze(-1), memory,
+-                                 torch.zeros_like(memory))
+             # Append after normalization so LN biases cannot affect the null.
+-            memory = torch.cat([memory, memory.new_zeros(batch, 1, width)], dim=1)
+-            valid = torch.cat([valid, ~valid.any(dim=1, keepdim=True)], dim=1)
+-            attention_mask = valid[:, None, None, :]
++            memory, _, attention_mask = self.masked_memory(memory, key_mask)
+         length = memory.shape[1]
+         q = self.query(query).reshape(batch, queries, self.heads,
+                                       self.head_width).transpose(1, 2)
+@@ -76,23 +100,19 @@
+         The final read has only one query per task, not one per field.
+         """
+         batch, queries, width = query.shape
+-        valid = key_mask.bool()
+         query = self.query_norm(query)
+         memory = self.memory_norm(memory)
+-        memory = torch.where(valid.unsqueeze(-1), memory,
+-                             torch.zeros_like(memory))
+-        values = torch.where(valid.unsqueeze(-1), values,
++        memory, memory_valid, attention_mask = self.masked_memory(memory, key_mask)
++        values = torch.where(memory_valid.unsqueeze(-1), values,
+                              torch.zeros_like(values))
+-        memory = torch.cat([memory, memory.new_zeros(batch, 1, width)], dim=1)
+         values = torch.cat([values, values.new_zeros(batch, 1, values.shape[-1])], dim=1)
+-        valid = torch.cat([valid, ~valid.any(dim=1, keepdim=True)], dim=1)
+         length = memory.shape[1]
+         q = self.query(query).reshape(batch, queries, self.heads,
+                                       self.head_width).transpose(1, 2)
+         k = self.key(memory).reshape(batch, length, self.heads,
+                                      self.head_width).transpose(1, 2)
+         logits = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_width)
+-        logits = logits.masked_fill(~valid[:, None, None, :], float('-inf'))
++        logits = logits.masked_fill(~attention_mask, float('-inf'))
+         weights = torch.softmax(logits, dim=-1, dtype=torch.float32).mean(dim=1)
+         return torch.bmm(weights.to(values.dtype), values)
+ 
+@@ -111,11 +131,13 @@
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='WideValueExchange', gpu=-1,
++    def __init__(self, feature_map, model_id='BehaviorRoutedExchange', gpu=-1,
+                  embedding_dim=16, token_dim=32, num_heads=2,
+                  dynamic_query=CONFIG['dynamic_query'],
+                  raw_values=CONFIG['raw_values'],
+                  event_feedback=CONFIG['event_feedback'],
++                 behavior_routing=CONFIG['behavior_routing'],
++                 composition_counts=CONFIG['composition_counts'],
+                  tower_hidden_units=(128, 64), num_tasks=None,
+                  task='binary_classification', **kwargs):
+         labels = feature_map.labels
+@@ -123,13 +145,17 @@
+             raise ValueError('Task count mismatch')
+         if token_dim < 1 or num_heads < 1 or token_dim % num_heads:
+             raise ValueError('token_dim must be divisible by num_heads')
+-        if not all(isinstance(flag, bool) for flag in (dynamic_query, raw_values, event_feedback)):
++        if not all(isinstance(flag, bool) for flag in
++                   (dynamic_query, raw_values, event_feedback,
++                    behavior_routing, composition_counts)):
+             raise ValueError('Path controls must be boolean')
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(labels), task=task, **kwargs)
+         self.dynamic_query = float(dynamic_query)
+         self.raw_values = float(raw_values)
+         self.event_feedback = float(event_feedback)
++        self.behavior_routing = float(behavior_routing)
++        self.composition_counts = float(composition_counts)
+         self.token_dim = token_dim
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -174,22 +200,46 @@
+         self.reset_parameters()
+         nn.init.normal_(self.field_identity, std=0.02)
+         nn.init.normal_(self.history_position, std=0.02)
++        # Construct after all inherited initialization. At switches 0,0 the
++        # inherited trainable weights therefore start exactly as the parent.
++        # This shared 1 -> D map adds D parameters in every factorial arm.
++        self.count_projection = nn.Linear(1, token_dim, bias=False)
+         self.model_to_device()
+ 
+     def forward(self, inputs):
+-        user, item, mask = self.get_inputs(inputs)
++        if len(inputs) != 4 or inputs[3] is None:
++            raise ValueError('Requires the frozen historical task-mask inputs')
++        user, item, mask, multi_masks = self.get_inputs(inputs, return_multi_masks=True)
+         user_emb = self.embedding_layer(user)
+         item_emb = self.embedding_layer(item)
+         batch, length = mask.shape
+         if length > 100:
+             raise ValueError('History exceeds the frozen 100-event contract')
+         valid = mask.bool()
++        if not isinstance(multi_masks, (list, tuple)) or len(multi_masks) != self.num_tasks:
++            raise ValueError('One historical mask per task is required')
++        if any(task_mask.shape != mask.shape for task_mask in multi_masks):
++            raise ValueError('Task masks must align with the history mask')
++        task_valid = torch.stack([task_mask.bool() for task_mask in multi_masks], dim=1)
++        task_valid = task_valid & valid[:, None, :]
++        # Add only task queries, not another sequence projection. Shared
++        # global queries and task-filtered queries read one K/V memory.
++        read_mask = torch.cat([
++            valid[:, None, :].expand(-1, self.field_count + self.num_tasks, -1),
++            task_valid], dim=1)
++        final_read_mask = torch.cat([
++            valid[:, None, :].expand(-1, self.num_tasks, -1), task_valid], dim=1)
++        positive_counts = torch.log1p(task_valid.sum(dim=-1).float()) / math.log(101.0)
++        count_tokens = self.count_projection(positive_counts.unsqueeze(-1))
+         raw_fields = [user_emb[name].reshape(batch, -1) for name in self.user_fields]
+         raw_fields += [item_emb[name][:, -1] for name in self.item_fields]
+         field_inputs = torch.stack(raw_fields, dim=1)
+         raw_skip = field_inputs.flatten(start_dim=1)
+         fields = self.field_projection(field_inputs)
+         fields = torch.cat([fields, fields.new_zeros(batch, self.num_tasks, self.token_dim)], dim=1)
++        count_tokens = torch.cat([fields.new_zeros(batch, self.field_count, self.token_dim),
++                                  count_tokens.to(fields.dtype)], dim=1)
++        fields = fields + self.composition_counts * count_tokens
+         fields = self.initial_mix(fields + self.field_identity)
+         query_seed = fields
+ 
+@@ -208,7 +258,15 @@
+             # Scalar path interventions keep parameter shapes, initial weights,
+             # module order and forward operation counts identical in all arms.
+             query = query_seed + self.dynamic_query * (fields - query_seed)
+-            evidence = self.read(query, events, valid)
++            all_query = torch.cat([query, query[:, self.field_count:]], dim=1)
++            all_evidence = self.read(all_query, events, read_mask)
++            evidence = all_evidence[:, :self.field_count + self.num_tasks]
++            specific = all_evidence[:, self.field_count + self.num_tasks:]
++            global_task = evidence[:, self.field_count:]
++            # Retain half of the global read even for a task with no positive
++            # history. Such a task gets exactly zero from its specific read.
++            task_evidence = global_task + 0.5 * self.behavior_routing * (specific - global_task)
++            evidence = torch.cat([evidence[:, :self.field_count], task_evidence], dim=1)
+             fields = mixer(fields + 0.5 * evidence)
+             if round_index == 0 and length > 0:
+                 delta = self.write(events, fields)
+@@ -217,7 +275,12 @@
+ 
+         fields = self.final_norm(fields)
+         task_states = fields[:, self.field_count:]
+-        wide_summary = self.read.pool_values(task_states, events, event_inputs, valid)
++        all_summary = self.read.pool_values(
++            torch.cat([task_states, task_states], dim=1), events, event_inputs,
++            final_read_mask)
++        wide_summary = all_summary[:, :self.num_tasks]
++        specific_summary = all_summary[:, self.num_tasks:]
++        wide_summary = wide_summary + 0.5 * self.behavior_routing * (specific_summary - wide_summary)
+         # Linear compression commutes with weighted summation. This is the
+         # same low-rank value replacement as encoding every event first,
+         # implemented after pooling to avoid an extra sequence-wide matmul.

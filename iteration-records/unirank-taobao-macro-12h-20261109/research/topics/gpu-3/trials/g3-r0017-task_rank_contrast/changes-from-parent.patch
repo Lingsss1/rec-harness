@@ -1,0 +1,92 @@
+--- g3-r0012-memory_task_private_linear/model.py
++++ g3-r0017-task_rank_contrast/model.py
+@@ -1,13 +1,12 @@
+-"""Prospective compatibility study: g0 memory representation plus g3 task readout.
+-
+-Keep the complete committed memory-joint/collapsed g0 representation, its
+-masking, initialization, and shared history paths. Append the committed g3
+-residual task-content scorer and shared extra-summary projection. Each head
+-receives its shared DIN sum plus C_t + P(M_t). Cross private/mean routing
+-with linear/copy extra basis as active, parameter/operator-matched controls.
+-All added score outputs and P start at zero, preserving the initial g0
+-function and CPU RNG stream. Host numerical checks and evaluation are pending.
+-This is an integration of two local sources, with no novelty/result claim.
++"""Prospective task-contrast rank residual study on the committed R12 model.
++
++Preserve all inherited memory, task scoring, shared rank projection and towers.
++Add four zero-initialized bias-free maps at the final task-history readout:
++contrast arm maps M_t - mean(M); common control maps mean(M) for every task.
++Both arms execute the same source construction and batched contraction, own
++the same parameters, and start at the inherited initial function. This is a
++local architectural contrast, with no trained improvement or novelty claim.
++Numerical, masking, gradient and cost checks require the authorized host.
+ """
+ import math
+ import torch
+@@ -17,7 +16,7 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'moment_mode': 'linear', 'moment_component': 'full', 'residual_mode': 'copy', 'bank_mode': 'relation', 'content_bank_mode': 'relation', 'feedback_content_mode': 'factorized', 'memory_source': 'joint', 'memory_layout': 'collapsed', 'task_routing': 'private', 'block_click_score_grad': False, 'block_aux_score_grad': False, 'scorer_hidden_width': 64, 'task_extra_basis': 'linear'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'moment_mode': 'linear', 'moment_component': 'full', 'residual_mode': 'copy', 'bank_mode': 'relation', 'content_bank_mode': 'relation', 'feedback_content_mode': 'factorized', 'memory_source': 'joint', 'memory_layout': 'collapsed', 'task_routing': 'private', 'block_click_score_grad': False, 'block_aux_score_grad': False, 'scorer_hidden_width': 64, 'task_extra_basis': 'linear', 'rank_residual_source': 'contrast'}
+ 
+ 
+ class FeedbackMemory(nn.Module):
+@@ -158,7 +157,7 @@
+                  memory_source='joint', memory_layout='collapsed',
+                  task_routing='private', block_click_score_grad=False,
+                  block_aux_score_grad=False, scorer_hidden_width=64,
+-                 task_extra_basis='linear',
++                 task_extra_basis='linear', rank_residual_source='contrast',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -183,6 +182,9 @@
+             raise ValueError('Extra task summary requires linear or copy basis')
+         self.task_routing = task_routing
+         self.task_extra_basis = task_extra_basis
++        if rank_residual_source not in ('contrast', 'common'):
++            raise ValueError('Rank residual source must be contrast or common')
++        self.rank_residual_source = rank_residual_source
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         if representation_mode != 'replicas':
+@@ -349,6 +351,11 @@
+             self.task_extra_projection = nn.Linear(
+                 self.value_width, self.value_width, bias=False)
+             nn.init.zeros_(self.task_extra_projection.weight)
++        # Appended after every inherited initialization. Zeros consume no RNG;
++        # bias-free maps preserve the exact empty-history zero. The shared P
++        # remains untouched; each head receives only its own bank output.
++        self.task_rank_bank = nn.Parameter(torch.zeros(
++            self.num_tasks, self.value_width, self.value_width))
+         self.model_to_device()
+ 
+     def _task_pool(self, target, keys, actions, values, valid):
+@@ -391,7 +398,26 @@
+             content = torch.bmm(content_weights.transpose(1, 2), values.float())
+             extra = torch.bmm(extra_weights.transpose(1, 2), values.float())
+             result = content + self.task_extra_projection(extra)
++            result = result + self._rank_residual(extra)
+         return result.to(values.dtype)
++
++    def _rank_residual(self, extra):
++        """Map task contrasts or an active task-independent rank summary.
++
++        Input is the existing [B,4,V] signed-rank summary, before projection.
++        Compute both sources in FP32 in both arms; identical contiguous shape
++        prevents a broadcasted contraction from changing the forward operator.
++        Source choice never changes the inherited private content/rank path.
++        Zero banks preserve the parent; initially zero scorer outputs delay
++        bank gradients until those outputs open, just as for the shared P.
++        """
++        with torch.autocast(device_type=extra.device.type, enabled=False):
++            extra = extra.float()
++            mean = extra.mean(dim=1, keepdim=True)
++            contrast = (extra - mean).contiguous()
++            common = mean.expand_as(extra).contiguous()
++            source = contrast if self.rank_residual_source == 'contrast' else common
++            return torch.einsum('btv,tvw->btw', source, self.task_rank_bank.float())
+ 
+     def _feedback_source(self, joint, factorized, total):
+         if self.feedback_content_mode == 'factorized':

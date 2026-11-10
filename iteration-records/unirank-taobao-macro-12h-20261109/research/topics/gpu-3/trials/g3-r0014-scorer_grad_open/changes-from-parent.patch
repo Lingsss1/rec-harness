@@ -1,0 +1,76 @@
+--- g3-r0012-memory_task_private_linear/model.py
++++ g3-r0014-scorer_grad_open/model.py
+@@ -1,13 +1,10 @@
+-"""Prospective compatibility study: g0 memory representation plus g3 task readout.
+-
+-Keep the complete committed memory-joint/collapsed g0 representation, its
+-masking, initialization, and shared history paths. Append the committed g3
+-residual task-content scorer and shared extra-summary projection. Each head
+-receives its shared DIN sum plus C_t + P(M_t). Cross private/mean routing
+-with linear/copy extra basis as active, parameter/operator-matched controls.
+-All added score outputs and P start at zero, preserving the initial g0
+-function and CPU RNG stream. Host numerical checks and evaluation are pending.
+-This is an integration of two local sources, with no novelty/result claim.
++"""Prospective 2x2 gradient attribution of the committed combined model.
++
++Cross click/auxiliary gradient access to the residual task-scorer trunk.
++All forward expressions, parameter shapes and inherited initialization are
++preserved. Stops occur at the trunk output, before independent task heads.
++This tests the utility of these learning paths, not observed gradient conflict
++or a novel architecture. Torch numerical gates and host evaluation are pending.
+ """
+ import math
+ import torch
+@@ -173,8 +170,10 @@
+             raise ValueError('Unknown task readout routing')
+         if not isinstance(block_click_score_grad, bool) or not isinstance(block_aux_score_grad, bool):
+             raise ValueError('Scorer-input stop switches must be booleans')
+-        if block_click_score_grad or block_aux_score_grad:
+-            raise ValueError('Shared-trunk study requires open scorer-input gradients')
++        if (block_click_score_grad or block_aux_score_grad) and task_routing != 'private':
++            raise ValueError('Task-gradient attribution requires private score routing')
++        self.block_click_score_grad = block_click_score_grad
++        self.block_aux_score_grad = block_aux_score_grad
+         if len(attention_hidden_units) != 2:
+             raise ValueError('Shared-trunk study requires two relevance hidden layers')
+         if not isinstance(scorer_hidden_width, int) or isinstance(scorer_hidden_width, bool) or scorer_hidden_width <= 0:
+@@ -354,12 +353,13 @@
+     def _task_pool(self, target, keys, actions, values, valid):
+         """Keep content and augment it with a projected second summary.
+ 
+-        Scorers see target, visible item fields and historical actions. Their
+-        inputs and values train in every arm. Routing is applied to scores
+-        before both summaries. Extra rank uses visible order, not timestamps.
+-        At zero P every arm starts at its inherited content-source function.
+-        Initially zero scorer outputs also make P's gradient zero; the host
+-        must check learning after scorer outputs become nonzero.
++        Scorers see target, visible item fields and historical actions.
++        Selected task groups cannot backpropagate through the scorer hidden
++        activation. They still learn their own scorer heads, value embeddings,
++        and other inherited paths. The both-blocked trunk retains its initial
++        parameters; training-mode Dice running statistics still update.
++        Zero scorer outputs initially hide upstream gradients in every arm;
++        diagnose the boundary after opening final scorer outputs in a clone.
+         """
+         batch, length, _ = keys.shape
+         if not length:
+@@ -369,7 +369,18 @@
+         interactions = torch.cat([query, keys, query - keys, query * keys, actions], dim=-1)
+         flat = interactions.reshape(batch * length, -1)
+         hidden = self.task_trunk(flat)
+-        columns = [scorer(hidden) for scorer in self.task_scorers]
++        # Stop only the selected head's gradient into the shared residual
++        # scorer trunk and its embedding inputs. The selected scorer head,
++        # direct pooled values, extra projection, memory and towers stay live.
++        # detach preserves every forward value and Dice update; no duplicate
++        # trunk evaluation or added capacity is introduced. Under private
++        # routing each head's score enters only its corresponding task tower.
++        columns = []
++        for index, scorer in enumerate(self.task_scorers):
++            blocked = (self.block_click_score_grad if index == 0
++                       else self.block_aux_score_grad)
++            scorer_input = hidden.detach() if blocked else hidden
++            columns.append(scorer(scorer_input))
+         scores = torch.cat(columns, dim=-1).reshape(batch, length, self.num_tasks)
+         scores = scores.masked_fill(~valid.unsqueeze(-1), 0)
+         # Same score/routing arithmetic in all factorial cells. FP32 averaging

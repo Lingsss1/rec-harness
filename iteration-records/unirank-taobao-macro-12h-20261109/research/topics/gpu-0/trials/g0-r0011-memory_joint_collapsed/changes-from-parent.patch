@@ -1,0 +1,174 @@
+--- g0-r0010-feedback_factorized/model.py
++++ g0-r0011-memory_joint_collapsed/model.py
+@@ -1,13 +1,14 @@
+-"""Feedback-bound item summaries within the inherited time/relation tokens.
+-
+-For relation/bin R and historical feedback mask m_a, H_a=sum(R*m_a*w*x),
+-F_a=(sum(R*m_a)/max(1,sum(R)))*sum(R*w*x), all scaled by 1/sqrt(7).
+-Only item content x is used in this new path; action embeddings remain in
+-all inherited paths. Joint uses H, factorized uses F, duplicate uses the
+-unconditional item summary, and zero disables the computed residual.
+-The same four zero-initialized feedback maps are shared across relations
+-and bins. All summaries are fused into the existing 35 tokens before the
+-unchanged interaction. This is a local adaptation, with no priority claim.
++"""Separately addressable feedback/time memory, with a matched 2x2 contrast.
++
++All incumbent factorized feedback and relation paths remain. The added memory
++has 20 slots: global/four rank bins by four historical feedback masks. Choose
++actual feedback-selected item content or rate-times-unconditional content;
++keep four content vectors or broadcast their mean. Individual counts, slot
++identities, validity, constructors and attention are identical in every arm.
++Existing field/relation tokens read this memory before their JointBlock.
++The new residual output starts at zero; inherited initialization is retained.
++Behavior pooling and proxy cross-attention are related to INFNet. This is a
++local adaptation and discriminating follow-up, with no originality claim.
+ """
+ import math
+ import torch
+@@ -33,7 +34,103 @@
+     'bank_mode': 'relation',
+     'content_bank_mode': 'relation',
+     'feedback_content_mode': 'factorized',
++    'memory_source': 'joint',
++    'memory_layout': 'collapsed',
+ }
++
++
++class FeedbackMemory(nn.Module):
++    """One-way, strictly masked read of target-weighted behavior summaries.
++
++Validity depends only on the temporal bin, so every arm exposes identical
++key masks. Per-feedback counts remain separate even in the collapsed arm.
++Overlapping task masks are allowed. No signed-weight normalization is used.
++"""
++
++    def __init__(self, item_width, width, heads, source, layout):
++        super().__init__()
++        self.source = source
++        self.layout = layout
++        self.item_width = item_width
++        self.heads = heads
++        self.head_width = width // heads
++        self.input_projection = nn.Linear(item_width + 1, width)
++        self.identity = nn.Parameter(torch.empty(1, 5, 4, width))
++        self.query_norm = nn.LayerNorm(width)
++        self.key_norm = nn.LayerNorm(width)
++        self.query = nn.Linear(width, width, bias=False)
++        self.key = nn.Linear(width, width, bias=False)
++        self.value = nn.Linear(width, width, bias=False)
++        self.output = nn.Linear(width, width, bias=False)
++        nn.init.normal_(self.identity, std=0.02)
++        nn.init.zeros_(self.output.weight)
++
++    def _summaries(self, values, weights, temporal_masks, valid, task_masks):
++        batch, length, _ = values.shape
++        # Empty tensors still have five bins, four feedbacks and fixed width.
++        if not length:
++            content = values.new_zeros((batch, 5, 4, self.item_width),
++                                       dtype=torch.float32)
++            counts = values.new_zeros((batch, 5, 4, 1), dtype=torch.float32)
++            return content, counts
++        with torch.autocast(device_type=values.device.type, enabled=False):
++            temporal = (temporal_masks.bool() & valid[:, None, :]).float()
++            items = values[..., :self.item_width].float()
++            weighted = temporal * weights.float()[:, None, :]
++            total = torch.bmm(weighted, items) / math.sqrt(7.0)
++            bin_count = temporal.sum(dim=-1, keepdim=True).clamp_min(1.0)
++            joint_parts, rate_parts, count_parts = [], [], []
++            for task_mask in task_masks:
++                feedback = (task_mask.bool() & valid).float()[:, None, :]
++                selected = temporal * feedback
++                count = selected.sum(dim=-1, keepdim=True)
++                joint = torch.bmm(weighted * feedback, items) / math.sqrt(7.0)
++                joint_parts.append(joint)
++                rate_parts.append(count / bin_count)
++                count_parts.append(count)
++            # Both inputs are computed in all arms for a matched forward path.
++            joint = torch.stack(joint_parts, dim=2)
++            rates = torch.stack(rate_parts, dim=2)
++            counts = torch.stack(count_parts, dim=2)
++            factorized = rates * total[:, :, None, :]
++            content = joint if self.source == 'joint' else factorized
++            collapsed = content.mean(dim=2, keepdim=True).expand_as(content)
++            if self.layout == 'collapsed':
++                content = collapsed
++            log_counts = torch.log1p(counts) / math.log(101.0)
++        return content, log_counts
++
++    def forward(self, tokens, token_valid, values, weights, temporal_masks,
++                valid, task_masks):
++        content, counts = self._summaries(values, weights, temporal_masks,
++                                         valid, task_masks)
++        memory = self.input_projection(torch.cat([content, counts], dim=-1))
++        memory = (memory + self.identity.to(memory.dtype)).flatten(1, 2)
++        memory_valid = temporal_masks.bool().any(dim=-1)
++        memory_valid = memory_valid[:, :, None].expand(-1, -1, 4).flatten(1)
++        memory = memory * memory_valid.unsqueeze(-1).to(memory.dtype)
++        batch, count, width = tokens.shape
++        query = self.query(self.query_norm(tokens)).reshape(
++            batch, count, self.heads, self.head_width).transpose(1, 2)
++        key = self.key(self.key_norm(memory)).reshape(
++            batch, 20, self.heads, self.head_width).transpose(1, 2)
++        value = self.value(memory).reshape(
++            batch, 20, self.heads, self.head_width).transpose(1, 2)
++        with torch.autocast(device_type=tokens.device.type, enabled=False):
++            scores = torch.matmul(query.float(), key.float().transpose(-1, -2))
++            scores = scores / math.sqrt(self.head_width)
++            # Finite sentinel plus exact mask/renormalization handles all-empty
++            # histories without NaNs or a dummy key carrying unavailable data.
++            key_mask = memory_valid[:, None, None, :]
++            scores = scores.masked_fill(~key_mask, -1e9)
++            attention = torch.softmax(scores, dim=-1) * key_mask.float()
++            attention = attention / attention.sum(dim=-1, keepdim=True).clamp_min(1e-9)
++        mixed = torch.matmul(attention.to(value.dtype), value)
++        mixed = mixed.transpose(1, 2).reshape(batch, count, width)
++        update = self.output(mixed)
++        active = token_valid & memory_valid.any(dim=-1, keepdim=True)
++        update = update * active.unsqueeze(-1).to(update.dtype)
++        return (tokens + update.to(tokens.dtype)) * token_valid.unsqueeze(-1).to(tokens.dtype)
+ 
+ 
+ class JointBlock(nn.Module):
+@@ -77,6 +174,7 @@
+                  content_mode='relation', count_mode='relation', moment_mode='linear',
+                  moment_component='full', residual_mode='copy', bank_mode='relation',
+                  content_bank_mode='relation', feedback_content_mode='factorized',
++                 memory_source='joint', memory_layout='collapsed',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -117,6 +215,12 @@
+             raise ValueError('Feedback study freezes relation-specific content maps')
+         if feedback_content_mode not in ('joint', 'factorized', 'duplicate', 'zero'):
+             raise ValueError('Unknown feedback-content intervention')
++        if feedback_content_mode != 'factorized':
++            raise ValueError('Memory study retains the factorized incumbent path')
++        if memory_source not in ('joint', 'factorized'):
++            raise ValueError('Unknown memory source')
++        if memory_layout not in ('separate', 'collapsed'):
++            raise ValueError('Unknown memory layout')
+         self.feedback_content_mode = feedback_content_mode
+         self.content_bank_mode = content_bank_mode
+         self.bank_mode = bank_mode
+@@ -209,6 +313,12 @@
+         # Four maps shared over every bin/relation; only item fields enter.
+         self.feedback_content_bank = nn.Parameter(
+             torch.zeros(4, self.key_width, token_dim))
++        # New modules are constructed only after inherited reset/initialization.
++        # Forking CPU RNG preserves inherited weights and subsequent host draws.
++        # Every cell has exactly the same added modules and zero-start output.
++        with torch.random.fork_rng(devices=[]):
++            self.feedback_memory = FeedbackMemory(
++                self.key_width, token_dim, num_heads, memory_source, memory_layout)
+         self.model_to_device()
+ 
+     def _feedback_source(self, joint, factorized, total):
+@@ -513,6 +623,8 @@
+         static_valid = torch.ones((batch, self.static_count), dtype=torch.bool, device=valid.device)
+         token_valid = torch.cat([static_valid, group_valid], dim=1)
+         tokens = tokens * token_valid.unsqueeze(-1).to(tokens.dtype)
++        tokens = self.feedback_memory(tokens, token_valid, values, weights,
++                                      content_mask, valid, task_masks)
+         tokens = self.interaction(tokens, token_valid)
+         features = torch.cat([static.flatten(1), pooled[:, 0], tokens.flatten(1), log_counts], dim=-1)
+         return {label + '_pred': torch.sigmoid(tower(features))

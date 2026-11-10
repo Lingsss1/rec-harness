@@ -1,0 +1,112 @@
+--- g3-r0008-compact_private/model.py
++++ g3-r0009-task_moment_private/model.py
+@@ -1,12 +1,11 @@
+-"""Prospective scorer-sharing study, with inherited linear-moment tokens.
+-
+-One action-aware first layer is evaluated once per event. Four independent
+-nonlinear heads produce residual relevance scores for private or mean routing.
+-Widths 64 and 210 cross routing with compact and near-parent scorer capacity.
+-Distinct head hidden weights keep the mean control active; zero output layers
+-preserve the inherited g0 function initially. All scorer-input gradients are
+-open, as in the committed g3-r0007-linear_grad_open comparison source.
+-No performance, speedup, gradient-isolation, or originality claim is established.
++"""Prospective task-residual position study; no local effectiveness claim.
++
++The shared relation/count/linear-moment token path is inherited unchanged.
++Only the compact task residual's pooling basis is replaced: content (copy)
++or centered RMS-normalized signed valid rank (linear). Cross that replacement
++with private versus mean task routing, at identical parameters and operators.
++All four arms use FP32 residual accumulation, including content controls.
++No timestamps, task-history selection, new parameters, or new loss are used.
+ """
+ import math
+ import torch
+@@ -16,7 +15,7 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'moment_mode': 'linear', 'task_routing': 'private', 'block_click_score_grad': False, 'block_aux_score_grad': False, 'scorer_hidden_width': 64}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'moment_mode': 'linear', 'task_routing': 'private', 'block_click_score_grad': False, 'block_aux_score_grad': False, 'scorer_hidden_width': 64, 'task_pool_mode': 'linear'}
+ 
+ class JointBlock(nn.Module):
+     """Pre-norm attention with invalid slots excluded as keys and outputs."""
+@@ -52,13 +51,14 @@
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='SharedScorerMomentStudy', gpu=-1,
++    def __init__(self, feature_map, model_id='TaskResidualPositionStudy', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), token_dim=32, num_heads=2,
+                  slot_mode='recency', representation_mode='replicas',
+                  content_mode='relation', count_mode='relation', moment_mode='linear',
+                  task_routing='private', block_click_score_grad=False,
+                  block_aux_score_grad=False, scorer_hidden_width=64,
++                 task_pool_mode='linear',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -91,6 +91,9 @@
+             raise ValueError('Unknown position moment')
+         if content_mode != 'relation' or count_mode != 'relation':
+             raise ValueError('Position study requires the frozen relation parent')
++        if task_pool_mode not in ('linear', 'copy'):
++            raise ValueError('Task residual requires linear or copy pooling')
++        self.task_pool_mode = task_pool_mode
+         self.moment_mode = moment_mode
+         self.task_routing = task_routing
+         self.slot_mode = slot_mode
+@@ -188,6 +191,9 @@
+         The shared first layer executes once. Each nonlinear head has its own
+         parameters and Dice buffers. All scorer inputs and value paths train.
+         Mean routing sends the same computed score mean to all four towers.
++        Then replace only this residual's pooling basis. Content pooling is
++        the capacity/operator control; signed rank can preserve event order.
++        The inherited shared content and moment paths are not replaced.
+         """
+         batch, length, _ = keys.shape
+         if not length:
+@@ -206,7 +212,17 @@
+         center = scores.float().mean(dim=-1, keepdim=True).to(scores.dtype)
+         mixing = 1.0 if self.task_routing == 'mean' else 0.0
+         scores = (1.0 - mixing) * scores + mixing * center
+-        return torch.bmm(scores.transpose(1, 2), values)
++        # Derive rank from visible events, never from padded offsets or time.
++        # Both bases are computed in every arm. FP32 scores-times-basis and
++        # reduction protect signed cancellation under the host BF16 autocast.
++        # Content controls use the SAME FP32 path; they are precision-matched
++        # controls, not a promise of byte-identical old BF16 training replay.
++        with torch.autocast(device_type=values.device.type, enabled=False):
++            basis = self._moment_coefficients(
++                valid[:, None, :], mode=self.task_pool_mode).squeeze(1)
++            residual_weights = scores.float() * basis[:, :, None]
++            result = torch.bmm(residual_weights.transpose(1, 2), values.float())
++        return result.to(values.dtype)
+ 
+     def _slot_masks(self, valid):
+         """Global plus four rank quartiles, or five global copies."""
+@@ -240,7 +256,7 @@
+         relations = torch.stack(relations, dim=1)
+         return temporal_masks[:, :, None, :] & relations[:, None, :, :]
+ 
+-    def _moment_coefficients(self, temporal_masks):
++    def _moment_coefficients(self, temporal_masks, mode=None):
+         """Relative valid rank, independent of padding IDs and absolute offsets.
+ 
+         Center BEFORE restricting by a target relation, so a relation present
+@@ -264,11 +280,12 @@
+         quadratic = quadratic / quadratic_rms
+         # Always calculate both bases in all arms. In particular, a reversed
+         # linear basis is NOT a distinct mechanism; its sign is absorbable.
+-        if self.moment_mode == 'linear':
++        mode = self.moment_mode if mode is None else mode
++        if mode == 'linear':
+             return linear
+-        if self.moment_mode == 'quadratic':
++        if mode == 'quadratic':
+             return quadratic
+-        if self.moment_mode == 'copy':
++        if mode == 'copy':
+             return visible
+         return visible * 0.0
+ 

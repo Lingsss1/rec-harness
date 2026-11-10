@@ -1,0 +1,120 @@
+--- g3-r0010-content_plus_linear_private/model.py
++++ g3-r0011-private_content_mean_copy/model.py
+@@ -1,13 +1,12 @@
+-"""Prospective content-preserving task-moment augmentation.
+-
+-Inherit the compact task-content source and shared g0 token representation.
+-Retain the direct task content sum C, then add P(M), where M is either a
+-signed valid-rank sum or another content sum. P is a shared bias-free linear
+-map initialized to zero after all inherited modules, inside an RNG fork.
+-The 2x2 study crosses extra basis (linear/copy) and routing (private/mean).
+-Copy is an active, parameter/operator-matched content-capacity control.
+-Only visible historical inputs are used; no loss or host protocol changes.
+-No predictive, mechanistic, efficiency, or novelty result is claimed here.
++"""Prospective independent content/moment task-routing study.
++
++Retain the shared g0 relation/count/linear-moment tokens and R10 compact
++residual scorer, content C, and zero-initialized shared map P(E). Independently
++route the scores for C and E as private task scores or their four-task mean.
++Cross this separation with linear/copy E, completing the missing cells of
++the R10 three-factor study. No new parameters, values, loss or inputs.
++Existing matching-route cells are historical controls, not new repetitions.
++No predictive, mechanistic, efficiency or originality result is established.
+ """
+ import math
+ import torch
+@@ -17,7 +16,7 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'moment_mode': 'linear', 'task_routing': 'private', 'block_click_score_grad': False, 'block_aux_score_grad': False, 'scorer_hidden_width': 64, 'task_extra_basis': 'linear'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'token_dim': 32, 'num_heads': 2, 'slot_mode': 'recency', 'representation_mode': 'replicas', 'content_mode': 'relation', 'count_mode': 'relation', 'moment_mode': 'linear', 'task_routing': 'private', 'block_click_score_grad': False, 'block_aux_score_grad': False, 'scorer_hidden_width': 64, 'task_extra_basis': 'copy', 'task_extra_routing': 'mean'}
+ 
+ class JointBlock(nn.Module):
+     """Pre-norm attention with invalid slots excluded as keys and outputs."""
+@@ -53,14 +52,14 @@
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='TaskContentPlusMomentStudy', gpu=-1,
++    def __init__(self, feature_map, model_id='IndependentContentMomentRoutingStudy', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), token_dim=32, num_heads=2,
+                  slot_mode='recency', representation_mode='replicas',
+                  content_mode='relation', count_mode='relation', moment_mode='linear',
+                  task_routing='private', block_click_score_grad=False,
+                  block_aux_score_grad=False, scorer_hidden_width=64,
+-                 task_extra_basis='linear',
++                 task_extra_basis='copy', task_extra_routing='mean',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -95,6 +94,9 @@
+             raise ValueError('Position study requires the frozen relation parent')
+         if task_extra_basis not in ('linear', 'copy'):
+             raise ValueError('Extra task summary requires linear or copy basis')
++        if task_extra_routing not in ('private', 'mean'):
++            raise ValueError('Unknown extra-summary score routing')
++        self.task_extra_routing = task_extra_routing
+         self.task_extra_basis = task_extra_basis
+         self.moment_mode = moment_mode
+         self.task_routing = task_routing
+@@ -196,14 +198,14 @@
+         self.model_to_device()
+ 
+     def _task_pool(self, target, keys, actions, values, valid):
+-        """Keep content and augment it with a projected second summary.
+-
+-        Scorers see target, visible item fields and historical actions. Their
+-        inputs and values train in every arm. Routing is applied to scores
+-        before both summaries. Extra rank uses visible order, not timestamps.
+-        At zero P every arm starts at its inherited content-source function.
+-        Initially zero scorer outputs also make P's gradient zero; the host
+-        must check learning after scorer outputs become nonzero.
++        """Independently route content and extra scores before pooling.
++
++        Both routes use the SAME raw scorer outputs, values and valid mask.
++        Each mean uses the inherited FP32 mean followed by the inherited cast.
++        Routing changes learned scorer gradients as well as representations;
++        these are training interventions, not frozen-weight causal mediation.
++        Matching routes reproduce R10 arithmetic; P=0 reproduces its initial
++        content source. Empty histories remain zero without projection bias.
+         """
+         batch, length, _ = keys.shape
+         if not length:
+@@ -216,12 +218,19 @@
+         columns = [scorer(hidden) for scorer in self.task_scorers]
+         scores = torch.cat(columns, dim=-1).reshape(batch, length, self.num_tasks)
+         scores = scores.masked_fill(~valid.unsqueeze(-1), 0)
+-        # Same score/routing arithmetic in all factorial cells. FP32 averaging
+-        # avoids an unnecessary BF16 accumulation loss. Explicit broadcasting
+-        # makes mean routing exactly task-independent, including under BF16.
++        # Route C and E independently from the same raw scores. The previous
++        # diagonal cells routed both together. Always execute both mixtures;
++        # no route adds parameters, normalization or a new hidden state.
+         center = scores.float().mean(dim=-1, keepdim=True).to(scores.dtype)
+-        mixing = 1.0 if self.task_routing == 'mean' else 0.0
+-        scores = (1.0 - mixing) * scores + mixing * center
++        content_mixing = 1.0 if self.task_routing == 'mean' else 0.0
++        extra_mixing = 1.0 if self.task_extra_routing == 'mean' else 0.0
++        content_scores = (1.0 - content_mixing) * scores + content_mixing * center
++        extra_scores = (1.0 - extra_mixing) * scores + extra_mixing * center
++        # Diagonal replay shares the actual tensor/gradient graph, matching
++        # R10 accumulation order as well as the forward arithmetic. The
++        # second mixture still executes, but is unused on diagonal checks.
++        if self.task_extra_routing == self.task_routing:
++            extra_scores = content_scores
+         # Content path keeps the R9 content control's FP32 arithmetic.
+         # Both summaries and the dense projection execute in every arm.
+         # Protect signed cancellation and projection/addition from BF16
+@@ -230,8 +239,8 @@
+             content_basis = valid.float()
+             extra_basis = self._moment_coefficients(
+                 valid[:, None, :], mode=self.task_extra_basis).squeeze(1)
+-            content_weights = scores.float() * content_basis[:, :, None]
+-            extra_weights = scores.float() * extra_basis[:, :, None]
++            content_weights = content_scores.float() * content_basis[:, :, None]
++            extra_weights = extra_scores.float() * extra_basis[:, :, None]
+             content = torch.bmm(content_weights.transpose(1, 2), values.float())
+             extra = torch.bmm(extra_weights.transpose(1, 2), values.float())
+             result = content + self.task_extra_projection(extra)

@@ -1,0 +1,131 @@
+--- g0-r0013-pair_joint_both/model.py
++++ g0-r0016-pair_rank_marginal/model.py
+@@ -1,13 +1,11 @@
+-"""Same-event target-field conjunctions, with a content/count 2x2 control.
+-
+-The incumbent summarizes six item-field matches separately. Add summaries of
+-all 15 unordered match pairs in the same five temporal bins. The joint source
+-uses same-event intersections. The factorized source uses only the parent's
+-marginal counts and content sums. Content and count sources vary independently.
+-Each pair has an equal-size zero-start projection and contributes to its two
+-existing relation tokens; no new downstream tokens or attention keys are added.
+-All inherited modules, initialization, masks, task heads and loss are retained.
+-This is an untested local representation hypothesis, not a novelty claim.
++"""Rank-sensitive same-event conjunction summaries with matched source controls.
++
++Retain the g0-r0013 pair-content/count incumbent in full. A separate zero-start
++bank projects the first rank moment of pair-match content, its symmetric
++marginal estimate, or a copy of existing joint content. A fourth cell disables
++the new update. All sources are computed in every arm; no tokens or masks are
++added. Rank is relative valid-event order, not elapsed time. This is an
++untested local hypothesis; no priority or original-method reproduction claim.
+ """
+ import math
+ import torch
+@@ -37,6 +35,7 @@
+     'memory_layout': 'collapsed',
+     'pair_content_source': 'joint',
+     'pair_count_source': 'joint',
++    'pair_rank_source': 'marginal',
+ }
+ 
+ 
+@@ -177,6 +176,7 @@
+                  content_bank_mode='relation', feedback_content_mode='factorized',
+                  memory_source='joint', memory_layout='collapsed',
+                  pair_content_source='joint', pair_count_source='joint',
++                 pair_rank_source='marginal',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -227,6 +227,9 @@
+             raise ValueError('Unknown pair content source')
+         if pair_count_source not in ('joint', 'factorized'):
+             raise ValueError('Unknown pair count source')
++        if pair_rank_source not in ('joint', 'marginal', 'copy', 'zero'):
++            raise ValueError('Unknown pair rank source')
++        self.pair_rank_source = pair_rank_source
+         self.pair_content_source = pair_content_source
+         self.pair_count_source = pair_count_source
+         self.feedback_content_mode = feedback_content_mode
+@@ -344,9 +347,14 @@
+             routes[index, left] = scale
+             routes[index, right] = scale
+         self.register_buffer('pair_routes', routes)
++        # Appended after all inherited initialization: zeros consume no RNG.
++        # Every source cell has the same 15 x value_width x token_dim bank.
++        self.pair_rank_bank = nn.Parameter(
++            torch.zeros(len(pairs), self.value_width, token_dim))
+         self.model_to_device()
+ 
+-    def _pair_tokens(self, values, weights, relation_masks, relation_counts):
++    def _pair_tokens(self, values, weights, relation_masks, relation_counts,
++                     temporal_masks):
+         """Conjunctive content/counts versus symmetric marginal estimates.
+ 
+         Let n be temporal support, n_r a relation count, and S_r the parent's
+@@ -397,6 +405,55 @@
+         # Summary accumulation is FP32. Projection follows host BF16 autocast,
+         # like the incumbent content banks. No signed denominator is used.
+         projected = torch.einsum('btpv,pvd->btpd', source, self.pair_bank)
++        pair_tokens = torch.einsum('btpd,pg->btgd', projected,
++                                    self.pair_routes.to(projected.dtype))
++        rank_tokens = self._pair_rank_tokens(
++            values, weights, relation_masks, temporal_masks, joint_mask,
++            joint_content, left_count, right_count, support)
++        return pair_tokens + rank_tokens.to(pair_tokens.dtype)
++
++    def _pair_rank_tokens(self, values, weights, relation_masks, temporal_masks,
++                          joint_mask, joint_content, left_count, right_count,
++                          support):
++        """First rank moments of joint content versus marginal/copy controls.
++
++        The centered unit-RMS basis comes from temporal support, before field
++        restriction. Coefficients and weights may be signed. Counts/support
++        are unweighted and support is clamped at one, never a learned-weight
++        denominator. All three sources are computed even in the zero cell.
++        Pair sums/counts in _pair_tokens keep their inherited arithmetic.
++        """
++        batch = values.shape[0]
++        with torch.autocast(device_type=values.device.type, enabled=False):
++            coefficients = self._moment_coefficients(temporal_masks)
++            rank_weights = (weights.float()[:, None, None, :]
++                            * coefficients.float()[:, :, None, :])
++            joint_weights = joint_mask.float() * rank_weights
++            joint_moment = torch.bmm(joint_weights.flatten(1, 2), values.float())
++            joint_moment = joint_moment.reshape(
++                batch, 5, self.pair_bank.shape[0], self.value_width)
++            joint_moment = joint_moment / math.sqrt(self.group_count)
++            marginal_weights = relation_masks.float() * rank_weights
++            marginal_moment = torch.bmm(marginal_weights.flatten(1, 2), values.float())
++            marginal_moment = marginal_moment.reshape(
++                batch, 5, self.group_count, self.value_width)
++            marginal_moment = marginal_moment / math.sqrt(self.group_count)
++            left_moment = marginal_moment.index_select(2, self.pair_left)
++            right_moment = marginal_moment.index_select(2, self.pair_right)
++            marginal = 0.5 * ((right_count / support) * left_moment
++                              + (left_count / support) * right_moment)
++            if self.pair_rank_source == 'marginal':
++                source = marginal
++            elif self.pair_rank_source == 'copy':
++                source = joint_content
++            else:
++                source = joint_moment
++        # FP32 accumulation followed by the same host-autocast contraction
++        # as the inherited pair bank. The copy cell is an active duplicate
++        # projection; zero is only a replay check, not a capacity control.
++        projected = torch.einsum('btpv,pvd->btpd', source, self.pair_rank_bank)
++        if self.pair_rank_source == 'zero':
++            projected = projected * 0.0
+         return torch.einsum('btpd,pg->btgd', projected,
+                             self.pair_routes.to(projected.dtype))
+ 
+@@ -693,7 +750,7 @@
+             values, weights, relation_masks, valid, task_masks)
+         slot_tokens = slot_tokens + feedback_tokens.to(slot_tokens.dtype)
+         pair_tokens = self._pair_tokens(values, weights, relation_masks,
+-                                        relation_counts)
++                                        relation_counts, content_mask)
+         slot_tokens = slot_tokens + pair_tokens.to(slot_tokens.dtype)
+         slot_tokens = slot_tokens.flatten(1, 2)
+         # Validity is temporal in EVERY arm, so group occupancy is not leaked

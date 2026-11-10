@@ -1,0 +1,98 @@
+--- g0-r0017-pair_rank_occupancy/model.py
++++ g0-r0019-pair_magnitude_placement/model.py
+@@ -1,9 +1,9 @@
+-"""Decompose pair-rank information into placement and within-pair variation.
+-
+-All inherited paths remain unchanged. Replace only the input of the existing
+-zero-start pair-rank bank: W=M-mu*S, O=mu*S, or full M. The unweighted pair
+-centroid mu uses the parent's temporal rank basis and valid pair support.
+-This is a prospective local mechanism test, not an originality claim.
++"""Compare activation-magnitude and uniform pair placement summaries.
++
++Replace only mu in the existing occupancy input mu*S. The new centroid uses
++detached absolute DIN weights on valid pair support. Signed content S, all
++other summaries, trainable parameters and initialization remain inherited.
++This is a prospective local mechanism test; originality is unverified.
+ """
+ import math
+ import torch
+@@ -35,6 +35,7 @@
+     'pair_count_source': 'joint',
+     'pair_rank_source': 'joint',
+     'pair_rank_component': 'occupancy',
++    'pair_placement_source': 'magnitude',
+ }
+ 
+ 
+@@ -176,6 +177,7 @@
+                  memory_source='joint', memory_layout='collapsed',
+                  pair_content_source='joint', pair_count_source='joint',
+                  pair_rank_source='joint', pair_rank_component='occupancy',
++                 pair_placement_source='magnitude',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -233,6 +235,11 @@
+         if pair_rank_source != 'joint':
+             raise ValueError('Pair decomposition requires the joint rank source')
+         self.pair_rank_component = pair_rank_component
++        if pair_placement_source not in ('magnitude', 'uniform'):
++            raise ValueError('Unknown pair placement source')
++        if pair_rank_component != 'occupancy':
++            raise ValueError('Placement study freezes the occupancy component')
++        self.pair_placement_source = pair_placement_source
+         self.pair_rank_source = pair_rank_source
+         self.pair_content_source = pair_content_source
+         self.pair_count_source = pair_count_source
+@@ -447,7 +454,7 @@
+             marginal = 0.5 * ((right_count / support) * left_moment
+                               + (left_count / support) * right_moment)
+             joint_moment = self._select_pair_rank_component(
+-                joint_moment, joint_content, joint_mask, coefficients)
++                joint_moment, joint_content, joint_mask, coefficients, weights)
+             if self.pair_rank_source == 'marginal':
+                 source = marginal
+             elif self.pair_rank_source == 'copy':
+@@ -463,18 +470,34 @@
+         return torch.einsum('btpd,pg->btgd', projected,
+                             self.pair_routes.to(projected.dtype))
+ 
+-    def _select_pair_rank_component(self, moment, content, pair_mask, coefficients):
+-        """M=W+O on joint pair support, without signed normalization.
+-
+-        mu is the unweighted pair centroid in the original temporal basis.
+-        Empty support yields zero; a singleton has W=0 in exact arithmetic.
+-        W also vanishes for constant weighted content on the pair support.
+-        All cells compute both components; full returns the original tensor.
++    def _select_pair_rank_component(self, moment, content, pair_mask,
++                                    coefficients, weights):
++        """Locate signed content by uniform or magnitude-weighted mean rank.
++
++        Magnitudes describe contribution size, not positive user preference.
++        Detachment prevents a new derivative through centroid estimation;
++        the signed content keeps its inherited gradient. Normalize positive
++        magnitudes by their pair maximum before summing to avoid an unstable
++        signed denominator or an absolute epsilon cutoff. All-zero magnitude
++        falls back to uniform placement; empty support still returns zero.
++        Both centroids are computed, with no new parameters or RNG draws.
+         Called inside the inherited FP32 autocast-disabled summary block.
+         """
+         count = pair_mask.sum(dim=-1, keepdim=True).float()
+-        centroid = (pair_mask * coefficients[:, :, None, :]).sum(
++        uniform = (pair_mask * coefficients[:, :, None, :]).sum(
+             dim=-1, keepdim=True) / count.clamp_min(1.0)
++        magnitude = (pair_mask.float()
++                     * weights.detach().float().abs()[:, None, None, :])
++        peak = magnitude.amax(dim=-1, keepdim=True)
++        safe_peak = torch.where(peak > 0, peak, torch.ones_like(peak))
++        magnitude = magnitude / safe_peak
++        mass = magnitude.sum(dim=-1, keepdim=True)
++        safe_mass = torch.where(mass > 0, mass, torch.ones_like(mass))
++        weighted = (magnitude * coefficients[:, :, None, :]).sum(
++            dim=-1, keepdim=True) / safe_mass
++        weighted = torch.where(mass > 0, weighted, uniform)
++        centroid = (weighted if self.pair_placement_source == 'magnitude'
++                    else uniform)
+         occupancy = centroid * content
+         within = moment - occupancy
+         if self.pair_rank_component == 'within':

@@ -1,0 +1,128 @@
+{
+  "markdown_report": "## Insights\n\n**Starting point.** (1) Feedback favors recent intent and repeated narrow preferences. This motivates separating recent evidence from accumulated preference, but does not establish that recency weighting improves accuracy. (2) Broad associations sometimes outrank supported practical matches. Histories cannot establish equipment ownership, compatibility, or satisfied needs; missing evidence must remain unknown. (3) Existing probes measure embedding similarity and sampled margins. Neither establishes useful temporal reasoning or predicts validation gains; margin magnitudes also depend on score scale.\n\n**Related work.** (1) Petrov et al. report strong history-aware pairwise baselines on different datasets [1]. Test simple history components before increasing encoder complexity. (2) FCESR studies influential subsequences [2], while Refining Fidelity Metrics cautions against unequal intervention lengths [3]. Use equal-count controls, interpreting sensitivity descriptively. (3) Sampled rankings can reverse model comparisons [4,5]. Selection remains conditional on the pinned users, candidates, and seeds. (4) HGN and SHAN already combine historical and recent signals [6,7]. The proposed fusion is an inexpensive adaptation with limited architectural novelty.\n\n## Directions and framework\n\nThree directions connect these insights: separate timescales, test history dependence, and preserve evidence boundaries.\n\n| Component | Existing approach | Proposed extension | Evidence boundary |\n|---|---|---|---|\n| Representation | SASRec sequence features | Normalized recent-history residual | Must improve pinned validation |\n| Diagnosis | Sampled margins | Matched history interventions | Sensitivity alone is insufficient |\n| Practical utility | Qualitative feedback | Supported/contradicted/unknown claims | Missing ownership stays unknown |\n\n## Candidate ideas\n\nScores are originality/potential/difficulty; higher difficulty means harder implementation. Each assessment lists a positive (+) and negative (−) reason.\n\n| Idea | Scores | Positive assessment | Negative assessment |\n|---|---|---|---|\n| Recent-history residual [1,6,7] | 3/6/4 | O: controlled adaptation; P: reusable timescale test; D: small architecture change | O: established fusion; P: transfer uncertain; D: scale and predictor parity require care |\n| Matched intervention probe [2,3] | 4/6/4 | O: stronger controls; P: reusable diagnosis; D: no retraining required | O: established intervention methods; P: indirect accuracy benefit; D: position controls matter |\n| Evidence-aware compatibility audit | 5/6/6 | O: explicit uncertainty; P: useful feedback schema; D: text-only implementation possible | O: proposed rules; P: sparse specifications limit coverage; D: extraction is difficult |\n\n## Selected idea: recent-history residual\n\nAt 0% progress, retain the smallest trainable change, with explicit scale controls. Add a gated, normalized history summary to each SASRec position feature. This preserves the encoder’s history pathway while testing direct recent evidence; it establishes neither compatibility nor purchase necessity.\n\n```text\nfor each valid input position t:\n    recent = nonpadding inputs in positions max(0,t-4)..t\n    weights = normalize(exp(-(t-position)/2))\n    p[t] = sum(weights * unscaled_item_embedding(recent))\n    h[t] = (1-g)*LayerNorm(sasrec_feature[t])\n           + g*LayerNorm(p[t])\nscore with the baseline output item embeddings\ntrain with the unchanged baseline loss\n```\n\nUse separate affine LayerNorms with epsilon 1e-5; initialize weights to one and biases to zero. The learned gate is one scalar per dataset, initialized with logit −2.2, giving approximately 10% pooled contribution. Mask padded outputs. Include the current input item, never its next-item target; decay measures interaction positions, not elapsed time.\n\nPredeclare four configurations: unchanged SASRec; normalized fusion with last-item pooling and fixed g=0.1; recent pooling with fixed g=0.1; recent pooling with learned g. The matched fixed-g comparison isolates aggregation; the learned-g comparison tests gating. These controls do not fully isolate normalization. Uniform-history-only, recency-only, raw-branch, zero-decay, latest-item-exclusion, and gate-logit-zero controls remain deferred experiments, not an expanding search.\n\nRetain baseline optimizer and other settings, preprocessing seed 0, training seed 42, all four routes, `os.environ['GAGC_DATA_DIR']`, trial-local artifacts, and single-GPU execution. Evaluate at epochs 50, 100, and 200 under the supplied default; select solely by pinned macro validation HR@10, breaking ties toward baseline, then fixed gates. Sum GPU-seconds across concurrent jobs, diagnostics, and failures within 43,200; reserve 25% for finalist completion and component ablations. Report unfinished trials explicitly. Treat 0.005 macro improvement as a practical threshold, not statistical significance.\n\nReport category scores and paired, within-category user-bootstrap intervals for macro differences, using 10,000 resamples and seed 42 when host outcomes are available. These intervals exclude training variability and adaptive selection optimism [8]. One changed hit moves macro HR by 0.00125. Sampled HR does not establish full-catalog accuracy.\n\nUse training-only chronological pseudo-holdouts for equal-count recent, older, and repeated random removals; keep users, targets, and candidates paired. Shuffle earlier items while preserving the last item, multiset, padding, and occupied positions. Report rank changes and overlap descriptively: targets already influenced training weights, and perturbations can be unrealistic.\n\nUpdate the predictor writer and compatibility view together. Preserve `DiagnosisProbe(view, device).run_full_diagnosis(train_loader)`, actual `view.model`, feature/scoring hooks, histories, and metrics/definitions. Restore model mode; mark empty measurements unavailable; leave unavailable category breakdowns empty. Track branch norms, gate saturation, and frequency-stratified errors to detect scale or popularity shortcuts. Keep twenty-user feedback exploratory, separating acceptance, rejection, uncertainty, and missing feedback without inferring unobserved traits.",
+  "idea": {
+    "description": "Add a normalized, causally pooled recent-history branch to SASRec, using matched fixed-gate and learned-gate controls to distinguish history aggregation from last-item reinforcement.",
+    "motivation": "Feedback suggests that recent, specific preferences sometimes receive insufficient weight. Established long-/short-term fusion methods motivate a small controlled adaptation, while matched controls test whether any gain comes from earlier recent history rather than the last input item alone.",
+    "implementation_notes": "Run four prespecified configurations: unchanged baseline; last-item fusion with fixed g=0.1; five-position recency fusion with fixed g=0.1; identical recency fusion with a learned scalar gate initialized at logit -2.2. Use position decay tau=2, excluding padding and including only inputs through each position. Pool unscaled item embeddings. Apply separate affine LayerNorms with epsilon 1e-5 to SASRec and pooled features, then blend as (1-g)*normalized_sequence + g*normalized_pool; mask padded outputs. Keep baseline output embeddings, loss, optimizer, splits, seeds, and dataset routing. This controlled family does not isolate normalization from fusion; avoid attributing every gain to recency. Serialize branch configuration, normalization parameters, and gate; generate working/predict.py with identical computation. Respect SASREC_EPOCHS, whose supplied default is 200, and checkpoints at 50, 100, and the configured final epoch without exceeding that limit. Select using the host's pinned four-category macro validation HR@10. Predeclare deterministic tie handling and a descriptive practical-gain threshold of 0.005. Account for all concurrent GPU usage within 43,200 GPU-seconds and reserve 25% for finalist completion and ablations; no runtime guarantee is implied. Preserve DiagnosisProbe's required constructor, method, return keys, actual-model reference, and compatibility hooks. Restore prior model mode, distinguish unavailable metrics from zero, and leave category metadata breakdowns empty. Use only public histories, titles, descriptions, and timestamps; reviews, ratings, ownership, simulator traits, and item categories remain unavailable. Training-history perturbations measure fitted-model sensitivity, not independent generalization. Conditional paired bootstrap intervals require per-user host validation outcomes; do not invent them or replace the evaluator. No implementation execution or performance improvement is claimed.",
+    "pseudocode": "configurations = [baseline, last_fixed, recent_fixed, recent_learned]\nfor configuration in configurations:\n    retain all four dataset routes and required seeds\n    E = item_embedding(sequence)  # unscaled lookup\n    S = baseline_sasrec_features(sequence)\n    if configuration != baseline:\n        for position t:\n            J = valid input positions in [max(0,t-4), t]\n            if configuration == last_fixed:\n                P[t] = E[t]\n            else:\n                a = exp(-(t-J)/2)\n                P[t] = sum(a * E[J]) / sum(a)\n        g = sigmoid(gate_logit) if learned else 0.1\n        H = ((1-g)*LN_sequence(S) + g*LN_pool(P)) * valid_mask\n    else:\n        H = S\n    train using baseline scores, loss, optimizer and seed 42\n    serialize architecture, normalization and gate parameters\n    generate predictor implementing identical scoring\n    evaluate only through pinned host validation\n# Compare fixed recent versus fixed last to assess aggregation.\n# Compare learned recent versus fixed recent to assess gating.\n# Select by macro HR@10; report uncertainty and all attempted trials.",
+    "originality": {
+      "score": 3,
+      "positive": "The controlled adaptation connects a minimal architecture change to the task's diagnostic compatibility contract and isolates aggregation from last-item fusion.",
+      "negative": "HGN, SHAN, and other established approaches already combine recent and historical signals; gating and pooling alone provide little novelty."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "Provides an inexpensive foundation for investigating when explicit recent history complements sequence encoding, with reusable matched controls.",
+      "negative": "Benefits may come from normalization, optimization, last-item reinforcement, or popularity shortcuts; broader temporal-reasoning claims require additional evidence."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Uses standard embedding lookups, causal pooling, LayerNorm, and one scalar gate without extra datasets or pretrained models.",
+      "negative": "Correct masking, branch scaling, baseline reproduction, checkpoint compatibility, predictor generation, and diagnostic state handling require coordinated changes."
+    }
+  },
+  "related_work": [
+    {
+      "title": "[1] Do Sequential Recommendation Benchmarks Require Higher-Order Sequence Modelling?",
+      "link": "https://research.atspotify.com/2026/10/do-sequential-recommendation-benchmarks-require-higher-order-sequence-modelling",
+      "contributions": [
+        "The supplied summary reports strong history-aware pairwise baselines and benefits from earlier interactions."
+      ],
+      "limitations": [
+        "The Amazon categories differ from this task; transfer remains unverified.",
+        "Strong pairwise performance does not establish that the proposed residual will improve SASRec."
+      ]
+    },
+    {
+      "title": "[2] FCESR",
+      "link": "https://arxiv.org/abs/2504.13632",
+      "contributions": [
+        "Studies minimal influential interaction subsequences using reinforcement learning."
+      ],
+      "limitations": [
+        "Recommendation changes alone do not establish improved accuracy or useful temporal reasoning."
+      ]
+    },
+    {
+      "title": "[3] Refining Fidelity Metrics",
+      "link": "https://sigir2025.dei.unipd.it/detailed-program/paper?paper=e21e4e58ad9ab56e8a4634046da90113",
+      "contributions": [
+        "Highlights problems with mixed supporting and contradictory interactions and percentage-based deletion comparisons."
+      ],
+      "limitations": [
+        "Explanation fidelity does not directly establish ranking gains or causal identification."
+      ]
+    },
+    {
+      "title": "[4] On the Reliability of Sampling Strategies",
+      "link": "https://doi.org/10.1145/3705328.3748086",
+      "contributions": [
+        "Examines sampling reliability through resolution, fidelity, robustness, and predictive power."
+      ],
+      "limitations": [
+        "Does not identify which model improves this benchmark's pinned macro validation HR@10."
+      ]
+    },
+    {
+      "title": "[5] On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled recommendation metrics can disagree with exact metrics and reverse model comparisons."
+      ],
+      "limitations": [
+        "Does not justify changing the required benchmark evaluator; conclusions must remain conditional on its sampling protocol."
+      ]
+    },
+    {
+      "title": "[6] Hierarchical Gating Networks for Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1906.09217",
+      "contributions": [
+        "Combines feature- and instance-level gates with item–item interactions, establishing relevant gating and history-aggregation prior art."
+      ],
+      "limitations": [
+        "Its architecture and evaluation do not establish gains for this particular SASRec adaptation."
+      ]
+    },
+    {
+      "title": "[7] Sequential Recommender System Based on Hierarchical Attention Network",
+      "link": "https://www.ijcai.org/proceedings/2018/0546.pdf",
+      "contributions": [
+        "Hierarchically combines historical preferences with recent items.",
+        "Provides component ablations relevant to testing whether fusion helps."
+      ],
+      "limitations": [
+        "Fusion is not uniformly superior: the supplied summary notes that its short-term variant exceeds the combined model on Tmall Recall@20."
+      ]
+    },
+    {
+      "title": "[8] On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how optimizing model selection criteria can produce selection bias and optimistic performance estimates."
+      ],
+      "limitations": [
+        "Ordinary paired bootstrap intervals do not correct unrestricted adaptive validation reuse."
+      ]
+    },
+    {
+      "title": "SciPy bootstrap documentation",
+      "link": "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.bootstrap.html",
+      "contributions": [
+        "Documents paired resampling, supporting preservation of model pairing in uncertainty estimation."
+      ],
+      "limitations": [
+        "The proposed category-stratified procedure must be implemented explicitly; conditional intervals do not capture training variability or selection bias."
+      ]
+    },
+    {
+      "title": "Hyperband: A Novel Bandit-Based Approach to Hyperparameter Optimization",
+      "link": "https://www.jmlr.org/beta/papers/v18/16-558.html",
+      "contributions": [
+        "Motivates allocating resources in stages rather than fully training every exploratory configuration."
+      ],
+      "limitations": [
+        "Early performance can misorder finalists; the proposed checkpoint plan is not a claim to implement full Hyperband."
+      ]
+    }
+  ]
+}

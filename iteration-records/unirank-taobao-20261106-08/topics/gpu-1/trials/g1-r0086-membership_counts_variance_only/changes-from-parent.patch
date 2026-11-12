@@ -1,0 +1,149 @@
+--- g1-r0085-membership_native_uniform_bridge/model.py
++++ g1-r0086-membership_counts_variance_only/model.py
+@@ -1,10 +1,10 @@
+-"""Native-forward Dice with a controlled population-moment Jacobian.
+-
+-The full/counts/permuted contrast retains valid event content, action codes,
+-order, capacity, native Dice forward values and running-state updates.
+-Uniform auxiliary history closes the separate grouped-readout route.
+-Only primary Dice backward may treat population moments as constants.
+-This is a diagnostic surrogate gradient, not a new-information or novelty
+-claim. The host must check FP32/BF16 parity and measure cost before use.
++"""Conditional membership utility through scorer variance gradients.
++
++Retain native BatchNorm forward values, running-state updates and evaluation.
++During primary scorer training only, compare an explicit full input VJP with
++its variance-coupled, mean-gradient-omitted replacement. The full/counts/
++valid-rank-permuted arms retain identical learned capacity and host exposure.
++The explicit full VJP is a numerical bridge, not an assumed exact reproduction
++of the native mixed-precision backward kernel. No novelty claim is made.
+ """
+ import torch
+@@ -15,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'membership_use': 'full', 'primary_scorer_normalization': 'native', 'auxiliary_history_readout': 'uniform', 'primary_moment_gradient': 'native'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'membership_use': 'counts', 'primary_scorer_normalization': 'native', 'auxiliary_history_readout': 'uniform', 'primary_moment_gradient': 'variance_only'}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -857,28 +857,49 @@
+ 
+ class _PrimaryPopulationJacobian(torch.autograd.Function):
+-    """Identical normalized values, native or diagonal input Jacobian.
+-
+-    Native mode routes the incoming cotangent to the real BatchNorm graph.
+-    Detached mode routes it directly to X with scale (Var[X]+eps)^(-1/2).
+-    The native mean/variance derivatives are omitted, while Dice's sigmoid,
+-    learned alpha and direct X edges remain differentiable. The additional
+-    FP32 reduction approximates the native kernel's biased train variance;
+-    it is not claimed bitwise equal to the kernel's internal saved invstd.
++    """Native forward values with explicit first-order input VJP controls.
++
++    For population dimension zero let r=(biased_var(X)+eps)^(-1/2),
++    z=(X-mean(X))*r and g be the incoming normalized-value cotangent.
++    Explicit full: r*(g-mean(g)-z*mean(g*z)). Variance-only:
++    r*(g-z*mean(g*z)); it omits the mean derivative while retaining
++    the variance derivative, including its dependence on centered X.
++    This does NOT remove forward centering or event content.
++
++    Detached FP32 moments approximate the native kernel's saved statistics.
++    Every mode computes both components; native mode remains available as
++    an exact graph-routing bridge. Explicit modes cast once at the input
++    boundary. These are first-order surrogate VJPs; no higher-order or
++    exact native mixed-precision gradient equivalence is claimed.
+     """
+     @staticmethod
+-    def forward(ctx, hidden, normalized, inverse_std, detach_moments):
+-        ctx.detach_moments = detach_moments
+-        ctx.save_for_backward(inverse_std)
+-        # No arithmetic changes native BN values, dtype or signed zeros.
++    def forward(ctx, hidden, normalized, mean, inverse_std, mode):
++        ctx.mode = mode
++        # A detached view shares storage, adding no full-size saved copy.
++        ctx.save_for_backward(hidden.detach(), mean, inverse_std)
+         return normalized.view_as(normalized)
+ 
+     @staticmethod
+     def backward(ctx, incoming):
+-        inverse_std, = ctx.saved_tensors
+-        if not ctx.detach_moments:
+-            return None, incoming, None, None
++        hidden, mean, inverse_std = ctx.saved_tensors
+         with torch.autocast(device_type=incoming.device.type, enabled=False):
+-            local = (incoming.float() * inverse_std).to(dtype=incoming.dtype)
+-        return local, None, None, None
++            work = incoming.float()
++            standardized = (hidden.float() - mean) * inverse_std
++            mean_component = work.mean(dim=0, keepdim=True)
++            variance_component = standardized * (work * standardized).mean(
++                dim=0, keepdim=True)
++            full = (work - mean_component - variance_component) * inverse_std
++            variance_only = (work - variance_component) * inverse_std
++            diagonal = work * inverse_std
++        if ctx.mode == 'native':
++            return None, incoming, None, None, None
++        if ctx.mode == 'analytic_full':
++            local = full
++        elif ctx.mode == 'variance_only':
++            local = variance_only
++        elif ctx.mode == 'detached':
++            local = diagonal
++        else:
++            raise ValueError('Unknown primary population VJP')
++        return local.to(dtype=hidden.dtype), None, None, None, None
+ 
+ 
+@@ -913,7 +934,7 @@
+                  click_relative_transfer='orthogonal_native',
+                  orthogonal_assignment='nuisance_line_fixed_angle_occupied_cycle_source_bit',
+-                 membership_use='full',
++                 membership_use='counts',
+                  primary_scorer_normalization='native',
+-                 primary_moment_gradient='native',
++                 primary_moment_gradient='variance_only',
+                  auxiliary_history_readout='uniform',
+                  task='binary_classification', **kwargs):
+@@ -942,5 +963,5 @@
+         if primary_scorer_normalization != 'native':
+             raise ValueError('Moment-Jacobian study retains native forward normalization')
+-        if primary_moment_gradient not in ('native', 'detached'):
++        if primary_moment_gradient not in ('native', 'detached', 'analytic_full', 'variance_only'):
+             raise ValueError('Unknown primary moment gradient')
+         if auxiliary_history_readout != 'uniform':
+@@ -1578,12 +1599,12 @@
+ 
+     def _primary_population_dice(self, layer, hidden):
+-        """Run native BN once; choose only its training input Jacobian.
+-
+-        Every arm performs the same detached FP32 variance reduction and
+-        custom wrapper. No learned module, buffer, RNG or running-state
+-        update is added. Native BN still sees all expanded 70 rows with
+-        the inherited support multiplicities, including zero summary rows.
+-        At evaluation use the original Dice implementation unmodified.
+-        Tower Dice and functional auxiliary Dice never use this helper.
++        """One native state update; select only the training input VJP.
++
++        All 70 expanded rows, support duplicates and empty summary rows
++        retain their inherited normalization mass. Every arm recomputes
++        detached FP32 mean/variance and uses the same wrapper/work. No
++        modules, persistent state, labels, masks or RNG are added. At
++        evaluation use the original Dice directly. Functional auxiliary
++        scoring, tower Dice and collected context transfer are untouched.
+         """
+         if not self.training:
+@@ -1593,11 +1614,11 @@
+         normalized = layer.bn(hidden)
+         with torch.autocast(device_type=hidden.device.type, enabled=False):
+-            variance = hidden.detach().float().var(dim=0, unbiased=False, keepdim=True)
++            work = hidden.detach().float()
++            mean = work.mean(dim=0, keepdim=True)
++            variance = work.var(dim=0, unbiased=False, keepdim=True)
+             inverse_std = torch.rsqrt(variance + layer.bn.eps)
+         normalized = _PrimaryPopulationJacobian.apply(
+-            hidden, normalized, inverse_std,
+-            self.primary_moment_gradient == 'detached')
++            hidden, normalized, mean, inverse_std, self.primary_moment_gradient)
+         gate = torch.sigmoid(normalized)
+-        # Preserve the pinned native Dice operation order exactly.
+         return gate * hidden + layer.alpha * (1 - gate) * hidden
+ 

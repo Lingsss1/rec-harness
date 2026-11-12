@@ -1,0 +1,60 @@
+{
+  "request_sha256": "1b61f98927ca9cf0d7498eec61e657763b1e4ff1084c8bce8383915674546b7f",
+  "response": {
+    "markdown_report": "**Proposed direction: audit negative coverage before changing NextItNet’s loss.** At 20% progress, a small diagnostic extension offers a practical next experiment.\n\n**Insights from the supplied evidence.** First, CDs has a sampled training margin of 12.03 but training-prefix catalog HR@10 of zero. This motivates checking missed competitors, without establishing a sampling failure. Second, permutation worsens ranks in several categories. Order sensitivity therefore exists, but does not establish useful recency weighting. Third, replacement probes preserve positions and distinguish inserted-candidate effects. Their remaining gap is whether training negatives represent the competitors exposed by those probes.\n\n**Insights from related work.** [Improved Estimation of Ranks](https://research.google/pubs/improved-estimation-of-ranks-for-learning-item-recommenders-with-negative-sampling/) identifies sampled-rank bias. Exact ranks can anchor the proposed audit. [Zhang and Nanda](https://arxiv.org/abs/2309.16042) show that intervention choices affect localization. Retaining both random and plausible replacements limits dependence on one corruption scheme. [Sampled-softmax analysis](https://wujcan.github.io/papers/tois-ssm.pdf) discusses problems with excessively hard negatives. Missing competitors would motivate a controlled loss experiment, rather than automatically justify hardest-negative training.\n\nThree directions follow: improve intervention validity, measure competitor coverage, and test optimization changes only after diagnosis.\n\n| Direction | Existing approach | Remaining question |\n|---|---|---|\n| Context | Position-preserving lag replacements | Does plausibility change measured sensitivity? |\n| Competition | Fixed/shared restricted catalogs | Which outranking items escape sampled negatives? |\n| Optimization | Sampled training margins | Would broader supervision improve host validation? |\n\nThree atomic ideas are worth considering. Scores below are originality/potential/difficulty, each out of ten.\n\n- **Competitor-coverage audit: 5/8/3.** Originality: connects existing probes to sampling, but uses established estimators. Potential: identifies actionable ranking gaps, but remains in-sample. Difficulty: reuses chunked scoring, but requires exact denominators.\n- **Residual restoration patching: 6/7/6.** Originality: adapts intervention localization to causal convolutions, but patching is established. Potential: localizes sensitivity, but hybrid activations may be unnatural. Difficulty: needs no retraining, but requires architecture-specific hooks [Zhang and Nanda].\n- **Bounded multi-negative loss: 3/7/4.** Originality: is a direct optimization intervention, but has substantial precedent. Potential: broadens competition, but risks false-negative pressure. Difficulty: preserves inference, but increases training cost [sampled-softmax analysis].\n\n**Selected algorithm.** Freeze the supplied category model and reuse deterministic training-prefix pairs. For clean and matched replacement histories, stream identical eligible catalogs. Measure exact rank, the fraction of outranking items covered by unique sampled negatives, and their captured eligible-catalog softmax mass. Also report results after excluding inserted items through a shared restricted catalog.\n\n```text\nfreeze model; sample training prefixes with seed 42\nfor clean/replacement pair:\n    fix eligible items and unique training negatives\n    stream scores; count outrankers and accumulate logsumexp\n    report rank, competitor coverage, captured mass\naggregate within users, then categories; bootstrap users\n```\n\nReport empty-denominator cases as undefined and restoration controls explicitly. These measurements guide hypotheses; unchanged four-category host validation HR@10 alone selects improvements.",
+    "idea": {
+      "description": "Extend the existing position-preserving NextItNet intervention adapter with a paired competitor-coverage audit. Measure whether sampled training negatives cover the items that actually outrank training targets, before and after matched lag replacements.",
+      "motivation": "The supplied diagnostics show strong sampled-negative training separation alongside weak eligible-catalog training-prefix ranking. This discrepancy motivates measuring competitor coverage; it does not establish that negative sampling caused poor ranking or that changing the loss will improve validation.",
+      "implementation_notes": "Keep exactly one independently trained NextItNet model/checkpoint per category and perform this audit on its frozen parameters. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), diagnosis_interpreter_prompt(raw_diagnosis), and all ModelView interfaces. Use training prefixes and next training items only, with deterministic seed 42; retain original positions, terminal items, replacement matching, and final-nonpadding readout. Never use nonpadding_count-1. Restore module modes and RNG states after diagnosis. Fix original-prefix eligibility across paired variants, retain the target once, and exclude PAD. Report both the fixed catalog and a shared restricted catalog excluding inserted replacement IDs except the target. Draw diagnostic negatives using the supplied family-specific training sampler where accessible; otherwise label the actual sampling distribution explicitly and avoid claiming to reproduce training. Deduplicate negatives for set coverage and mass calculations, intersect them with eligible non-target IDs, and report retained counts. Define outranker coverage as the intersection with strict target-outranking items divided by their total count; return null when none exist. Compute captured negative probability mass using stable eligible-catalog logsumexp with temperature fixed at 1, clearly identifying this as a score-based diagnostic. Keep deterministic ascending-ID tie-breaking for exact ranks and report ties separately. Aggregate prefixes within users and users within category; compute a macro only after all four category results are available. Preserve unavailable metadata as null or empty. Keep DATA_DIR = os.environ['GAGC_DATA_DIR'], trial-local artifacts, preprocessing seed 0, training seed 42, at most 200 epochs and 200 batches per epoch. Preserve routing for Movies_and_TV, Industrial_and_Scientific, Electronics, and CDs_and_Vinyl. No architecture or inference change is needed; checkpoint and embedded predictor remain consistent. Account for diagnostics within the shared 43,200 GPU-second budget and retain the prescribed twenty-user full-catalog recommendation procedure. No validation gain is claimed or measured here.",
+      "pseudocode": "Record protocol, seed, prefix cap, replacement rules, negative draw count, temperature=1, and bootstrap repetitions.\nSave model modes and RNG states; enter eval/no_grad.\nFor each category's single trained NextItNet:\n  Reuse deterministic training-prefix/next-training-item pairs.\n  Construct matched recent/older replacements without shifting positions.\n  Freeze original-prefix eligibility; retain the target exactly once.\n  Draw one negative set per prefix and reuse it across paired variants.\n  For each clean/replacement variant and fixed/shared restricted catalog:\n    Encode once through log2feats(sequence).\n    Gather the maximum nonpadding index; exclude empty histories.\n    Score the target and retained unique sampled negatives.\n    Stream eligible item chunks through predict_score.\n    Accumulate strict outranker count, score ties, exact ID-tiebroken rank, and catalog logsumexp.\n    Count unique sampled negatives that strictly outrank the target.\n    coverage = captured_outrankers / all_outrankers, or null if denominator is zero.\n    captured_mass = exp(logsumexp(unique sampled-negative scores) - catalog_logsumexp).\n    Record counts, paired differences, and inserted-item competition effects.\n  Average valid observations within users, then users within category.\nBootstrap users within categories; form equal-weight macro summaries only with all four categories.\nRestore modes and RNG states in finally.\nReturn metrics and metric_definitions, including coverage failures, undefined values, and measured diagnostic cost.\nInterpret results as training sensitivity and sampling coverage; select future changes only through pinned host macro validation HR@10.",
+      "originality": {
+        "score": 5,
+        "positive": "Connects lag interventions, inserted-item controls, exact catalog competition, and training-negative coverage in a single family-specific diagnostic.",
+        "negative": "Ranking, set coverage, probability mass, and paired perturbation estimators are established; novelty lies mainly in their integration."
+      },
+      "future_potential": {
+        "score": 8,
+        "positive": "Can distinguish hypotheses about missing competitors from hypotheses about context sensitivity and motivate a minimal single-model loss experiment.",
+        "negative": "Training-prefix coverage may not predict held-out improvement, and catalog softmax mass does not identify true relevance or false negatives."
+      },
+      "code_difficulty": {
+        "score": 3,
+        "positive": "Reuses existing prefix sampling, replacement generation, chunked scoring, and user-level aggregation without retraining or predictor changes.",
+        "negative": "Sampler fidelity, duplicate handling, stable probability accumulation, paired eligibility, and undefined denominators need careful implementation."
+      }
+    },
+    "related_work": [
+      {
+        "title": "Improved Estimation of Ranks for Learning Item Recommenders with Negative Sampling",
+        "link": "https://research.google/pubs/improved-estimation-of-ranks-for-learning-item-recommenders-with-negative-sampling/",
+        "contributions": [
+          "Analyzes rank estimation under negative sampling and motivates anchoring sampled comparisons to catalog-level ranking."
+        ],
+        "limitations": [
+          "Does not establish that the supplied NextItNet failures arise from insufficient competitor coverage or that the proposed audit predicts validation gains."
+        ]
+      },
+      {
+        "title": "Towards Best Practices of Activation Patching in Language Models: Metrics and Methods",
+        "link": "https://arxiv.org/abs/2309.16042",
+        "contributions": [
+          "Shows that corruption methods and evaluation metrics influence intervention-based localization."
+        ],
+        "limitations": [
+          "Its language-model findings require adaptation and verification for NextItNet; intervention sensitivity alone does not establish recommendation relevance."
+        ]
+      },
+      {
+        "title": "Sampled-softmax analysis (2024; supplied reference)",
+        "link": "https://wujcan.github.io/papers/tois-ssm.pdf",
+        "contributions": [
+          "Provides analysis motivating caution about excessively hard negatives and their gradient influence."
+        ],
+        "limitations": [
+          "Does not supply benchmark-specific evidence that broader or harder negative training improves the four-category NextItNet task."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/model-family-comparison-20261029/runs/nextitnet-self_evolverec/self_evolverec/calls/00758"
+}

@@ -1,0 +1,171 @@
+{
+  "markdown_report": "SASRec’s useful historical context can also obscure current intent. The simulator identifies unsupported broad associations and stale or isolated demand; Electronics has 14.95% sampled wrong rankings and a −0.4812 tenth-percentile margin. These observations motivate experiments, not proof that recency causes ranking errors.\n\n**Insights and directions.** Three starting-point insights follow. Attention already models sequential relevance, so an added branch must demonstrate incremental value. Recent and repeated interests receive favorable qualitative feedback, suggesting conditional selection rather than universal removal of older evidence. Positive average margins conceal a weak lower tail; training separation alone cannot establish validation improvement.\n\nThree literature insights organize the alternatives. TLSTSRec supports adaptive long/short fusion, while hierarchical preference modeling retrieves persistent interests using recent activity. SLi-Rec and CLSR establish substantial fusion prior art, reducing originality. gSASRec provides a separate objective-level experiment addressing sampling-induced overconfidence.\n\n**Framework.**\n\n| Direction | Existing mechanism | Proposed experiment | Main uncertainty |\n|---|---|---|---|\n| Context selection | SASRec; TLSTSRec; SLi-Rec | Shared-encoder recent/full gate | Recent history may be noisy; positional effects |\n| Persistent interests | Hierarchical preference modeling; CLSR | Recent-conditioned interest pooling | Added capacity, identifiability and cost |\n| Ranking supervision | gSASRec | Uniform multi-negative gBCE | Convergence within budget |\n\n**Candidate assessments.** Scores are originality/potential/user alignment/model alignment/difficulty, each 0–10; higher difficulty means harder.\n\n- **Recent/full gate: 2/6/7/6/6.** Originality: controlled adaptation, but established fusion prior art. Potential: reusable context selection, but cheaper truncation may suffice. User alignment: targets stale demand and broad historical associations, but cannot establish compatibility or satisfaction. Model alignment: may remove confusing context, but margin gains are unproven. Difficulty: shared parameters help, but exact endpoint windows and memory management require care.\n- **Interest-bank retrieval: 4/7/8/6/7.** Originality: useful synthesis, but close prior art. Potential: preserves multiple interests, but risks overfitting. User alignment: selects specific persistent interests, but latent clusters lack purpose labels. Model alignment: may separate competing interests, but sparse supervision limits identification. Difficulty: small pooling modules, but routing requires careful tuning.\n- **Multi-negative gBCE: 2/7/4/9/3.** Originality: direct adaptation, but established method. Potential: strong reusable baseline, but slower convergence. User alignment: challenges distractors, but lacks explicit current-intent selection. Model alignment: targets separation, but margins need not improve HR@10. Difficulty: simple vectorization, but memory grows with negatives.\n\n**Selected experiment: recent/full gate.** Retain this eligible hypothesis at 0% progress, conditional on beating inexpensive controls. Encode the full prefix and its last ten items with shared SASRec weights; normalize branches and learn a scalar gate from both representations and observed prefix length. This targets stale/isolated demand and unsupported broad historical associations while retaining older preferences. Compare unchanged SASRec, recent-only SASRec, recency pooling, fixed mixtures, and a learned global scalar before claiming contextual gating helps. Match positional conventions and report compute. Select solely by pinned four-category macro validation HR@10; report category scores, lower-tail margins, gate contributions, and exploratory paired uncertainty. Predeclare selection rules because repeated validation reuse can overfit. No improvement or compatibility inference is claimed.",
+  "idea": {
+    "description": "Add a recent-conditioned scalar gate between shared-weight SASRec encodings of the full observed prefix and its last ten nonpadding items. Normalize branch representations before their convex mixture and use the existing item dot-product scorer. Treat this as an incremental context-selection hypothesis whose value must exceed cheaper truncation, pooling, and fixed-mixture controls.",
+    "motivation": "The selected idea explicitly targets two user-facing failures: older or isolated interactions being interpreted as current demand, and broadly related historical interests competing with more specific recent matches. Preserving a full-history branch keeps persistent interests available. The model-facing target is weak positive–negative separation, particularly Electronics’ negative tenth-percentile margin and 14.95% wrong-ranking rate. These diagnostics do not establish that historical distraction causes errors. Recency cannot reliably identify compatibility, replacement purpose, or satisfied durable-device needs, and a recent isolated interaction can itself be misleading. The objective-only gBCE alternative remains useful, but it does not explicitly address both required user-facing failures.",
+    "implementation_notes": "Preserve four category-specific models, dataset routing, original splits, preprocessing seed 0, training seed 42, and DATA_DIR = os.environ['GAGC_DATA_DIR']. Keep baseline optimizer, loss, sampling, and the SASREC_EPOCHS environment setting, whose host default is 200, for the first architectural comparison. Train on one GPU and save all artifacts beneath the trial directory. Never access hidden test data or fetch pretrained weights or additional datasets. Only public histories, titles, descriptions, and timestamps are available; generic schema examples do not authorize using ratings, reviews, categories, prices, or stores.\n\nDefine the initial recent window W=10. For each valid supervised position t, use sequence items only through t. Retain the full branch’s baseline causal encoding and its existing positional convention. Construct the recent branch independently: gather the last W observed nonpadding items ending at t, left-pad to W slots, assign position IDs 0 through W−1, run every shared encoder layer, and retain the final-slot feature. Deployment uses exactly this W-slot construction. Parameter sharing includes attention, feed-forward blocks, item embeddings, and the positional embedding table; the recent branch uses the table’s first W entries. This deliberately resets recent positions and must be distinguished from preserving full-branch positions in an ablation. No representation may be computed from the batch endpoint and reused for earlier targets. Dense local masking is not an equivalent shortcut: positional embeddings differ, and stacked layers can transmit information from outside a nominal window.\n\nThe previous instruction to reuse full features whenever prefix length is at most W is withdrawn: full and recent position IDs, padding lengths, and dropout masks can differ. Reuse is valid only when the complete inputs and positional conventions match, and stochastic-mask equivalence is also required for exact training equality. Evaluation parity checks run in eval mode. The gate’s length input is the count of observed nonpadding items in the supplied prefix, capped by the baseline sequence length; do not substitute a full-user-history count unavailable through the inference contract.\n\nFor hidden width d, normalize branch outputs as z=h/sqrt(mean(h²)+1e−6), using no additional branch-specific affine parameters. Set g=sigmoid(Linear(GELU(Linear(concat(z_full,z_recent,log1p(length)),d)),1)); initialize the final linear weights and bias to zero. Form fused=(1−g)*z_full+g*z_recent and retain the baseline candidate dot-product scorer. This normalization changes baseline score scale, so include a normalized full-only control and identical normalization in mixture comparisons. Record raw branch norms, g, weighted contribution norms, and branch cosine similarity; normalization cannot prevent cancellation or establish that gate variation reflects intent. The gate sees no target identity, future timestamp, simulator trait, or unavailable metadata.\n\nFor B sequences and T supervised endpoints, explicit recent windows with input length W require approximately O(BTD(W²d+Wd²)) dense arithmetic across D layers. Conventional saved recent activations grow approximately as O(BTD(Wd+hW²)) for h attention heads, in addition to the full branch. Parameter sharing does not remove this cost. Chunking forward calls alone does not bound retained autograd activations. Use nonreentrant checkpointing of scalar recent-window chunk losses, passing integer windows and full features into checkpointed functions and constructing recent embeddings inside. Preserve dropout RNG during recomputation. Sum chunk losses divided by the total number of valid supervised positions, then backpropagate and step once. Keep the baseline loss’s original positive/negative weighting inside each position loss. This retains the full-branch graph and checkpoint inputs while avoiding all saved recent activations; it does not eliminate their arithmetic. Validate gradients against an unchunked small reference with dropout disabled. Immediate chunk backward is an alternative only if full-branch graph retention or recomputation is handled explicitly and the same global loss normalization is used.\n\nUse a staged, prespecified search rather than an exhaustive ablation grid. Before runs, record a concrete allocation within the shared 43,200 GPU-second budget, checkpoint evaluation cadence, deterministic stopping rule, minimum practically meaningful macro improvement, and tie rule favoring lower compute. Charge training, diagnostics, debugging, and failures. The host default remains 200 epochs; any early-stopping variation must be declared. Establish unchanged SASRec, normalized full-only, and recent-only W=10 controls first. If budget permits, test recent-only W=5 and W=20 and exponential recency pooling with weights proportional to exp(−0.1*r), where r is backward position distance. Pooling uses observed item embeddings with the same normalization and scorer; label it a separate representation baseline. For identical dual branches, compare fixed weights g in {0.25,0.5,0.75}, a learned global sigmoid scalar initialized at 0.5, and the context gate. Apply identical normalization, windows, loss, and positional conventions. Compare model size and GPU seconds; a larger single encoder or two-encoder fixed ensemble is a secondary capacity control if affordable. Do not combine gBCE with fusion in the first comparison. Record every evaluated configuration and checkpoint.\n\nCheck shortcut learning using validation-only interventions without retraining or changing host evaluation: remove the length input, inspect gate behavior by observed prefix length and target training-popularity strata, and deterministically permute gate values across validation users within category. Permuting gates tests contextual assignment but creates an intervention distribution shift; interpret it as supporting evidence rather than proof. Train no gate on validation labels. Recent position resetting, branch scale, popularity, or increased computation could explain gains without improved intent modeling. Limit adaptive tuning and freeze the final selection before independent held-out evaluation.\n\nSelect only by the pinned macro validation HR@10 with 200 users/category, 99 unique negatives, and evaluation seed 42. Report every category score and GPU seconds. The previous inspiration’s 0.5363 is a reported historical score, not evidence for this architecture. If the unchanged evaluator exposes paired per-user hit indicators, compute macro difference as the average of four category mean paired differences. Use 10,000 stratified paired bootstrap replicates with seed 42, resampling users within category while preserving paired outcomes; report the difference in percentage points and its 95% percentile interval. These exploratory intervals condition on fitted models, fixed categories, and fixed candidate panels; they exclude training-seed and candidate-sampling variability and do not correct adaptive winner selection. If paired indicators are unavailable, report that limitation without modifying the host evaluator. Optional prespecified binary comparisons may report A-only/B-only hit counts and exact McNemar tests; apply Holm correction if making four category-specific inferential claims.\n\nKeep view.model as the actual trained nn.Module and retain item_emb, log2feats(sequence), predict_score(features, items), user_train, meta_data, and review_data. Make log2feats return fused B×L features, with padding outputs masked, so predict_score remains a stateless item dot-product function. Implement one shared window-construction and fusion routine for training, diagnostics, and export. Add an internal final-feature path that computes only the last endpoint’s recent window for validation and inference; verify its equality to the corresponding log2feats output. This avoids recomputing every training endpoint during deployment.\n\nRetain DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). The loader remains (None, sequence, positive, negative), with B×L tensors. Measure complete-score mean/p10 margins, wrong-ranking and small-margin rates with eps=0.5, embedding cosine similarity, gate values, raw branch norms, effective contribution norms, and margins stratified by observed prefix length. Use deterministic diagnostic sampling and report the measured position count. Return metrics and metric_definitions. Mark category breakdowns unavailable rather than inventing item categories. The interpretation prompt must include measured values, definitions, and missing-data limitations. Similarity values near 0.5 do not establish severe collapse, and training margins do not establish validation improvement.\n\nUpdate the predictor writer to export the shared encoder, gate, normalization, configuration, item mappings, positional convention, and identical recent-window construction into working/predict.py. Preserve category routing and evaluator masking rules. For simulator recommendations to twenty real training users, five/category, score the full catalog in chunks and mask observed items according to the established contract. Verify causal prefix invariance by modifying suffix items without moving earlier position IDs, checkpoint reload parity, generated-predictor parity, final-feature-path parity, and candidate/full-catalog score agreement. Qualitative assessment must distinguish uncertain relevance from explicit mismatch; claims about immediate-choice acceptance or compatibility require actual observations.",
+    "pseudocode": "Set preprocessing seed=0, training seed=42; preserve four-category routing.\nPredeclare budget, checkpoint cadence, stopping and tie rules, and comparisons.\n\nrecent_windows(sequence, endpoints, W=10):\n    for each endpoint (b,t):\n        prefix = nonpadding(sequence[b,:t+1])\n        yield left_pad(prefix[-W:], W), position_ids=0..W-1\n\nnormalize(h):\n    return h / sqrt(mean(h*h, dim=-1, keepdim=True) + 1e-6)\n\nfor category in FOUR_CATEGORIES:\n    preserve baseline splits, item mappings, and environment epoch setting\n    initialize shared SASRec encoder and gate; zero gate's final layer\n    for baseline training batch:\n        valid = positions with valid positive targets\n        full = shared_encoder(sequence, baseline_position_ids)\n        total_loss = 0\n        for chunk in partition(valid):\n            integer_windows = recent_windows(sequence, chunk, W=10)\n            chunk_loss = checkpoint_nonreentrant(\n                function(integer_windows, full_features_at_chunk):\n                    recent = shared_encoder(integer_windows, positions=0..W-1)[:,-1]\n                    z_full = normalize(full_features_at_chunk)\n                    z_recent = normalize(recent)\n                    g = sigmoid(gate(z_full, z_recent, log1p(observed_prefix_length)))\n                    fused = (1-g)*z_full + g*z_recent\n                    scores = dot(fused, matching_positive_negative_embeddings)\n                    return sum(baseline_per_position_loss(scores)),\n                integer_windows, full[chunk], preserve_rng_state=True)\n            total_loss += chunk_loss / number_of_valid_positions\n        backward(total_loss)\n        optimizer.step(); optimizer.zero_grad()\n    evaluate only through unchanged pinned validation protocol\n    save architecture, weights, mappings, configuration, and matching predictor\n\nlog2feats(sequence):\n    compute full branch and independent recent window at every valid endpoint\n    normalize, gate, fuse, mask padding; return B×L features\n\nfinal_features(sequence):\n    compute full final feature and only the final recent window\n    apply identical normalization, gate and fusion\n\nDiagnosisProbe.run_full_diagnosis(train_loader):\n    measure complete scorer margins, embedding similarity, gate and branch statistics\n    return metrics and metric_definitions; mark unavailable breakdowns explicitly\n\ndiagnosis_interpreter_prompt(raw_diagnosis):\n    return prompt containing measured metrics, definitions and limitations\n\nVerify with dropout disabled:\n    chunked-checkpoint gradients match an unchunked reference\n    suffix changes cannot affect earlier features at unchanged position IDs\n    final_features equals log2feats at the last valid position\n    saved/reloaded model and generated predictor reproduce scores\n    candidate scores equal corresponding full-catalog entries\n\nRun declared controls before interpreting contextual gating.\nSelect only by pinned four-category macro validation HR@10.\nIf paired hits are available, report exploratory stratified paired bootstrap intervals.\nFreeze final choice; leave held-out evaluation to the host.",
+    "originality": {
+      "score": 2,
+      "positive": "Provides a controlled adaptation with explicit causal windows, shared parameters, and deployment parity under the exact benchmark contract.",
+      "negative": "Adaptive long/short fusion, including comparisons with fixed mixtures, is established in SLi-Rec and subsequent work; the gate itself is not a new scientific mechanism."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "Can establish whether context-dependent selection adds value beyond truncation and global fusion, providing evidence before pursuing interest banks or temporal dynamics.",
+      "negative": "Exact endpoint windows are expensive, cheaper controls may explain any improvement, and next-item supervision cannot identify compatibility, satisfaction, or purchase purpose."
+    },
+    "code_difficulty": {
+      "score": 6,
+      "positive": "Reuses SASRec parameters, item scoring, and the compatibility interface; independent windows provide a clear reference implementation.",
+      "negative": "Correct positional conventions, checkpointed loss computation, diagnostic costs, gradient normalization, and efficient exported inference require substantially more care than the original rating suggested."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Uses causal self-attention to learn next-item representations from interaction histories.",
+        "Already adaptively models recent and distant interactions, supplying both the starting architecture and a strong competing explanation for fusion gains.",
+        "Its learned positional embeddings make explicit recent-window positional conventions necessary."
+      ],
+      "limitations": [
+        "Does not explicitly separate recent and persistent preference branches.",
+        "The proposed fusion overlaps with its existing sequential modeling, requiring matched comparisons."
+      ]
+    },
+    {
+      "title": "TLSTSRec",
+      "link": "https://doi.org/10.3233/IDA-240051",
+      "contributions": [
+        "The supplied search summary describes temporal representations and adaptive fusion of long- and short-term sequences.",
+        "Motivates context-dependent fusion experiments."
+      ],
+      "limitations": [
+        "Does not establish improvement on the pinned four-category benchmark.",
+        "The shared encoder, ten-item window, and normalization are experimental adaptations."
+      ]
+    },
+    {
+      "title": "Hierarchical long and short-term user preference modeling",
+      "link": "https://journal.hep.com.cn/fcs/EN/10.1007/s11704-025-41181-y",
+      "contributions": [
+        "The supplied summary describes multiple persistent preference vectors and recent-context similarity matching.",
+        "Motivates conditional retrieval of useful historical interests."
+      ],
+      "limitations": [
+        "Interest routing adds complexity beyond the selected early-stage experiment.",
+        "Latent preferences do not identify purchase purpose or compatibility."
+      ]
+    },
+    {
+      "title": "gSASRec",
+      "link": "https://arxiv.org/abs/2308.07192",
+      "contributions": [
+        "Combines additional uniform negatives with generalized BCE to address sampling-induced overconfidence.",
+        "Provides a separate objective-level candidate for weak positive–negative separation."
+      ],
+      "limitations": [
+        "Stronger calibration can delay convergence.",
+        "Does not explicitly select current interests or demonstrate gains on this pinned benchmark."
+      ]
+    },
+    {
+      "title": "SLi-Rec: Adaptive User Modeling with Long and Short-Term Preferences for Personalized Recommendation",
+      "link": "https://www.ijcai.org/proceedings/2019/0585.pdf",
+      "contributions": [
+        "Studies adaptive long/short preference fusion.",
+        "The supplied search results identify comparisons with long-only, short-only, and tuned fixed mixtures."
+      ],
+      "limitations": [
+        "Its reported AUC evaluation does not establish HR@10 gains here.",
+        "Its prior adaptive-fusion contribution lowers the proposed gate’s originality."
+      ]
+    },
+    {
+      "title": "CLSR",
+      "link": "https://arxiv.org/abs/2202.13090",
+      "contributions": [
+        "Uses separate interest encoders, contrastive supervision, and adaptive aggregation.",
+        "Provides further prior art for separating persistent and recent interests."
+      ],
+      "limitations": [
+        "Its contrastive objectives and separate encoders differ from this shared-encoder experiment.",
+        "No supplied evidence establishes effectiveness under the pinned protocol."
+      ]
+    },
+    {
+      "title": "Dual Stream Adaptive Sequential Recommendation",
+      "link": "https://link.springer.com/article/10.1007/s44163-026-02282-0",
+      "contributions": [
+        "The supplied search summary reports a fixed 50/50 versus learned-gate comparison with identical dual-stream encoders, windows, and loss.",
+        "Supports controlling branch architecture when testing adaptive fusion."
+      ],
+      "limitations": [
+        "Does not establish the complete requested comparison with recent-only SASRec, pooling, and tuned fixed mixtures.",
+        "No pinned RecHarness improvement is established."
+      ]
+    },
+    {
+      "title": "PyTorch activation checkpoint documentation",
+      "link": "https://docs.pytorch.org/docs/stable/checkpoint/",
+      "contributions": [
+        "Documents activation recomputation and nonreentrant checkpointing.",
+        "Supports preserving RNG state when recomputing dropout-bearing window encoders."
+      ],
+      "limitations": [
+        "Checkpointing increases recomputation and does not reduce asymptotic arithmetic.",
+        "Chunking without checkpointing or correctly managed backward passes does not bound retained activation memory."
+      ]
+    },
+    {
+      "title": "Longformer",
+      "link": "https://arxiv.org/abs/2004.05150",
+      "contributions": [
+        "Analyzes stacked local-attention receptive fields.",
+        "Helps explain why multiple local layers can transmit information beyond one endpoint’s intended window."
+      ],
+      "limitations": [
+        "Local attention is not equivalent to independently recomputed SASRec suffix windows.",
+        "A dense attention mask does not provide sparse-kernel computational savings."
+      ]
+    },
+    {
+      "title": "SciPy bootstrap documentation",
+      "link": "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.bootstrap.html",
+      "contributions": [
+        "Documents paired resampling principles.",
+        "Supports preserving model outcome pairs while resampling users within category."
+      ],
+      "limitations": [
+        "The proposed stratified implementation must preserve category weights explicitly.",
+        "Ordinary bootstrap intervals do not account for adaptive model selection or training randomness."
+      ]
+    },
+    {
+      "title": "Paired binary-classifier testing explanation",
+      "link": "https://blog.stata.com/2025/04/22/approximate-statistical-tests-for-comparing-binary-classifier-error-rates-using-h2oml/",
+      "contributions": [
+        "Explains paired binary-outcome comparisons using discordant pairs.",
+        "Motivates optional exact McNemar testing for prespecified hit-indicator comparisons."
+      ],
+      "limitations": [
+        "Testing requires appropriate independence and null assumptions.",
+        "P-values do not quantify practical improvement or repair adaptive validation reuse."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://jmlr.csail.mit.edu/beta/papers/v11/cawley10a.html",
+      "contributions": [
+        "Documents overfitting of model-selection criteria and resulting evaluation bias.",
+        "Motivates predeclared search limits, complete trial logs, and an independently evaluated final model."
+      ],
+      "limitations": [
+        "Does not provide a generic correction for arbitrary adaptive reuse of this fixed validation panel.",
+        "Winner-only bootstrap intervals remain exploratory."
+      ]
+    }
+  ]
+}

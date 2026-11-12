@@ -1,0 +1,96 @@
+{
+  "schema_version": 2,
+  "protocol_id": "63d884e335450b4c7d4c05470c02cfbc484d52d6b839640f603abc93a1b33219",
+  "record": {
+    "round_idx": 7,
+    "trial_group_id": "trialgrp_1793442890498_2865811",
+    "trial_id": 2,
+    "arm": "feature_construction",
+    "selected_categories": [
+      "feature_construction"
+    ],
+    "patch_summary": "Add mild training-only frequency scaling to history inputs for all four category models. Registered buffers are saved in each checkpoint and restored by the existing generated predictor, which imports the updated model class.",
+    "benchmark_score": 0.5188,
+    "val_score": 0.5188,
+    "is_winner": false,
+    "is_group_winner": false,
+    "valid": true,
+    "failure_type": null,
+    "delta_vs_prev_best": -0.0712,
+    "delta_vs_input": -0.0024,
+    "outcome": "regressed",
+    "val_support": "regressed",
+    "gpu_seconds": 338.05415016412735,
+    "trial_cap_seconds": 436.0,
+    "per_dataset_hr10": {
+      "Movies_and_TV": 0.55,
+      "Industrial_and_Scientific": 0.56,
+      "Electronics": 0.37,
+      "CDs_and_Vinyl": 0.595
+    },
+    "error": "",
+    "parameter_changes": [
+      {
+        "name": "DATA_DIR",
+        "before_expression": "os.environ.get('GAGC_DATA_DIR', './input/trainval')",
+        "after_expression": "os.environ['GAGC_DATA_DIR']"
+      }
+    ],
+    "changed_definitions": [
+      "GRU4RecModel",
+      "GRU4RecModel.__init__",
+      "GRU4RecModel.encode",
+      "GRU4RecModel.forward",
+      "train_one_dataset"
+    ],
+    "summary": "Add mild training-only frequency scaling to history inputs for all four category models. Registered buffers are saved in each checkpoint and restored by the existing generated predictor, which imports the updated model class.",
+    "proposal_history": [
+      {
+        "attempt": 1,
+        "summary": "Add mild training-only frequency scaling to history inputs for all four category models. Registered buffers are saved in each checkpoint and restored by the existing generated predictor, which imports the updated model class."
+      }
+    ],
+    "hypothesis": "Across all four datasets, scale history embeddings by a deterministic training-frequency feature: clamp((median_positive_item_count/max(item_count,1))^0.10,0.8,1.2), with padding remaining zero. This tests gentler frequency correction than the previously regressing exponent 0.25. Derive counts solely from training interactions and checkpoint the scales for identical inference. Preserve learned embedding design, GRU topology, readout, candidate embeddings, loss and optimizer.",
+    "input_source_sha256": "f296505abb52a62a2c72d8038e5c88c49dafa77b1600523cbd3aa2773094469c",
+    "candidate_source_sha256": "d0dfab93768251df9af730d04f2a1d5e89be17db0a13e8a1ef94bfec87229c4a",
+    "input_normalized_sha256": "7c2531396dc0d003a37ebc86a0b60797fb92eabc46c6f6de268a2d94fb145a6a",
+    "candidate_normalized_sha256": "e6df627503707b7eed566bcb81a60b79c4ea4c78c5da84ad0e33193b9eba286c",
+    "patch_sha256": "1c94a7cd6850dba39595772a39bbfc91cf466282b86f2b984d77d3b42e74b115",
+    "diff_excerpt": "--- \n+++ \n@@ -30,5 +30,5 @@\n ]\n \n-DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")\n+DATA_DIR = os.environ['GAGC_DATA_DIR']\n \n SEED = int(os.environ.get(\"GAGC_SEED\", \"42\"))\n@@ -193,4 +193,6 @@\n         self.hidden_units = hidden_units\n         self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)\n+        self.register_buffer(\"history_frequency_scale\", torch.ones(itemnum + 1))\n+        self.history_frequency_scale[0] = 0.0\n         dropout = dropout_rate if num_layers > 1 else 0.0\n         self.gru = nn.GRU(hidden_units, hidden_units, num_layers=num_layers,\n@@ -206,5 +208,7 @@\n \n     def encode(self, seq: torch.Tensor) -> torch.Tensor:\n-        emb = self.dropout(self.item_emb(seq))\n+        emb = self.dropout(\n+            self.item_emb(seq) * self.history_frequency_scale[seq].unsqueeze(-1)\n+        )\n         out, _ = self.gru(emb)\n         # Histories are LEFT padded; count-1 indexes padding on short histories.\n@@ -214,5 +218,7 @@\n \n     def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n-        emb = self.dropout(self.item_emb(seq))\n+        emb = self.dropout(\n+            self.item_emb(seq) * self.history_frequency_scale[seq].unsqueeze(-1)\n+        )\n         out, _ = self.gru(emb)\n         pos_scores = (out * self.output_emb(pos)).sum(dim=-1)\n@@ -239,4 +245,21 @@\n         dropout_rate=DROPOUT_RATE,\n     ).to(device)\n+    training_items = np.fromiter(\n+        (item for history in user_train.values() for item in history),\n+        dtype=np.int64,\n+    )\n+    training_counts = np.bincount(training_items, minlength=itemnum + 1).astype(np.float32)\n+    positive_counts = training_counts[1:][training_counts[1:] > 0]\n+    median_count = float(np.median(positive_counts)) if positive_counts.size else 1.0\n+    frequency_scale = np.clip(\n+        (median_count / np.maximum(training_counts, 1.0)) ** 0.10,\n+        0.8,\n+        1.2,\n+    ).astype(np.float32)\n+    frequency_scale[0] = 0.0\n+    with torch.no_grad():\n+        model.history_frequency_scale.copy_(\n+            torch.as_tensor(frequency_scale, device=device)\n+        )\n     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)\n \n",
+    "category_rationales": [
+      {
+        "category": "feature_construction",
+        "rationale": "Test gentle training-frequency correction on history inputs across all four datasets: clamp((median_positive_count/max(count,1))^0.10,0.8,1.2), with zero padding. Checkpoint the deterministic scales for identical inference. Preserve learned embeddings, GRU topology, readout, candidate scoring, loss, optimizer and training settings."
+      }
+    ],
+    "baseline_validation": 0.5212,
+    "basin_id": "default|combination_jump@6",
+    "execution_status": "success",
+    "attempt_count": 1,
+    "training_attempt_count": 1,
+    "training_attempts": [
+      {
+        "id": "round-0006-slot-2-attempt-1",
+        "status": "success",
+        "source_sha256": "d0dfab93768251df9af730d04f2a1d5e89be17db0a13e8a1ef94bfec87229c4a",
+        "allocated_gpu_seconds": 338.05415016412735,
+        "error": "",
+        "score": 0.5188
+      }
+    ],
+    "checkpoint_fingerprints": {
+      "Movies_and_TV_model.pt": "a4a898859a339607ab5822101aa562829f3aca29857dc1017023a4f8d135de4b",
+      "Industrial_and_Scientific_model.pt": "2e117cfd7c09ec7d976c66727df73938ac3c2b3fd489dcccc3e7d865cdc6cb3f",
+      "Electronics_model.pt": "818fee1f984e3af955482789a3dcb0c1fb8fee30aafd73f99aaaff76d77d9b54",
+      "CDs_and_Vinyl_model.pt": "17dd24a3d5d2e2d9093e6e0a9f7ef7567eb72cf0a323973b6689d1f76d1f2f2b"
+    },
+    "repair_errors": [],
+    "phase": "retune",
+    "jump_window_id": "default|combination_jump@6",
+    "promoted": false,
+    "provisional": false,
+    "protocol_id": "63d884e335450b4c7d4c05470c02cfbc484d52d6b839640f603abc93a1b33219",
+    "evidence_id": "2a460b2e9ae0d28f137efe5631c9fe95124ad7816ce59073137a878bf491c259"
+  },
+  "record_sha256": "4ec67363f961075de436a83e71a2c9216fbf07c59ce32d29e3ffdf06f7cc83f8"
+}

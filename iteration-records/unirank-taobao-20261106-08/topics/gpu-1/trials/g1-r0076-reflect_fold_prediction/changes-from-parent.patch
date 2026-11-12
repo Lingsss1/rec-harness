@@ -1,0 +1,111 @@
+--- g1-r0075-reflect_prediction/model.py
++++ g1-r0076-reflect_fold_prediction/model.py
+@@ -18,5 +18,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'interaction_coarse_signed': False, 'primary_adapter_coarse_signed': True, 'auxiliary_adapter_coarse_signed': False, 'block_primary_adapter_coarse_grad': False, 'primary_adapter_readout': 'signed', 'primary_residual_hidden': 16, 'coarse_view_treatment': 'reflect', 'averaging_location': 'prediction'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'interaction_coarse_signed': False, 'primary_adapter_coarse_signed': True, 'auxiliary_adapter_coarse_signed': False, 'block_primary_adapter_coarse_grad': False, 'primary_adapter_readout': 'signed', 'primary_residual_hidden': 16, 'coarse_view_treatment': 'reflect', 'averaging_location': 'prediction', 'tower_execution': 'coalesced_native_dice'}
+ 
+ 
+@@ -44,4 +44,5 @@
+                  primary_residual_hidden=16,
+                  coarse_view_treatment='reflect', averaging_location='prediction',
++                 tower_execution='coalesced_native_dice',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -84,4 +85,7 @@
+         self.coarse_view_treatment = coarse_view_treatment
+         self.averaging_location = averaging_location
++        if tower_execution != 'coalesced_native_dice':
++            raise ValueError('This diagnostic requires coalesced affine rows and native Dice')
++        self.tower_execution = tower_execution
+         if (not isinstance(primary_residual_hidden, int)
+                 or isinstance(primary_residual_hidden, bool)
+@@ -853,26 +857,67 @@
+         return first, second
+ 
++    def _coalesced_primary_tower(self, tower, features, batch, reflected):
++        """Share affine representatives; preserve native four-view Dice rows.
++
++        Reflection representatives are [mean, first, second]. Expand them to
++        [mean, mean, first, second] before each Dice, then retain [0,2,3].
++        Duplicate has a single representative expanded four times, then
++        retained once. Native Dice owns all moments, coupled derivatives,
++        momentum, variance corrections and buffer updates. No manual buffer
++        updates, detached statistics, new parameters or precision overrides.
++        This requires the inherited deterministic Linear/Dice tower only.
++        """
++        groups = 3 if reflected else 1
++        if features.ndim != 2 or features.shape[0] != groups * batch:
++            raise ValueError('Unexpected number of coalesced tower rows')
++        expand_index = torch.tensor([0, 0, 1, 2] if reflected else [0, 0, 0, 0],
++                                    device=features.device, dtype=torch.long)
++        retain_index = torch.tensor([0, 2, 3] if reflected else [0],
++                                    device=features.device, dtype=torch.long)
++        hidden = features
++        for layer in tower:
++            if isinstance(layer, nn.Linear):
++                hidden = layer(hidden)
++            elif isinstance(layer, Dice):
++                expanded = hidden.reshape(groups, batch, -1).index_select(0, expand_index)
++                expanded = layer(expanded.reshape(4 * batch, -1))
++                hidden = expanded.reshape(4, batch, -1).index_select(
++                    0, retain_index).reshape(groups * batch, -1)
++            else:
++                raise ValueError('Coalesced tower requires audited Linear/Dice layers')
++        return hidden
++
+     def _primary_view_prediction(self, tower, tower_context, target, base,
+                                  has_history, common, first, second):
+-        """One 4B tower call gives common native Dice support to both readouts.
+-
+-        Row groups are [adapter mean, adapter mean, first view, second view].
+-        Every cell evaluates all groups and both probability readouts.
+-        Early/late cells within a treatment have identical normalization
+-        populations at common state; unselected rows can still influence
+-        gradients through native batch moments. This support is intentional.
+-        Auxiliary towers never receive these extra rows. No running state is
+-        copied, swapped or updated outside the ordinary tower call.
+-        """
+-        early = ((first.float() + second.float()) * 0.5).to(first.dtype)
+-        corrections = torch.cat([early, early, first, second], dim=0)
+-        pooled = (base.repeat(4, 1) + has_history.repeat(4, 1)
+-                  * (corrections + common.repeat(4, 1)))
+-        features = torch.cat([tower_context.repeat(4, 1), target.repeat(4, 1),
+-                              pooled], dim=-1)
+-        probabilities = torch.sigmoid(tower(features)).float()
+-        early_a, early_b, late_a, late_b = probabilities.chunk(4, dim=0)
+-        adapter_prediction = (early_a + early_b) * 0.5
+-        view_prediction = (late_a + late_b) * 0.5
++        """Same real-arithmetic estimand as r0075, tied duplicate graph.
++
++        Only affine execution and representative selection change. A single
++        native 4B Dice population is preserved at every normalization layer.
++        Both locations return the very same tensor for duplicate treatment;
++        this is a structural null control, not an independent mechanism test.
++        Reflection keeps the original early and late probability definitions.
++        Whole-history order and all other consumers remain untouched.
++        """
++        batch = base.shape[0]
++        reflected = self.coarse_view_treatment == 'reflect'
++        if reflected:
++            early = ((first.float() + second.float()) * 0.5).to(first.dtype)
++            corrections = torch.cat([early, first, second], dim=0)
++            groups = 3
++        else:
++            # first == second in real arithmetic. Share one representative
++            # and one gradient route rather than select between tied copies.
++            corrections = first
++            groups = 1
++        pooled = (base.repeat(groups, 1) + has_history.repeat(groups, 1)
++                  * (corrections + common.repeat(groups, 1)))
++        features = torch.cat([tower_context.repeat(groups, 1),
++                              target.repeat(groups, 1), pooled], dim=-1)
++        probabilities = torch.sigmoid(self._coalesced_primary_tower(
++            tower, features, batch, reflected)).float()
++        if not reflected:
++            return probabilities
++        adapter_prediction, first_prediction, second_prediction = probabilities.chunk(3, dim=0)
++        view_prediction = (first_prediction + second_prediction) * 0.5
+         if self.averaging_location == 'prediction':
+             return view_prediction + 0.0 * adapter_prediction

@@ -1,0 +1,145 @@
+--- g1-r0084-membership_permuted_native_uniform/model.py
++++ g1-r0085-membership_counts_detached_moments/model.py
+@@ -1,13 +1,10 @@
+-"""Path-resolved valid-history membership permutation.
+-
+-Diagnostic extension of g1-r0083. Cross native/row-local primary scorer
+-normalization with feedback/uniform auxiliary readout. Rotate all supplied
+-task-mask bits together by half the valid-event count inside each ten-event
+-block. This preserves the joint mask-pattern multiset, counts and padding;
+-item fields, actions, order, targets and loss remain untouched.
+-
+-Native Dice and row-local gate implementations are inherited. No learned
+-capacity, state, RNG, loss or gradient-transfer mechanism is added. This is
+-an attribution study, not a new architecture or an accuracy/novelty claim.
++"""Native-forward Dice with a controlled population-moment Jacobian.
++
++The full/counts/permuted contrast retains valid event content, action codes,
++order, capacity, native Dice forward values and running-state updates.
++Uniform auxiliary history closes the separate grouped-readout route.
++Only primary Dice backward may treat population moments as constants.
++This is a diagnostic surrogate gradient, not a new-information or novelty
++claim. The host must check FP32/BF16 parity and measure cost before use.
+ """
+ import torch
+@@ -18,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'membership_use': 'permuted', 'primary_scorer_normalization': 'native', 'auxiliary_history_readout': 'uniform'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'membership_use': 'counts', 'primary_scorer_normalization': 'native', 'auxiliary_history_readout': 'uniform', 'primary_moment_gradient': 'detached'}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -859,4 +856,31 @@
+ 
+ 
++class _PrimaryPopulationJacobian(torch.autograd.Function):
++    """Identical normalized values, native or diagonal input Jacobian.
++
++    Native mode routes the incoming cotangent to the real BatchNorm graph.
++    Detached mode routes it directly to X with scale (Var[X]+eps)^(-1/2).
++    The native mean/variance derivatives are omitted, while Dice's sigmoid,
++    learned alpha and direct X edges remain differentiable. The additional
++    FP32 reduction approximates the native kernel's biased train variance;
++    it is not claimed bitwise equal to the kernel's internal saved invstd.
++    """
++    @staticmethod
++    def forward(ctx, hidden, normalized, inverse_std, detach_moments):
++        ctx.detach_moments = detach_moments
++        ctx.save_for_backward(inverse_std)
++        # No arithmetic changes native BN values, dtype or signed zeros.
++        return normalized.view_as(normalized)
++
++    @staticmethod
++    def backward(ctx, incoming):
++        inverse_std, = ctx.saved_tensors
++        if not ctx.detach_moments:
++            return None, incoming, None, None
++        with torch.autocast(device_type=incoming.device.type, enabled=False):
++            local = (incoming.float() * inverse_std).to(dtype=incoming.dtype)
++        return local, None, None, None
++
++
+ class Model(MultiTaskModel):
+     def __init__(self, feature_map, model_id='TargetMatchOrderMoment', gpu=-1,
+@@ -889,6 +913,7 @@
+                  click_relative_transfer='orthogonal_native',
+                  orthogonal_assignment='nuisance_line_fixed_angle_occupied_cycle_source_bit',
+-                 membership_use='permuted',
++                 membership_use='counts',
+                  primary_scorer_normalization='native',
++                 primary_moment_gradient='detached',
+                  auxiliary_history_readout='uniform',
+                  task='binary_classification', **kwargs):
+@@ -915,4 +940,11 @@
+             raise ValueError('Retain folded train, pruned eval and primary auxiliary bases')
+         self.primary_scorer_normalization = primary_scorer_normalization
++        if primary_scorer_normalization != 'native':
++            raise ValueError('Moment-Jacobian study retains native forward normalization')
++        if primary_moment_gradient not in ('native', 'detached'):
++            raise ValueError('Unknown primary moment gradient')
++        if auxiliary_history_readout != 'uniform':
++            raise ValueError('Close grouped auxiliary readout in this contrast')
++        self.primary_moment_gradient = primary_moment_gradient
+         if auxiliary_history_readout not in ('feedback', 'uniform'):
+             raise ValueError('Unknown auxiliary history readout')
+@@ -1545,4 +1577,29 @@
+             batch, 70, width)
+ 
++    def _primary_population_dice(self, layer, hidden):
++        """Run native BN once; choose only its training input Jacobian.
++
++        Every arm performs the same detached FP32 variance reduction and
++        custom wrapper. No learned module, buffer, RNG or running-state
++        update is added. Native BN still sees all expanded 70 rows with
++        the inherited support multiplicities, including zero summary rows.
++        At evaluation use the original Dice implementation unmodified.
++        Tower Dice and functional auxiliary Dice never use this helper.
++        """
++        if not self.training:
++            return layer(hidden)
++        if not layer.bn.training or layer.bn.affine:
++            raise ValueError('Expected training non-affine native Dice BatchNorm')
++        normalized = layer.bn(hidden)
++        with torch.autocast(device_type=hidden.device.type, enabled=False):
++            variance = hidden.detach().float().var(dim=0, unbiased=False, keepdim=True)
++            inverse_std = torch.rsqrt(variance + layer.bn.eps)
++        normalized = _PrimaryPopulationJacobian.apply(
++            hidden, normalized, inverse_std,
++            self.primary_moment_gradient == 'detached')
++        gate = torch.sigmoid(normalized)
++        # Preserve the pinned native Dice operation order exactly.
++        return gate * hidden + layer.alpha * (1 - gate) * hidden
++
+     @staticmethod
+     def _row_local_dice(layer, hidden):
+@@ -1576,5 +1633,6 @@
+                 if isinstance(layer, Dice):
+                     expanded = self._expand_support_rows(hidden.reshape(batch, 50, -1))
+-                    expanded = layer(expanded.reshape(batch * 70, -1))
++                    expanded = self._primary_population_dice(
++                        layer, expanded.reshape(batch * 70, -1))
+                     hidden = expanded.reshape(batch, 10, 7, -1)[:, :, :5, :].reshape(
+                         batch * 50, -1)
+@@ -1630,5 +1688,11 @@
+         """
+         if self.primary_scorer_normalization == 'native':
+-            return self.local_activation(interactions)
++            if not self.training:
++                return self.local_activation(interactions)
++            hidden = interactions
++            for layer in self.local_activation:
++                hidden = (self._primary_population_dice(layer, hidden)
++                          if isinstance(layer, Dice) else layer(hidden))
++            return hidden
+         hidden = interactions
+         for layer in self.local_activation:
+@@ -1791,6 +1855,7 @@
+         # feedback functional scorer and its private buffers still execute
+         # in training, but neither its result nor buffers feed predictions.
+-        # Only primary scorer row-locality PLUS this selection closes both
+-        # membership paths; either intervention alone leaves another route.
++        # Uniform auxiliary readout closes the grouped base route. Native
++        # primary population values retain membership dependence even when
++        # the population-moment derivatives are blocked.
+         feedback = (aux_strata[:, 0, :]
+                     if self.auxiliary_history_readout == 'uniform'

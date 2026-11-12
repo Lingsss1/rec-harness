@@ -1,0 +1,173 @@
+--- g2-r0006-exact_blocked/model.py
++++ g2-r0007-rotated_blocked/model.py
+@@ -1,16 +1,16 @@
+-"""Prospective exact-join sidecar for compressed multi-feedback histories.
+-
+-Preserve the incumbent uniform/feedback-stratified embedding summaries. Before
+-averaging, count exact nonzero category/brand matches to the current target
+-within the supplied exposure and four historical-feedback masks. A tiny private
+-auxiliary logit branch uses these counts, or target-independent field-support
+-counts in a matched control. Cross that intervention with auxiliary item/action
+-gradient permission. No private ID tables, label access, or training-policy
+-changes. Existing source-path caveats and Dice buffer handling remain in force.
+-
+-All four cells have identical parameters, initialization and computed statistics.
+-Only count selection and the declared item-gradient gate differ. Added heads
+-start at zero logits; inherited RNG state is preserved. Static checks only in
+-this workspace; numerical prerequisites, training and scoring belong to host.
++"""Prospective task/target-conditioned relational content compression.
++
++Keep the exact-count UF ancestor and append twelve masked content means:
++all exposures/cart/fav/buy crossed with category/brand/joint target matches.
++An auxiliary residual combines six means, target products and exact counts.
++Aligned and rotated membership cells have identical capacity and count inputs;
++rotation is within each example's valid history, never across examples. Cross
++this contrast with the auxiliary item/action gradient gate. No new ID banks.
++
++New final layers are zero initialized under a restored CPU RNG stream, after
++all inherited initialization. No new normalization state or scoring passes.
++This source has only static checks in the coding workspace. Host numerical,
++masking, ownership and initialization checks are required before training.
++No improvement, sufficient-statistic property or architecture novelty asserted.
+ """
+ import math
+@@ -33,14 +33,17 @@
+     'count_view': 'exact',
+     'count_hidden_units': 32,
++    'moment_alignment': 'rotated',
++    'moment_hidden_units': 32,
+ }
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='ExactJoinCompression', gpu=-1,
++    def __init__(self, feature_map, model_id='RelationalContentCompression', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+                  compression_routes='uf', block_aux_scorer_grad=True,
+                  block_aux_context_grad=False, block_aux_item_grad=True,
+-                 count_view='exact', count_hidden_units=32, num_tasks=None,
++                 count_view='exact', count_hidden_units=32,
++                 moment_alignment='rotated', moment_hidden_units=32, num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -64,6 +67,11 @@
+         if block_aux_context_grad:
+             raise ValueError('Shared context updates stay open in this study')
+-        if count_view not in ('exact', 'support'):
+-            raise ValueError('count_view must be exact or support')
++        if count_view != 'exact':
++            raise ValueError('The exact-count sidecar is frozen in every cell')
++        if moment_alignment not in ('aligned', 'rotated'):
++            raise ValueError('moment_alignment must be aligned or rotated')
++        if moment_hidden_units != 32:
++            raise ValueError('Matched moment head capacity is fixed at 32')
++        self.moment_alignment = moment_alignment
+         if count_hidden_units != 32:
+             raise ValueError('Matched sidecar capacity is fixed to 32 hidden units')
+@@ -121,4 +129,19 @@
+                 nn.init.zeros_(head[-1].weight)
+                 nn.init.zeros_(head[-1].bias)
++        # The inherited count-head fork restores the same CPU RNG state as
++        # its ancestor. Allocate the new heads in another restoring scope.
++        # There are six moments per task: three exposure relations plus three
++        # matching relations for that task. Target action is never included.
++        self.moment_input_width = 40 + self.key_width + 6 * (self.value_width + self.key_width)
++        with torch.random.fork_rng(devices=[]):
++            self.moment_heads = nn.ModuleDict({
++                label: nn.Sequential(nn.Linear(self.moment_input_width, moment_hidden_units),
++                                     nn.ReLU(), nn.Linear(moment_hidden_units, 1))
++                for label in feature_map.labels if label != 'is_click'
++            })
++            for head in self.moment_heads.values():
++                nn.init.zeros_(head[-1].weight)
++                nn.init.zeros_(head[-1].bias)
++        self.aux_moment_groups = {'cart': 1, 'fav': 2, 'buy': 3}
+         self.model_to_device()
+ 
+@@ -153,6 +176,7 @@
+         values = torch.cat([keys, item_emb[self.action_field][:, :-1]], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
+-        exact_stats, support_stats = self._count_statistics(item, mask, task_masks)
+-        return context, target, values, mask, auxiliary, exact_stats, support_stats
++        exact_stats, support_stats, assignment = self._count_statistics(item, mask, task_masks)
++        moments = self._content_moments(values, assignment, mask)
++        return context, target, values, mask, auxiliary, exact_stats, support_stats, moments
+ 
+     def _count_statistics(self, item, mask, task_masks):
+@@ -200,5 +224,48 @@
+                                   (torch.log1p(counts) / scale).flatten(1),
+                                   (counts / totals.clamp_min(1).unsqueeze(-1)).flatten(1)), dim=-1)
+-            return vector(matches), vector(supports)
++            # Keep all five groups for the identical count sidecar. Only all
++            # exposures and the three auxiliary types need content moments.
++            selected_groups = [0] + [index + 1 for index in self.auxiliary_indices]
++            task_groups = group_mask[:, selected_groups, :]
++            assignment = (task_groups[:, :, None, :]
++                          * match_membership.transpose(1, 2)[:, None, :, :])
++            return vector(matches), vector(supports), assignment.reshape(mask.shape[0], 12, 100)
++
++    def _content_moments(self, values, assignment, mask):
++        # Rotate the ENTIRE joint membership by half the valid-event count.
++        # Padding may be arbitrary: build rank->physical-position using only
++        # valid events rather than rolling the physical 100 padded positions.
++        # The same index/gather/reduction operators execute in aligned cells.
++        valid = mask.bool()
++        batch, length = valid.shape
++        positions = torch.arange(length, device=mask.device).expand(batch, -1)
++        ranks = (valid.long().cumsum(dim=1) - 1).clamp_min(0)
++        lengths = valid.long().sum(dim=1, keepdim=True)
++        physical_by_rank = torch.zeros_like(positions).scatter_add(
++            1, ranks, positions * valid.long())
++        shift = lengths // 2
++        if self.moment_alignment == 'aligned':
++            shift = torch.zeros_like(shift)
++        source_ranks = (ranks + shift).remainder(lengths.clamp_min(1))
++        source_positions = physical_by_rank.gather(1, source_ranks)
++        assignment = assignment.gather(
++            2, source_positions[:, None, :].expand(-1, 12, -1))
++        assignment = assignment * valid[:, None, :].to(assignment.dtype)
++        counts = assignment.sum(dim=-1)
++        # No per-event learned scorer or new embeddings. Values retain their
++        # original chronological positions; only membership changes in the
++        # negative control. Counts/overlaps are exactly preserved by rotation.
++        sums = torch.bmm(assignment.to(values.dtype), values)
++        means = sums / counts.to(sums.dtype).clamp_min(1).unsqueeze(-1)
++        return means.reshape(batch, 4, 3, self.value_width)
++
++    def _moment_features(self, label, target, moments, exact_stats):
++        group = self.aux_moment_groups[label]
++        means = torch.cat((moments[:, 0], moments[:, group]), dim=1)
++        keys = means[:, :, :self.key_width]
++        products = target[:, None, :] * keys
++        return torch.cat((exact_stats.to(target.dtype), target,
++                          means.flatten(1), products.flatten(1)), dim=-1)
++
+ 
+     def _compress_both(self, values, mask, auxiliary):
+@@ -249,5 +316,5 @@
+ 
+     def forward(self, inputs):
+-        context, target, values, mask, auxiliary, exact_stats, support_stats = self._represent(inputs)
++        context, target, values, mask, auxiliary, exact_stats, support_stats, moments = self._represent(inputs)
+         count_stats = exact_stats if self.count_view == 'exact' else support_stats
+         values, counts = self._compress_both(values, mask, auxiliary)
+@@ -266,4 +333,5 @@
+             aux_target = target.detach() if self.block_aux_item_grad else target
+             aux_values = values.detach() if self.block_aux_item_grad else values
++            aux_moments = moments.detach() if self.block_aux_item_grad else moments
+             aux_weights = self._auxiliary_activation(self._interactions(aux_target, aux_values))
+             aux_strata = self._pool(aux_weights, aux_values, counts)
+@@ -272,4 +340,5 @@
+             # just one scorer pass for every factorial cell.
+             aux_context, aux_target = context, target
++            aux_moments = moments
+             aux_strata = primary_strata
+         feedback = aux_strata[:, 1, :] + aux_strata[:, 2, :]
+@@ -283,4 +352,6 @@
+             if label != 'is_click':
+                 logit = logit + self.count_heads[label](count_stats)
++                moment_features = self._moment_features(label, aux_target, aux_moments, exact_stats)
++                logit = logit + self.moment_heads[label](moment_features)
+             predictions[label + '_pred'] = torch.sigmoid(logit)
+         return predictions

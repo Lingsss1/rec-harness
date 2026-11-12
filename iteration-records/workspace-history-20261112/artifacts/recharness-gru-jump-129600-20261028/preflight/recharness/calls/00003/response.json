@@ -1,0 +1,31 @@
+{
+  "category_edits": [
+    {
+      "category": "network_architecture",
+      "rationale": "Stack two GRU layers at the baseline width and add each refinement layer's output to its input. The residual path preserves first-layer signals while allowing recurrent refinement. Embeddings, scoring, readout, loss, optimizer and dataset routing remain unchanged. The predictor imports the updated model class and reconstructs its depth from existing checkpoint metadata.",
+      "edits": [
+        {
+          "find": "NUM_LAYERS    = int(os.environ.get(\"GRU4REC_LAYERS\", \"1\"))",
+          "replace": "NUM_LAYERS    = int(os.environ.get(\"GRU4REC_LAYERS\", \"2\"))"
+        },
+        {
+          "find": "    def __init__(self, itemnum: int, hidden_units: int = 128, num_layers: int = 1,\n                 dropout_rate: float = 0.1):",
+          "replace": "    def __init__(self, itemnum: int, hidden_units: int = 128, num_layers: int = 2,\n                 dropout_rate: float = 0.1):"
+        },
+        {
+          "find": "        dropout = dropout_rate if num_layers > 1 else 0.0\n        self.gru = nn.GRU(hidden_units, hidden_units, num_layers=num_layers,\n                          batch_first=True, dropout=dropout)",
+          "replace": "        self.gru = nn.GRU(hidden_units, hidden_units, num_layers=1,\n                          batch_first=True)\n        self.residual_grus = nn.ModuleList([\n            nn.GRU(hidden_units, hidden_units, num_layers=1, batch_first=True)\n            for _ in range(num_layers - 1)\n        ])"
+        },
+        {
+          "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)",
+          "replace": "    def _recurrent_outputs(self, emb: torch.Tensor) -> torch.Tensor:\n        out, _ = self.gru(emb)\n        for layer in self.residual_grus:\n            refinement, _ = layer(out)\n            out = out + refinement\n        return out\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out = self._recurrent_outputs(emb)"
+        },
+        {
+          "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)",
+          "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out = self._recurrent_outputs(emb)"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Use a two-layer residual GRU by default, with matching training and prediction architecture through the existing model import and depth metadata."
+}

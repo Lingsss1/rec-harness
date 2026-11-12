@@ -1,0 +1,146 @@
+--- g0-r0064-mean_removed_transfer/model.py
++++ g0-r0065-native_shrunk_transfer/model.py
+@@ -1,11 +1,12 @@
+-"""Prospective blockwise nonlinear summary study; validation results unmeasured.
+-
+-Reuse ten frozen compressed blocks and every learned parameter of the incumbent.
+-Compare mean_j tanh(W [M*b_j, global_details]) with tanh(W [sum_j b_j,
+-global_details]), crossed with the existing auxiliary adapter-context gate.
+-Both summary paths execute in every cell for a measured work-matched contrast.
+-The original signed pooled base and five detail paths remain intact. This tests
+-projection/aggregation order, not a new attention mechanism or verified novelty.
+-Native tensor, BF16, autograd and resource checks belong to the host.
++"""Prospective gradient-direction versus magnitude study; outcomes unmeasured.
++
++Keep the incumbent forward, modules, initialization, masks and source gates.
++At the input of its live RMS normalizer, replace only the upstream gradient:
++mean_restored preserves the mean-deleted direction at the native vector norm;
++native_shrunk preserves the native direction at the mean-deleted vector norm.
++Cross these with the existing auxiliary adapter-context transfer gate. Archived
++native and mean-deleted trials supply the other direction/norm factorial cells.
++The deliberate surrogate backward is first-order only, not an ordinary model
++Jacobian or a new normalized representation. No originality claim is made.
+ """
+ import torch
+@@ -16,5 +17,54 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'product_vjp_removal': 'mean'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'product_vjp_control': 'native_shrunk'}
++
++
++
++class _MeanDirectionVJP(torch.autograd.Function):
++    """Identity forward with explicitly prescribed first-order backward.
++
++    This sits BEFORE the live RMS normalizer, so incoming v is J_R(x)^T g.
++    Project v onto the orthogonal complement of the all-ones direction.
++    Scaling for norm computation avoids squaring tiny raw gradients. It does
++    not change the prescribed ratios in real arithmetic. Both alternatives
++    execute in every cell. There is no RNG, persistent state or added capacity.
++    An exactly constant v projects to zero; its lost direction cannot be
++    normalized. Both intervention modes return zero in that degenerate case.
++    No finite-difference claim is made for this intentional surrogate VJP.
++    """
++    @staticmethod
++    def forward(ctx, fused, mode):
++        ctx.mode = mode
++        return fused.clone()
++
++    @staticmethod
++    def backward(ctx, grad_output):
++        v = grad_output.float()
++        projected = v - v.mean(dim=-1, keepdim=True)
++        scale = v.abs().amax(dim=-1, keepdim=True)
++        safe_scale = torch.where(scale > 0, scale, torch.ones_like(scale))
++        unit = v / safe_scale
++        projected_unit = projected / safe_scale
++        native_norm = torch.linalg.vector_norm(unit, dim=-1, keepdim=True)
++        projected_norm = torch.linalg.vector_norm(projected_unit, dim=-1, keepdim=True)
++        safe_native_norm = torch.where(
++            native_norm > 0, native_norm, torch.ones_like(native_norm))
++        safe_projected_norm = torch.where(
++            projected_norm > 0, projected_norm, torch.ones_like(projected_norm))
++        restored = (projected_unit / safe_projected_norm) * native_norm * scale
++        shrunk = v * (projected_norm / safe_native_norm)
++        if ctx.mode == 'mean_restored':
++            result = restored
++        elif ctx.mode == 'native_shrunk':
++            result = shrunk
++        elif ctx.mode == 'mean_removed':
++            # Diagnostic endpoint: previous trial's exact FP32 projection.
++            result = projected
++        elif ctx.mode == 'native':
++            # Diagnostic endpoint: unchanged first-order derivative.
++            result = v
++        else:
++            raise ValueError('Unknown product VJP control')
++        return result.to(grad_output.dtype), None
+ 
+ 
+@@ -36,5 +86,5 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16, summary_placement='block',
+-                 product_vjp_removal='mean',
++                 product_vjp_control='native_shrunk',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -70,12 +120,13 @@
+         self.context_fusion = context_fusion
+         self.interaction_rank = interaction_rank
+-        if interaction_rank < 2 or interaction_rank % 2:
+-            raise ValueError('Rank-matched direction deletion requires even rank >= 2')
+-        if product_vjp_removal not in ('mean', 'alternating'):
+-            raise ValueError('Unknown rank-one product VJP deletion')
+-        self.product_vjp_removal = product_vjp_removal
+         if summary_placement not in ('block', 'aggregate'):
+             raise ValueError('Unknown history projection placement')
+         self.summary_placement = summary_placement
++        if product_vjp_control not in ('mean_restored', 'native_shrunk',
++                                       'mean_removed', 'native'):
++            raise ValueError('Unknown product VJP control')
++        if interaction_rank < 2:
++            raise ValueError('Direction control requires interaction rank >= 2')
++        self.product_vjp_control = product_vjp_control
+         if context_fusion != 'product':
+             raise ValueError('This placement study fixes product fusion')
+@@ -725,34 +776,10 @@
+         else:
+             fused = (query + summary) * (2.0 ** -0.5)
+-        fused = self._normalize_product(fused)
++        if self.training:
++            # Forward identity; the native live-scale normalizer below still
++            # runs and differentiates at the original product, not at P*x.
++            fused = _MeanDirectionVJP.apply(fused, self.product_vjp_control)
++        fused = fused * torch.rsqrt(fused.square().mean(dim=-1, keepdim=True) + 1e-4)
+         return self.interaction_outputs[index](fused.to(history.dtype))
+-
+-    def _normalize_product(self, fused):
+-        """Forward R(x); upstream VJP P_d J_R(x), with native live scale.
+-
+-        d has entries +1 (mean) or alternating +1/-1, hence d^T d = rank.
+-        P_d = I - d d^T / rank. The two projectors have the same rank and
+-        spectral/Frobenius norms; the removed gradient magnitudes can differ.
+-        Unlike a centered normalizer, J_R is evaluated at the UNMODIFIED x.
+-        Projection acts BEFORE J_R in the forward chain, so its VJP is
+-        P_d J_R(x)^T g. The output matrix still sees the native R(x).
+-
+-        Both projections execute in all training cells; no RNG/state changes.
+-        The finite proxy-minus-identical-proxy expression is exactly zero.
+-        Eval uses the original operator without surrogate/projection work.
+-        """
+-        if self.training:
+-            signs = (1 - 2 * torch.arange(
+-                fused.shape[-1], device=fused.device).remainder(2)).to(fused.dtype)
+-            mean_proxy = fused - fused.mean(dim=-1, keepdim=True)
+-            alternating_proxy = fused - (
+-                fused * signs).mean(dim=-1, keepdim=True) * signs
+-            if self.product_vjp_removal == 'mean':
+-                proxy = mean_proxy + 0.0 * alternating_proxy
+-            else:
+-                proxy = alternating_proxy + 0.0 * mean_proxy
+-            fused = fused.detach() + (proxy - proxy.detach())
+-        return fused * torch.rsqrt(
+-            fused.square().mean(dim=-1, keepdim=True) + 1e-4)
+ 
+     def forward(self, inputs):

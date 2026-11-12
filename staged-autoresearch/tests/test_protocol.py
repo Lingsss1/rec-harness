@@ -272,6 +272,25 @@ class ContractTests(unittest.TestCase):
 
 
 class EngineTests(Fixture):
+    def test_worker_exception_reaches_next_experiment_packet(self):
+        runtime = FakeRuntime(failures=(1,))
+        evaluate = runtime.evaluate
+        def nested_failure(*args, **kwargs):
+            result = evaluate(*args, **kwargs)
+            if result['returncode']:
+                result['stderr'] = 'AssertionError: synthetic target role dependence'
+                write(args[2] / 'transport.json', result)
+            return result
+        runtime.evaluate = nested_failure
+        trajectory = self.trajectory('A', runtime)
+        state = trajectory.prepare()
+        trajectory.trial(state)
+        trajectory.trial(state)
+        self.assertIn('synthetic target role dependence', state['records'][0]['error'])
+        self.assertIn('synthetic target role dependence', runtime.calls[1]['packet']['experiments'][0]['error'])
+        visible = read(trajectory.root / 'visible_evidence/trial_logs/t001.json')
+        self.assertIn('synthetic target role dependence', visible['stderr'])
+
     def test_budget_reservation_is_durable_before_execution(self):
         runtime = FakeRuntime()
         trajectory = self.trajectory("A", runtime)
@@ -299,6 +318,21 @@ class EngineTests(Fixture):
         self.assertEqual(len(runtime.evaluations), 0)
         self.assertEqual(len(state["records"]), 0)
         self.assertEqual(state["agent_calls"], 1)
+
+    def test_all_arms_stop_at_44_including_partial_final_stage(self):
+        self.config["protocol"].update(trial_budget=44, replicates=1)
+        for arm in "ABCD":
+            with self.subTest(arm=arm):
+                runtime = FakeRuntime()
+                trajectory = self.trajectory(arm, runtime)
+                state = trajectory.run()
+                self.assertEqual(len(state["records"]), 44)
+                self.assertEqual(sum(e["split"] == "validation" for e in runtime.evaluations), 44)
+                self.assertEqual(sum(e["split"] == "test" for e in runtime.evaluations), 1)
+                self.assertEqual(len(state["plans"]), 0 if arm == "A" else 5)
+                self.assertEqual(len(state["final_reviews"]), 0 if arm == "A" else 5)
+                trajectory.run()
+                self.assertEqual(len(runtime.evaluations), 45)
 
     def test_all_four_arms_complete_with_expected_contexts_and_budget(self):
         for arm in "ABCD":

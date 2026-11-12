@@ -1,0 +1,170 @@
+{
+  "markdown_report": "The best initial experiment is a **gated recent-item embedding readout**, supported by paired history-perturbation diagnostics. This revises contextual-state pooling: causal states already summarize overlapping prefixes and were trained against different next-item targets. Improvement remains a hypothesis.\n\n### Insights and directions\n\n**Starting point.** (1) Feedback favors repeated recent interests, motivating recent-item aggregation. It does not establish ownership, satisfaction, or compatibility. (2) Training margins measure pair separation, not immediate relevance or generalization. (3) The compatibility interface supports small readout changes, provided diagnosis and inference use the trained scoring path.\n\n**Related work.** (1) Sampled metrics can reverse full-catalog rankings [1]; retain pinned validation selection. (2) History-edit work motivates sensitivity probes [2], but deletion changes SASRec positions and masks [4]. (3) HAM/HGN support complementary recent-item components, with dataset-dependent benefits [5,6]; BSARec motivates checking smoothing [7]. Adaptive negatives remain an alternative with false-negative risk [3].\n\nThese findings define three directions: complementary recent-interest aggregation, controlled architecture-aware diagnosis, and cautious sampling.\n\n### Framework\n\n| Layer | Existing evidence | Proposed extension | Remaining gap |\n|---|---|---|---|\n| Representation | SASRec contextual states | Gated recent-item mean | Current intent unobserved |\n| Diagnosis | Alignment and margins | Controlled paired perturbations | Sensitivity is not preference |\n| Selection | Four-category sampled HR@10 | Matched, budgeted comparisons | Adaptive selection bias |\n\n### Candidate ideas\n\nScores are originality/potential/difficulty out of 10; higher difficulty means harder implementation.\n\n1. **Gated contextual-state pooling: 4/6/3.** Originality: useful combination, established components. Potential: aggregates recent states, but mixes overlapping histories and target roles. Difficulty: small change, requiring matching inference [2,4].\n2. **Paired deletion diagnostics: 4/7/5.** Originality: matched controls sharpen interpretation, though deletion is established. Potential: guides experiments, without guaranteeing HR gains. Difficulty: encoder reuse helps, but positional and masking controls complicate implementation [2,4].\n3. **Mixed uniform/hard negatives: 3/6/5.** Originality: benchmark-specific adaptation, established mixture. Potential: sharper discrimination, but false negatives hurt. Difficulty: moderate code, additional mining cost [3].\n4. **Gated recent-item embedding pooling: 3/7/4.** Originality: focused adaptation of established components. Potential: complementary recent evidence, but HAM reports heterogeneous benefits. Difficulty: simple pooling, with scale, checkpoint, and diagnostic integration [5,6].\n\n### Selected experiment\n\nBlend each SASRec state with a causal five-item embedding mean through one learned gate per dataset. Initialize toward baseline; use parameter-free normalization to control branch scale. Preserve the existing loss and matched settings. First compare baseline and this variant; reserve contextual pooling, fixed mixtures, and older-window controls for a predeclared budget.\n\nRetain all four routes, seeds 0/42, environment epoch default 200, and pinned macro validation HR@10 [1]. Predeclare checkpoint cadence, patience, ties, and trial limits; log every comparison [8]. Paired user bootstraps describe conditional uncertainty, not selection correction.\n\nPreserve diagnostic interfaces, report missing measurements as unavailable, and leave unsupported category breakdowns empty. Freeze visible windows and targets; control positional changes, masks, replacement, and random deletion. Training-prefix sensitivity is supplementary. Update the predictor writer identically; claim no measured improvement.",
+  "idea": {
+    "description": "Add a learned scalar gate to each per-dataset SASRec model, blending every causal sequence state with a normalized mean of its five most recent valid item embeddings. Retain contextual-state pooling as a controlled alternative rather than the selected design. Pair the experiment with architecture-aware history-perturbation diagnostics.",
+    "motivation": "The supplied feedback identifies insufficient emphasis on repeated recent interests. Pooling item embeddings introduces an explicit recent-interest component without averaging contextual states trained for different next-item targets. HAM and HGN motivate this component, but do not establish gains on this benchmark. At 0% progress, this small intervention is preferable to expensive negative mining or a larger architectural replacement.",
+    "implementation_notes": "Preserve DATA_DIR = os.environ['GAGC_DATA_DIR'], all four dataset routes, preprocessing seed 0, training seed 42, unchanged input splits and baseline loss/optimizer settings, and SASREC_EPOCHS with environment default 200. Keep execution single-GPU and artifacts beneath the trial directory. No external datasets, pretrained weights, hidden test files, or evaluator changes are permitted. The selected change requires a distinct matched training run; code below specifies its readout, not a replacement for the unavailable baseline training script.\n\nCompute causal pooling at every valid training position from the same item embedding table used by SASRec. Average the last five valid events including the current item; repeated events retain their multiplicity. Apply parameter-free LayerNorm separately to the contextual state and recent-item mean for the additional branch, then use z = h + sigmoid(gate_logit) * (LN(recent_mean) - LN(h)). This residual formulation preserves the original contextual feature at gate zero while controlling the added branch's scale. Initialize gate_logit to -4, giving an approximately 0.018 contribution; this approximates baseline initialization but is not exactly identical. Keep the SASRec output scoring function unchanged. Do not add item bias, loss changes, or sampling changes in this first comparison. Record the learned gate and feature norms separately by dataset; interpret gate magnitude cautiously because correlated branches can make it weakly identifiable.\n\nUse the final valid feature for inference, explicitly handling left or right padding and rejecting all-padding histories according to the baseline's existing policy. Save architecture name, window size, normalization epsilon, gate parameters, item mapping, and all baseline model configuration in checkpoints. Update the predictor writer so generated working/predict.py reconstructs the same readout, loads its state strictly, retains routing, and reproduces scores in evaluation mode. Match existing weight tying, padding embedding treatment, and item indexing.\n\nPreserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). view.model must remain the actual trained nn.Module, and view.item_emb, log2feats, predict_score, user_train, meta_data, and review_data must remain available. log2feats must return the blended features used for scoring. The loader remains (None, sequence, positive, negative), with B x L tensors. The prompt must include measured metrics, definitions, sample counts, missingness, and limitations. Preserve embedding alignment and positive-negative margin summaries; label them as training-pair diagnostics. Return null and count zero when measurements are undefined, rather than healthy-looking zeros. Keep unavailable category breakdowns empty. Only histories, timestamps, titles, and descriptions are available; do not use review ratings/text, item ratings/categories/prices/stores, or infer simulator diversity/conformity traits.\n\nFor training-prefix sensitivity, preselect up to 20 users per dataset with at least ten valid prefix events and a public next-item target; report actual coverage. These users are a separate diagnostic sample from the native twenty-user panel. Fix the target before perturbation and freeze the original truncated visible prefix so deletion cannot expose older items. Use a local seed-42 generator and cache a target plus up to 99 unique negatives excluding the user's public training-history items; report candidate shortages. These candidates are diagnostic only and do not replace official evaluator candidates. Evaluate paired original and perturbed prefixes without dropout or gradients. Delete two recent versus two immediately older events; add count-matched random controls and random deletions matched to each window's recency band. Keep the last interaction intact in the primary experiment. Analyze final-interaction deletion separately with an explicit last-surviving-state readout rule.\n\nCompare compact deletion with surviving absolute position IDs preserved, using an optional diagnostic position-ID hook without changing normal inference. Also test content replacement at fixed positions and sequence length, and position-ID shifts with identical content where valid embedding indices permit. Padding replacement changes attention masks and must be labeled as a separate perturbation. Optional backfilling is another separate experiment. Report paired observed-target score, positive-negative margin, target-rank, diagnostic HR@10, and top-10 overlap changes. Distinguish observed next-item targets from original-model top recommendations. Stratify by history length and target popularity computed only from training interactions. Report uncertainty by resampling users, not individual positions. Restore the prior model mode after probing. These measurements describe fitted-model dependence on training prefixes, may involve out-of-distribution inputs, and establish neither generalization nor causal user preferences. Retraining after deletion answers a different question.\n\nBefore the first comparison, declare two primary variants: unchanged SASRec and the proposed readout. Evaluate every ten epochs and at the final epoch, stop after five scheduled evaluations without improvement, and retain the earliest checkpoint on exact macro-score ties. Apply the same policy to both variants using the established pinned validation implementation; if that implementation is unavailable within training, leave official scoring and selection to the host rather than reconstructing it. Log every attempted variant and checkpoint comparison, including failures. The shared 43,200 GPU-second cap overrides planned runs; training, diagnosis, and failed trials all count. Further ablations require a recorded budget allocation before observing their results: final state, last-five contextual mean, last-five raw-embedding mean, fixed versus learned mixture, and equally sized older-item windows. Match normalization controls and comparable compute to distinguish recency from normalization or smoothing effects. Supplement cosine alignment with effective rank of centered valid sequence features, defined as exp(-sum(p_j log p_j)) for normalized nonzero singular values, and report sample size. Such controls are hypotheses to test, not completed results.\n\nSelect only by the unchanged host macro validation HR@10: 200 users per category, target plus 99 unique negatives, evaluation seed 42, equal category weights. Report every category and the macro score without cherry-picking. One changed hit changes category HR by 0.005 and macro HR by 0.00125. If per-user hit vectors are available from the established evaluation path, use 2,000 paired bootstrap replicates with local seed 42, resampling the same 200 user indices for baseline and variant independently within each category, then averaging the four differences with weight 1/4. Report percentile intervals and category differences. These intervals condition on trained models and fixed candidates; they exclude seed and candidate variability and do not correct adaptive model selection. Ordinary confidence intervals cannot establish that a selected tiny gain is robust. Freeze the winner before independent host test evaluation.\n\nRetain twenty real training users, five per category, for native full-catalog unseen-item recommendations. Record evidence excerpts, timestamps, feedback provenance, confidence, abstentions, and assessed coverage if panel judgments are available. No panel counts or explicit rejection labels have been supplied. Missing specifications are not compatibility conflicts; interactions do not establish ownership or satisfaction. Keep uncertain complements and possible redundancy out of negative labels. Panel feedback and optional budgeted full-catalog audits remain supplementary and never replace benchmark selection.",
+    "pseudocode": "class RecentItemReadout(nn.Module):\n    def __init__(self, encoder, window=5, eps=1e-5):\n        super().__init__()\n        self.encoder = encoder\n        self.window = window\n        self.eps = eps\n        self.gate_logit = nn.Parameter(torch.tensor(-4.0))\n\n    @property\n    def item_emb(self):\n        return self.encoder.item_emb\n\n    def log2feats(self, sequence, position_ids=None):\n        # Add an optional position-ID hook to the existing encoder for probes.\n        # Ordinary training/inference keeps its original positional convention.\n        h = self.encoder.log2feats(sequence, position_ids=position_ids)\n        valid = sequence.ne(0)\n        embeddings = self.item_emb(sequence)\n        pooled_rows = []\n        for b in range(sequence.shape[0]):\n            positions = valid[b].nonzero(as_tuple=True)[0]\n            events = embeddings[b, positions]\n            # Event-order rolling means handle either padding convention.\n            cumulative = torch.cat([events.new_zeros(1, events.shape[-1]),\n                                    events.cumsum(dim=0)], dim=0)\n            end = torch.arange(1, len(positions)+1, device=sequence.device)\n            start = (end - self.window).clamp_min(0)\n            means = (cumulative[end] - cumulative[start]) / (end-start).unsqueeze(-1)\n            row = torch.zeros_like(h[b]).index_copy(0, positions, means)\n            pooled_rows.append(row)\n        recent = torch.stack(pooled_rows)\n        normalized_h = F.layer_norm(h, (h.shape[-1],), eps=self.eps)\n        normalized_recent = F.layer_norm(recent, (h.shape[-1],), eps=self.eps)\n        gate = torch.sigmoid(self.gate_logit)\n        z = h + gate * (normalized_recent - normalized_h)\n        return z * valid.unsqueeze(-1)\n\n    def predict_score(self, features, items):\n        return self.encoder.predict_score(features, items)\n\n# Vectorize across rows for production once padding conventions are confirmed.\n# Train using the unchanged baseline loss on valid positive positions.\n# Use the largest valid sequence index for inference; handle empty rows explicitly.\n# Save encoder configuration, architecture, window, eps, and complete state_dict.\n# Predictor writer reconstructs exactly this module and loads strictly.\n# Diagnosis runs the actual scoring path, restoring the previous model mode.\n# run_full_diagnosis returns {'metrics': values, 'metric_definitions': definitions}.\n# diagnosis_interpreter_prompt includes measured values, definitions, and limitations.\n# Perturbation probes freeze windows/targets/candidates and record positional controls.\n# Official selection uses only pinned four-category macro validation HR@10.",
+    "originality": {
+      "score": 3,
+      "positive": "Pairs a narrowly targeted recent-item residual with architecture-aware controls that distinguish recency, positional effects, and smoothing.",
+      "negative": "Recent-item pooling, gated preference components, and sensitivity probes are established; the contribution is a controlled adaptation rather than a new model class."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Offers a feasible first experiment with interpretable ablations and a path toward adaptive windows or context-dependent gates if validation supports further work.",
+      "negative": "Recent-item similarity may reinforce broad associations or popularity shortcuts, and existing evidence shows that recency components can hurt particular datasets."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "The selected readout adds one scalar and a causal embedding-pooling operation while preserving item scoring and dataset routing.",
+      "negative": "Reliable integration requires matched checkpoint loading, predictor generation, efficient pooling, diagnostic position hooks, and controlled perturbations; the full diagnostic suite is harder than the readout alone."
+    }
+  },
+  "related_work": [
+    {
+      "title": "[1] On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Explains why sampled recommendation metrics can disagree with full-catalog metrics.",
+        "Supports retaining the pinned sampled validation objective and describing findings specifically as sampled HR@10."
+      ],
+      "limitations": [
+        "Does not establish that either pooling variant improves this benchmark.",
+        "Does not justify substituting training margins or full-catalog audits for official validation."
+      ]
+    },
+    {
+      "title": "[2] Demystifying Sequential Recommendations",
+      "link": "https://arxiv.org/abs/2508.03606",
+      "contributions": [
+        "Investigates history edits that change sequential recommendations.",
+        "Motivates probing dependence on recent versus older interactions."
+      ],
+      "limitations": [
+        "Optimized edits differ from controlled paired deletion diagnostics.",
+        "Recommendation sensitivity does not establish causal preference changes."
+      ]
+    },
+    {
+      "title": "[3] Adaptive Hardness Negative Sampling for Collaborative Filtering",
+      "link": "https://ojs.aaai.org/index.php/AAAI/article/view/28709",
+      "contributions": [
+        "Motivates controlling negative difficulty.",
+        "Provides a reference for the alternative uniform/hard-negative mixture."
+      ],
+      "limitations": [
+        "Hardness does not establish that an unobserved item is irrelevant.",
+        "Mining costs and sequential-benchmark transfer require empirical assessment."
+      ]
+    },
+    {
+      "title": "[4] Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Introduces SASRec's causal self-attention architecture with item and absolute positional embeddings.",
+        "Explains why deletion, truncation, and position reassignment require separate controls."
+      ],
+      "limitations": [
+        "Does not directly establish benefits from averaging its recent contextual states.",
+        "Attention patterns alone do not identify causal user intent."
+      ]
+    },
+    {
+      "title": "[5] HAM: Hybrid Associations Models for Sequential Recommendation",
+      "link": "https://pmc.ncbi.nlm.nih.gov/articles/PMC10034966/",
+      "contributions": [
+        "Studies pooling and complementary short-term item components.",
+        "Reports dataset-dependent effects, including cases where removing a recent-item component slightly improves performance."
+      ],
+      "limitations": [
+        "Its architecture and evaluation differ from the pinned RecHarness task.",
+        "Mean-pooling results do not guarantee gains from the proposed SASRec residual."
+      ]
+    },
+    {
+      "title": "[6] Hierarchical Gating Networks for Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1906.09217",
+      "contributions": [
+        "Combines gated preference components, pooling, and item-item scoring.",
+        "Provides precedent for complementing sequence representations with recent-item information."
+      ],
+      "limitations": [
+        "Its gates differ from a single per-dataset scalar.",
+        "Reported ablations do not isolate this proposed readout."
+      ]
+    },
+    {
+      "title": "[7] A Frequency-Domain Perspective on Sequential Recommendation",
+      "link": "https://arxiv.org/html/2312.10325v2",
+      "contributions": [
+        "BSARec studies attention alongside frequency information.",
+        "Motivates checking whether pooling suppresses useful distinctions through smoothing."
+      ],
+      "limitations": [
+        "Evidence for frequency modeling is not evidence for additional averaging.",
+        "Cosine similarity and effective rank remain diagnostics rather than accuracy objectives."
+      ]
+    },
+    {
+      "title": "[8] On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://jmlr.org/papers/volume11/cawley10a/cawley10a.pdf",
+      "contributions": [
+        "Explains selection bias from repeated optimization against finite validation data.",
+        "Motivates predeclared trial limits, checkpoint policies, and complete attempt logs."
+      ],
+      "limitations": [
+        "Logging and limited comparisons reduce exposure but do not eliminate selection bias.",
+        "Ordinary bootstrap intervals do not correct adaptive selection."
+      ]
+    },
+    {
+      "title": "Evaluating Feature Importance Estimates",
+      "link": "https://research.google/pubs/evaluating-feature-importance-estimates/",
+      "contributions": [
+        "ROAR motivates scrutiny of perturbation-based importance measurements.",
+        "Distinguishes evaluations involving retraining from sensitivity of an already fitted model."
+      ],
+      "limitations": [
+        "Retraining answers a different question from fixed-model deletion.",
+        "Its evidence does not validate arbitrary recommender perturbations."
+      ]
+    },
+    {
+      "title": "Recursive ROAR",
+      "link": "https://mcgill-nlp.github.io/publications/nlp_recursive_roar/",
+      "contributions": [
+        "Extends removal-and-retraining evaluation of feature importance.",
+        "Reinforces the need to consider redundancy and perturbation artifacts."
+      ],
+      "limitations": [
+        "Does not supply causal interpretation for fixed-model history edits.",
+        "Repeated retraining may be impractical within the shared GPU budget."
+      ]
+    },
+    {
+      "title": "Adaptive Holdout Research",
+      "link": "https://arxiv.org/abs/1506.02629",
+      "contributions": [
+        "Studies reuse of holdout data under adaptive analysis.",
+        "Clarifies why repeated validation feedback needs explicit control."
+      ],
+      "limitations": [
+        "Reusable-holdout guarantees require their specified feedback mechanisms.",
+        "Those guarantees cannot be claimed for unrestricted HR@10 queries."
+      ]
+    },
+    {
+      "title": "Recommendation Significance Research",
+      "link": "https://arxiv.org/abs/2305.02461",
+      "contributions": [
+        "Supports considering bootstrap or randomization methods for recommender comparisons.",
+        "Motivates paired analysis of user-level outcomes."
+      ],
+      "limitations": [
+        "Large-sample findings do not guarantee calibration with 200 users per category.",
+        "Conditional user bootstraps omit training-seed variability and adaptive selection."
+      ]
+    }
+  ]
+}

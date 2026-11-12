@@ -1,0 +1,38 @@
+{
+  "directions": [
+    {
+      "description": "gSASRec: retain SASRec and replace single-negative BCE with multiple negatives and calibrated gBCE. This directly targets negative-sampling overconfidence. [Paper](https://arxiv.org/abs/2308.07192), [official PyTorch implementation](https://github.com/asash/gSASRec-pytorch).",
+      "urls": [
+        "https://arxiv.org/abs/2308.07192",
+        "https://github.com/asash/gSASRec-pytorch",
+        "https://github.com/asash/gsasrec"
+      ],
+      "implementation": "Implement as an independent trial from the supplied baseline. For every valid next-item position, sample K negatives excluding that user's training items. Start with K=64 and calibration t=0.5; subsequently try K=256 and t=0.75 if budget permits. Compute beta=1-t+t*K/(itemnum-1). With positive logits p and negative logits n shaped [N,K], use loss=(-beta*F.logsigmoid(p)+F.softplus(n).sum(-1)).mean()/(K+1). Chunk negative scoring to limit GPU memory. Initially retain tied embeddings and baseline inference; separately ablate an output embedding table, updating predict() and checkpoint metadata together. Shared requirements for all four directions: DATA_DIR=os.environ['GAGC_DATA_DIR']; preserve all four categories, existing splits, preprocessing seed 0, training seed 42, and SASREC_EPOCHS default 200. Store artifacts under the trial's working directory. Preserve dataset routing and generate working/predict.py for the exact saved architecture. Select checkpoints using fixed validation candidates matching the pinned protocol, without changing the host evaluator. Use local evaluation RNGs so validation never reseeds training. Keep every trial single-GPU, and charge all runs against the shared 43,200 GPU-second budget. No performance improvement is claimed before validation."
+    },
+    {
+      "description": "DuoRec: add dropout-based and same-target contrastive supervision to the SASRec encoder. This provides additional representation learning without external data. [Paper](https://arxiv.org/abs/2110.05730), [author implementation](https://github.com/RuihongQiu/DuoRec).",
+      "urls": [
+        "https://arxiv.org/abs/2110.05730",
+        "https://github.com/RuihongQiu/DuoRec",
+        "https://github.com/RuihongQiu/DuoRec/blob/master/recbole/model/sequential_recommender/duorec.py"
+      ],
+      "implementation": "Build prefix-target examples exclusively from user_train and index prefixes by their next-item target. Keep the baseline causal next-item BCE objective. Encode each sampled prefix twice with independent dropout to obtain an unsupervised positive pair; sample another training prefix sharing its target for a supervised pair when available. Add symmetric InfoNCE losses over final nonpadding representations: loss=loss_bce+lambda_u*loss_dropout+lambda_s*loss_same_target. Exclude self-pairs and avoid treating known same-target positives as negatives. Start with temperature 0.2 and lambda_u=lambda_s=0.1; compare weights 0.05 and 0.2 only after the initial trial. Bound prefix generation and sample partners lazily rather than materializing every padded sequence. These coefficients are proposed search settings, not reproduced results. Inference remains ordinary SASRec candidate dot products with contrastive branches disabled. The predictor writer must reconstruct the trained encoder and load its checkpoint; no target-conditioned partner selection occurs during prediction. Apply the shared benchmark and budget constraints specified in direction one."
+    },
+    {
+      "description": "FMLP-Rec: replace attention with learned frequency filters to explore denoising and cheaper sequence mixing. [Paper](https://arxiv.org/abs/2202.13556), [author implementation](https://github.com/RUCAIBox/FMLP-Rec).",
+      "urls": [
+        "https://arxiv.org/abs/2202.13556",
+        "https://github.com/RUCAIBox/FMLP-Rec"
+      ],
+      "implementation": "Create an independent architecture trial retaining item IDs, positional embeddings, and per-category training. Replace each attention block with an FFT filter followed by a residual feed-forward block: z=torch.fft.rfft(x.float(),dim=1,norm='ortho'); y=torch.fft.irfft(z*complex_weight,n=maxlen,dim=1,norm='ortho'); x=layer_norm(x+dropout(y)). Learn complex_weight with shape [maxlen//2+1,hidden], storing real and imaginary parameters. Start with hidden=64, two blocks, maxlen=128, dropout=0.3, and Adam learning rate 1e-3. Because frequency mixing is bidirectional, do not reuse shifted all-position labels: construct training prefixes with the target excluded and supervise only the final representation using the next item. Start with baseline positive/negative BCE to isolate the encoder change. At inference, right-align the supplied history and score candidates from its final representation. Save architecture='fmlp' and filter dimensions in metadata; update the predictor writer to instantiate FMLPRec. Apply direction one's shared constraints."
+    },
+    {
+      "description": "BERT4Rec: test bidirectional masked-item learning as a distinct alternative to causal next-item training. [Paper](https://arxiv.org/abs/1904.06690), [author implementation](https://github.com/FeiSun/BERT4Rec).",
+      "urls": [
+        "https://arxiv.org/abs/1904.06690",
+        "https://github.com/FeiSun/BERT4Rec"
+      ],
+      "implementation": "Adapt the supplied per-dataset trainer to a bidirectional Transformer with a new MASK token itemnum+1. Start with hidden=64, two layers, two heads, dropout=0.2, and masking probability 0.2. Mask only nonpadding items from training sequences; at selected positions use 80% MASK replacement, 10% random real item, and 10% unchanged input. Compute item cross-entropy only at selected positions, excluding padding and MASK from output classes. Guarantee at least one supervised position per example. Add training examples ending in MASK with their next training item withheld to exercise the prediction format. Full-catalog cross-entropy should be computed only for supervised representations and chunked over them when needed. At prediction, use history[-(maxlen-1):]+[MASK], right-align it, and score real candidate IDs from the MASK representation. Save architecture, mask_id, output head, and dimensions in metadata, and update the predictor writer accordingly. Do not invoke the reference repository's preprocessing or test-evaluation scripts. Apply direction one's shared constraints."
+    }
+  ]
+}

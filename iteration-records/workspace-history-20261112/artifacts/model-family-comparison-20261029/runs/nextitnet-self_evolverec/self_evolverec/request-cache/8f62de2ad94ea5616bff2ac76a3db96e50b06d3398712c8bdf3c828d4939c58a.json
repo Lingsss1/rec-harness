@@ -1,0 +1,80 @@
+{
+  "request_sha256": "8f62de2ad94ea5616bff2ac76a3db96e50b06d3398712c8bdf3c828d4939c58a",
+  "response": {
+    "markdown_report": "**Evidence and insights.** The starting point supports three insights. (1) NextItNet provides causal features at several context scales. The earlier depth-gating proposal changes their aggregation, but gate weights cannot establish exclusion of stale history. (2) Users reject broad-purpose matches and persistent older interests. Recent-context training could address both, although purchase purpose remains unobserved. (3) Electronics has 12.27% sampled ranking errors and a −0.2595 lower-tail margin. This motivates discrimination improvements; embedding similarities near 0.5 do not establish collapse.\n\nRelated work provides three further insights. (1) [Wu et al.](https://wujcan.github.io/papers/tois-ssm.pdf) connect sampled softmax with hard-negative emphasis. Transfer from collaborative filtering to NextItNet needs testing. (2) [Prakash et al.](https://arxiv.org/abs/2410.17276) find dataset-dependent sampling effects. Uniform negatives therefore provide a conservative starting point. (3) [UFNRec](https://arxiv.org/abs/2208.04116) identifies false-negative risks. Excluding observed positives helps, but cannot identify every plausible future purchase.\n\n**Framework.** Three directions form a context × discrimination × information matrix: depth aggregation changes context representation; multi-negative learning changes discrimination; text conditioning adds permitted semantic information. The proposed gap is discrimination trained on both complete and recent prefixes, without requiring unavailable compatibility labels.\n\n**Candidate assessment.** Scores are originality/potential/user alignment/model alignment/difficulty; difficulty increases with implementation effort. Each assessment includes a positive (+) and limitation (−).\n\n| Idea | Scores | Critical assessment |\n|---|---|---|\n| Uniform multi-negative softmax [Wu] | 3/7/5/8/3 | O: +focused adaptation, −established objective; P: +scalable, −sampling sensitivity; U: +specific competition, −no recency intervention; M: +targets separation, −sampled margins differ from HR; D: +small change, −exclusion overhead. |\n| Recent-prefix paired softmax [Wu; UFNRec] | 4/7/8/8/5 | O: +context/objective combination, −familiar components; P: +tests stale-context dependence, −long-term preferences may suffer; U: +targets stale and broad-purpose matches, −intent unobserved; M: +multiple competing negatives, −false negatives persist; D: +shared network, −extra forward pass. |\n| Joint title encoder [Recformer](https://arxiv.org/abs/2305.13731) inspiration | 4/6/7/5/7 | O: +convolutional adaptation, −text fusion established; P: +semantic transfer, −sparse descriptions; U: +functional cues, −compatibility unverified; M: +item differentiation, −separation benefit uncertain; D: +available text, −vocabulary/export changes. |\n\n**Selected experiment: recent-prefix paired softmax.** At 0% progress, test one shared NextItNet on the original prefix and its recent suffix, using the same target and negative candidates. This explicitly targets stale-interest persistence and broad relevance displacing immediate-purpose matches; multi-negative competition addresses Electronics’ measured separation weakness. These are hypotheses, not demonstrated improvements.\n\nCompute `loss = original_softmax + 0.25 * suffix_softmax`, initially retaining eight recent items. Use 16 uniform negatives excluding padding, target, and observed training positives. Keep original-only inference. Compare against baseline and original-only softmax as separate trials; never combine checkpoints. Select solely by fixed four-category macro validation HR@10. Preserve all seeds, limits, routing, diagnosis contracts, and predictor/checkpoint consistency. Sampled margins and twenty-user feedback provide supporting evidence only.",
+    "idea": {
+      "description": "Train one NextItNet per category with a paired next-item objective: multi-negative sampled softmax on the complete training prefix plus a weak auxiliary copy of that objective on its recent suffix. Both branches use exactly the same jointly trained network, target, and negative candidates. Deploy only the complete-prefix forward pass from one checkpoint.",
+      "motivation": "The user diagnosis identifies stale-interest persistence and broad-purpose recommendations outranking specific immediate matches. Training the same next-item prediction from recent suffixes encourages the shared network to retain useful recent evidence, while the full-prefix objective preserves access to longer context. Multi-negative competition targets the observed Electronics separation weakness: 12.27% negative-over-positive positions and a negative tenth-percentile margin. Neither sampled-margin improvement nor this mechanism establishes better HR@10, actual purchase purpose, compatibility, or duplication avoidance.",
+      "implementation_notes": "The corrected baseline source is absent, so this specifies an architectural and objective-preserving integration rather than inventing a replacement train.py. Start from that baseline's NextItNet, sampler interfaces, optimizer, validation schedule, and checkpoint rule. Replace its ranking loss with original-prefix sampled softmax and add a recent-prefix auxiliary term with initial coefficient 0.25, window 8, and 16 uniform negatives; use raw dot-product logits with temperature 1 initially. These values are proposals, not measured optima. For each selected training target position, construct a left-padded prefix ending at its corresponding input item and a left-padded suffix retaining at most eight nonpadding items. Reuse the baseline's valid target positions and sample a bounded subset for the auxiliary pass to control compute; do not construct a full B×L×L expansion. Exclude item 0, the target, and all items in that user's observed training history from negative candidates, without consulting validation or test interactions. Skip positions with no eligible negatives. Observed-positive exclusion changes the training objective intentionally and does not eliminate unknown false negatives. Begin with a baseline comparison, then original-only multi-negative softmax, then the paired objective, as budget permits; every trial trains independent category models and no models are fused. The auxiliary pass can nearly double selected-position compute, so account for it within the shared 43,200 GPU-second budget. Maintain preprocessing seed 0, training seed 42, maximum 200 epochs, 200 batches per epoch, single-GPU execution, all four categories, supplied splits, DATA_DIR = os.environ['GAGC_DATA_DIR'], and artifacts beneath the trial directory. Keep causal left padding, channel-wise normalization, zero padding embeddings, and padding masks around temporal sublayers. Select the actual final nonpadding position using positional maximum, never count−1; preserve the baseline empty-history policy. Export exactly the trained NextItNet architecture/configuration in the embedded predictor writer and verify reload score agreement. The auxiliary objective adds no inference branch or independently fitted parameters. Keep ModelView.model as the actual nn.Module and preserve item_emb, log2feats(sequence), predict_score(features, items), user_train, meta_data, and review_data interfaces. Retain DiagnosisProbe(view, device), run_full_diagnosis(train_loader) returning metrics and metric_definitions, and diagnosis_interpreter_prompt(raw_diagnosis). Continue measuring margins with the diagnostic loader's supplied negatives and deployed full-prefix features, separately from the new training loss. Mark unavailable item-category breakdowns unavailable; use no ratings, reviews, prices, stores, category metadata, pretrained weights, or inferred simulator traits. Retain the twenty-user unseen-item diagnostic recommendation process. Track reported stale-interest and broad-purpose rejections without claiming those judgments establish causal mechanisms; select exclusively through pinned macro validation HR@10.",
+      "pseudocode": "for batch in baseline_sample_batch(seed=42):\n    sequence, positive, negative = unpack(batch)\n    full_features = model.log2feats(sequence)\n    positions = valid_target_positions(sequence, positive)\n    negatives = sample_uniform_eligible_items(\n        positions, count=16,\n        exclude=padding_target_and_user_training_positives)\n    main_loss = sampled_cross_entropy(\n        model.predict_score(full_features[positions],\n                            concat(positive[positions], negatives)),\n        positive_column=0)\n\n    selected = bounded_subset(positions, training_rng)\n    # Each target stays outside its corresponding input prefix.\n    suffixes = left_padded_recent_prefixes(\n        sequence, selected, max_nonpadding_items=8)\n    suffix_features = model.log2feats(suffixes)\n    last = where(suffixes != 0, arange(L), -1).amax(dim=1)\n    auxiliary_loss = sampled_cross_entropy(\n        model.predict_score(suffix_features[nonempty, last[nonempty]],\n                            same_candidates_for(selected[nonempty])),\n        positive_column=0)\n    loss = main_loss + 0.25 * auxiliary_loss\n    optimizer_step(loss)\n\n# Prediction: one full-prefix forward pass, one checkpoint/category.\nfeatures = model.log2feats(sequence)\nlast = where(sequence != 0, arange(L), -1).amax(dim=1)\nhandle_empty_histories_using_baseline_policy(last)\nscores = model.predict_score(features[nonempty, last[nonempty]], candidates)\n# Preserve host validation, checkpoint selection, routing, and predictor export.",
+      "originality": {
+        "score": 4,
+        "positive": "Combines a specific recent-prefix auxiliary objective with multi-negative discrimination inside the required NextItNet family.",
+        "negative": "Suffix augmentation, shared-network auxiliary learning, and sampled softmax are established components; the contribution is a controlled adaptation."
+      },
+      "future_potential": {
+        "score": 7,
+        "positive": "Provides a testable route to studying whether recent-context sufficiency improves immediate-purpose recommendations without adding inference models.",
+        "negative": "Recent prefixes can omit essential long-term preferences, and improvements may arise from regularization rather than better intent modeling."
+      },
+      "code_difficulty": {
+        "score": 5,
+        "positive": "Reuses the existing NextItNet architecture and scoring interface; deployed inference remains a single forward pass.",
+        "negative": "Correct target-prefix alignment, eligible-negative sampling, bounded auxiliary computation, and consistent diagnostics require careful integration."
+      }
+    },
+    "related_work": [
+      {
+        "title": "NextItNet: A Simple Convolutional Generative Network for Next Item Recommendation",
+        "link": "https://arxiv.org/abs/1808.05163",
+        "contributions": [
+          "Provides the causal dilated residual convolution backbone retained by the proposal."
+        ],
+        "limitations": [
+          "The backbone alone does not establish current purchase purpose or product compatibility."
+        ]
+      },
+      {
+        "title": "Wu et al.: sampled softmax analysis, TOIS 2024",
+        "link": "https://wujcan.github.io/papers/tois-ssm.pdf",
+        "contributions": [
+          "Connects sampled softmax to hard-negative emphasis and describes temperature-dependent gradient concentration."
+        ],
+        "limitations": [
+          "The supplied evidence concerns collaborative filtering; transfer to this NextItNet benchmark remains untested."
+        ]
+      },
+      {
+        "title": "Prakash et al.: negative sampling for sequential recommendation, 2024",
+        "link": "https://arxiv.org/abs/2410.17276",
+        "contributions": [
+          "Compares sampling approaches and reports dataset-dependent tradeoffs."
+        ],
+        "limitations": [
+          "Does not establish a universally superior sampler or gains on the pinned four-category task."
+        ]
+      },
+      {
+        "title": "UFNRec",
+        "link": "https://arxiv.org/abs/2208.04116",
+        "contributions": [
+          "Highlights potential false negatives in sequential recommendation."
+        ],
+        "limitations": [
+          "Its teacher-based approach is not imported; training-positive exclusion cannot identify all unknown future positives."
+        ]
+      },
+      {
+        "title": "Recformer",
+        "link": "https://arxiv.org/abs/2305.13731",
+        "contributions": [
+          "Motivates combining item-text learning with recommendation objectives."
+        ],
+        "limitations": [
+          "Its Transformer architecture cannot replace the required NextItNet backbone, and pretrained weights are disallowed here."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/model-family-comparison-20261029/runs/nextitnet-self_evolverec/self_evolverec/calls/00333"
+}

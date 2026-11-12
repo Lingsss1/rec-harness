@@ -1,0 +1,76 @@
+--- g0-r0085-action_plus_membership/model.py
++++ g0-r0086-conditional_counts_membership/model.py
+@@ -1,12 +1,14 @@
+-"""Explicit mask-membership access for conditional historical action utility.
+-
+-Inherit the complete incumbent architecture and surrogate context VJP.
+-Append a zero-initialized 16-row embedding of the four supplied historical
+-mask bits to the existing action channel by addition. In blind mode this
+-channel has no event action information: the inherited action-table mean
+-is constant across valid events. Full mode retains every event action.
+-The two new arms have identical capacity and initialization. Target action,
+-padding, item order, masks, objective and host training are unchanged.
+-This is a prospective representation-control study; no novelty is claimed.
++"""Historical action composition conditional on supplied mask membership.
++
++Inherit all learned modules, initialization, forward readouts, true-label loss
++and the surrogate context VJP of g0-r0085-action_plus_membership. Replace only
++valid historical action vectors before any scorer or summary, then add the
++unchanged zero-initialized membership embedding. No new parameters or input
++information. Target action, padding, item order and masks remain unchanged.
++Global counts use a whole-history mean. Membership counts use a per-history,
++per-exact-mask-pattern mean, preserving only conditional action composition.
++The latter is uninformative about event alignment if codes are constant within
++each observed row/stratum. Averaging is not a permutation: nonlinear scale and
++optimization effects remain confounds. No novelty or measured result claimed.
+ """
+ import torch
+@@ -17,5 +19,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'historical_action_mode': 'full'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'historical_action_mode': 'membership_counts_only'}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -924,5 +926,5 @@
+                  click_relative_transfer='orthogonal_native',
+                  orthogonal_assignment='nuisance_line_fixed_angle_occupied_cycle_source_bit',
+-                 historical_action_mode='full',
++                 historical_action_mode='membership_counts_only',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -936,5 +938,5 @@
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+-        if historical_action_mode not in ('full', 'blind', 'counts_only', 'within_membership_cycle'):
++        if historical_action_mode not in ('full', 'blind', 'counts_only', 'within_membership_cycle', 'membership_counts_only'):
+             raise ValueError('Unknown historical action intervention')
+         self.historical_action_mode = historical_action_mode
+@@ -1224,4 +1226,8 @@
+         """Replace only the historical action channel, before ANY summary.
+ 
++        Membership-counts-only projects each row/stratum action histogram
++        and broadcasts it within the same exact four-mask pattern. It does
++        not preserve individual event action values when these vary. Both
++        count replacements change variance/optimization and are not shuffles.
+         Counts-only is a learned linear projection of the complete per-row
+         action histogram, divided by valid history length. The existing
+@@ -1242,4 +1248,18 @@
+             mean = (active.sum(dim=1, keepdim=True) / count).to(history.dtype)
+             replacement = mean.expand_as(history)
++        elif self.historical_action_mode == 'membership_counts_only':
++            # O(B*L*D + B*16*D), no event-pair attention or new parameters.
++            # Counts/sums use valid history only; membership zero is a real
++            # stratum and is distinguished from padding by the valid mask.
++            codes = self._membership_codes(mask, task_masks)
++            batch, _, width = history.shape
++            indices = codes.unsqueeze(-1).expand_as(history)
++            active = torch.where(valid, history.float(), 0.0)
++            totals = history.new_zeros((batch, 16, width), dtype=torch.float32)
++            totals = totals.scatter_add(1, indices, active)
++            counts = history.new_zeros((batch, 16), dtype=torch.float32)
++            counts = counts.scatter_add(1, codes, mask.bool().to(torch.float32))
++            means = totals / counts.clamp_min(1).unsqueeze(-1)
++            replacement = means.gather(1, indices).to(history.dtype)
+         elif self.historical_action_mode == 'blind':
+             spec = self.feature_map.features[self.action_field]

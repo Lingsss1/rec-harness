@@ -1,0 +1,82 @@
+--- g0-r0031-adapter_context_only/model.py
++++ g0-r0034-context_all/model.py
+@@ -1,12 +1,14 @@
+-"""Auxiliary context gradients through tower versus history adapter.
+-
+-Four cells retain identical learned modules, inputs, loss, forward arithmetic,
+-initialization and normalization populations. Independent stop-gradients gate
+-auxiliary context at the task adapter and direct prediction-tower inputs.
+-Click paths, auxiliary scorer/item ownership and running states are inherited.
+-The all-enabled/all-blocked cells bridge round 30; two partial gates isolate
+-where auxiliary supervision shapes shared context. Dense global clipping can
+-still couple task heads indirectly. No full-isolation or novelty claim.
+-Only static source checks are possible here; host tensor checks are required.
++"""History-conditioned auxiliary adapter context gradients.
++
++The two factors allow the context backward edge at rows with at most 16
++valid historical events and at rows with more than 16. All auxiliary tasks
++retain full-batch forward computation and their original BCE losses. Every
++learned module, initialization, normalization population and click path is
++inherited. The all/none cells bridge the existing context-edge controls.
++Only the auxiliary adapter input is gated; this is neither label selection
++nor sample loss weighting. Dice couples examples, embeddings couple repeated
++impressions, and dense clipping can couple heads. Slice differences motivate
++this prospective contrast but do not identify the source of useful labels.
++No novelty or independent-repetition claim. Host tensor checks are required.
+ """
+ import torch
+@@ -17,5 +19,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'aux_adapter_short_context_grad': True, 'aux_adapter_long_context_grad': True}
+ 
+ 
+@@ -36,4 +38,6 @@
+                  block_aux_tower_context_grad=True,
+                  block_aux_adapter_context_grad=False,
++                 aux_adapter_short_context_grad=True,
++                 aux_adapter_long_context_grad=True,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -62,4 +66,11 @@
+         self.block_aux_tower_context_grad = block_aux_tower_context_grad
+         self.block_aux_adapter_context_grad = block_aux_adapter_context_grad
++        if block_aux_tower_context_grad is not True or block_aux_adapter_context_grad is not False:
++            raise ValueError('Freeze the incumbent tower-blocked, adapter-enabled topology')
++        if (not isinstance(aux_adapter_short_context_grad, bool)
++                or not isinstance(aux_adapter_long_context_grad, bool)):
++            raise ValueError('History-conditioned context gates must be booleans')
++        self.aux_adapter_short_context_grad = aux_adapter_short_context_grad
++        self.aux_adapter_long_context_grad = aux_adapter_long_context_grad
+         if residual_input != 'match_detail':
+             raise ValueError('The original match-detail channel must be retained')
+@@ -752,4 +763,12 @@
+         total_count = grouped_counts[:, :, 0].sum(dim=1, keepdim=True)
+         has_history = (total_count > 0).to(uniform.dtype)
++        if self.training:
++            # Count ONLY the frozen validity mask, before any compression.
++            # Threshold 16 is an existing diagnostic boundary, not a tuned
++            # timestamp/label threshold. Noncontiguous valid masks are legal.
++            long_context_rows = mask.bool().sum(dim=1, keepdim=True) > 16
++            allowed_context_rows = (
++                (long_context_rows & self.aux_adapter_long_context_grad)
++                | (~long_context_rows & self.aux_adapter_short_context_grad))
+         predictions = {}
+         for index, (label, tower) in enumerate(zip(self.feature_map.labels, self.towers)):
+@@ -774,6 +793,14 @@
+             tower_context = task_context
+             if self.training and label != 'is_click':
+-                if self.block_aux_adapter_context_grad:
++                if self.block_aux_adapter_context_grad or not (
++                        self.aux_adapter_short_context_grad or self.aux_adapter_long_context_grad):
+                     adapter_context = adapter_context.detach()
++                elif not (self.aux_adapter_short_context_grad and self.aux_adapter_long_context_grad):
++                    # Forward values are retained on every row. Gating at
++                    # this input leaves adapter/tower learning and all native
++                    # Dice populations intact. Fast paths above/below keep
++                    # the none/all anchors' inherited autograd topology.
++                    adapter_context = torch.where(
++                        allowed_context_rows, adapter_context, adapter_context.detach())
+                 if self.block_aux_tower_context_grad:
+                     tower_context = tower_context.detach()

@@ -1,0 +1,434 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "proposal": {
+        "category_edits": [
+          {
+            "category": "feature_construction",
+            "rationale": "Across all four categories, project training log-frequency relative to its observed-prefix mean into historical inputs. Mask padding and checkpoint the frequency buffer. Preserve candidate embeddings, scoring, loss and training settings; update the predictor writer to restore the same feature configuration.",
+            "edits": [
+              {
+                "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+                "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+              },
+              {
+                "find": "class NextItNetModel(nn.Module):\n    def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 8,\n                 kernel_size: int = 3, dropout_rate: float = 0.2, maxlen: int = 128):",
+                "replace": "class NextItNetModel(nn.Module):\n    def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 8,\n                 kernel_size: int = 3, dropout_rate: float = 0.2, maxlen: int = 128,\n                 item_log_counts: torch.Tensor | None = None):"
+              },
+              {
+                "find": "            nn.init.xavier_uniform_(self.pos_emb.weight)\n            self.pos_emb.weight[0].zero_()\n\n    def encode_sequence",
+                "replace": "            nn.init.xavier_uniform_(self.pos_emb.weight)\n            self.pos_emb.weight[0].zero_()\n        counts = (torch.zeros(itemnum + 1, dtype=torch.float32)\n                  if item_log_counts is None\n                  else item_log_counts.detach().to(dtype=torch.float32).clone())\n        counts[0] = 0.0\n        self.register_buffer(\"item_log_counts\", counts)\n        self.frequency_projection = nn.Linear(1, hidden_units, bias=False)\n        nn.init.normal_(self.frequency_projection.weight, mean=0.0, std=0.02)\n\n    def encode_sequence"
+              },
+              {
+                "find": "        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)\n        x = self.dropout(x)",
+                "replace": "        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)\n        observed = (seq != 0).to(dtype=x.dtype)\n        log_frequency = self.item_log_counts[seq] * observed\n        prefix_mean = log_frequency.cumsum(dim=1) / observed.cumsum(dim=1).clamp(min=1.0)\n        relative_frequency = (log_frequency - prefix_mean) * observed\n        x = x + self.frequency_projection(relative_frequency.unsqueeze(-1))\n        x = self.dropout(x)"
+              },
+              {
+                "find": "    model = NextItNetModel(\n        itemnum=itemnum,",
+                "replace": "    training_items = np.fromiter(\n        (item for history in user_train.values() for item in history),\n        dtype=np.int64,\n    )\n    training_counts = np.bincount(training_items, minlength=itemnum + 1)\n    item_log_counts = torch.from_numpy(training_counts).float().log1p()\n    item_log_counts[0] = 0.0\n\n    model = NextItNetModel(\n        itemnum=itemnum,\n        item_log_counts=item_log_counts,"
+              },
+              {
+                "find": "        with open(meta_path, \"rb\") as f:\n            meta = pickle.load(f)\n        model = ModelClass(",
+                "replace": "        with open(meta_path, \"rb\") as f:\n            meta = pickle.load(f)\n        state = torch.load(ckpt_path, map_location=\"cpu\", weights_only=True)\n        model = ModelClass("
+              },
+              {
+                "find": "            maxlen=meta[\"maxlen\"],\n        ).to(_device)\n        model.load_state_dict(torch.load(ckpt_path, map_location=_device, weights_only=True))",
+                "replace": "            maxlen=meta[\"maxlen\"],\n            item_log_counts=state[\"item_log_counts\"],\n        ).to(_device)\n        model.load_state_dict(state, strict=True)\n        del state"
+              }
+            ]
+          },
+          {
+            "category": "architecture_interaction",
+            "rationale": "Retain every NextItNet causal convolution and add a jointly trained channel gate to each residual update. Gates use the normalized current-position residual, with zero weights and bias 2 initially, allowing context-dependent updates within each category's single model. The predictor imports this same architecture.",
+            "edits": [
+              {
+                "find": "        self.activation = nn.GELU()\n\n    def _causal_conv",
+                "replace": "        self.activation = nn.GELU()\n        self.residual_gate = nn.Linear(hidden_units, hidden_units)\n        nn.init.zeros_(self.residual_gate.weight)\n        nn.init.constant_(self.residual_gate.bias, 2.0)\n\n    def _causal_conv"
+              },
+              {
+                "find": "        residual = x\n        y = self.norm1(x).transpose(1, 2)",
+                "replace": "        residual = x\n        normalized_residual = self.norm1(x)\n        y = normalized_residual.transpose(1, 2)"
+              },
+              {
+                "find": "        y = self.dropout(y)\n        return residual + y",
+                "replace": "        y = self.dropout(y)\n        gate = torch.sigmoid(self.residual_gate(normalized_residual))\n        return residual + gate * y"
+              }
+            ]
+          }
+        ],
+        "change_summary": "Add causal relative-frequency input features and context-dependent residual gates across all four category models, with checkpoint-consistent prediction. Preserve NextItNet, one checkpoint per category, routing, splits, seeds, loss and training caps.",
+        "edits": [
+          {
+            "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+            "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+          },
+          {
+            "find": "class NextItNetModel(nn.Module):\n    def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 8,\n                 kernel_size: int = 3, dropout_rate: float = 0.2, maxlen: int = 128):",
+            "replace": "class NextItNetModel(nn.Module):\n    def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 8,\n                 kernel_size: int = 3, dropout_rate: float = 0.2, maxlen: int = 128,\n                 item_log_counts: torch.Tensor | None = None):"
+          },
+          {
+            "find": "            nn.init.xavier_uniform_(self.pos_emb.weight)\n            self.pos_emb.weight[0].zero_()\n\n    def encode_sequence",
+            "replace": "            nn.init.xavier_uniform_(self.pos_emb.weight)\n            self.pos_emb.weight[0].zero_()\n        counts = (torch.zeros(itemnum + 1, dtype=torch.float32)\n                  if item_log_counts is None\n                  else item_log_counts.detach().to(dtype=torch.float32).clone())\n        counts[0] = 0.0\n        self.register_buffer(\"item_log_counts\", counts)\n        self.frequency_projection = nn.Linear(1, hidden_units, bias=False)\n        nn.init.normal_(self.frequency_projection.weight, mean=0.0, std=0.02)\n\n    def encode_sequence"
+          },
+          {
+            "find": "        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)\n        x = self.dropout(x)",
+            "replace": "        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)\n        observed = (seq != 0).to(dtype=x.dtype)\n        log_frequency = self.item_log_counts[seq] * observed\n        prefix_mean = log_frequency.cumsum(dim=1) / observed.cumsum(dim=1).clamp(min=1.0)\n        relative_frequency = (log_frequency - prefix_mean) * observed\n        x = x + self.frequency_projection(relative_frequency.unsqueeze(-1))\n        x = self.dropout(x)"
+          },
+          {
+            "find": "    model = NextItNetModel(\n        itemnum=itemnum,",
+            "replace": "    training_items = np.fromiter(\n        (item for history in user_train.values() for item in history),\n        dtype=np.int64,\n    )\n    training_counts = np.bincount(training_items, minlength=itemnum + 1)\n    item_log_counts = torch.from_numpy(training_counts).float().log1p()\n    item_log_counts[0] = 0.0\n\n    model = NextItNetModel(\n        itemnum=itemnum,\n        item_log_counts=item_log_counts,"
+          },
+          {
+            "find": "        with open(meta_path, \"rb\") as f:\n            meta = pickle.load(f)\n        model = ModelClass(",
+            "replace": "        with open(meta_path, \"rb\") as f:\n            meta = pickle.load(f)\n        state = torch.load(ckpt_path, map_location=\"cpu\", weights_only=True)\n        model = ModelClass("
+          },
+          {
+            "find": "            maxlen=meta[\"maxlen\"],\n        ).to(_device)\n        model.load_state_dict(torch.load(ckpt_path, map_location=_device, weights_only=True))",
+            "replace": "            maxlen=meta[\"maxlen\"],\n            item_log_counts=state[\"item_log_counts\"],\n        ).to(_device)\n        model.load_state_dict(state, strict=True)\n        del state"
+          },
+          {
+            "find": "        self.activation = nn.GELU()\n\n    def _causal_conv",
+            "replace": "        self.activation = nn.GELU()\n        self.residual_gate = nn.Linear(hidden_units, hidden_units)\n        nn.init.zeros_(self.residual_gate.weight)\n        nn.init.constant_(self.residual_gate.bias, 2.0)\n\n    def _causal_conv"
+          },
+          {
+            "find": "        residual = x\n        y = self.norm1(x).transpose(1, 2)",
+            "replace": "        residual = x\n        normalized_residual = self.norm1(x)\n        y = normalized_residual.transpose(1, 2)"
+          },
+          {
+            "find": "        y = self.dropout(y)\n        return residual + y",
+            "replace": "        y = self.dropout(y)\n        gate = torch.sigmoid(self.residual_gate(normalized_residual))\n        return residual + gate * y"
+          }
+        ],
+        "scope_validation": "exact categories and nontrivial AST changes; semantic labels prompt-enforced"
+      }
+    }
+  ],
+  "receipt": {
+    "id": "round-0004-slot-3-attempt-1",
+    "status": "success",
+    "gpu": 7,
+    "allocated_gpu_seconds": 507.41652666032314,
+    "output": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/nextitnet/recharness/trials/round-0004-slot-3-attempt-1",
+    "source_sha256": "e8339b1938d66ba38f459d59dc1bfb80a3fd36fc9ef6ab9c03543f9917153c2e",
+    "score": 0.5375,
+    "aggregate": {
+      "HR@5": 0.4125,
+      "HR@10": 0.5375,
+      "HR@20": 0.6663,
+      "NDCG@5": 0.2941,
+      "NDCG@10": 0.3347,
+      "NDCG@20": 0.3674,
+      "Movies_and_TV/HR@5": 0.45,
+      "Movies_and_TV/HR@10": 0.555,
+      "Movies_and_TV/HR@20": 0.67,
+      "Movies_and_TV/NDCG@5": 0.3219,
+      "Movies_and_TV/NDCG@10": 0.3557,
+      "Movies_and_TV/NDCG@20": 0.3849,
+      "Industrial_and_Scientific/HR@5": 0.51,
+      "Industrial_and_Scientific/HR@10": 0.625,
+      "Industrial_and_Scientific/HR@20": 0.735,
+      "Industrial_and_Scientific/NDCG@5": 0.367,
+      "Industrial_and_Scientific/NDCG@10": 0.4039,
+      "Industrial_and_Scientific/NDCG@20": 0.4324,
+      "Electronics/HR@5": 0.295,
+      "Electronics/HR@10": 0.405,
+      "Electronics/HR@20": 0.54,
+      "Electronics/NDCG@5": 0.2136,
+      "Electronics/NDCG@10": 0.2487,
+      "Electronics/NDCG@20": 0.2833,
+      "CDs_and_Vinyl/HR@5": 0.395,
+      "CDs_and_Vinyl/HR@10": 0.565,
+      "CDs_and_Vinyl/HR@20": 0.72,
+      "CDs_and_Vinyl/NDCG@5": 0.274,
+      "CDs_and_Vinyl/NDCG@10": 0.3303,
+      "CDs_and_Vinyl/NDCG@20": 0.3688
+    },
+    "per_dataset": {
+      "Movies_and_TV": {
+        "metrics": {
+          "HR@5": 0.45,
+          "HR@10": 0.555,
+          "HR@20": 0.67,
+          "NDCG@5": 0.3219,
+          "NDCG@10": 0.3557,
+          "NDCG@20": 0.3849
+        },
+        "n_users": 200
+      },
+      "Industrial_and_Scientific": {
+        "metrics": {
+          "HR@5": 0.51,
+          "HR@10": 0.625,
+          "HR@20": 0.735,
+          "NDCG@5": 0.367,
+          "NDCG@10": 0.4039,
+          "NDCG@20": 0.4324
+        },
+        "n_users": 200
+      },
+      "Electronics": {
+        "metrics": {
+          "HR@5": 0.295,
+          "HR@10": 0.405,
+          "HR@20": 0.54,
+          "NDCG@5": 0.2136,
+          "NDCG@10": 0.2487,
+          "NDCG@20": 0.2833
+        },
+        "n_users": 200
+      },
+      "CDs_and_Vinyl": {
+        "metrics": {
+          "HR@5": 0.395,
+          "HR@10": 0.565,
+          "HR@20": 0.72,
+          "NDCG@5": 0.274,
+          "NDCG@10": 0.3303,
+          "NDCG@20": 0.3688
+        },
+        "n_users": 200
+      }
+    },
+    "evaluation_seconds": 5.061380907893181,
+    "predictor_sha256": "bed25135f23487848fe7170d97732464a0c205295e871ba371cf1c734db5cf50"
+  },
+  "native_result": {
+    "spec": {
+      "dimension": "combination_jump",
+      "delta": 1.0,
+      "estimated_cost_secs": 637.0,
+      "code_diff": "",
+      "code_edits": [],
+      "code_content": "",
+      "arm": "combination_jump",
+      "composite_dims": [
+        "combination_jump"
+      ],
+      "strategy_arm": null,
+      "round_role": "lowlevel_routing",
+      "parallel_group_estimated_wall_secs": 2548.0,
+      "budget_safe_if_global_budget_gte": 2548.0,
+      "budget_accounting": "Parallel group cost is sum(estimated_cost_secs) across the selected candidates.",
+      "code_hint": "COMBINATION JUMP: make a substantive, coordinated change in EACH selected direction. 特征构造: Construct input features solely from supplied training interactions, such as frequency or recency indicators. No external metadata, independent scorer or score fusion.\n架构与交互: Coordinate backbone-appropriate blocks (GRU recurrence, NextItNet causal convolution, BERT4Rec masked bidirectional attention, or HSTU gated attention), feed-forward structure, residual paths and jointly trained interaction/scoring formulas such as bilinear compatibility.\nFor a jump, preservation rules apply to UNSELECTED directions. Shared changes must have one owner; do not claim the same edit for multiple directions. Keep observed-history data, registered model family, seed 42, epoch cap 200 and batches per epoch 200 fixed.\nMaintain shape, checkpoint and predictor consistency for changes in the selected directions; preserve the registered direction boundaries.",
+      "hypothesis": "Memory available in state; agent should write a short arm-specific hypothesis; Agent hypothesis: Across all four categories, construct the causal feature log1p(training_count[item]) minus its cumulative mean over the observed prefix; project this scalar into historical inputs, with padding zero. Within each existing NextItNet block, replace the residual update with residual+sigmoid(W*norm(residual)+b)*y, using a jointly trained channel gate initialized with b=2. Relative frequency highlights shifts between common and niche items, while gates allow context-dependent convolution updates rather than uniformly halving residuals, which regressed. Preserve all existing hyperparameters, embeddings, scoring, readout and pointwise loss. Save training-count buffers and update the predictor writer; retain one checkpoint/category and fixed seeds and caps.",
+      "is_jumping": true,
+      "implementation_backend": "claude_code",
+      "implementation_prompt": "COMBINATION JUMP: make a substantive, coordinated change in EACH selected direction. 特征构造: Construct input features solely from supplied training interactions, such as frequency or recency indicators. No external metadata, independent scorer or score fusion.\n架构与交互: Coordinate backbone-appropriate blocks (GRU recurrence, NextItNet causal convolution, BERT4Rec masked bidirectional attention, or HSTU gated attention), feed-forward structure, residual paths and jointly trained interaction/scoring formulas such as bilinear compatibility.\nFor a jump, preservation rules apply to UNSELECTED directions. Shared changes must have one owner; do not claim the same edit for multiple directions. Keep observed-history data, registered model family, seed 42, epoch cap 200 and batches per epoch 200 fixed.\nMaintain shape, checkpoint and predictor consistency for changes in the selected directions; preserve the registered direction boundaries.",
+      "allowed_files": [
+        "train.py",
+        "predict.py"
+      ],
+      "claude_attempts": 3,
+      "arm_design": "semantic_v4",
+      "selected_categories": [
+        "feature_construction",
+        "architecture_interaction"
+      ],
+      "hypothesis_key": "slot-3",
+      "sampling_draw": {
+        "slot": 3,
+        "arm": "combination_jump",
+        "selected_directions": [
+          "feature_construction",
+          "architecture_interaction"
+        ],
+        "sampled_values": {
+          "feature_construction": 0.7795831186118786,
+          "embedding_representation": 0.1898984716805207,
+          "architecture_interaction": 0.26138432113029086,
+          "sequence_interest": 0.02488065685810338,
+          "learning_objective": 0.18929930641494683,
+          "hyperparameter_tuning": 0.574973903647116
+        },
+        "direction_count": 2,
+        "selection": "best unused TS-ranked combination at sizes 2,3,4,2"
+      },
+      "max_trial_gpu_seconds": 637.0,
+      "protected_gpu_seconds": 15119.999999999998,
+      "jump_trigger": "plateau",
+      "jump_budget_plan": {
+        "trial_cap_secs": 637.0,
+        "jump_group_size": 4,
+        "jump_reserved_secs": 2548.0,
+        "retune_group_size": 4,
+        "retune_rounds": 4,
+        "retune_reserved_secs": 10192.0,
+        "total_reserved_secs": 12740.0,
+        "protected_envelope_secs": 15119.999999999998,
+        "cost_source": "p75 measured trial cost * safety + teardown margin"
+      },
+      "predict_code_edits": [],
+      "predict_code_content": "",
+      "agent_hypothesis": "Across all four categories, construct the causal feature log1p(training_count[item]) minus its cumulative mean over the observed prefix; project this scalar into historical inputs, with padding zero. Within each existing NextItNet block, replace the residual update with residual+sigmoid(W*norm(residual)+b)*y, using a jointly trained channel gate initialized with b=2. Relative frequency highlights shifts between common and niche items, while gates allow context-dependent convolution updates rather than uniformly halving residuals, which regressed. Preserve all existing hyperparameters, embeddings, scoring, readout and pointwise loss. Save training-count buffers and update the predictor writer; retain one checkpoint/category and fixed seeds and caps.",
+      "gagc_memory_context": {
+        "experiment_skill": "# RecHarness Experiment Skill\n\n## Objective\nUse benchmark val_score as the search and winner criterion.\nDo not use held-out test metrics during search.\nThompson Sampling chooses arms; this skill only guides how to edit code within selected arms.\n\n## Recent Patch Lessons\n- Round 4, embedding_representation: Use separate jointly trained input and output item embedding tables across all four category models, with copied initialization and consistent training and candidate scoring.; validation=0.51, delta_vs_input=-0.0462, outcome=regressed, promoted=False, GPU seconds=495.3. An observation of this exact configuration, not a rule against the whole direction.\n- Round 4, architecture_interaction: Halve each NextItNet block's residual contribution for training and inference across all four datasets.; validation=0.5487, delta_vs_input=-0.0075, outcome=regressed, promoted=False, GPU seconds=476.5. An observation of this exact configuration, not a rule against the whole direction.\n- Round 4, learning_objective: Apply recency-weighted pointwise logistic supervision to all four category models, preserving sampling, topology, inference, optimizer and training schedule.; validation=0.5262, delta_vs_input=-0.03, outcome=regressed, promoted=False, GPU seconds=684.4. An observation of this exact configuration, not a rule against the whole direction.\n\n## Concrete Avoids\nNo concrete patch-level avoids yet.\n",
+        "recent_text_gradients": [
+          "Round 4, embedding_representation: Use separate jointly trained input and output item embedding tables across all four category models, with copied initialization and consistent training and candidate scoring.; validation=0.51, delta_vs_input=-0.0462, outcome=regressed, promoted=False, GPU seconds=495.3. An observation of this exact configuration, not a rule against the whole direction.",
+          "Round 4, architecture_interaction: Halve each NextItNet block's residual contribution for training and inference across all four datasets.; validation=0.5487, delta_vs_input=-0.0075, outcome=regressed, promoted=False, GPU seconds=476.5. An observation of this exact configuration, not a rule against the whole direction.",
+          "Round 4, learning_objective: Apply recency-weighted pointwise logistic supervision to all four category models, preserving sampling, topology, inference, optimizer and training schedule.; validation=0.5262, delta_vs_input=-0.03, outcome=regressed, promoted=False, GPU seconds=684.4. An observation of this exact configuration, not a rule against the whole direction."
+        ],
+        "failure_memory": [],
+        "skill_notes": "Round 4: best_ever=0.5562, recent=0.5562, trend=plateau. Top arms: feature_construction, embedding_representation, learning_objective."
+      },
+      "trial_group_id": "trialgrp_1793459642264_2946412",
+      "trial_id": 3
+    },
+    "wall_time_secs": 507.41652666032314,
+    "timed_out": false,
+    "oom": false,
+    "val_score": 0.5375,
+    "val_metrics": {
+      "Movies_and_TV": {
+        "HR@5": 0.45,
+        "HR@10": 0.555,
+        "HR@20": 0.67,
+        "NDCG@5": 0.3219,
+        "NDCG@10": 0.3557,
+        "NDCG@20": 0.3849
+      },
+      "Industrial_and_Scientific": {
+        "HR@5": 0.51,
+        "HR@10": 0.625,
+        "HR@20": 0.735,
+        "NDCG@5": 0.367,
+        "NDCG@10": 0.4039,
+        "NDCG@20": 0.4324
+      },
+      "Electronics": {
+        "HR@5": 0.295,
+        "HR@10": 0.405,
+        "HR@20": 0.54,
+        "NDCG@5": 0.2136,
+        "NDCG@10": 0.2487,
+        "NDCG@20": 0.2833
+      },
+      "CDs_and_Vinyl": {
+        "HR@5": 0.395,
+        "HR@10": 0.565,
+        "HR@20": 0.72,
+        "NDCG@5": 0.274,
+        "NDCG@10": 0.3303,
+        "NDCG@20": 0.3688
+      }
+    },
+    "test_score": null,
+    "test_metrics": null,
+    "convergence_trace": [
+      0.56,
+      0.56,
+      0.56,
+      0.58,
+      0.57,
+      0.56,
+      0.57,
+      0.555,
+      0.625,
+      0.64,
+      0.64,
+      0.615,
+      0.625,
+      0.615,
+      0.435,
+      0.37,
+      0.37,
+      0.385,
+      0.38,
+      0.42,
+      0.47,
+      0.535,
+      0.55,
+      0.575,
+      0.56,
+      0.53,
+      0.57,
+      0.505
+    ],
+    "error_message": null,
+    "stdout_tail": "R@20=0.7300  NDCG@10=0.3861\n  [Industrial_and_Scientific] epoch  10/200  loss=0.5498  val_score: 0.6400  HR@20=0.7350  NDCG@10=0.4204\n  [Industrial_and_Scientific] epoch  15/200  loss=0.4283  val_score: 0.6400  HR@20=0.7500  NDCG@10=0.4000\n  [Industrial_and_Scientific] epoch  20/200  loss=0.3656  val_score: 0.6150  HR@20=0.7400  NDCG@10=0.3736\n  [Industrial_and_Scientific] epoch  25/200  loss=0.3209  val_score: 0.6250  HR@20=0.7100  NDCG@10=0.3850\n  [Industrial_and_Scientific] epoch  30/200  loss=0.2981  val_score: 0.6150  HR@20=0.7200  NDCG@10=0.3651\n  [Industrial_and_Scientific] Early stopping at epoch 30\n  [Industrial_and_Scientific] Best val HR@10=0.6400  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/nextitnet/recharness/trials/round-0004-slot-3-attempt-1/working/Industrial_and_Scientific_model.pt\n  [Electronics] users=27601  items=31533\n  [Electronics] epoch   5/200  loss=0.8877  val_score: 0.4350  HR@20=0.5650  NDCG@10=0.2588\n  [Electronics] epoch  10/200  loss=0.6469  val_score: 0.3700  HR@20=0.5100  NDCG@10=0.2341\n  [Electronics] epoch  15/200  loss=0.5176  val_score: 0.3700  HR@20=0.4900  NDCG@10=0.2129\n  [Electronics] epoch  20/200  loss=0.4391  val_score: 0.3850  HR@20=0.5350  NDCG@10=0.2044\n  [Electronics] epoch  25/200  loss=0.3940  val_score: 0.3800  HR@20=0.5050  NDCG@10=0.2036\n  [Electronics] Early stopping at epoch 25\n  [Electronics] Best val HR@10=0.4350  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/nextitnet/recharness/trials/round-0004-slot-3-attempt-1/working/Electronics_model.pt\n  [CDs_and_Vinyl] users=18481  items=30951\n  [CDs_and_Vinyl] epoch   5/200  loss=0.8138  val_score: 0.4200  HR@20=0.5550  NDCG@10=0.2317\n  [CDs_and_Vinyl] epoch  10/200  loss=0.4946  val_score: 0.4700  HR@20=0.6600  NDCG@10=0.2718\n  [CDs_and_Vinyl] epoch  15/200  loss=0.3559  val_score: 0.5350  HR@20=0.7000  NDCG@10=0.3055\n  [CDs_and_Vinyl] epoch  20/200  loss=0.2948  val_score: 0.5500  HR@20=0.6950  NDCG@10=0.3151\n  [CDs_and_Vinyl] epoch  25/200  loss=0.2530  val_score: 0.5750  HR@20=0.7100  NDCG@10=0.3343\n  [CDs_and_Vinyl] epoch  30/200  loss=0.2308  val_score: 0.5600  HR@20=0.7050  NDCG@10=0.3358\n  [CDs_and_Vinyl] epoch  35/200  loss=0.2090  val_score: 0.5300  HR@20=0.7100  NDCG@10=0.3105\n  [CDs_and_Vinyl] epoch  40/200  loss=0.1923  val_score: 0.5700  HR@20=0.6700  NDCG@10=0.3308\n  [CDs_and_Vinyl] epoch  45/200  loss=0.1847  val_score: 0.5050  HR@20=0.6900  NDCG@10=0.3140\n  [CDs_and_Vinyl] Early stopping at epoch 45\n  [CDs_and_Vinyl] Best val HR@10=0.5750  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/nextitnet/recharness/trials/round-0004-slot-3-attempt-1/working/CDs_and_Vinyl_model.pt\npredict.py written -> /home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/nextitnet/recharness/trials/round-0004-slot-3-attempt-1/working/predict.py\n\nAll datasets done. Average val HR@10 = 0.5575\n",
+    "stderr_tail": "",
+    "memory_evidence": {
+      "parameter_changes": [
+        {
+          "name": "DATA_DIR",
+          "before_expression": "os.environ.get('GAGC_DATA_DIR', './input/trainval')",
+          "after_expression": "os.environ['GAGC_DATA_DIR']"
+        }
+      ],
+      "changed_definitions": [
+        "NextItNetBlock",
+        "NextItNetBlock.__init__",
+        "NextItNetBlock.forward",
+        "NextItNetModel",
+        "NextItNetModel.__init__",
+        "NextItNetModel.encode_sequence",
+        "train_one_dataset",
+        "write_predict_script"
+      ],
+      "summary": "Add causal relative-frequency input features and context-dependent residual gates across all four category models, with checkpoint-consistent prediction. Preserve NextItNet, one checkpoint per category, routing, splits, seeds, loss and training caps.",
+      "proposal_history": [
+        {
+          "attempt": 1,
+          "summary": "Add causal relative-frequency input features and context-dependent residual gates across all four category models, with checkpoint-consistent prediction. Preserve NextItNet, one checkpoint per category, routing, splits, seeds, loss and training caps."
+        }
+      ],
+      "hypothesis": "Across all four categories, construct the causal feature log1p(training_count[item]) minus its cumulative mean over the observed prefix; project this scalar into historical inputs, with padding zero. Within each existing NextItNet block, replace the residual update with residual+sigmoid(W*norm(residual)+b)*y, using a jointly trained channel gate initialized with b=2. Relative frequency highlights shifts between common and niche items, while gates allow context-dependent convolution updates rather than uniformly halving residuals, which regressed. Preserve all existing hyperparameters, embeddings, scoring, readout and pointwise loss. Save training-count buffers and update the predictor writer; retain one checkpoint/category and fixed seeds and caps.",
+      "input_source_sha256": "19ac0d1003bf0d5268911395ff645d8a669fb4ac89dff3ec01535ad8cf53b05d",
+      "candidate_source_sha256": "e8339b1938d66ba38f459d59dc1bfb80a3fd36fc9ef6ab9c03543f9917153c2e",
+      "input_normalized_sha256": "f6d87843e0988e2477758da86aacd12b6399923c508e1bf9e2783c26b6c3b35f",
+      "candidate_normalized_sha256": "e355f6f4bd174b23faf745cff5f1e8a35e944ad7bae44998cc96aef178193343",
+      "patch_sha256": "be202e822a6f593b2d1ef4983fd7cac47a703673ff4df4acbab1aed2a7e90806",
+      "diff_excerpt": "--- \n+++ \n@@ -30,5 +30,5 @@\n ]\n \n-DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")\n+DATA_DIR = os.environ['GAGC_DATA_DIR']\n \n SEED = int(os.environ.get(\"GAGC_SEED\", \"42\"))\n@@ -188,4 +188,7 @@\n         self.dropout = nn.Dropout(dropout_rate)\n         self.activation = nn.GELU()\n+        self.residual_gate = nn.Linear(hidden_units, hidden_units)\n+        nn.init.zeros_(self.residual_gate.weight)\n+        nn.init.constant_(self.residual_gate.bias, 2.0)\n \n     def _causal_conv(self, conv: nn.Conv1d, x: torch.Tensor) -> torch.Tensor:\n@@ -196,5 +199,6 @@\n     def forward(self, x: torch.Tensor) -> torch.Tensor:\n         residual = x\n-        y = self.norm1(x).transpose(1, 2)\n+        normalized_residual = self.norm1(x)\n+        y = normalized_residual.transpose(1, 2)\n         y = self._causal_conv(self.conv1, y).transpose(1, 2)\n         y = self.dropout(self.activation(y))\n@@ -202,10 +206,12 @@\n         y = self._causal_conv(self.conv2, y).transpose(1, 2)\n         y = self.dropout(y)\n-        return residual + y\n+        gate = torch.sigmoid(self.residual_gate(normalized_residual))\n+        return residual + gate * y\n \n \n class NextItNetModel(nn.Module):\n     def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 8,\n-                 kernel_size: int = 3, dropout_rate: float = 0.2, maxlen: int = 128):\n+                 kernel_size: int = 3, dropout_rate: float = 0.2, maxlen: int = 128,\n+                 item_log_counts: torch.Tensor | None = None):\n         super().__init__()\n         self.itemnum = itemnum\n@@ -226,4 +232,11 @@\n             nn.init.xavier_uniform_(self.pos_emb.weight)\n             self.pos_emb.weight[0].zero_()\n+        counts = (torch.zeros(itemnum + 1, dtype=torch.float32)\n+                  if item_log_counts is None\n+                  else item_log_counts.detach().to(dtype=torch.float32).clone())\n+        counts[0] = 0.0\n+        self.register_buffer(\"item_log_counts\", counts)\n+        self.frequency_projection = nn.Linear(1, hidden_units, bias=False)\n+        nn.init.normal_(self.frequency_projection.weight, mean=0.0, std=0.02)\n \n     def encode_sequence(self, seq: torch.Tensor) -> torch.Tensor:\n@@ -232,4 +245,9 @@\n         pos = pos * (seq != 0).long()\n         x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)\n+        observed = (seq != 0).to(dtype=x.dtype)\n+        log_frequency = self.item_log_counts[seq] * observed\n+        prefix_mean = log_frequency.cumsum(dim=1) / observed.cumsum(dim=1).clamp(min=1.0)\n+        relative_frequency = (log_frequency - prefix_mean) * observed\n+        x = x + self.frequency_projection(relative_frequency.unsqueeze(-1))\n         x = self.dropout(x)\n         for block in self.blocks:\n@@ -260,6 +278,15 @@\n         raise RuntimeError(f\"empty dataset or item vocabulary for {dataset_name}\")\n \n+    training_items = np.fromiter(\n+        (item for history in user_train.values() for item in history),\n+        dtype=np.int64,\n+    )\n+    training_coun",
+      "category_rationales": [
+        {
+          "category": "feature_construction",
+          "rationale": "Across all four categories, project training log-frequency relative to its observed-prefix mean into historical inputs. Mask padding and checkpoint the frequency buffer. Preserve candidate embeddings, scoring, loss and training settings; update the predictor writer to restore the same feature configuration."
+        },
+        {
+          "category": "architecture_interaction",
+          "rationale": "Retain every NextItNet causal convolution and add a jointly trained channel gate to each residual update. Gates use the normalized current-position residual, with zero weights and bias 2 initially, allowing context-dependent updates within each category's single model. The predictor imports this same architecture."
+        }
+      ],
+      "baseline_validation": 0.5562,
+      "basin_id": "default",
+      "execution_status": "success",
+      "attempt_count": 1,
+      "training_attempt_count": 1,
+      "training_attempts": [
+        {
+          "id": "round-0004-slot-3-attempt-1",
+          "status": "success",
+          "source_sha256": "e8339b1938d66ba38f459d59dc1bfb80a3fd36fc9ef6ab9c03543f9917153c2e",
+          "allocated_gpu_seconds": 507.41652666032314,
+          "error": "",
+          "score": 0.5375
+        }
+      ],
+      "checkpoint_fingerprints": {
+        "Movies_and_TV_model.pt": "aae5c27ff2a3365152837f8124aa00b3ff77a54e4a9f54fa909e68c4bde17d3e",
+        "Industrial_and_Scientific_model.pt": "f32bc2f49008d31b8520687241bc394e2db78ec84e0af10a45e6d91327272977",
+        "Electronics_model.pt": "ff165d243abd40629a6f622978e433818a27afd60ac06b4705cacd18cf2889d1",
+        "CDs_and_Vinyl_model.pt": "97f5993cfa23e5359320af6eb75b0824e022dbe8e1ac3e8ede916f78416b1529"
+      },
+      "repair_errors": [],
+      "phase": "jump"
+    }
+  },
+  "gpu_seconds_all_attempts": 507.41652666032314,
+  "training_attempts": [
+    {
+      "id": "round-0004-slot-3-attempt-1",
+      "status": "success",
+      "source_sha256": "e8339b1938d66ba38f459d59dc1bfb80a3fd36fc9ef6ab9c03543f9917153c2e",
+      "allocated_gpu_seconds": 507.41652666032314,
+      "error": "",
+      "score": 0.5375
+    }
+  ],
+  "checkpoint_fingerprints": {
+    "Movies_and_TV_model.pt": "aae5c27ff2a3365152837f8124aa00b3ff77a54e4a9f54fa909e68c4bde17d3e",
+    "Industrial_and_Scientific_model.pt": "f32bc2f49008d31b8520687241bc394e2db78ec84e0af10a45e6d91327272977",
+    "Electronics_model.pt": "ff165d243abd40629a6f622978e433818a27afd60ac06b4705cacd18cf2889d1",
+    "CDs_and_Vinyl_model.pt": "97f5993cfa23e5359320af6eb75b0824e022dbe8e1ac3e8ede916f78416b1529"
+  }
+}

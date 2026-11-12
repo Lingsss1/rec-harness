@@ -1,0 +1,58 @@
+每 GPU 一个课题：保留 auto 的研究上下文
+
+入口与资源
+这是可选的新入口 topics.py。各课题内继续使用原 auto 的 propose、实现、训练和反馈流程；需要分配课题时，另开一个只读取轻量摘要的决策调用。固定 Agent 指令保持通用，课题描述放在外部任务文件。
+每个指定 GPU 只有一个 lane 和一个活跃课题，不同 lane 并行。课题内部候选/对照沿用原接口，每次提交 1—4 项，全部在该课题的 GPU 上串行执行。课题由 title/question/hypothesis 描述，初始课题来自外部 JSON；topics.example.json 提供四个可修改示例。课题不限制只能修改一个位置，也不固定为某一种模型。
+开发验收使用模拟调用；实际独立多课题实验见 artifacts/taobao-ctr-topics-latest/。已终止的旧实验保持停止。
+
+课题内研究上下文
+普通 propose 调用沿用原 auto 的组织方式：当前最佳候选、公共基线、最近试验完整回执、完整试验轻量索引、近期源码、已有知识检索接口和失败反馈。近 12 项回执及近 4 项源码的选择规则与原 auto 一致，保留基线与当前最佳的原有处理。
+范围仅包括公共参考、当前课题自己的轨迹，以及明确选中的借用/合并来源。其他 GPU 的试验、源码和共享课题板不进入普通研究调用。历史课题完整记录继续保存在主机上，切换后不自动带入新课题上下文。决策调用失败的反馈只交给下次决策，不混入 auto 的模型实现错误反馈。
+外部任务文件补充当前课题描述。论文、行业知识与本课题试验记录仍按原 auto 的工具接口检索；个人知识保持禁用。无需增加增强版的 query/analyze 或反思记忆流程。
+
+独立轻量决策
+默认每完成 6 轮研究检查一次，--decision-every 可调整；失败的 proposal 不计为已完成轮次，其耗时仍计入预算。预算不足或用户停止时不再发起决策。
+决策输入只有：当前课题、各活跃课题与最多 4 个正收益已搁置课题的摘要、本课题最近 4 项结果、公共参考指标、剩余时间和上次决策错误。摘要包含问题/假设、进入参考、最佳验证 AUC/Logloss、增量、训练尝试/失败次数、参数量与实测成本。过长的问题和假设会截断，未展示的已搁置课题数量另外记录。
+决策调用不装载模型源码、完整轨迹、诊断矩阵、论文全文或知识卡。主机保留完整记录用于校验，模型只收到上述摘要。单次决策最多 180 秒，其耗时与失败一并计入 campaign 预算。
+输出是单独的 topic-decision.json；普通 proposal.json 保持原 study、parent_trial、variants 接口，不要求提交调度字段。
+
+决策动作
+  continue：保持本课题及原 auto 上下文，继续研究。
+  switch：提出新问题，原课题转为 parked 并保留记录。默认从公共参考开始；显式 start_trial_ref 才借用选中的模型及回执。
+  merge：开一个组合课题，选中两个来源的冻结最佳模型及回执，以较强来源为进入参考。来源课题记录保留，另一 GPU 的课题继续独立运行。
+只有明确选择借用或合并后，对应来源才会进入新课题的研究上下文；不会携带来源的全部轨迹。
+
+topic-decision.json 示例
+  {
+    "action": "continue",
+    "reason": "根据已完成结果、成本和未解决问题继续研究",
+    "evidence_refs": ["真实且在摘要中可见的 trial ID"]
+  }
+switch 需要 topic:{title,question,hypothesis}，可选 start_trial_ref。
+merge 还需要 source_topic_ids:[idA,idB]、merge_control_refs:[trialA,trialB] 和新的 topic。
+所有引用须来自本次决策可见的已提交记录。
+
+收益与合并准入
+topic-board.json 是主机上的完整课题证据板，提供状态、训练尝试/失败/中断次数、最佳验证指标、参数量和实测成本。普通研究调用不读取它；决策只读取裁剪后的摘要。封闭测试结果不进入此流程。
+收益分别记录相对公共参考和相对课题进入参考的 AUC 增量。合并要求两个来源均有相对各自进入参考的正增量，并超过公共参考。不能把继承的高分计为新课题的贡献。单次增量只支持尝试合并，不证明机制成立或收益可叠加。
+组合课题首轮 study 的 evidence_refs 与 contrasts 必须实际引用两个来源的冻结最佳模型作对照。若组合没有超过较强来源，其课题增量为零或负。参数量、训练和推理成本单独报告，不合成为“创新分数”。
+
+当前范围
+- 初始课题数量须与 GPU 数量一致；拒绝重复 GPU、超出预算的资源和文字完全相同的活跃问题。自然语言语义重复尚无自动保证。
+- 训练器、数据、基线、评分、冻结 seed 和配方保持不变。尚未扩展多种子、成本等价自动验证或调度效果验证。
+- 共享三个已注册基线，只接受数据 identity、源码、seed 和训练配方匹配的成功参考。复用成本须在新 campaign 预算中声明。
+- 此入口只进行开放研究/验证，不自动启动最终测试；STOP 或 SIGINT/SIGTERM 终止子进程。故障退出也不进入最终评估。
+- 已停止或已有状态的 campaign 不得覆盖；当前不提供自动恢复。本次模拟检查只验证流程与上下文边界，不能证明实际探索质量提高。
+
+新 campaign 的启动准备
+使用全新 campaign 目录，准备 prepared/metadata.json 与冻结数组、protocol.json、budget.json、knowledge-assets-v2/manifest.json、auto-validation-only.json（enabled=true）。budget.gpus 可为 GPU 列表或含 auto 列表的映射；deadline_unix 必须覆盖本次准备、研究调用、失败和训练。历史可见性与数值源码须符合 protocol。
+以下命令说明新 campaign 入口；已有运行状态的目录不得重复启动：
+  benchmark_res/.venv/bin/python experiments/taobao_ctr_dual/topics.py \
+    --root NEW_CAMPAIGN_ROOT --gpus 0,1,2,3 \
+    --topics experiments/taobao_ctr_dual/topics.example.json \
+    --references REFERENCE_STATE_JSON --decision-every 6
+
+检查（无真实 LLM 调用或 GPU 训练）
+  从本目录执行：
+  ../../benchmark_res/.venv/bin/python -m unittest test_topics test_knowledge test_references -v
+覆盖原版 auto 上下文一致性、其他课题信息隔离、轻量决策、选中后导入、决策频率、GPU 资源与串行训练、课题切换、合并增量及双控制、停止、失败记录和知识访问边界。

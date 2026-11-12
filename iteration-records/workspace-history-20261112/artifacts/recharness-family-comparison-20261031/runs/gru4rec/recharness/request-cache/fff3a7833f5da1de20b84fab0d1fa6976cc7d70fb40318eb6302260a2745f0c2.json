@@ -1,0 +1,19 @@
+{
+  "request_sha256": "fff3a7833f5da1de20b84fab0d1fa6976cc7d70fb40318eb6302260a2745f0c2",
+  "response": {
+    "category_edits": [
+      {
+        "category": "sequence_interest",
+        "rationale": "Pool observed GRU states causally with normalized weights 0.8^(t-j), excluding padding, to retain complementary recent interests. Apply identical pooling at every supervised training position and the final real inference position across all four categories. The generated predictor imports the updated model class directly; checkpoint shapes, embeddings, GRU topology, scoring, loss and optimizer remain unchanged.",
+        "edits": [
+          {
+            "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        # Histories are LEFT padded; count-1 indexes padding on short histories.\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores",
+            "replace": "    def _pooled_states(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        positions = torch.arange(seq.size(1), device=seq.device)\n        lag = positions[:, None] - positions[None, :]\n        causal_weights = torch.exp(lag.clamp(min=0).to(out.dtype) * math.log(0.8))\n        causal_weights = causal_weights.masked_fill(lag < 0, 0.0)\n        weights = causal_weights.unsqueeze(0) * seq.ne(0).unsqueeze(1).to(out.dtype)\n        weights = weights / weights.sum(dim=-1, keepdim=True).clamp(min=1e-12)\n        pooled = torch.bmm(weights, out)\n        return pooled.masked_fill(seq.eq(0).unsqueeze(-1), 0.0)\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        out = self._pooled_states(seq)\n        # Histories are LEFT padded; select the final real position.\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        out = self._pooled_states(seq)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Replace raw GRU-state readout with padding-excluding causal exponential pooling at decay 0.8 for training and inference. Predictor imports the updated class; no checkpoint shape changes are required."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/gru4rec/recharness/calls/00047"
+}

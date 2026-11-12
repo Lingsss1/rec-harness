@@ -1,0 +1,62 @@
+{
+  "markdown_report": "The next experiment should isolate **multi-negative calibrated gBCE within corrected BERT4Rec**. This is a provisional research choice: both current diagnoses are absent, so no proposal can satisfy the required evidence of addressing two observed user failures and one measured model failure. Earlier inspirations mention such failures, but they cannot establish the current model’s behavior.\n\n**Insights from the starting point.** (1) Protected dropout achieved supplied validation HR@10 0.5600 versus baseline 0.5425; this descriptive difference does not isolate recency protection without matched controls. (2) The curriculum scored 0.5375, so increased terminal emphasis has no demonstrated advantage here. (3) Protected dropout preserves recent evidence while perturbing older context, but durable preferences may also reside there.\n\n**Insights from related work.** (1) gSASRec motivates examining negative-sampled BCE calibration before adding architecture; transfer to BERT4Rec remains untested. (2) TiSASRec motivates learning interval relevance rather than universally deleting old events, although timestamp integration requires serving-interface support. (3) CCFRec motivates aligning text and collaborative representations, but its pretrained text encoder cannot be imported under these constraints.\n\n| Direction | Existing mechanism | Minimal experiment | Main uncertainty |\n|---|---|---|---|\n| Context regularization | Protected deletion | Matched-count uniform control | Selective retention versus generic noise |\n| Ranking objective | gSASRec calibration | Multi-negative gBCE | Transfer to masked prediction |\n| Temporal relevance | TiSASRec intervals | Learned historical-gap bias | Additional complexity and serving parity |\n\nScores below are originality/potential/user alignment/model alignment/difficulty; higher difficulty means harder implementation. Missing alignment scores are unassessable, not zero.\n\n1. **Matched-count protected deletion: 3/6/NA/NA/4.** Originality: precise control; established augmentation. Potential: clarifies retention; may erase durable tastes. User alignment: plausible stale-context benefit; no current observations. Model alignment: measurable robustness; no supplied failure metrics. Difficulty: parameter-free; PAD-hole and position handling require care.\n2. **Multi-negative calibrated gBCE: 4/7/NA/NA/4.** Originality: useful family transfer; established objective. Potential: directly changes discrimination; may depend strongly on sampling. User alignment: could improve relevant-item ordering; qualitative failures are unknown. Model alignment: directly tests score calibration; current miscalibration is unmeasured. Difficulty: localized loss change; numerical stability and sampling matter.\n3. **Historical-gap attention bias: 4/7/NA/NA/7.** Originality: adapts temporal attention; close precedents exist. Potential: retains useful older events; timestamps may be noisy. User alignment: plausible interest tracking; current failures are unavailable. Model alignment: permits sensitivity tests; no measured temporal defect. Difficulty: compact parameterization; model, adapter, and export changes are substantial.\n\nAt 40% progress, provisionally prioritize idea 2 for its limited integration cost. Compare a matched multi-negative BCE control with calibrated gBCE before attributing improvements to calibration. Preserve the existing masking, branch weights, augmentation setting, sampling policy, and inference. Select solely through host macro validation HR@10; report compute and avoid claims about unmeasured user behavior.",
+  "idea": {
+    "description": "Provisionally test multi-negative calibrated gBCE in the supplied corrected BERT4Rec, using one independently trained model and one selected checkpoint per category. Compare against ordinary BCE using identical negative samples. Current diagnoses are absent, so this proposal is not eligible for a diagnosis-qualified best-idea designation.",
+    "motivation": "The supplied protected-dropout score of 0.5600 motivates retaining that configuration as the common starting point rather than combining several new interventions. gSASRec provides evidence that sampled-BCE calibration can matter in sequential recommendation, but does not establish a gain for this BERT4Rec setup. A paired loss comparison tests that transfer with no inference architecture change.",
+    "implementation_notes": "This is an integration specification, not a standalone train.py: the supplied baseline source is absent from the prompt. Retain its corrected BERT4Rec factory, sampler, terminal/interior loss reductions, augmentation configuration, optimizer, and predictor writer. Use 16 independently sampled uniform negatives per supervised target in both new arms, preserving the baseline exclusion policy and allowing duplicate draws unless that policy already forbids them. Document the resulting proposal and eligible-catalog size; do not use validation/test interactions for exclusions. Include an unchanged-loss reference only if the shared budget permits, because changing negative count and calibration together cannot identify their separate effects.\n\nFor each target, compute positive and negative logits in float32. Ordinary BCE is softplus(-positive_logit) plus mean softplus(negative_logits). For gBCE, define alpha=K/N where N is the actual number of eligible real items under the uniform proposal, and beta=alpha+t*(1-alpha), initially t=0.75. Use positive loss -log(1-(1-sigmoid(s_positive))**beta), evaluated with stable log-space operations, and retain the same mean negative loss. This normalization is equivalent, up to a common scale, to weighting the positive term by K before averaging K+1 terms. Record K, N, beta and the exact reduction. The paired BCE arm uses beta=1. Avoid silently importing a calibration parameterization with a different negative-loss normalization.\n\nPreserve preprocessing seed 0, training seed 42, all four routes, DATA_DIR=os.environ['GAGC_DATA_DIR'], at most 200 epochs and exactly 200 batches per epoch. Use dedicated negative-sampling RNG streams, identical checkpoint opportunities, one GPU, and trial-local artifacts. Count every arm and failed attempt against 43,200 GPU-seconds; do not reuse other trials’ checkpoints or fuse scores.\n\nNo inference change is required: append the reserved MASK to intact observed history and read its final nonpadding position. Save the selected state_dict and exact architecture configuration; the canonical predictor writer must reconstruct the same BERT4Rec with strict loading. Preserve ModelView interfaces and DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). On a fixed unaugmented training diagnostic panel, report measured terminal/interior positive-negative margins and loss components with definitions and sample counts. These are training diagnostics, not host validation metrics. No text encoder, pretrained weights, unavailable metadata, hidden labels, or additional fitted scorer is introduced.",
+    "pseudocode": "import torch\nimport torch.nn.functional as F\n\n\ndef sampled_gbce(positive_logits, negative_logits, eligible_count,\n                  calibration=0.75):\n    \"\"\"Per-target loss; negatives have shape (..., K).\n\n    Uniform proposal over the documented eligible item set.\n    calibration=None gives the matched ordinary-BCE control.\n    Caller retains baseline example/branch reductions.\n    \"\"\"\n    positive_logits = positive_logits.float()\n    negative_logits = negative_logits.float()\n    k = negative_logits.shape[-1]\n    n = torch.as_tensor(eligible_count, device=positive_logits.device,\n                        dtype=torch.float32)\n    if k < 1 or torch.any(n < 1):\n        raise ValueError('Need negatives and a nonempty eligible catalog')\n    if calibration is None:\n        positive_loss = F.softplus(-positive_logits)\n    else:\n        if not 0.0 <= calibration <= 1.0:\n            raise ValueError('calibration must be in [0, 1]')\n        alpha = k / n\n        if torch.any(alpha > 1):\n            raise ValueError('This experiment requires K <= eligible count')\n        beta = alpha + calibration * (1.0 - alpha)\n        # log(1 - sigmoid(s)) = logsigmoid(-s).\n        # -expm1(x) stably evaluates 1-exp(x) for x <= 0.\n        log_complement = beta * F.logsigmoid(-positive_logits)\n        tiny = torch.finfo(torch.float32).tiny\n        positive_loss = -torch.log(\n            (-torch.expm1(log_complement)).clamp_min(tiny)\n        )\n    negative_loss = F.softplus(negative_logits).mean(dim=-1)\n    return positive_loss + negative_loss\n\n\n# Integrate into the supplied corrected training loop, without changing inputs:\n# for each independently executed, budgeted arm:\n#   reset seed 42; initialize one BERT4Rec per category\n#   use identical histories, hidden targets, masks, and K=16 negative draws\n#   compute per-target sampled_gbce(..., calibration=None or 0.75)\n#   retain baseline within-example and terminal/interior branch reductions\n#   run exactly 200 batches/epoch, configured epochs <= 200\n#   retain one host-validation-selected checkpoint per category\n#   export through the unchanged canonical BERT4Rec predictor writer\n# Never combine predictions, parameters, or checkpoints across arms.",
+    "originality": {
+      "score": 4,
+      "positive": "A controlled transfer of calibrated sampled BCE to leakage-free terminal/interior BERT4Rec is a useful experimental contribution.",
+      "negative": "The calibration mechanism and multi-negative training are established; this is not a new learning principle."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "A successful controlled comparison could motivate broader study of loss calibration across masked sequential recommenders.",
+      "negative": "Benefits remain unverified, may depend on negative sampling, and cannot establish the missing user-facing mechanisms."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Changes are confined primarily to training loss and negative sampling, with no extra inference parameters.",
+      "negative": "Correct normalization, stable arithmetic, paired sampling, and baseline integration require careful verification."
+    }
+  },
+  "related_work": [
+    {
+      "title": "gSASRec",
+      "link": "https://www.ijcai.org/proceedings/2024/939",
+      "contributions": [
+        "Studies overconfidence from negative-sampled BCE and introduces generalized BCE calibration.",
+        "Motivates a matched-negative loss comparison within the preserved BERT4Rec backbone."
+      ],
+      "limitations": [
+        "Evidence from its published setup does not establish gains on this pinned four-category BERT4Rec benchmark.",
+        "Calibration depends on sampling and loss normalization."
+      ]
+    },
+    {
+      "title": "TiSASRec",
+      "link": "https://jiachengli1995.github.io/files/wsdm20.pdf",
+      "contributions": [
+        "Models interaction intervals alongside sequence positions.",
+        "Provides a mechanism for the alternative historical-gap attention direction."
+      ],
+      "limitations": [
+        "Its backbone and evaluation differ from the required corrected BERT4Rec setup.",
+        "An appended mask has no observed target timestamp and requires an explicit unknown-time relation."
+      ]
+    },
+    {
+      "title": "CCFRec",
+      "link": "https://www.atailab.cn/seminar2025Fall/pdf/2025-KDD-Bridging%20Textual-Collaborative%20Gap%20through%20Semantic%20Codes%20for%20Sequential%20Recommendation.pdf",
+      "contributions": [
+        "Uses semantic codes and alignment objectives to connect textual and collaborative representations.",
+        "Motivates a separate representation-alignment research direction."
+      ],
+      "limitations": [
+        "The supplied description reports pretrained Sentence-T5 use, which is inadmissible here.",
+        "A randomly initialized replacement would be a new, unvalidated adaptation with greater integration cost."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,109 @@
+--- g1-r0029-summary_align_task/model.py
++++ g1-r0030-rotate_match_shared/model.py
+@@ -1,11 +1,12 @@
+-"""Within-block action alignment control for all five residual summaries.
+-
+-Only the action coordinates of the summary input use a deterministic cyclic
+-rotation among valid positions in each original ten-event block. Aligned cells
+-execute the same gather with zero shift. Per-block action multisets, original
+-pool/scorer streams, item coordinates, coefficient construction, task masks,
+-learned modules and auxiliary gradient ownership are retained. This is a
+-conditional representation probe; action-derived masks still expose feedback.
+-No training or tensor validation has been performed in the coding environment.
++"""Family-specific action-alignment controls for five residual summaries.
++
++Two matched contractions build the previous aligned and within-block rotated
++summaries. Only action coordinates of the declared family select the rotated
++result; all item coordinates use the inherited rotated contraction (whose item
++input is unchanged). The other family stays aligned. Endpoints all/none exist
++for host parity checks against r0029. Original lookup, masks, direct pool,
++scorer, coefficients, learned capacity and gradient ownership are retained.
++This is a conditional representation probe, not total feedback removal.
++Tensor, gradient, BF16 and cost checks require the authorized host.
+ """
+ import torch
+@@ -16,5 +17,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'aligned'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'shared', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'match'}
+ 
+ 
+@@ -25,5 +26,5 @@
+                  compression_routes='uf', block_aux_scorer_grad=True,
+                  block_aux_context_grad=False, block_aux_item_grad=True, num_tasks=None,
+-                 residual_input='match_detail', residual_routing='task', residual_hidden=16,
++                 residual_input='match_detail', residual_routing='shared', residual_hidden=16,
+                  temporal_detail='position', block_detail='ordinal',
+                  curvature_detail='quadratic', joint_detail='duplicate_match',
+@@ -32,5 +33,6 @@
+                  support_gradient='attached', action_in_scorer=False,
+                  action_in_pool=True, action_in_summaries=True,
+-                 summary_action_group='all', summary_action_alignment='aligned',
++                 summary_action_group='all', summary_action_alignment='rotated',
++                 summary_rotation_group='match',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -89,4 +91,7 @@
+             raise ValueError('Unknown within-block summary action alignment')
+         self.summary_action_alignment = summary_action_alignment
++        if summary_rotation_group not in ('match', 'ordinal', 'all', 'none'):
++            raise ValueError('Unknown rotated summary action family')
++        self.summary_rotation_group = summary_rotation_group
+         self.residual_input = residual_input
+         self.residual_routing = residual_routing
+@@ -220,5 +225,6 @@
+         summary_values = self._summary_values(values, mask)
+         detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._target_match_summary(
+-            item, self._action_channel(summary_values, self.action_in_summaries), mask)
++            item, self._action_channel(summary_values, self.action_in_summaries), mask,
++            self._action_channel(values, self.action_in_summaries))
+         return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union
+ 
+@@ -252,5 +258,5 @@
+                           actions.reshape(batch, length, width - self.key_width)], dim=-1)
+ 
+-    def _target_match_summary(self, item, values, mask):
++    def _target_match_summary(self, item, values, mask, aligned_values):
+         """Five masked value summaries; only the fifth direction/gate varies.
+ 
+@@ -343,8 +349,39 @@
+         summaries = summaries.reshape(batch, 10, 5, width).sum(dim=1)
+         summaries = summaries / total.sqrt().unsqueeze(-1).to(summaries.dtype)
++        # Execute the same full-width contraction for the aligned stream.
++        # Both contractions and the gather execute in every new factorial cell.
++        # No coefficients, reductions or inherited rotated item values change.
++        aligned_summaries = torch.bmm(
++            coefficients.to(values.dtype).reshape(batch * 10, 5, 10),
++            aligned_values.reshape(batch * 10, 10, width))
++        aligned_summaries = aligned_summaries.reshape(batch, 10, 5, width).sum(dim=1)
++        aligned_summaries = aligned_summaries / total.sqrt().unsqueeze(-1).to(aligned_summaries.dtype)
++        summaries = self._select_summary_alignment(summaries, aligned_summaries)
+         summaries = self._summary_action_channels(summaries)
+         return (summaries[:, 0, :], summaries[:, 1, :], summaries[:, 2, :],
+                 summaries[:, 3, :], summaries[:, 4, :], match_counts,
+                 match_matrix.bool().any(dim=-1))
++
++    def _select_summary_alignment(self, rotated, aligned):
++        """Select action alignment by family without removing any channel.
++
++        Match rows 0/4 use the existing target-match directions and gates.
++        Ordinal rows 1/2/3 use local, coarse-linear and quadratic directions.
++        Coarse directions are invariant to within-block rotation in exact
++        arithmetic; host checks must bound the finite-precision residual.
++        Item coordinates always retain the inherited rotated contraction.
++        The all/none endpoints execute this identical graph for bridge checks.
++        """
++        groups = {
++            'match': (True, False, False, False, True),
++            'ordinal': (False, True, True, True, False),
++            'all': (True, True, True, True, True),
++            'none': (False, False, False, False, False),
++        }
++        active = torch.tensor(groups[self.summary_rotation_group],
++                              device=rotated.device, dtype=torch.bool).view(1, 5, 1)
++        actions = torch.where(active, rotated[:, :, self.key_width:],
++                              aligned[:, :, self.key_width:])
++        return torch.cat([rotated[:, :, :self.key_width], actions], dim=-1)
+ 
+     def _coarse_extension_coefficients(self, incumbent, position, quadratic,

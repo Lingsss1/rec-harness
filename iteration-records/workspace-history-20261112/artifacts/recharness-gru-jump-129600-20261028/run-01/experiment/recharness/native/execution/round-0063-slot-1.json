@@ -1,0 +1,378 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "proposal": {
+        "category_edits": [
+          {
+            "category": "feature_construction",
+            "rationale": "For all four datasets, scale each input embedding by 1 + 0.1*min(log1p(c), log(4))/log(4), where c counts earlier occurrences in the available history prefix, including occurrences before sequence truncation. This deterministic repeat feature preserves the learned embeddings, GRU, readout, loss, optimizer and single-checkpoint routing.",
+            "edits": [
+              {
+                "find": "def sample_batch(user_train: dict[int, list[int]], itemnum: int, batch_size: int, maxlen: int):",
+                "replace": "def _history_repeat_scales(history: list[int], maxlen: int) -> list[float]:\n    scales = [1.0] * maxlen\n    counts: dict[int, int] = {}\n    start = max(0, len(history) - maxlen)\n    offset = maxlen - min(len(history), maxlen)\n    log_four = math.log(4.0)\n    for index, item in enumerate(history):\n        if item == 0:\n            continue\n        earlier = counts.get(item, 0)\n        if index >= start:\n            scales[offset + index - start] = 1.0 + 0.1 * math.log1p(min(earlier, 3)) / log_four\n        counts[item] = earlier + 1\n    return scales\n\n\ndef sample_batch(user_train: dict[int, list[int]], itemnum: int, batch_size: int, maxlen: int):"
+              },
+              {
+                "find": "    batch_seq, batch_pos, batch_neg = [], [], []",
+                "replace": "    batch_seq, batch_pos, batch_neg, batch_repeat_scale = [], [], [], []"
+              },
+              {
+                "find": "        batch_seq.append(seq)\n        batch_pos.append(pos)\n        batch_neg.append(neg)\n    return np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg)",
+                "replace": "        batch_seq.append(seq)\n        batch_pos.append(pos)\n        batch_neg.append(neg)\n        batch_repeat_scale.append(_history_repeat_scales(history[:-1], maxlen))\n    return (np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg),\n            np.asarray(batch_repeat_scale, dtype=np.float32))"
+              },
+              {
+                "find": "            seq_t = _history_to_tensor(history, maxlen, device)\n            cand_t = torch.tensor(candidates, dtype=torch.long, device=device)\n            scores = model.score_candidates(seq_t, cand_t).detach().cpu().tolist()",
+                "replace": "            seq_t = _history_to_tensor(history, maxlen, device)\n            repeat_scale_t = torch.tensor([_history_repeat_scales(history, maxlen)], dtype=torch.float32, device=device)\n            cand_t = torch.tensor(candidates, dtype=torch.long, device=device)\n            scores = model.score_candidates(seq_t, cand_t, repeat_scale_t).detach().cpu().tolist()"
+              },
+              {
+                "find": "def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:\n    pos_scores, neg_scores = model(seq, pos, neg)",
+                "replace": "def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor,\n                      repeat_scale: torch.Tensor) -> torch.Tensor:\n    pos_scores, neg_scores = model(seq, pos, neg, repeat_scale)"
+              },
+              {
+                "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        out = self.aggregate_states(out, seq)\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        out = self.aggregate_states(out, seq)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores\n\n    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:\n        user_emb = self.encode(seq)[0]\n        cand_emb = self.item_emb(candidates)\n        return torch.matmul(cand_emb, user_emb)",
+                "replace": "    def encode(self, seq: torch.Tensor, repeat_scale: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq) * repeat_scale.unsqueeze(-1))\n        out, _ = self.gru(emb)\n        out = self.aggregate_states(out, seq)\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor,\n                repeat_scale: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq) * repeat_scale.unsqueeze(-1))\n        out, _ = self.gru(emb)\n        out = self.aggregate_states(out, seq)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores\n\n    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor,\n                         repeat_scale: torch.Tensor) -> torch.Tensor:\n        user_emb = self.encode(seq, repeat_scale)[0]\n        cand_emb = self.item_emb(candidates)\n        return torch.matmul(cand_emb, user_emb)"
+              },
+              {
+                "find": "            seq, pos, neg = sample_batch(user_train, itemnum, BATCH_SIZE, MAXLEN)\n            seq_t = torch.tensor(seq, dtype=torch.long, device=device)\n            pos_t = torch.tensor(pos, dtype=torch.long, device=device)\n            neg_t = torch.tensor(neg, dtype=torch.long, device=device)\n            loss = bpr_sequence_loss(model, seq_t, pos_t, neg_t)",
+                "replace": "            seq, pos, neg, repeat_scale = sample_batch(user_train, itemnum, BATCH_SIZE, MAXLEN)\n            seq_t = torch.tensor(seq, dtype=torch.long, device=device)\n            pos_t = torch.tensor(pos, dtype=torch.long, device=device)\n            neg_t = torch.tensor(neg, dtype=torch.long, device=device)\n            repeat_scale_t = torch.tensor(repeat_scale, dtype=torch.float32, device=device)\n            loss = bpr_sequence_loss(model, seq_t, pos_t, neg_t, repeat_scale_t)"
+              },
+              {
+                "find": "_models = {}\n_metas = {}\n_device = None",
+                "replace": "_models = {}\n_metas = {}\n_device = None\n_history_repeat_scales = None"
+              },
+              {
+                "find": "def _load_model_class():\n    spec = importlib.util.spec_from_file_location(",
+                "replace": "def _load_model_class():\n    global _history_repeat_scales\n    spec = importlib.util.spec_from_file_location("
+              },
+              {
+                "find": "    spec.loader.exec_module(mod)\n    return mod.GRU4RecModel",
+                "replace": "    spec.loader.exec_module(mod)\n    _history_repeat_scales = mod._history_repeat_scales\n    return mod.GRU4RecModel"
+              },
+              {
+                "find": "    seq_t = torch.tensor([seq_arr], dtype=torch.long, device=_device)\n    cand_t = torch.tensor(candidates, dtype=torch.long, device=_device)\n    with torch.no_grad():\n        scores = model.score_candidates(seq_t, cand_t).detach().cpu().tolist()",
+                "replace": "    seq_t = torch.tensor([seq_arr], dtype=torch.long, device=_device)\n    repeat_scale_t = torch.tensor([_history_repeat_scales(history, maxlen)], dtype=torch.float32, device=_device)\n    cand_t = torch.tensor(candidates, dtype=torch.long, device=_device)\n    with torch.no_grad():\n        scores = model.score_candidates(seq_t, cand_t, repeat_scale_t).detach().cpu().tolist()"
+              }
+            ]
+          }
+        ],
+        "change_summary": "Add bounded causal repeat-frequency scaling to input embeddings across all four datasets, with consistent training, validation and generated prediction plumbing. Preserve the existing GRU architecture, scoring, optimization and checkpoint routing.",
+        "edits": [
+          {
+            "find": "def sample_batch(user_train: dict[int, list[int]], itemnum: int, batch_size: int, maxlen: int):",
+            "replace": "def _history_repeat_scales(history: list[int], maxlen: int) -> list[float]:\n    scales = [1.0] * maxlen\n    counts: dict[int, int] = {}\n    start = max(0, len(history) - maxlen)\n    offset = maxlen - min(len(history), maxlen)\n    log_four = math.log(4.0)\n    for index, item in enumerate(history):\n        if item == 0:\n            continue\n        earlier = counts.get(item, 0)\n        if index >= start:\n            scales[offset + index - start] = 1.0 + 0.1 * math.log1p(min(earlier, 3)) / log_four\n        counts[item] = earlier + 1\n    return scales\n\n\ndef sample_batch(user_train: dict[int, list[int]], itemnum: int, batch_size: int, maxlen: int):"
+          },
+          {
+            "find": "    batch_seq, batch_pos, batch_neg = [], [], []",
+            "replace": "    batch_seq, batch_pos, batch_neg, batch_repeat_scale = [], [], [], []"
+          },
+          {
+            "find": "        batch_seq.append(seq)\n        batch_pos.append(pos)\n        batch_neg.append(neg)\n    return np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg)",
+            "replace": "        batch_seq.append(seq)\n        batch_pos.append(pos)\n        batch_neg.append(neg)\n        batch_repeat_scale.append(_history_repeat_scales(history[:-1], maxlen))\n    return (np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg),\n            np.asarray(batch_repeat_scale, dtype=np.float32))"
+          },
+          {
+            "find": "            seq_t = _history_to_tensor(history, maxlen, device)\n            cand_t = torch.tensor(candidates, dtype=torch.long, device=device)\n            scores = model.score_candidates(seq_t, cand_t).detach().cpu().tolist()",
+            "replace": "            seq_t = _history_to_tensor(history, maxlen, device)\n            repeat_scale_t = torch.tensor([_history_repeat_scales(history, maxlen)], dtype=torch.float32, device=device)\n            cand_t = torch.tensor(candidates, dtype=torch.long, device=device)\n            scores = model.score_candidates(seq_t, cand_t, repeat_scale_t).detach().cpu().tolist()"
+          },
+          {
+            "find": "def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:\n    pos_scores, neg_scores = model(seq, pos, neg)",
+            "replace": "def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor,\n                      repeat_scale: torch.Tensor) -> torch.Tensor:\n    pos_scores, neg_scores = model(seq, pos, neg, repeat_scale)"
+          },
+          {
+            "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        out = self.aggregate_states(out, seq)\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        out = self.aggregate_states(out, seq)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores\n\n    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:\n        user_emb = self.encode(seq)[0]\n        cand_emb = self.item_emb(candidates)\n        return torch.matmul(cand_emb, user_emb)",
+            "replace": "    def encode(self, seq: torch.Tensor, repeat_scale: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq) * repeat_scale.unsqueeze(-1))\n        out, _ = self.gru(emb)\n        out = self.aggregate_states(out, seq)\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor,\n                repeat_scale: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq) * repeat_scale.unsqueeze(-1))\n        out, _ = self.gru(emb)\n        out = self.aggregate_states(out, seq)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores\n\n    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor,\n                         repeat_scale: torch.Tensor) -> torch.Tensor:\n        user_emb = self.encode(seq, repeat_scale)[0]\n        cand_emb = self.item_emb(candidates)\n        return torch.matmul(cand_emb, user_emb)"
+          },
+          {
+            "find": "            seq, pos, neg = sample_batch(user_train, itemnum, BATCH_SIZE, MAXLEN)\n            seq_t = torch.tensor(seq, dtype=torch.long, device=device)\n            pos_t = torch.tensor(pos, dtype=torch.long, device=device)\n            neg_t = torch.tensor(neg, dtype=torch.long, device=device)\n            loss = bpr_sequence_loss(model, seq_t, pos_t, neg_t)",
+            "replace": "            seq, pos, neg, repeat_scale = sample_batch(user_train, itemnum, BATCH_SIZE, MAXLEN)\n            seq_t = torch.tensor(seq, dtype=torch.long, device=device)\n            pos_t = torch.tensor(pos, dtype=torch.long, device=device)\n            neg_t = torch.tensor(neg, dtype=torch.long, device=device)\n            repeat_scale_t = torch.tensor(repeat_scale, dtype=torch.float32, device=device)\n            loss = bpr_sequence_loss(model, seq_t, pos_t, neg_t, repeat_scale_t)"
+          },
+          {
+            "find": "_models = {}\n_metas = {}\n_device = None",
+            "replace": "_models = {}\n_metas = {}\n_device = None\n_history_repeat_scales = None"
+          },
+          {
+            "find": "def _load_model_class():\n    spec = importlib.util.spec_from_file_location(",
+            "replace": "def _load_model_class():\n    global _history_repeat_scales\n    spec = importlib.util.spec_from_file_location("
+          },
+          {
+            "find": "    spec.loader.exec_module(mod)\n    return mod.GRU4RecModel",
+            "replace": "    spec.loader.exec_module(mod)\n    _history_repeat_scales = mod._history_repeat_scales\n    return mod.GRU4RecModel"
+          },
+          {
+            "find": "    seq_t = torch.tensor([seq_arr], dtype=torch.long, device=_device)\n    cand_t = torch.tensor(candidates, dtype=torch.long, device=_device)\n    with torch.no_grad():\n        scores = model.score_candidates(seq_t, cand_t).detach().cpu().tolist()",
+            "replace": "    seq_t = torch.tensor([seq_arr], dtype=torch.long, device=_device)\n    repeat_scale_t = torch.tensor([_history_repeat_scales(history, maxlen)], dtype=torch.float32, device=_device)\n    cand_t = torch.tensor(candidates, dtype=torch.long, device=_device)\n    with torch.no_grad():\n        scores = model.score_candidates(seq_t, cand_t, repeat_scale_t).detach().cpu().tolist()"
+          }
+        ],
+        "scope_validation": "exact categories and nontrivial AST changes; semantic labels prompt-enforced"
+      }
+    }
+  ],
+  "receipt": {
+    "id": "round-0063-slot-1-attempt-1",
+    "status": "success",
+    "gpu": 5,
+    "allocated_gpu_seconds": 2166.132844403386,
+    "output": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/run-01/experiment/recharness/trials/round-0063-slot-1-attempt-1",
+    "source_sha256": "f3cd986b31d7d484128c9e493f15c34dbaef4e3d018e91c4f91aea0aa8afd9f6",
+    "score": 0.585,
+    "aggregate": {
+      "HR@5": 0.415,
+      "HR@10": 0.585,
+      "HR@20": 0.7225,
+      "NDCG@5": 0.3089,
+      "NDCG@10": 0.3632,
+      "NDCG@20": 0.398,
+      "Movies_and_TV/HR@5": 0.455,
+      "Movies_and_TV/HR@10": 0.595,
+      "Movies_and_TV/HR@20": 0.735,
+      "Movies_and_TV/NDCG@5": 0.3342,
+      "Movies_and_TV/NDCG@10": 0.3795,
+      "Movies_and_TV/NDCG@20": 0.4151,
+      "Industrial_and_Scientific/HR@5": 0.42,
+      "Industrial_and_Scientific/HR@10": 0.605,
+      "Industrial_and_Scientific/HR@20": 0.77,
+      "Industrial_and_Scientific/NDCG@5": 0.3122,
+      "Industrial_and_Scientific/NDCG@10": 0.3705,
+      "Industrial_and_Scientific/NDCG@20": 0.4123,
+      "Electronics/HR@5": 0.28,
+      "Electronics/HR@10": 0.43,
+      "Electronics/HR@20": 0.57,
+      "Electronics/NDCG@5": 0.2035,
+      "Electronics/NDCG@10": 0.2512,
+      "Electronics/NDCG@20": 0.2864,
+      "CDs_and_Vinyl/HR@5": 0.505,
+      "CDs_and_Vinyl/HR@10": 0.71,
+      "CDs_and_Vinyl/HR@20": 0.815,
+      "CDs_and_Vinyl/NDCG@5": 0.3856,
+      "CDs_and_Vinyl/NDCG@10": 0.4517,
+      "CDs_and_Vinyl/NDCG@20": 0.4783
+    },
+    "per_dataset": {
+      "Movies_and_TV": {
+        "metrics": {
+          "HR@5": 0.455,
+          "HR@10": 0.595,
+          "HR@20": 0.735,
+          "NDCG@5": 0.3342,
+          "NDCG@10": 0.3795,
+          "NDCG@20": 0.4151
+        },
+        "n_users": 200
+      },
+      "Industrial_and_Scientific": {
+        "metrics": {
+          "HR@5": 0.42,
+          "HR@10": 0.605,
+          "HR@20": 0.77,
+          "NDCG@5": 0.3122,
+          "NDCG@10": 0.3705,
+          "NDCG@20": 0.4123
+        },
+        "n_users": 200
+      },
+      "Electronics": {
+        "metrics": {
+          "HR@5": 0.28,
+          "HR@10": 0.43,
+          "HR@20": 0.57,
+          "NDCG@5": 0.2035,
+          "NDCG@10": 0.2512,
+          "NDCG@20": 0.2864
+        },
+        "n_users": 200
+      },
+      "CDs_and_Vinyl": {
+        "metrics": {
+          "HR@5": 0.505,
+          "HR@10": 0.71,
+          "HR@20": 0.815,
+          "NDCG@5": 0.3856,
+          "NDCG@10": 0.4517,
+          "NDCG@20": 0.4783
+        },
+        "n_users": 200
+      }
+    },
+    "evaluation_seconds": 10.475429221987724,
+    "predictor_sha256": "dedca1e0927871c0be50c4300ba01dae8685424d0ba76aaef043dd1339158745"
+  },
+  "native_result": {
+    "spec": {
+      "dimension": "feature_construction",
+      "delta": -1.0,
+      "estimated_cost_secs": 5586.372658915818,
+      "code_diff": "",
+      "code_edits": [],
+      "code_content": "",
+      "arm": "feature_construction",
+      "composite_dims": [
+        "feature_construction"
+      ],
+      "strategy_arm": null,
+      "round_role": "lowlevel_routing",
+      "parallel_group_estimated_wall_secs": 22345.49063566327,
+      "budget_safe_if_global_budget_gte": 22345.49063566327,
+      "budget_accounting": "Parallel group cost is sum(estimated_cost_secs) across the selected candidates.",
+      "code_hint": "REGULAR MUTATION: change only this one direction. 特征构造: Construct input features solely from supplied training interactions, such as frequency or recency indicators. No external metadata, independent scorer or score fusion. Keep learned embedding design, GRU topology, readout, loss and optimizer fixed.\nOnly minimal shape/checkpoint/predictor consistency edits outside the chosen directions are allowed; they must not introduce another modeling or training change.",
+      "hypothesis": "Thompson: low success rate (0.04, 23 obs) — explore cautiously; Memory available in state; agent should write a short arm-specific hypothesis; Agent hypothesis: Feature construction, all four datasets: scale each existing input item embedding by 1 + 0.1*min(log1p(c), log(4))/log(4), where c counts that item's earlier occurrences in the available training-history prefix. This bounded, deterministic repeat indicator may distinguish recurring interests without adding embedding tables or an independent scorer. Preserve sequence selection, embedding design, GRU, readout, scoring, loss and optimizer; reproduce the prefix calculation in prediction.",
+      "is_jumping": false,
+      "implementation_backend": "claude_code",
+      "implementation_prompt": "REGULAR MUTATION: change only this one direction. 特征构造: Construct input features solely from supplied training interactions, such as frequency or recency indicators. No external metadata, independent scorer or score fusion. Keep learned embedding design, GRU topology, readout, loss and optimizer fixed.\nOnly minimal shape/checkpoint/predictor consistency edits outside the chosen directions are allowed; they must not introduce another modeling or training change.",
+      "allowed_files": [
+        "train.py",
+        "predict.py"
+      ],
+      "claude_attempts": 3,
+      "arm_design": "eight_directions_v3",
+      "selected_categories": [
+        "feature_construction"
+      ],
+      "hypothesis_key": "slot-1",
+      "sampling_draw": {
+        "slot": 1,
+        "rank": 2,
+        "arm": "feature_construction",
+        "sampled_values": {
+          "feature_construction": 0.07244578203870176,
+          "embedding_representation": 0.027256245812956572,
+          "interaction_mechanism": 0.14286148578412675,
+          "network_architecture": 0.06257282772226867,
+          "sequence_modeling": 0.03901268809381267,
+          "interest_aggregation": 0.036303165000962076,
+          "learning_objective": 0.025269244753569668,
+          "training_strategy": 0.03993865121237782
+        }
+      },
+      "max_trial_gpu_seconds": 5586.372658915818,
+      "protected_gpu_seconds": 0.0,
+      "jump_trigger": null,
+      "predict_code_edits": [],
+      "predict_code_content": "",
+      "agent_hypothesis": "Feature construction, all four datasets: scale each existing input item embedding by 1 + 0.1*min(log1p(c), log(4))/log(4), where c counts that item's earlier occurrences in the available training-history prefix. This bounded, deterministic repeat indicator may distinguish recurring interests without adding embedding tables or an independent scorer. Preserve sequence selection, embedding design, GRU, readout, scoring, loss and optimizer; reproduce the prefix calculation in prediction.",
+      "gagc_memory_context": {
+        "experiment_skill": "# RecHarness Experiment Skill\n\n## Objective\nUse benchmark val_score as the search and winner criterion.\nDo not use held-out test metrics during search.\nThompson Sampling chooses arms; this skill only guides how to edit code within selected arms.\n\n## Recent Patch Lessons\n- Round 14 winner improved validation score by +0.0050 using training_strategy/training_strategy ↓. Val score also improved — high confidence direction. Per-dataset HR@10 was imbalanced; prefer follow-ups that preserve weaker datasets, not only aggregate gain.\n- Round 15 winner improved validation score by +0.0125 using interest_aggregation/interest_aggregation ↓. Val score also improved — high confidence direction. Per-dataset HR@10 was imbalanced; prefer follow-ups that preserve weaker datasets, not only aggregate gain.\n- Round 62 winner improved validation score by +0.0025 using network_architecture/network_architecture ↓. Val score also improved — high confidence direction. Per-dataset HR@10 was imbalanced; prefer follow-ups that preserve weaker datasets, not only aggregate gain.\n\n## Concrete Avoids\n- Do not repeat `training_strategy/training_strategy ↓` — caused timeout. Reduce model size or batch size.\n- Do not repeat `sequence_modeling/sequence_modeling ↓` — caused timeout. Reduce model size or batch size.\n- Do not repeat `network_architecture/network_architecture ↓` — caused timeout. Reduce model size or batch size.\n- Do not repeat `interest_aggregation/interest_aggregation ↓` — caused timeout. Reduce model size or batch size.\n",
+        "recent_text_gradients": [
+          "Round 14 winner improved validation score by +0.0050 using training_strategy/training_strategy ↓. Val score also improved — high confidence direction. Per-dataset HR@10 was imbalanced; prefer follow-ups that preserve weaker datasets, not only aggregate gain.",
+          "Round 15 winner improved validation score by +0.0125 using interest_aggregation/interest_aggregation ↓. Val score also improved — high confidence direction. Per-dataset HR@10 was imbalanced; prefer follow-ups that preserve weaker datasets, not only aggregate gain.",
+          "Round 62 winner improved validation score by +0.0025 using network_architecture/network_architecture ↓. Val score also improved — high confidence direction. Per-dataset HR@10 was imbalanced; prefer follow-ups that preserve weaker datasets, not only aggregate gain."
+        ],
+        "failure_memory": [
+          {
+            "round_idx": 10,
+            "arm": "sequence_modeling",
+            "failure_type": "timeout",
+            "patch_pattern": "sequence_modeling/sequence_modeling ↓",
+            "normalized_pattern": "sequence_modeling/sequence_modeling ↓",
+            "avoid_rule": "Do not repeat `sequence_modeling/sequence_modeling ↓` — caused timeout. Reduce model size or batch size.",
+            "count": 3
+          },
+          {
+            "round_idx": 9,
+            "arm": "network_architecture",
+            "failure_type": "timeout",
+            "patch_pattern": "network_architecture/network_architecture ↓",
+            "normalized_pattern": "network_architecture/network_architecture ↓",
+            "avoid_rule": "Do not repeat `network_architecture/network_architecture ↓` — caused timeout. Reduce model size or batch size.",
+            "count": 1
+          },
+          {
+            "round_idx": 10,
+            "arm": "interest_aggregation",
+            "failure_type": "timeout",
+            "patch_pattern": "interest_aggregation/interest_aggregation ↓",
+            "normalized_pattern": "interest_aggregation/interest_aggregation ↓",
+            "avoid_rule": "Do not repeat `interest_aggregation/interest_aggregation ↓` — caused timeout. Reduce model size or batch size.",
+            "count": 1
+          }
+        ],
+        "skill_notes": "Round 63: best_ever=0.5850, recent=0.5850, trend=plateau. Top arms: combination_jump, network_architecture, training_strategy."
+      },
+      "trial_group_id": "trialgrp_1793236504331_1512370",
+      "trial_id": 1
+    },
+    "wall_time_secs": 2166.132844403386,
+    "timed_out": false,
+    "oom": false,
+    "val_score": 0.585,
+    "val_metrics": {
+      "Movies_and_TV": {
+        "HR@5": 0.455,
+        "HR@10": 0.595,
+        "HR@20": 0.735,
+        "NDCG@5": 0.3342,
+        "NDCG@10": 0.3795,
+        "NDCG@20": 0.4151
+      },
+      "Industrial_and_Scientific": {
+        "HR@5": 0.42,
+        "HR@10": 0.605,
+        "HR@20": 0.77,
+        "NDCG@5": 0.3122,
+        "NDCG@10": 0.3705,
+        "NDCG@20": 0.4123
+      },
+      "Electronics": {
+        "HR@5": 0.28,
+        "HR@10": 0.43,
+        "HR@20": 0.57,
+        "NDCG@5": 0.2035,
+        "NDCG@10": 0.2512,
+        "NDCG@20": 0.2864
+      },
+      "CDs_and_Vinyl": {
+        "HR@5": 0.505,
+        "HR@10": 0.71,
+        "HR@20": 0.815,
+        "NDCG@5": 0.3856,
+        "NDCG@10": 0.4517,
+        "NDCG@20": 0.4783
+      }
+    },
+    "test_score": null,
+    "test_metrics": null,
+    "convergence_trace": [
+      0.535,
+      0.595,
+      0.55,
+      0.615,
+      0.59,
+      0.6,
+      0.615,
+      0.605,
+      0.585,
+      0.59,
+      0.605,
+      0.615,
+      0.59,
+      0.565,
+      0.575,
+      0.565,
+      0.39,
+      0.42,
+      0.385,
+      0.39,
+      0.415,
+      0.415,
+      0.51,
+      0.64,
+      0.645,
+      0.62,
+      0.63,
+      0.65,
+      0.655,
+      0.645,
+      0.66,
+      0.675,
+      0.695,
+      0.69,
+      0.715,
+      0.69,
+      0.68,
+      0.68,
+      0.68
+    ],
+    "error_message": null,
+    "stdout_tail": "c_model.pt\n  [Electronics] users=27601  items=31533\n  [Electronics] epoch   5/200  loss=0.5709  val_score: 0.3900  HR@20=0.4950  NDCG@10=0.2245\n  [Electronics] epoch  10/200  loss=0.5161  val_score: 0.4200  HR@20=0.5650  NDCG@10=0.2487\n  [Electronics] epoch  15/200  loss=0.4770  val_score: 0.3850  HR@20=0.5100  NDCG@10=0.2309\n  [Electronics] epoch  20/200  loss=0.4675  val_score: 0.3900  HR@20=0.5400  NDCG@10=0.2377\n  [Electronics] epoch  25/200  loss=0.4218  val_score: 0.4150  HR@20=0.5450  NDCG@10=0.2507\n  [Electronics] epoch  30/200  loss=0.4004  val_score: 0.4150  HR@20=0.5500  NDCG@10=0.2544\n  [Electronics] Early stopping at epoch 30\n  [Electronics] Best val HR@10=0.4200  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/run-01/experiment/recharness/trials/round-0063-slot-1-attempt-1/working/Electronics_model.pt\n  [CDs_and_Vinyl] users=18481  items=30951\n  [CDs_and_Vinyl] epoch   5/200  loss=0.5238  val_score: 0.5100  HR@20=0.7000  NDCG@10=0.2959\n  [CDs_and_Vinyl] epoch  10/200  loss=0.4564  val_score: 0.6400  HR@20=0.7600  NDCG@10=0.3411\n  [CDs_and_Vinyl] epoch  15/200  loss=0.4232  val_score: 0.6450  HR@20=0.7600  NDCG@10=0.3931\n  [CDs_and_Vinyl] epoch  20/200  loss=0.4094  val_score: 0.6200  HR@20=0.7950  NDCG@10=0.3821\n  [CDs_and_Vinyl] epoch  25/200  loss=0.3851  val_score: 0.6300  HR@20=0.8050  NDCG@10=0.4044\n  [CDs_and_Vinyl] epoch  30/200  loss=0.3603  val_score: 0.6500  HR@20=0.7950  NDCG@10=0.4025\n  [CDs_and_Vinyl] epoch  35/200  loss=0.3576  val_score: 0.6550  HR@20=0.8050  NDCG@10=0.4226\n  [CDs_and_Vinyl] epoch  40/200  loss=0.3403  val_score: 0.6450  HR@20=0.8150  NDCG@10=0.4210\n  [CDs_and_Vinyl] epoch  45/200  loss=0.3257  val_score: 0.6600  HR@20=0.8150  NDCG@10=0.3989\n  [CDs_and_Vinyl] epoch  50/200  loss=0.3232  val_score: 0.6750  HR@20=0.8000  NDCG@10=0.4136\n  [CDs_and_Vinyl] epoch  55/200  loss=0.3182  val_score: 0.6950  HR@20=0.8150  NDCG@10=0.4383\n  [CDs_and_Vinyl] epoch  60/200  loss=0.3024  val_score: 0.6900  HR@20=0.8000  NDCG@10=0.4307\n  [CDs_and_Vinyl] epoch  65/200  loss=0.2974  val_score: 0.7150  HR@20=0.8150  NDCG@10=0.4267\n  [CDs_and_Vinyl] epoch  70/200  loss=0.2977  val_score: 0.6900  HR@20=0.8150  NDCG@10=0.4316\n  [CDs_and_Vinyl] epoch  75/200  loss=0.3014  val_score: 0.6800  HR@20=0.7850  NDCG@10=0.4280\n  [CDs_and_Vinyl] epoch  80/200  loss=0.2928  val_score: 0.6800  HR@20=0.7850  NDCG@10=0.4110\n  [CDs_and_Vinyl] epoch  85/200  loss=0.2819  val_score: 0.6800  HR@20=0.8100  NDCG@10=0.4222\n  [CDs_and_Vinyl] Early stopping at epoch 85\n  [CDs_and_Vinyl] Best val HR@10=0.7150  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/run-01/experiment/recharness/trials/round-0063-slot-1-attempt-1/working/CDs_and_Vinyl_model.pt\npredict.py written -> /home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/run-01/experiment/recharness/trials/round-0063-slot-1-attempt-1/working/predict.py\n\nAll datasets done. Average val HR@10 = 0.5912\n",
+    "stderr_tail": ""
+  },
+  "gpu_seconds_all_attempts": 2166.132844403386
+}

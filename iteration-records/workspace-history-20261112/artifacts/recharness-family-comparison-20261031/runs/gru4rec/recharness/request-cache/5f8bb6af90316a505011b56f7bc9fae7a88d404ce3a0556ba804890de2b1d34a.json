@@ -1,0 +1,19 @@
+{
+  "request_sha256": "5f8bb6af90316a505011b56f7bc9fae7a88d404ce3a0556ba804890de2b1d34a",
+  "response": {
+    "category_edits": [
+      {
+        "category": "sequence_interest",
+        "rationale": "Test normalized causal recency pooling of GRU states with decay 0.8 under the incumbent mixed loss across all four datasets. Exclude padding, pool at every supervised position, and read the final real pooled position at inference. Preserve history truncation, embeddings, recurrent topology, scoring, loss and optimizer. The predictor writer already imports the updated model class, so checkpoint and inference remain consistent.",
+        "edits": [
+          {
+            "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        # Histories are LEFT padded; count-1 indexes padding on short histories.\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores",
+            "replace": "    def _pooled_states(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        positions = torch.arange(seq.size(1), device=seq.device)\n        age = positions[:, None] - positions[None, :]\n        weights = torch.pow(out.new_tensor(0.8), age.clamp(min=0).to(out.dtype))\n        weights = weights.masked_fill(age < 0, 0.0)\n        weights = weights.unsqueeze(0) * (seq != 0).unsqueeze(1).to(out.dtype)\n        denominator = weights.sum(dim=-1, keepdim=True).clamp(min=1e-8)\n        pooled = torch.matmul(weights, out) / denominator\n        return pooled * (seq != 0).unsqueeze(-1).to(out.dtype)\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        out = self._pooled_states(seq)\n        # Histories are LEFT padded; select the final real position.\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        out = self._pooled_states(seq)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Apply padding-excluding causal recency pooling with decay 0.8 consistently during training and inference for each category's single GRU4Rec model. Parameter and checkpoint shapes remain unchanged."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/gru4rec/recharness/calls/00012"
+}

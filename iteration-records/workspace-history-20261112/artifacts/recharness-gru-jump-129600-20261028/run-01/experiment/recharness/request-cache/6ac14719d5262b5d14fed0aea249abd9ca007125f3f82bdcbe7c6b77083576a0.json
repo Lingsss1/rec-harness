@@ -1,0 +1,71 @@
+{
+  "request_sha256": "6ac14719d5262b5d14fed0aea249abd9ca007125f3f82bdcbe7c6b77083576a0",
+  "response": {
+    "category_edits": [
+      {
+        "category": "feature_construction",
+        "rationale": "Scale each existing input embedding by the inverse square root of its item's occurrence count in the user's causal prefix, including observed interactions preceding the truncated window. This may reduce repeated-item domination. Apply identical features during training, validation and prediction across all four datasets, preserving embeddings, GRU topology, readout, loss and optimizer.",
+        "edits": [
+          {
+            "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+            "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+          },
+          {
+            "find": "def sample_batch(user_train: dict[int, list[int]], itemnum: int, batch_size: int, maxlen: int):",
+            "replace": "def _causal_occurrence_counts(history):\n    seen = defaultdict(int)\n    counts = []\n    for item in history:\n        if item != 0:\n            seen[item] += 1\n            counts.append(seen[item])\n        else:\n            counts.append(0)\n    return counts\n\n\ndef _history_counts_to_tensor(history, maxlen, device):\n    counts = _causal_occurrence_counts(history)[-maxlen:]\n    padded = [0] * (maxlen - len(counts)) + counts\n    return torch.tensor([padded], dtype=torch.float32, device=device)\n\n\ndef sample_batch(user_train: dict[int, list[int]], itemnum: int, batch_size: int, maxlen: int):"
+          },
+          {
+            "find": "    batch_seq, batch_pos, batch_neg = [], [], []",
+            "replace": "    batch_seq, batch_pos, batch_neg, batch_counts = [], [], [], []"
+          },
+          {
+            "find": "        batch_neg.append(neg)\n    return np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg)",
+            "replace": "        batch_neg.append(neg)\n        prefix_counts = _causal_occurrence_counts(history[:-1])[-maxlen:]\n        count_arr = np.zeros(maxlen, dtype=np.float32)\n        count_arr[-len(prefix_counts):] = prefix_counts\n        batch_counts.append(count_arr)\n    return (np.asarray(batch_seq), np.asarray(batch_pos),\n            np.asarray(batch_neg), np.asarray(batch_counts))"
+          },
+          {
+            "find": "            seq_t = _history_to_tensor(history, maxlen, device)\n            cand_t = torch.tensor(candidates, dtype=torch.long, device=device)\n            scores = model.score_candidates(seq_t, cand_t).detach().cpu().tolist()",
+            "replace": "            seq_t = _history_to_tensor(history, maxlen, device)\n            counts_t = _history_counts_to_tensor(history, maxlen, device)\n            cand_t = torch.tensor(candidates, dtype=torch.long, device=device)\n            scores = model.score_candidates(seq_t, cand_t, counts_t).detach().cpu().tolist()"
+          },
+          {
+            "find": "def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:\n    pos_scores, neg_scores = model(seq, pos, neg)",
+            "replace": "def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor,\n                      occurrence_counts: torch.Tensor) -> torch.Tensor:\n    pos_scores, neg_scores = model(seq, pos, neg, occurrence_counts)"
+          },
+          {
+            "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))",
+            "replace": "    def input_embeddings(self, seq: torch.Tensor, occurrence_counts: torch.Tensor) -> torch.Tensor:\n        emb = self.item_emb(seq)\n        scale = occurrence_counts.to(emb.dtype).clamp_min(1).rsqrt()\n        return self.dropout(emb * scale.unsqueeze(-1))\n\n    def encode(self, seq: torch.Tensor, occurrence_counts: torch.Tensor) -> torch.Tensor:\n        emb = self.input_embeddings(seq, occurrence_counts)"
+          },
+          {
+            "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))",
+            "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor,\n                occurrence_counts: torch.Tensor):\n        emb = self.input_embeddings(seq, occurrence_counts)"
+          },
+          {
+            "find": "    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:\n        user_emb = self.encode(seq)[0]",
+            "replace": "    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor,\n                         occurrence_counts: torch.Tensor) -> torch.Tensor:\n        user_emb = self.encode(seq, occurrence_counts)[0]"
+          },
+          {
+            "find": "            seq, pos, neg = sample_batch(user_train, itemnum, BATCH_SIZE, MAXLEN)\n            seq_t = torch.tensor(seq, dtype=torch.long, device=device)\n            pos_t = torch.tensor(pos, dtype=torch.long, device=device)\n            neg_t = torch.tensor(neg, dtype=torch.long, device=device)\n            loss = bpr_sequence_loss(model, seq_t, pos_t, neg_t)",
+            "replace": "            seq, pos, neg, counts = sample_batch(user_train, itemnum, BATCH_SIZE, MAXLEN)\n            seq_t = torch.tensor(seq, dtype=torch.long, device=device)\n            pos_t = torch.tensor(pos, dtype=torch.long, device=device)\n            neg_t = torch.tensor(neg, dtype=torch.long, device=device)\n            counts_t = torch.tensor(counts, dtype=torch.float32, device=device)\n            loss = bpr_sequence_loss(model, seq_t, pos_t, neg_t, counts_t)"
+          },
+          {
+            "find": "_models = {}\n_metas = {}\n_device = None",
+            "replace": "_models = {}\n_metas = {}\n_device = None\n_history_counts_to_tensor = None"
+          },
+          {
+            "find": "def _load_model_class():\n    spec = importlib.util.spec_from_file_location(",
+            "replace": "def _load_model_class():\n    global _history_counts_to_tensor\n    spec = importlib.util.spec_from_file_location("
+          },
+          {
+            "find": "    spec.loader.exec_module(mod)\n    return mod.GRU4RecModel",
+            "replace": "    spec.loader.exec_module(mod)\n    _history_counts_to_tensor = mod._history_counts_to_tensor\n    return mod.GRU4RecModel"
+          },
+          {
+            "find": "    seq_t = torch.tensor([seq_arr], dtype=torch.long, device=_device)\n    cand_t = torch.tensor(candidates, dtype=torch.long, device=_device)\n    with torch.no_grad():\n        scores = model.score_candidates(seq_t, cand_t).detach().cpu().tolist()",
+            "replace": "    seq_t = torch.tensor([seq_arr], dtype=torch.long, device=_device)\n    counts_t = _history_counts_to_tensor(history, maxlen, _device)\n    cand_t = torch.tensor(candidates, dtype=torch.long, device=_device)\n    with torch.no_grad():\n        scores = model.score_candidates(seq_t, cand_t, counts_t).detach().cpu().tolist()"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Add causal repetition-count scaling to GRU input embeddings with matching training, validation and generated predictor plumbing. Counts exclude padding and future targets. Preserve one model per dataset and existing training settings."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/run-01/experiment/recharness/calls/00170"
+}

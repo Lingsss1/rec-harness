@@ -1,0 +1,105 @@
+{
+  "request_sha256": "334c8ce08684e2706363306b73357b6897b44c33c060d32c75fce2bf10aede9a",
+  "response": {
+    "category_edits": [
+      {
+        "category": "sequence_interest",
+        "rationale": "Across all four datasets, use newest-96 observed histories with cumulative observed-position IDs and a lighter causal recency readout: 0.85 times the current state plus 0.15 times exponential pooling with decay 6. Existing metadata and the predictor's imported HSTURec keep inference consistent.",
+        "edits": [
+          {
+            "find": "MAXLEN = int(os.environ.get(\"HSTU_MAXLEN\", \"128\"))",
+            "replace": "MAXLEN = int(os.environ.get(\"HSTU_MAXLEN\", \"96\"))"
+          },
+          {
+            "find": "dropout_rate: float = 0.3, maxlen: int = 128):",
+            "replace": "dropout_rate: float = 0.3, maxlen: int = 96):"
+          },
+          {
+            "find": "itemnum: int, device: torch.device, maxlen: int = 128,",
+            "replace": "itemnum: int, device: torch.device, maxlen: int = 96,"
+          },
+          {
+            "find": "weights = torch.exp(-distance.clamp_min(0).to(states.dtype) / 4.0)",
+            "replace": "weights = torch.exp(-distance.clamp_min(0).to(states.dtype) / 6.0)"
+          },
+          {
+            "find": "readout = 0.75 * states + 0.25 * pooled",
+            "replace": "readout = 0.85 * states + 0.15 * pooled"
+          }
+        ]
+      },
+      {
+        "category": "learning_objective",
+        "rationale": "Replace pairwise BPR with sampled softmax over one positive and eight uniform negatives excluding the user's observed training items. Apply supervision only at real target positions, using the same jointly trained item embeddings.",
+        "edits": [
+          {
+            "find": "        neg = np.zeros(maxlen, dtype=np.int64)",
+            "replace": "        neg = np.zeros((maxlen, 8), dtype=np.int64)"
+          },
+          {
+            "find": "            if nxt != 0:\n                neg_item = random.randint(1, itemnum)\n                while neg_item in interacted:\n                    neg_item = random.randint(1, itemnum)\n                neg[idx] = neg_item\n",
+            "replace": ""
+          },
+          {
+            "find": "        batch_seq.append(seq)\n        batch_pos.append(pos)\n        batch_neg.append(neg)",
+            "replace": "        active_positions = np.flatnonzero(pos)\n        sampled = np.random.randint(1, itemnum + 1, size=(len(active_positions), 8))\n        forbidden = np.asarray(list(interacted), dtype=np.int64)\n        rejected = np.isin(sampled, forbidden)\n        while rejected.any():\n            sampled[rejected] = np.random.randint(1, itemnum + 1, size=int(rejected.sum()))\n            rejected = np.isin(sampled, forbidden)\n        neg[active_positions] = sampled\n        batch_seq.append(seq)\n        batch_pos.append(pos)\n        batch_neg.append(neg)"
+          },
+          {
+            "find": "            mask = (pos_t != 0).float()\n            pos_scores = (out * model.item_emb(pos_t)).sum(dim=-1)\n            neg_scores = (out * model.item_emb(neg_t)).sum(dim=-1)\n            loss = F.softplus(-(pos_scores - neg_scores))\n            loss = (loss * mask).sum() / mask.sum().clamp(min=1.0)",
+            "replace": "            active = pos_t.ne(0)\n            active_states = out[active]\n            pos_scores = (active_states * model.item_emb(pos_t[active])).sum(dim=-1, keepdim=True)\n            neg_scores = (active_states.unsqueeze(1) * model.item_emb(neg_t[active])).sum(dim=-1)\n            logits = torch.cat((pos_scores, neg_scores), dim=1)\n            labels = torch.zeros(logits.size(0), dtype=torch.long, device=device)\n            loss = F.cross_entropy(logits, labels)"
+          }
+        ]
+      },
+      {
+        "category": "feature_construction",
+        "rationale": "Add a learned input projection of the causal prefix mean of standardized training-only log item counts, retaining the existing frequency scale. Checkpoint buffers preserve feature statistics, and the generated predictor imports the updated model directly. Restrict fallback vocabulary scanning to visible splits.",
+        "edits": [
+          {
+            "find": "    for split in (\"train\", \"valid\", \"test\"):",
+            "replace": "    for split in (\"train\", \"valid\"):"
+          },
+          {
+            "find": "        self.input_frequency_scale[0] = 0.0\n        self.pos_emb",
+            "replace": "        self.input_frequency_scale[0] = 0.0\n        self.register_buffer(\"input_log_frequency\", torch.zeros(itemnum + 1))\n        self.prefix_frequency_proj = nn.Linear(1, hidden_units, bias=False)\n        self.pos_emb"
+          },
+          {
+            "find": "        pos = observed.cumsum(dim=1) * observed\n        seq_emb = self.emb_dropout(seq_emb + self.pos_emb(pos))",
+            "replace": "        pos = observed.cumsum(dim=1) * observed\n        prefix_sum = (self.input_log_frequency[seq] * observed).cumsum(dim=1)\n        prefix_count = observed.cumsum(dim=1).clamp_min(1)\n        prefix_mean = (prefix_sum / prefix_count) * observed\n        seq_emb = seq_emb + self.prefix_frequency_proj(prefix_mean.unsqueeze(-1))\n        seq_emb = self.emb_dropout(seq_emb + self.pos_emb(pos))"
+          },
+          {
+            "find": "    frequency_scale[0] = 0.0\n    with torch.no_grad():\n        model.input_frequency_scale.copy_(torch.as_tensor(\n            frequency_scale, dtype=model.input_frequency_scale.dtype, device=device\n        ))",
+            "replace": "    frequency_scale[0] = 0.0\n    log_frequency = np.zeros(itemnum + 1, dtype=np.float64)\n    if observed_items.any():\n        observed_logs = np.log1p(training_counts[observed_items].astype(np.float64))\n        log_frequency[observed_items] = (\n            observed_logs - observed_logs.mean()\n        ) / max(float(observed_logs.std()), 1e-6)\n    with torch.no_grad():\n        model.input_frequency_scale.copy_(torch.as_tensor(\n            frequency_scale, dtype=model.input_frequency_scale.dtype, device=device\n        ))\n        model.input_log_frequency.copy_(torch.as_tensor(\n            log_frequency, dtype=model.input_log_frequency.dtype, device=device\n        ))"
+          }
+        ]
+      },
+      {
+        "category": "hyperparameter_tuning",
+        "rationale": "Jointly lower dropout to 0.2 and learning rate to 7e-4 while increasing weight decay to 1e-5. This couples stronger multi-negative supervision with smaller updates and explicit regularization, retaining width, depth, batch size, seeds and training caps.",
+        "edits": [
+          {
+            "find": "DROPOUT_RATE = float(os.environ.get(\"HSTU_DROPOUT\", \"0.3\"))",
+            "replace": "DROPOUT_RATE = float(os.environ.get(\"HSTU_DROPOUT\", \"0.2\"))"
+          },
+          {
+            "find": "LR = float(os.environ.get(\"HSTU_LR\", \"1e-3\"))",
+            "replace": "LR = float(os.environ.get(\"HSTU_LR\", \"7e-4\"))"
+          },
+          {
+            "find": "WEIGHT_DECAY = float(os.environ.get(\"HSTU_WD\", \"1e-6\"))",
+            "replace": "WEIGHT_DECAY = float(os.environ.get(\"HSTU_WD\", \"1e-5\"))"
+          },
+          {
+            "find": "num_heads: int = 2, dropout_rate: float = 0.3,",
+            "replace": "num_heads: int = 2, dropout_rate: float = 0.2,"
+          },
+          {
+            "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+            "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Coordinated HSTU jump across all four datasets: newest-96 histories, revised causal pooling, checkpointed prefix-frequency features, eight-negative sampled softmax, and coupled optimizer regularization settings. Preserve one model per category and metadata-driven inference. No tools or training executed."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/hstu/recharness/calls/00030"
+}

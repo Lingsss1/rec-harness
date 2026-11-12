@@ -1,0 +1,166 @@
+{
+  "markdown_report": "**Insights and directions.** SASRec supplies a strong sequential baseline; preserve its score through a residual extension [1]. User feedback identifies stale interests outweighing repeated current interests and loosely related choices outranking direct matches. These motivate selective historical evidence, but neither recurrence nor similarity establishes unmet demand or compatibility. Electronics has 14.95% negative-over-positive rankings and a −0.4812 lower-decile margin. These sampled training diagnostics motivate discrimination improvements; embedding similarity near the mapped zero-cosine baseline of 0.5 does not demonstrate severe collapse.\n\nRelated work suggests three directions. Long/short preference models separate current intent from historical affinity [2]. DIN establishes candidate-conditioned history weighting, limiting novelty claims [5]; Interaction Fidelity Attention motivates efficient candidate processing [4]. gSASRec motivates controlled comparisons of negative counts and objectives [3]. Item-item collaborative filtering supplies recurrence-neighborhood machinery, although co-occurrence is not temporal recurrence [6].\n\n**Framework.** Organize interventions along two axes: *intent evidence* (recent, repeated, candidate-matched history) and *candidate separation* (one-negative BCE, multi-negative BCE/gBCE/softmax). Titles and descriptions can supply specificity, but omitted specifications remain unknown.\n\n**Candidate assessment.** Scores are 0–10; higher difficulty means harder implementation. Each cell gives a positive reason and limitation.\n\n| Idea | Originality | Potential | User alignment | Model alignment | Difficulty |\n|---|---|---|---|---|---|\n| Uniform 32-negative softmax [3] | 2: useful adaptation; established | 7: scalable; sampling-sensitive | 4: sharper ranking; stale intent remains | 9: targets confusion; false negatives persist | 3: small loss change; exclusions require care |\n| Recent recurrence attention residual [2,4–6] | 3: focused combination; DIN and neighborhood aggregation precede it | 7: testable intent retrieval; sparse-history limits | 9: targets stale and loosely related choices; compatibility unproven | 7: candidate-specific separation; gains uncertain | 7: compact parameters; causal batching and graph integration add substantial work |\n| Scratch title/specification encoder [4] | 4: constraint-aware; standard pooling | 7: useful specificity; incomplete metadata | 8: direct content matching; overlap cannot prove fit | 6: may distinguish confusions; noisy semantics | 7: reusable encoder; token pipeline overhead |\n\n**Selected: recent recurrence attention residual.** At 0% progress, retain this eligible idea but stage implementation: candidate matching, then recency, then repeated-neighborhood support. It targets stale occasional interests and broad adjacent choices outranking direct current-interest matches, while testing whether candidate-specific evidence improves the weak-margin tail. Test the inexpensive objective-only alternative separately; its user-diagnosis coverage is insufficient for selection alone.\n\nFor prefix p, attend from candidate c to causal history states using logits q(c)ᵀk(h_t)/√d − λ log(1+p−t) + βr_t, with λ≥0 and bounded β,r_t. Define r_t from distinct earlier history items’ normalized graph similarities to item i_t. Unlike candidate-level support R(c), r_t varies across history positions: adding constant R(c) inside softmax would cancel. Pool values and add a candidate dot product through a zero-initialized scalar [7]. The residual must remain in autograd; branch parameters initially receive zero gradient, while the gate can learn.\n\nBuild a training-only binary incidence graph, cosine-normalize co-occurrences, remove self-links, shrink low-support edges and prune top-K [6]. This prevents held-out leakage but is an offline graph, not strictly event-time causal. Compare candidate matching alone, recency alone, recurrence alone and their combination; include graph-only/popularity controls and distinguish repeated support from a single strong neighbor.\n\nKeep all four routed models, seeds, splits, artifact conventions and the pinned evaluator. Update predictor serialization and diagnostic adapters together. Prespecify comparisons and checkpoint rules, log all GPU costs, and select only by macro validation HR@10. Report category results and paired uncertainty when per-user hits are available [8,9]. The 99-negative metric does not establish full-catalog quality; repeated validation selection can overfit [10]. References motivate experiments, not established benchmark gains.",
+  "idea": {
+    "description": "Add a candidate-conditioned attention residual over causal interaction history to each dataset-specific SASRec model, with explicit positional recency and bounded support from distinct earlier neighboring items. Stage the components to test their incremental value.",
+    "motivation": "Address two observed user-facing failures: stale occasional interests outweighing repeated current interests, and loosely related recommendations outranking direct matches. Candidate-specific history evidence also targets Electronics’ weak-margin tail. Neither learned similarity nor repeated purchases establishes compatibility, an unmet need, or continuing demand; those remain limitations.",
+    "implementation_notes": "Retain DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, four-category routing, trial-local artifacts, and SASREC_EPOCHS default 200. Preserve the baseline architecture and objective during the initial architectural comparison. No executable baseline files were supplied; the following specifies an implementation rather than claiming a tested replacement.\n\nGraph: construct binary training-only user-item incidence X separately per dataset, C=X.T@X, and degrees d_i=C_ii. Remove diagonal entries. For the primary proposed configuration use S_ij=[C_ij/sqrt(d_i*d_j)]*[C_ij/(C_ij+10)], require C_ij>=3, retain each row’s top 50 neighbors, and keep directed rows after pruning. These are prespecified starting values, not published optima. Compute sparsely without materializing a dense item-item matrix. Compare raw counts, normalized similarities and lift only within a limited declared tuning budget; lift can amplify rare coincidences. Training-only construction excludes held-out interactions, but includes later training events relative to earlier training prefixes. Describe this as an offline graph; strict event-time causality requires time-filtered counts.\n\nRepeated support: for history position t, collect distinct earlier nonpadding item IDs excluding i_t. Set r_t to the mean of S[i_t,i_u] over that set, including zero similarities; use zero for an empty set. Thus r_t lies in [0,1] and depends only on the prefix ending at t. It measures distinct neighboring evidence, not temporal periodicity. Compare this mean with maximum similarity and repeated-support alternatives. Do not add a candidate-level constant R(c) to every history attention logit: softmax cancels it. A candidate graph score could instead be a separately ablated residual, requiring its own scale and popularity controls.\n\nAttention: use the existing hidden dimension and learned bias-free query/key/value projections. For supervised position p, include nonpadding history positions t<=p because position p predicts the next item. Use causal SASRec states for keys/values and the shared candidate item embedding for queries. Define lag as p-t, rather than elapsed timestamps. Set lambda=softplus(ell), initialize lambda=0.1, and beta=tanh(b), initially zero. Normalize attention across history positions separately for every candidate. Set alpha=tanh(a), initially zero; retain the residual computation in autograd and initialize its projections normally. Zero alpha initially blocks branch-parameter gradients but generally permits a gate gradient. Avoid simultaneously zeroing the branch output.\n\nCompute causal states and projections once. Batch candidate queries and chunk supervised positions; the attention arithmetic remains O(B*L^2*K*d), where K includes all scored candidates. Use an explicit allowed-position mask with SDPA is_causal=False; boolean True means allowed. Positional indexing and truncation must match the baseline. For empty histories allow a dummy zero key/value before attention and zero the resulting context, preventing all-masked NaNs. During full-catalog scoring cache each user’s history projections, chunk candidates, and disable evaluation dropout. Candidate chunking preserves the per-candidate history normalization. Measure actual training and inference cost before allocating additional trials.\n\nExperiments: retain the existing one-negative BCE as the architecture control. Prespecify matching-only, matching+recency, matching+recurrence, and all-three variants, plus graph-only and popularity-only controls when budget permits. Use degree-preserving shuffled graphs to check whether graph gains reflect structural evidence rather than degree alone. Separately compare unchanged SASRec with one-negative BCE and K=32 uniform-negative BCE, gBCE and sampled softmax under equal GPU-second allocations and tuning opportunities. For ordinary multi-negative BCE use mean(softplus(-positive_score)+mean_k softplus(negative_score_k)); for softmax use temperature 1 over one positive and K negatives with no logQ correction for the uniform proposal. Exclude padding, the target and known training positives from sampled negatives, and document replacement behavior for small catalogs. A gBCE arm requires the paper’s exact parameterization and an explicitly logged calibration value before execution. Count diagnostics, graph work charged by the host, failed trials and debugging against the shared budget; report completed updates rather than equating epochs with cost.\n\nEvaluation: use only the pinned four-category macro validation HR@10 for selection, with the same users and candidates across models and a prespecified checkpoint schedule. Report category results and, if the host exposes per-user hits, bootstrap paired users independently within each category and average the four differences for a 95% interval. This is conditional on trained models and fixed candidates and does not correct winner-selection bias. One hit changes category HR by 0.5 percentage points and macro HR by 0.125 points. Worst-case independent-user standard errors are approximately 3.54 and 1.77 points respectively. Popularity/history-length strata are descriptive when accessible without changing the evaluator. Do not interpret sampled HR as full-catalog HR. Log every trial and limit adaptive selection; reserve confirmatory claims for untouched host evaluation.\n\nPredictor and diagnosis: serialize all projections, gates, recency parameters, graph buffers, configuration and item mappings, and update the predictor writer to restore identical scoring and routing. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). Keep view.model as the trained module. Preserve log2feats(sequence) and predict_score(features, items); retain tensor-shaped features and provide causal context through an explicit model context cache refreshed by log2feats, with correct handling of both final-candidate and BxL diagnostic scoring. Never silently diagnose only the base dot product. Return metrics and metric_definitions measured using the actual combined score and the original diagnostic sampling. Mark category breakdowns unavailable because item categories are unavailable. Use only histories, titles, descriptions and timestamps; never consume review attributes, ratings, prices, stores, hidden test files or pretrained weights. Track simulator mismatch descriptions only when measured, separating unknown specifications from explicit incompatibility. Twenty training users’ qualitative feedback is exploratory and can itself be overfit.",
+    "pseudocode": "for each dataset:\n    X = binary_incidence(training_histories)\n    C, degrees = sparse_cooccurrence(X)\n    S = cosine_times_support_shrinkage(C, degrees, tau=10)\n    S = remove_diagonal_filter_support_and_topk(S, min_support=3, k=50)\n    initialize projections normally; a=0; b=0; softplus(ell)=0.1\n\nfor each training batch:\n    h = sasrec(causal_sequences)\n    keys, values = key_projection(h), value_projection(h)\n    for each history position t:\n        U = distinct_nonpadding_items_before(t) minus {item_at(t)}\n        r[t] = mean(S[item_at(t), u] for u in U) if U else 0\n    for chunks of supervised positions p and candidates c:\n        allowed[t] = nonpadding(t) and t <= p\n        logits[t] = dot(query(item_embedding(c)), keys[t]) / sqrt(d)\n        logits[t] -= softplus(ell) * log1p(p-t)\n        logits[t] += tanh(b) * r[t]\n        context = safe_masked_attention(logits, values, allowed)\n        residual = dot(context, item_embedding(c))\n        score[p,c] = dot(h[p], item_embedding(c)) + tanh(a) * residual\n    optimize unchanged_baseline_objective(positive_scores, negative_scores)\n    # Always compute residual in autograd, including when a == 0.\n\nat prespecified checkpoints:\n    evaluate pinned four-category macro validation HR@10\n    record GPU cost, category results, and actual-score diagnostics\nsave selected model, graph, configuration, mappings, and matching predictor writer\n# At inference cache final history projections and chunk candidates.\n# Treat proposed ablations as experiments; do not claim unmeasured gains.",
+    "originality": {
+      "score": 3,
+      "positive": "The constrained combination of recent candidate matching and distinct-neighbor support yields a focused, falsifiable adaptation for unseen-item recommendation.",
+      "negative": "DIN already establishes candidate-conditioned weighting, while recency, neighborhood aggregation and zero-initialized residual gates are established techniques."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Controlled component comparisons could reveal which historical evidence supports current recommendations and provide a basis for later text or temporal extensions.",
+      "negative": "Popularity shortcuts, sparse neighborhoods, missing compatibility information and attention cost may limit transfer; no benchmark improvement has been measured."
+    },
+    "code_difficulty": {
+      "score": 7,
+      "positive": "Reuses SASRec states and item embeddings and adds relatively few learned parameters.",
+      "negative": "Sparse graph construction, causal recurrence, multi-position candidate attention, memory control, predictor serialization and faithful diagnostic integration require substantial engineering."
+    }
+  },
+  "related_work": [
+    {
+      "title": "[1] Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Uses causal self-attention to represent sequential preferences and score candidate items."
+      ],
+      "limitations": [
+        "The supplied baseline diagnostics show uneven discrimination across the four datasets; these are task-specific observations rather than universal SASRec properties."
+      ]
+    },
+    {
+      "title": "[2] MSMT-LSI",
+      "link": "https://link.springer.com/article/10.1007/s44196-024-00460-5",
+      "contributions": [
+        "The supplied search summary describes separate long- and short-term attention networks with temporal embeddings."
+      ],
+      "limitations": [
+        "The supplied evidence does not establish improvements under the pinned RecHarness protocol.",
+        "Separating timescales alone does not establish compatibility or unmet demand."
+      ]
+    },
+    {
+      "title": "[3] gSASRec",
+      "link": "https://arxiv.org/abs/2308.07192",
+      "contributions": [
+        "Connects negative sampling with overconfidence and proposes generalized BCE.",
+        "Motivates testing more negatives and simpler BCE or sampled-softmax alternatives."
+      ],
+      "limitations": [
+        "Does not establish universal gBCE superiority or the optimal objective for this benchmark.",
+        "Objective improvements alone do not resolve stale historical intent."
+      ]
+    },
+    {
+      "title": "[4] Interaction Fidelity Attention",
+      "link": "https://arxiv.org/abs/2406.09742",
+      "contributions": [
+        "Motivates candidate-to-history attention and efficient processing of candidate interactions."
+      ],
+      "limitations": [
+        "The proposed recency and recurring-neighborhood residual is an adaptation without demonstrated gains on these four datasets.",
+        "Caching does not eliminate the proposed attention branch’s arithmetic cost."
+      ]
+    },
+    {
+      "title": "[5] Deep Interest Network",
+      "link": "https://arxiv.org/abs/1706.06978",
+      "contributions": [
+        "Establishes candidate-conditioned history weighting through a local activation network."
+      ],
+      "limitations": [
+        "Candidate matching is established prior art and cannot support a strong novelty claim by itself.",
+        "Candidate conditioning does not establish functional compatibility."
+      ]
+    },
+    {
+      "title": "[6] Item-Based Collaborative Filtering Recommendation Algorithms",
+      "link": "https://archives.iw3c2.org/www10/cdrom/papers/519/index.html",
+      "contributions": [
+        "Provides the item-neighborhood aggregation foundation for the proposed graph support."
+      ],
+      "limitations": [
+        "Co-occurrence can reflect popularity or shared exposure.",
+        "Co-occurrence does not establish periodicity, temporal recurrence, compatibility or unmet need."
+      ]
+    },
+    {
+      "title": "[7] ReZero is All You Need: Fast Convergence at Large Depth",
+      "link": "https://arxiv.org/abs/2003.04887",
+      "contributions": [
+        "Supports zero-initialized scalar residual gates as an optimization mechanism."
+      ],
+      "limitations": [
+        "A zero gate initially blocks gradients to branch parameters.",
+        "Does not establish recommendation gains or budget feasibility for this extension."
+      ]
+    },
+    {
+      "title": "[8] On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled ranking metrics can reverse full-catalog model ordering."
+      ],
+      "limitations": [
+        "Does not invalidate the required pinned evaluation; it limits interpretation beyond that candidate-ranking task."
+      ]
+    },
+    {
+      "title": "[9] Computing Confidence Intervals for Common IR Measures",
+      "link": "https://www.nist.gov/publications/computing-confidence-intervals-common-ir-measures",
+      "contributions": [
+        "Provides a reference for bootstrap uncertainty assessment in retrieval evaluation."
+      ],
+      "limitations": [
+        "The proposed category-stratified paired bootstrap is an adaptation.",
+        "Conditional intervals do not account for repeated model selection or training randomness."
+      ]
+    },
+    {
+      "title": "[10] On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/beta/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how repeated model selection can overfit finite validation data."
+      ],
+      "limitations": [
+        "Prespecification and limited comparisons reduce opportunities for selection bias but do not remove it."
+      ]
+    },
+    {
+      "title": "Time Interval Aware Self-Attention for Sequential Recommendation",
+      "link": "https://jiachengli1995.github.io/files/wsdm20.pdf",
+      "contributions": [
+        "Models positions and time intervals in sequential attention."
+      ],
+      "limitations": [
+        "Temporal attention does not guarantee monotonic recency preference.",
+        "The proposed positional log-decay is a separate design choice."
+      ]
+    },
+    {
+      "title": "PyTorch Scaled Dot Product Attention",
+      "link": "https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention/",
+      "contributions": [
+        "Documents attention mask semantics and explicit dropout configuration used by the proposed implementation."
+      ],
+      "limitations": [
+        "Efficient kernels do not establish end-to-end budget compliance.",
+        "Flattened candidate queries require an explicit prefix mask rather than an ordinary triangular query mask."
+      ]
+    },
+    {
+      "title": "PyTorch Transformer Building Blocks",
+      "link": "https://docs.pytorch.org/tutorials/intermediate/transformer_building_blocks.html",
+      "contributions": [
+        "Provides implementation guidance relevant to masking and attention edge cases."
+      ],
+      "limitations": [
+        "Empty-history handling and score equivalence still require verification in the actual implementation."
+      ]
+    }
+  ]
+}

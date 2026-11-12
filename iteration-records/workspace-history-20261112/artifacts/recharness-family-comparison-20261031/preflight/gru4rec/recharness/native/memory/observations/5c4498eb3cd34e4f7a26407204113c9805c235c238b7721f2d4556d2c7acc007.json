@@ -1,0 +1,103 @@
+{
+  "schema_version": 2,
+  "protocol_id": "222216eb0e6c74e01630acd8101ecf991e36dcabc8443e843b69590271184c09",
+  "record": {
+    "round_idx": 3,
+    "trial_group_id": "trialgrp_1793440287271_2861855",
+    "trial_id": 3,
+    "arm": "combination_jump",
+    "selected_categories": [
+      "architecture_interaction",
+      "embedding_representation"
+    ],
+    "patch_summary": "Across all four category models, combine padding-masked input LayerNorm with residual feed-forward diagonal bilinear scoring. Keep one GRU checkpoint per category, tied embeddings, observed histories, BPR and existing training settings; synchronize predictor construction and strict checkpoint loading.",
+    "benchmark_score": 0.1075,
+    "val_score": 0.1075,
+    "is_winner": false,
+    "is_group_winner": false,
+    "valid": true,
+    "failure_type": null,
+    "delta_vs_prev_best": -0.0975,
+    "delta_vs_input": -0.0975,
+    "outcome": "regressed",
+    "val_support": "regressed",
+    "gpu_seconds": 10.744122132658958,
+    "trial_cap_seconds": 305.0,
+    "per_dataset_hr10": {
+      "Movies_and_TV": 0.09,
+      "Industrial_and_Scientific": 0.105,
+      "Electronics": 0.14,
+      "CDs_and_Vinyl": 0.095
+    },
+    "error": "",
+    "parameter_changes": [
+      {
+        "name": "DATA_DIR",
+        "before_expression": "os.environ.get('GAGC_DATA_DIR', './input/trainval')",
+        "after_expression": "os.environ['GAGC_DATA_DIR']"
+      }
+    ],
+    "changed_definitions": [
+      "GRU4RecModel",
+      "GRU4RecModel.__init__",
+      "GRU4RecModel.encode",
+      "GRU4RecModel.forward",
+      "GRU4RecModel.input_embeddings",
+      "GRU4RecModel.score_candidates",
+      "GRU4RecModel.scoring_query",
+      "write_predict_script"
+    ],
+    "summary": "Across all four category models, combine padding-masked input LayerNorm with residual feed-forward diagonal bilinear scoring. Keep one GRU checkpoint per category, tied embeddings, observed histories, BPR and existing training settings; synchronize predictor construction and strict checkpoint loading.",
+    "proposal_history": [
+      {
+        "attempt": 1,
+        "summary": "Across all four category models, combine padding-masked input LayerNorm with residual feed-forward diagonal bilinear scoring. Keep one GRU checkpoint per category, tied embeddings, observed histories, BPR and existing training settings; synchronize predictor construction and strict checkpoint loading."
+      }
+    ],
+    "hypothesis": "Across all four datasets, retain embedding dimensions and tying, but apply learned per-channel affine LayerNorm only to input embeddings, keeping padding zero and candidate embeddings unnormalized. Replace direct hidden-state scoring with q=h+W2 GELU(W1 h), followed by a learned diagonal bilinear compatibility q^T diag(a)e_item, initialized with a=1. Input normalization stabilizes GRU dynamics while the residual scorer learns channel-specific ranking geometry without removing candidate norms, unlike the previously regressed full L2 normalization. Preserve all training hyperparameters, history handling, final-real-position readout, sampling and BPR.",
+    "input_source_sha256": "b7361f620a4a8be0c520992ec8ba68f47b7b5f0e6c8cfdd5c16e129ca41eae20",
+    "candidate_source_sha256": "44c13eda5d592109d8b479b237116fee213ab203d68a5ee3df7f027f01bfbebe",
+    "input_normalized_sha256": "5e85648d7615fc7700ebd89e8ed7e4988ebf536f1b86e96355295eeed9cca2ec",
+    "candidate_normalized_sha256": "15a4e7fd60ac7e128f06cc94f7052907fe79132020bed7ee96279f287b8463e5",
+    "patch_sha256": "b3ab7fb3f8471a16a06958d7e66d9c09c6f251319f9e33380a90b8904cca936a",
+    "diff_excerpt": "--- \n+++ \n@@ -30,5 +30,5 @@\n ]\n \n-DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")\n+DATA_DIR = os.environ['GAGC_DATA_DIR']\n \n SEED = int(os.environ.get(\"GAGC_SEED\", \"42\"))\n@@ -181,14 +181,29 @@\n         self.hidden_units = hidden_units\n         self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)\n+        self.input_norm = nn.LayerNorm(hidden_units, elementwise_affine=True)\n         dropout = dropout_rate if num_layers > 1 else 0.0\n         self.gru = nn.GRU(hidden_units, hidden_units, num_layers=num_layers,\n                           batch_first=True, dropout=dropout)\n         self.dropout = nn.Dropout(dropout_rate)\n+        self.query_ff = nn.Sequential(\n+            nn.Linear(hidden_units, 2 * hidden_units),\n+            nn.GELU(),\n+            nn.Linear(2 * hidden_units, hidden_units),\n+        )\n+        self.score_diagonal = nn.Parameter(torch.ones(hidden_units))\n         with torch.no_grad():\n             nn.init.xavier_uniform_(self.item_emb.weight)\n             self.item_emb.weight[0].zero_()\n \n+    def input_embeddings(self, seq: torch.Tensor) -> torch.Tensor:\n+        emb = self.input_norm(self.item_emb(seq))\n+        return emb.masked_fill((seq == 0).unsqueeze(-1), 0.0)\n+\n+    def scoring_query(self, states: torch.Tensor) -> torch.Tensor:\n+        query = states + self.query_ff(states)\n+        return query * self.score_diagonal\n+\n     def encode(self, seq: torch.Tensor) -> torch.Tensor:\n-        emb = self.dropout(self.item_emb(seq))\n+        emb = self.dropout(self.input_embeddings(seq))\n         out, _ = self.gru(emb)\n         # Histories are LEFT padded; count-1 indexes padding on short histories.\n@@ -198,12 +213,13 @@\n \n     def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n-        emb = self.dropout(self.item_emb(seq))\n+        emb = self.dropout(self.input_embeddings(seq))\n         out, _ = self.gru(emb)\n-        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n-        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n+        query = self.scoring_query(out)\n+        pos_scores = (query * self.item_emb(pos)).sum(dim=-1)\n+        neg_scores = (query * self.item_emb(neg)).sum(dim=-1)\n         return pos_scores, neg_scores\n \n     def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:\n-        user_emb = self.encode(seq)[0]\n+        user_emb = self.scoring_query(self.encode(seq))[0]\n         cand_emb = self.item_emb(candidates)\n         return torch.matmul(cand_emb, user_emb)\n@@ -336,7 +352,10 @@\n             hidden_units=meta[\"hidden_units\"],\n             num_layers=meta[\"num_layers\"],\n-            dropout_rate=0.0,\n+            dropout_rate=float(meta[\"dropout_rate\"]),\n         ).to(_device)\n-        model.load_state_dict(torch.load(ckpt_path, map_location=_device, weights_only=True))\n+        model.load_state_dict(\n+            torch.load(ckpt_path, map_location=_device, weights_only=True),\n+            strict=True,\n+        )\n    ",
+    "category_rationales": [
+      {
+        "category": "embedding_representation",
+        "rationale": "Apply learned affine LayerNorm exclusively to GRU input embeddings, masking padding back to zero. Preserve embedding dimensions, tying and unnormalized candidate embeddings across all four dataset models."
+      },
+      {
+        "category": "architecture_interaction",
+        "rationale": "Retain GRU recurrence and score through a jointly trained residual feed-forward query and diagonal bilinear compatibility initialized with unit channel weights. Apply identical scoring during training and inference. The predictor imports the modified model class and strictly restores its checkpoint. Preserve BPR, sampling, readout and training settings."
+      }
+    ],
+    "baseline_validation": 0.205,
+    "basin_id": "default",
+    "execution_status": "success",
+    "attempt_count": 1,
+    "training_attempt_count": 1,
+    "training_attempts": [
+      {
+        "id": "round-0002-slot-3-attempt-1",
+        "status": "success",
+        "source_sha256": "44c13eda5d592109d8b479b237116fee213ab203d68a5ee3df7f027f01bfbebe",
+        "allocated_gpu_seconds": 10.744122132658958,
+        "error": "",
+        "score": 0.1075
+      }
+    ],
+    "checkpoint_fingerprints": {
+      "Movies_and_TV_model.pt": "52dd29fff5d8eda172f257087c23763dfd6a3e71bc5e9b517ee2c2c8999c009a",
+      "Industrial_and_Scientific_model.pt": "c324f866d5ee0d6bced66ac17a7f13796a999c679f4738ba3e6c7548105f8bc4",
+      "Electronics_model.pt": "8d660047c896db8351606bf40c97dc756cad131547da10b4d82b84ab8ba2af14",
+      "CDs_and_Vinyl_model.pt": "134423e662e3f2c27e7feaa494308af3713af9de9b9b3b8296d949f3e2361b88"
+    },
+    "repair_errors": [],
+    "phase": "jump",
+    "promoted": false,
+    "provisional": false,
+    "protocol_id": "222216eb0e6c74e01630acd8101ecf991e36dcabc8443e843b69590271184c09",
+    "evidence_id": "5c4498eb3cd34e4f7a26407204113c9805c235c238b7721f2d4556d2c7acc007"
+  },
+  "record_sha256": "c5612d4e1d87999e69c374cb67cb774a8ed247f8a15dd72f9976652eafecbdf1"
+}

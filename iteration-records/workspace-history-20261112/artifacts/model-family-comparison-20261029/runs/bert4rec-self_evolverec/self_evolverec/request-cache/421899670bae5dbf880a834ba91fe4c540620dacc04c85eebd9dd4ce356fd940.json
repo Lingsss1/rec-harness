@@ -1,0 +1,70 @@
+{
+  "request_sha256": "421899670bae5dbf880a834ba91fe4c540620dacc04c85eebd9dd4ce356fd940",
+  "response": {
+    "markdown_report": "The next experiment should isolate **terminal-loss scheduling in one BERT4Rec per category**, after repairing diagnostic category identity. At 20% progress, this offers a small, interpretable change with limited integration cost.\n\n**Insights and framework.** Three observations motivate the experiment. First, explicit per-example branch reduction makes terminal/interior weighting identifiable; equal branch sizes alone do not. Second, Electronics has weaker sampled-pair separation (p10 margin −0.126; negative wins 11.34%); these training statistics motivate investigation but establish no validation deficit. Third, category identity blocks serving parity everywhere; consequently, history sensitivity remains unknown, and embedding scores near 0.5 do not establish collapse.\n\nThree literature connections suggest distinct directions. BERT4Rec and [recency-sampling research](https://arxiv.org/abs/2207.02643) motivate aligning masked training with terminal inference; they do not validate this schedule. [TiSASRec](https://jiachengli1995.github.io/files/wsdm20.pdf) motivates representing elapsed time; its different backbone leaves transfer uncertain. [Prakash et al.](https://arxiv.org/abs/2410.17276) motivate testing negative selection; dataset-dependent results caution against assuming harder negatives always help.\n\n| Direction | Mechanism | Unresolved gap |\n|---|---|---|\n| Objective alignment | Terminal/interior curriculum | Does scheduling outperform constant weighting? |\n| Temporal representation | Jointly learned time-gap attention bias | Do timestamps improve current-intent ranking? |\n| Ranking discrimination | Modest model-mined negative fraction | Can separation improve without excessive false negatives? |\n\n**Candidate assessments.** Scores are originality/future potential/user alignment/model alignment/code difficulty; higher difficulty means harder implementation.\n\n| Idea | Scores | Positive / negative assessment by criterion |\n|---|---|---|\n| Terminal curriculum | 4/7/6/6/3 | O: explicit trajectory / familiar curriculum; F: reusable control / possibly negligible; U: current-choice supervision / no compatibility reasoning; M: terminal separation / cause unverified; D: scalar change / reductions need auditing |\n| Time-gap bias | 5/7/7/4/7 | O: family-preserving adaptation / established temporal attention; F: flexible timing / sparse timestamps; U: stale-interest hypothesis / gaps are ambiguous; M: testable sensitivity / currently unavailable; D: compact parameters / serving requires timestamp parity |\n| Hard-negative fraction | 3/6/6/7/5 | O: simple adaptation / established method; F: sharper ranking / sampling dependence; U: competing plausible items / false negatives; M: weak margins / training margins may mislead; D: unchanged backbone / mining adds cost |\n\n**Selected algorithm.** Keep terminal-prefix and interior-mask examples unchanged. Set terminal weight α(e)=0.5+0.3·min(e/100,1), using separately normalized per-example branch losses. This explicitly targets two reported user failures: stale interests outranking current preferences, and broadly related unsupported extensions outranking precise choices. These are hypotheses about terminal supervision, not demonstrated semantic repairs; duplicate functionality remains unresolved.\n\nCompare the schedule with constant α=0.5 and α=0.8, holding everything else fixed. Track branch-specific margins, especially Electronics, alongside host macro validation HR@10. First propagate the actual category through ModelView and verify exported checkpoint parity. Preserve left padding, reserved-mask corruption, appended-mask inference, fixed seeds and training limits. No performance gain is claimed.",
+    "idea": {
+      "description": "Test a linear terminal-objective curriculum within the corrected BERT4Rec: increase the explicitly normalized terminal-prefix loss weight from 0.5 to 0.8 over the first 100 epochs, retaining interior-mask supervision and one trained checkpoint per category.",
+      "motivation": "Terminal-prefix supervision directly matches appended-mask inference. Increasing its contribution may help distinguish specific current choices from broad historical associations, addressing stale-interest recommendations and unsupported extensions of earlier purchases. Electronics' negative tenth-percentile sampled margin motivates measuring terminal discrimination, but neither the diagnosis nor the literature establishes that scheduling will improve it. Repairing the missing ModelView category identity is a prerequisite for interpreting serving-dependent probes.",
+      "implementation_notes": "Modify only objective weighting relative to the supplied corrected baseline. Keep the existing user/endpoint sampler, negative sampler, optimizer, backbone, corruption policy and predictor writer. Compute the existing token loss at supervised positions, average within each example, then average examples separately within terminal and interior branches; combine those two branch means explicitly. Retain both branches in every batch. Use alpha=0.5+0.3*min(epoch_index/100,1), with zero-based epoch_index, and matched constant-weight controls at 0.5 and 0.8 if remaining search budget permits. Controls are separate experiments and are never fused. Use preprocessing seed 0, training seed 42, exactly 200 batches per epoch and at most 200 epochs. Preserve all four categories, DATA_DIR=os.environ['GAGC_DATA_DIR'], supplied splits and host evaluation. Save artifacts beneath the trial directory and load exactly one selected checkpoint per category. Propagate the actual category into ModelView.dataset_name; retain DiagnosisProbe(view, device), run_full_diagnosis(train_loader), diagnosis_interpreter_prompt(raw_diagnosis), and the family-specific model interfaces. Verify serialization and short/full/truncated/batched serving parity before sensitivity probes. No timestamp or metadata inputs are introduced. Training and inference continue to hide targets and read the final nonpadding mask position, never count-1. Record branch-specific sampled margins as training diagnostics, not validation metrics; select solely through the pinned four-category macro validation HR@10. The reported prior combined_score=0.5425 is not evidence of improvement by this proposal.",
+      "pseudocode": "def terminal_weight(epoch_index):\n    return 0.5 + 0.3 * min(epoch_index / 100.0, 1.0)\n\n# Integration pseudocode: retain the supplied sampler and token-loss implementation.\n# Each branch must contain at least one supervised position per example.\ndef branch_mean(token_loss, supervised):\n    count = supervised.sum(dim=1)\n    assert bool((count > 0).all())\n    return ((token_loss * supervised).sum(dim=1) / count).mean()\n\nfor category in FOUR_SUPPLIED_CATEGORIES:\n    model = initialize_corrected_bert4rec(seed=42)\n    for epoch in range(max_epochs):  # max_epochs <= 200\n        for batch_index in range(200):\n            terminal, interior = supplied_branch_sampler()\n            # Terminal target and all later events are withheld; append MASK.\n            # Interior supervised targets are replaced by MASK.\n            terminal_loss = branch_mean(existing_token_loss(model, terminal), terminal.supervised)\n            interior_loss = branch_mean(existing_token_loss(model, interior), interior.supervised)\n            alpha = terminal_weight(epoch)\n            loss = alpha * terminal_loss + (1.0 - alpha) * interior_loss\n            optimizer.zero_grad()\n            loss.backward()\n            optimizer.step()\n        run_unchanged_validation_and_checkpoint_selection()\n    export_matching_predictor_and_one_selected_checkpoint(category)\n    view.dataset_name = category\n    verify_checkpoint_and_serving_parity_before_sensitivity(view)\n# Constant controls replace terminal_weight with 0.5 or 0.8 in separate trials.\n# Serving: truncate observed history to maxlen-1, append MASK, left-pad,\n# encode bidirectionally, and score from the final nonpadding MASK feature.",
+      "originality": {
+        "score": 4,
+        "positive": "Explicit branch normalization and matched constant-weight controls make the curriculum hypothesis precise and attributable.",
+        "negative": "Terminal masking and objective curricula are established concepts; this is a controlled adaptation rather than a new model class."
+      },
+      "future_potential": {
+        "score": 7,
+        "positive": "A successful controlled result could establish a simple way to balance bidirectional representation learning and terminal recommendation.",
+        "negative": "The schedule may add nothing beyond a well-chosen constant weight, and user-facing semantic benefits remain unverified."
+      },
+      "code_difficulty": {
+        "score": 3,
+        "positive": "The architectural and serving paths remain unchanged; the training change is a scalar schedule over two explicit reductions.",
+        "negative": "Branch identification, normalization and diagnostic category propagation require careful integration; no executable baseline source was supplied."
+      }
+    },
+    "related_work": [
+      {
+        "title": "BERT4Rec: Sequential Recommendation with Bidirectional Encoder Representations from Transformer",
+        "link": "https://arxiv.org/abs/1904.06690",
+        "contributions": [
+          "Establishes bidirectional masked-item recommendation and includes terminal masking relevant to next-item inference."
+        ],
+        "limitations": [
+          "Does not establish that the proposed terminal/interior weight schedule improves the pinned four-category benchmark."
+        ]
+      },
+      {
+        "title": "Recency-sampling research referenced in the supplied search results",
+        "link": "https://arxiv.org/abs/2207.02643",
+        "contributions": [
+          "Motivates investigating the mismatch between random Cloze training and terminal next-item inference."
+        ],
+        "limitations": [
+          "Does not validate the specific linear loss schedule or demonstrate functional compatibility reasoning."
+        ]
+      },
+      {
+        "title": "Time Interval Aware Self-Attention for Sequential Recommendation",
+        "link": "https://jiachengli1995.github.io/files/wsdm20.pdf",
+        "contributions": [
+          "Models pairwise time intervals alongside positional information, motivating the temporal-representation alternative."
+        ],
+        "limitations": [
+          "Uses a different backbone; adapting temporal bias to BERT4Rec requires separate implementation and evaluation."
+        ]
+      },
+      {
+        "title": "Prakash et al. (2024): negative-sampling comparison referenced in the supplied search results",
+        "link": "https://arxiv.org/abs/2410.17276",
+        "contributions": [
+          "Compares negative-sampling strategies and motivates treating their effectiveness as dataset dependent."
+        ],
+        "limitations": [
+          "Does not establish that model-mined negatives improve this benchmark; unobserved candidates can be false negatives."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/model-family-comparison-20261029/runs/bert4rec-self_evolverec/self_evolverec/calls/00536"
+}

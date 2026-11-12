@@ -1,0 +1,74 @@
+{
+  "markdown_report": "SASRec’s useful historical context can also obscure current intent. The simulator identifies unsupported broad associations and stale or isolated demand; Electronics has 14.95% sampled wrong rankings and a −0.4812 tenth-percentile margin. These observations motivate experiments, not proof that recency causes ranking errors.\n\n**Insights and directions.** Three starting-point insights follow. Attention already models sequential relevance. An added branch must demonstrate incremental value. Recent and repeated interests receive favorable qualitative feedback. Older evidence should therefore be selected conditionally, rather than discarded universally. Positive average margins conceal a weak lower tail. Validation ranking remains necessary because training separation is insufficient.\n\nThree literature insights organize the alternatives. TLSTSRec studies adaptive long/short fusion. This supports a lightweight context-selection experiment. Hierarchical preference modeling retrieves persistent interests using recent activity. A single gated historical representation is a cheaper initial approximation. gSASRec changes negative sampling and calibration. It provides an objective-level alternative that should first be tested separately from architecture changes.\n\n**Framework.**\n\n| Direction | Existing mechanism | Proposed experiment | Main uncertainty |\n|---|---|---|---|\n| Context selection | SASRec; TLSTSRec | Shared-encoder recent/full gate | Recent history may be noisy |\n| Persistent interests | Hierarchical preference modeling | Recent-conditioned interest pooling | Added capacity and cost |\n| Ranking supervision | gSASRec | Uniform multi-negative gBCE | Convergence within budget |\n\n**Candidate assessments.** Scores are originality/potential/user alignment/model alignment/difficulty, each 0–10; higher difficulty means harder.\n\n- **Recent/full gate: 3/7/8/6/4.** Originality: economical adaptation, but established fusion prior art. Potential: reusable context selection, but little recent evidence can mislead. User alignment: targets stale demand and broad historical associations, but cannot establish compatibility. Model alignment: may remove confusing context, but margin gains are unproven. Difficulty: shared parameters simplify implementation, but two encodings increase cost.\n- **Interest-bank retrieval: 4/7/8/6/7.** Originality: useful synthesis, but close prior art. Potential: preserves multiple interests, but risks overfitting. User alignment: selects specific persistent interests, but latent clusters lack purpose labels. Model alignment: may separate competing interests, but sparse supervision limits identification. Difficulty: small pooling modules, but routing requires careful tuning.\n- **Multi-negative gBCE: 2/7/4/9/3.** Originality: direct adaptation, but established method. Potential: strong reusable baseline, but slower convergence. User alignment: challenges distractors, but lacks explicit current-intent selection. Model alignment: directly targets separation, but training margins need not improve HR@10. Difficulty: simple vectorization, but memory grows with negatives.\n\n**Selected experiment: recent/full gate.** At 0% progress, its modest complexity is preferable. Encode the full prefix and its last ten items with shared SASRec weights; learn a scalar sigmoid gate from both representations and history length. Score with their convex mixture. This explicitly targets stale/isolated demand and unsupported broad historical associations while retaining useful older preferences. Test the hypothesis against unchanged SASRec and fixed mixtures. Select solely by pinned four-category macro validation HR@10; report lower-tail margins and all category scores. No improvement is claimed.",
+  "idea": {
+    "description": "Add a recent-conditioned scalar gate between shared-weight SASRec encodings of the full observed prefix and its last ten nonpadding items. Use the resulting representation for the existing item dot-product scorer. This is an incremental context-selection hypothesis, not a demonstrated improvement.",
+    "motivation": "The selected idea explicitly targets two user-facing failures: older or isolated interactions being interpreted as current demand, and broadly related historical interests competing with more specific recent matches. Preserving a full-history branch allows persistent interests to remain available. The model-facing target is weak positive–negative separation, particularly Electronics’ negative tenth-percentile margin and 14.95% wrong-ranking rate. Removing distracting historical context may help, but neither compatibility nor satisfied-device needs can be identified reliably from these signals alone.",
+    "implementation_notes": "Preserve four category-specific models, dataset routing, original splits, preprocessing seed 0, training seed 42, and DATA_DIR = os.environ['GAGC_DATA_DIR']. Keep baseline optimizer, loss, sampling, and the SASREC_EPOCHS environment setting, whose host default is 200, for the first architectural comparison. Train on one GPU and save all artifacts beneath the trial directory. Do not access hidden test data or fetch pretrained weights or additional datasets.\n\nFor every supervised position t, encode only items through t. Build the recent sequence from at most ten nonpadding items ending at t. Reindex recent positions consistently and use the identical construction during exported inference. Never truncate once at the batch sequence endpoint and reuse that representation for earlier targets: that would leak later interactions. Construct per-position recent windows in chunks to bound memory; measure their GPU cost before allocating further trials. Share all encoder parameters between the two branches. Set g_t = sigmoid(MLP(concat(LayerNorm(h_full), LayerNorm(h_recent), log1p(prefix_length)))); initialize the gate’s final weights and bias to zero. Form h_t = (1-g_t)*h_full + g_t*h_recent and score candidates using the baseline item embedding table. For histories of at most ten items, reuse the full representation as the recent representation. The gate has no access to future timestamps, target identity, simulator traits, ratings, or unavailable metadata.\n\nCompare unchanged SASRec, a fixed 0.5 mixture, and the learned gate within the shared 43,200 GPU-second budget, accounting for every run. Select using only the pinned macro validation HR@10 with 200 users/category, 99 unique negatives, and evaluation seed 42. Log all configurations and all four category scores. Do not interpret the previous inspiration’s reported 0.5363 as evidence that this new architecture improves the benchmark.\n\nKeep view.model as the trained nn.Module and retain item_emb, log2feats(sequence), predict_score(features, items), user_train, meta_data, and review_data. Make log2feats return the fused B×L features, so predict_score remains a stateless item dot-product function. Retain DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). The loader contract remains (None, sequence, positive, negative), with B×L tensors. Measure complete-score mean/p10 margins, wrong-ranking and small-margin rates, embedding cosine similarity, gate values, and margins stratified by prefix length. Return metrics and metric_definitions, marking category breakdowns unavailable because item-category metadata is unavailable. Include measured values, definitions, and missing-data limitations in the interpretation prompt. Similarity values near 0.5 do not establish severe collapse.\n\nUpdate the predictor writer to export the shared encoder, gate, configuration, item mappings, and identical recent-window construction into working/predict.py. Preserve category routing and evaluator masking rules. For simulator recommendations to twenty training users, score the full catalog in chunks and mask observed items according to the existing contract. Verify causal prefix invariance, candidate/full-catalog score agreement, and checkpoint reload parity. Qualitative evaluation should distinguish uncertain relevance from explicit mismatch; improvements in compatibility or immediate-choice acceptance require actual observations.",
+    "pseudocode": "for category in FOUR_CATEGORIES:\n    preserve baseline splits, mappings, seeds, and routing\n    initialize shared SASRec encoder, item embeddings, and scalar gate\n    for baseline training batch:\n        full = encoder(sequence)  # causal B×L features\n        for chunk of valid supervised positions t:\n            recent_prefix = last_10_nonpadding(sequence[:t+1])\n            recent = encoder(recent_prefix).last_valid_feature\n            reuse full[t] when prefix_length <= 10\n            gate = sigmoid(MLP(full[t], recent, log1p(prefix_length)))\n            fused[t] = (1-gate)*full[t] + gate*recent\n        scores = dot(fused, positive_and_negative_embeddings)\n        optimize unchanged baseline loss\n    evaluate with the unchanged pinned validation protocol\n    save architecture, weights, mappings, configuration, and matching predictor\n\nDiagnosisProbe.run_full_diagnosis(train_loader):\n    evaluate fused scorer on measured valid positions\n    return metrics and metric_definitions, with unavailable fields marked\n\ndiagnosis_interpreter_prompt(raw_diagnosis):\n    return prompt containing measured metrics, definitions, and limitations\n\nVerify:\n    future suffix changes cannot affect earlier features\n    generated predictor reproduces saved-model scores\n    candidate scores equal corresponding full-catalog entries\nSelect by four-category macro validation HR@10 only",
+    "originality": {
+      "score": 3,
+      "positive": "Offers a small, controlled adaptation of recent-conditioned fusion to the exact SASRec compatibility and evaluation contract.",
+      "negative": "Long/short preference fusion is established; shared encoder weights and a scalar gate are incremental engineering choices."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides a tractable foundation for testing when persistent history helps current-intent ranking before introducing interest banks or temporal dynamics.",
+      "negative": "A recent window may contain unrelated interactions, and next-item supervision cannot directly reveal compatibility, replacement purpose, or satisfied needs."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Reuses SASRec parameters, the baseline item scorer, and the existing feature/scoring diagnostic interface.",
+      "negative": "Causally correct recent windows at every supervised position add computation and require careful chunking and exported-inference parity."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Uses causal self-attention to learn next-item representations from interaction histories.",
+        "Provides the required starting architecture and shared encoder."
+      ],
+      "limitations": [
+        "Does not explicitly separate recent and persistent preferences.",
+        "Its sequential modeling already overlaps with the proposed mechanism, so incremental benefit requires a matched comparison."
+      ]
+    },
+    {
+      "title": "TLSTSRec",
+      "link": "https://doi.org/10.3233/IDA-240051",
+      "contributions": [
+        "The supplied search summary describes temporal representations and adaptive fusion of long- and short-term sequences.",
+        "Motivates testing context-dependent fusion."
+      ],
+      "limitations": [
+        "Does not establish improvement on the pinned four-category benchmark.",
+        "The proposed shared encoder and ten-item window are experimental adaptations."
+      ]
+    },
+    {
+      "title": "Hierarchical long and short-term user preference modeling",
+      "link": "https://journal.hep.com.cn/fcs/EN/10.1007/s11704-025-41181-y",
+      "contributions": [
+        "The supplied summary describes multiple persistent preference vectors and recent-context similarity matching.",
+        "Motivates conditional retrieval of useful historical interests."
+      ],
+      "limitations": [
+        "Interest routing adds complexity beyond the selected early-stage experiment.",
+        "Latent preferences do not identify purchase purpose or compatibility."
+      ]
+    },
+    {
+      "title": "gSASRec",
+      "link": "https://arxiv.org/abs/2308.07192",
+      "contributions": [
+        "Combines additional uniform negatives with generalized BCE to address sampling-induced overconfidence.",
+        "Provides a separate objective-level candidate for weak positive–negative separation."
+      ],
+      "limitations": [
+        "Stronger calibration can delay convergence.",
+        "Does not explicitly select current interests or demonstrate gains on this pinned benchmark."
+      ]
+    }
+  ]
+}

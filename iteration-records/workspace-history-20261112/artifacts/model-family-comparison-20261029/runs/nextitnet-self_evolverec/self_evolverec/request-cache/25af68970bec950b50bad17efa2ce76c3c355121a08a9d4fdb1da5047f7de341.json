@@ -1,0 +1,75 @@
+{
+  "request_sha256": "25af68970bec950b50bad17efa2ce76c3c355121a08a9d4fdb1da5047f7de341",
+  "response": {
+    "markdown_report": "At 20% progress, prioritize a small extension: **historical-gap-conditioned residual gates in the corrected NextItNet**. This is an untested hypothesis; the supplied inspiration score, 0.5525, does not establish its performance.\n\n**Insights from the starting point.** (1) Zero gate weights and bias two preserve the baseline residual update initially. This enables a controlled architectural change. (2) Current-item conditioning supplies specific recent evidence without exposing the next-item target. It cannot establish ownership or compatibility. (3) Diagnostics show category-dependent sequence sensitivity: ordering corruption changes CDs diagnostic HR@10 by −0.15625, while endpoint replacement changes Industrial by −0.1875. These training stress tests support preserving both information sources, not prescribing universal recency weighting.\n\n**Insights from related work.** (1) [NextItNet](https://arxiv.org/abs/1808.05163) supplies causal multiscale dependencies. Gates should modulate these dependencies without replacing the backbone. (2) [TLSRec](https://arxiv.org/abs/2208.04760) motivates temporal preference modulation. Historical gaps are available, whereas recommendation-time lag cannot be inferred from held-out targets. (3) [Sampled softmax](https://arxiv.org/abs/2201.02327) motivates stronger ranking supervision. Its findings do not establish that harder negatives improve this task.\n\nThe framework groups directions by intervention:\n\n| Direction | Mechanism | Main uncertainty |\n|---|---|---|\n| Context selection | Item/gap residual gate | Gaps may reflect purchasing cadence |\n| Ranking supervision | Multi-negative cross-entropy | Unobserved positives become negatives |\n| Observable specificity | Joint title-token embeddings | Sparse supervision and noisy text |\n\nScores below are **originality / potential / user alignment / model alignment / difficulty**, each 0–10; higher difficulty means harder implementation. Each assessment gives a positive and a limitation.\n\n- **Joint item/gap gate: 4/7/7/6/3.** Originality: useful adaptation / established gating; potential: cheap temporal conditioning / ambiguous gaps; user: targets stale influence and broad matches / no direct compatibility evidence; model: adapts ordered-context updates / sensitivity is not dysfunction; difficulty: local projection / timestamp alignment needs care.\n- **Multi-negative loss: 3/7/6/7/4.** Originality: task adaptation / standard objective; potential: better discrimination / uncertain negatives; user: separates alternatives / lacks current-purpose features; model: targets negative diagnostic margins / training margins may not generalize; difficulty: simple loss / filtering adds cost.\n- **Joint title-token embeddings: 4/6/8/5/6.** Originality: constrained integration / familiar text fusion; potential: shares sparse-item information / noisy descriptions; user: exposes product distinctions / cannot verify needs; model: enriches representations / diagnosis does not establish missing semantics; difficulty: small encoder / vocabulary and export complexity.\n\n**Selected algorithm.** Extend the starting gate with a bounded log historical-gap feature and an availability indicator. Initialize its projection to zero and bias to two. This explicitly targets older isolated interests outweighing present evidence and broadly related recommendations displacing recent specific matches. It also targets weak diagnostic target-versus-alternative margins through adaptive residual transformations; improvement requires measurement.\n\nKeep loss and optimization unchanged for this first experiment. Train one network per category, select solely through pinned macro validation HR@10, and verify predictor parity. Never interpret reduced corruption sensitivity alone as improvement.",
+    "idea": {
+      "description": "Extend the supplied current-input-item-conditioned NextItNet residual gate with two causal timestamp features: a bounded log-scaled gap from the preceding observed interaction and an indicator that this gap is available. For each completed baseline residual update u, compute g = sigmoid(W[h; u; e; gap; available] + b) / sigmoid(2), then output mask * (h + g * u). Initialize W=0 and b=2. Every gate and backbone parameter belongs to one jointly trained model per category.",
+      "motivation": "The selected hypothesis addresses two explicit user failures: older or occasional interactions receiving excessive influence, and broad historical relevance displacing specific recent matches. Current item identity supplies specific evidence; observed gaps may help distinguish different interaction cadences while retaining earlier ordered context. Quantitatively, clean diagnostic target-minus-best-alternative margins are negative in all four categories, including −0.9352 in Electronics, motivating better discrimination. These are conditional training measurements, not validation failures or proof of harmful historical dependence. The category-specific corruption effects argue against enforcing uniform recency decay or suppressing all earlier context.",
+      "implementation_notes": "Start from the host's corrected NextItNet and preserve every existing causal convolution, dilation, normalization, dropout, residual boundary, embedding dimension and score head. Add a dimension-wise gate at each existing completed residual update, using the same current-input embedding e supplied to the backbone. Do not subtract h from a completed h+u output to recover u; expose the actual update at the existing residual addition. Preserve the baseline's dropout placement by treating u as exactly the update formerly added to h. Mask padding after temporal operations and residual addition; retain zero padding embeddings.\n\nFor position t, use only timestamps at t and its preceding occupied position. Parse the known source units explicitly. If both are valid and their difference is nonnegative, set available=1 and gap=clip(log1p(delta_seconds)/log1p(31536000),0,1); otherwise set both features to zero. Equal timestamps are valid. Never use the next interaction timestamp or held-out target time. The one-year scale is a fixed engineering choice, not an inferred seasonality model. Preserve sample_batch's B x L sequence/positive/negative outputs; align temporal features internally using the same selected training prefix, without changing the loader contract. Do not reconstruct ambiguous timestamp alignments from item IDs alone.\n\nInference integration is conditional on the host's public input contract: use timestamps only if the predictor receives the observed prefix timestamps or can recover them unambiguously from permitted public input. Do not inspect held-out interactions to recover them. Missing timestamps use gap=available=0 in both training and prediction; if temporal features cannot be supplied consistently, retain the starting item-conditioned gate and report the temporal proposal as unimplemented.\n\nUse identical gate definitions and configuration in train.py and its embedded predictor writer. Save the timestamp transform, architecture version and all gate parameters with the single selected checkpoint for each of Movies_and_TV, Industrial_and_Scientific, Electronics and CDs_and_Vinyl. Preserve item_emb, log2feats(sequence), predict_score(features, items), ModelView and family-specific sample_batch. If internal timestamp context is needed, make its scope explicit, batch-aligned and cleared after each call; sequence-only compatibility calls use the documented missing-time path. Read features at the maximum nonzero position, with the baseline empty-history fallback. Verify initialization equivalence, causal future invariance, padding behavior, and evaluation-mode feature/candidate-score parity after predictor reconstruction, including missing timestamps.\n\nKeep DATA_DIR = os.environ['GAGC_DATA_DIR'], trial-local artifacts, preprocessing seed 0, training seed 42, at most 200 epochs and exactly 200 batches per executed epoch. Keep optimizer, loss, negative sampling and host checkpoint selection unchanged. Do not launch the other proposed ideas as part of this initial experiment. All training, diagnostics and failures count toward the shared 43,200 GPU-second budget; use single-GPU execution. Load exactly one independently trained checkpoint per category, without fusion or averaging.\n\nRetain DiagnosisProbe(view, device), run_full_diagnosis(train_loader) returning metrics and metric_definitions, and diagnosis_interpreter_prompt(raw_diagnosis). view.model remains the actual network. Adapt any forward hooks to capture the completed gated residual output and include the supplied temporal context in diagnostic records. Report measured gate distributions and margin summaries without assigning intent to gate values. Keep identical diagnostic candidates across paired conditions and distinguish these training diagnostics from host validation. Retain unavailable labels for reviews, ratings, categories, prices, stores and simulator traits. Fix replay serialization using explicit configuration and tensor/ID records rather than source inspection of the dynamically defined model class. Export parity must be measured after reload, not inferred from numerical stability controls.",
+      "pseudocode": "import math\nimport torch\nfrom torch import nn\n\nclass HistoricalGapResidualGate(nn.Module):\n    \"\"\"Inputs h, update, item_input: B x L x D; mask: B x L.\n    gap and available: B x L, aligned to observed input events only.\n    \"\"\"\n    def __init__(self, hidden_dim):\n        super().__init__()\n        self.projection = nn.Linear(3 * hidden_dim + 2, hidden_dim)\n        nn.init.zeros_(self.projection.weight)\n        nn.init.constant_(self.projection.bias, 2.0)\n        self.register_buffer('normalizer', torch.sigmoid(torch.tensor(2.0)))\n\n    def forward(self, h, update, item_input, mask,\n                gap=None, available=None):\n        if gap is None or available is None:\n            gap = h.new_zeros(h.shape[:2])\n            available = h.new_zeros(h.shape[:2])\n        temporal = torch.stack((gap, available), dim=-1).to(h)\n        context = torch.cat((h, update, item_input, temporal), dim=-1)\n        multiplier = torch.sigmoid(self.projection(context)) / self.normalizer.to(h)\n        return (h + multiplier * update) * mask.unsqueeze(-1).to(h)\n\n# Timestamp preprocessing, using explicitly known timestamp units:\n# For each occupied t with a valid preceding occupied event:\n#   delta = timestamp_seconds[t] - timestamp_seconds[previous_t]\n#   if both timestamps are valid and delta >= 0:\n#       available[t] = 1\n#       gap[t] = min(math.log1p(delta) / math.log1p(31536000), 1.0)\n#   else: gap[t] = available[t] = 0\n# First occupied positions and padding use zero for both features.\n#\n# At each existing baseline residual boundary:\n#   update = existing_completed_causal_update(h, mask)\n#   h = gate(h, update, current_input_embedding, mask, gap, available)\n#\n# Train all parameters jointly using the unchanged baseline objective.\n# Keep the host's category routing and checkpoint-selection procedure.\n# Serialize this exact class and temporal transform in the predictor writer.\n# Readout: indices = where(sequence != 0, position, -1).amax(dim=1).\n# Handle indices == -1 through the baseline empty-history fallback.\n# Compare reconstructed predictor features/scores against the trained model.\n# Deploy one selected checkpoint per category; report only host-measured validation.",
+      "originality": {
+        "score": 4,
+        "positive": "Combines identity-preserving initialization, current-input identity and strictly historical gap conditioning in a localized NextItNet modification.",
+        "negative": "Temporal gates and input-conditioned residual modulation are established mechanisms; novelty is the constrained adaptation and controlled evaluation."
+      },
+      "future_potential": {
+        "score": 7,
+        "positive": "Provides an inexpensive way to study whether observed interaction cadence improves the use of ordered histories across categories.",
+        "negative": "Purchasing gaps are ambiguous, timestamps may be unavailable at inference, and gates may learn effectively static multipliers."
+      },
+      "code_difficulty": {
+        "score": 3,
+        "positive": "The network change is one standard linear projection per residual update with no additional scorer or training objective.",
+        "negative": "Correct prefix timestamp alignment, sequence-only compatibility and identical predictor reconstruction require careful integration."
+      }
+    },
+    "related_work": [
+      {
+        "title": "NextItNet: A Simple Convolutional Generative Network for Next Item Recommendation",
+        "link": "https://arxiv.org/abs/1808.05163",
+        "contributions": [
+          "Uses causal dilated convolutions and residual blocks to model sequential item dependencies.",
+          "Provides the required backbone retained by the proposal."
+        ],
+        "limitations": [
+          "Does not establish the effectiveness of the proposed item-and-gap residual gates."
+        ]
+      },
+      {
+        "title": "TLSRec",
+        "link": "https://arxiv.org/abs/2208.04760",
+        "contributions": [
+          "Motivates dimension-wise temporal gating of long- and short-term preferences."
+        ],
+        "limitations": [
+          "Its recommendation-time lag requires a query timestamp; this proposal uses only gaps within observed history.",
+          "Its results do not demonstrate gains for gated NextItNet on the pinned benchmark."
+        ]
+      },
+      {
+        "title": "Sampled Softmax for Item Recommendation",
+        "link": "https://arxiv.org/abs/2201.02327",
+        "contributions": [
+          "Studies sampled-softmax ranking behavior and implicit emphasis on difficult negatives.",
+          "Motivates the alternative multi-negative training direction."
+        ],
+        "limitations": [
+          "Does not establish superiority for this NextItNet setting.",
+          "Unobserved candidates can be false negatives."
+        ]
+      },
+      {
+        "title": "MARS",
+        "link": "https://arxiv.org/abs/2409.00702",
+        "contributions": [
+          "Motivates attribute-aware representations and matching preferences to item attributes."
+        ],
+        "limitations": [
+          "Uses pretrained language models, which are prohibited here.",
+          "Does not validate the proposed randomly initialized title-token encoder."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/model-family-comparison-20261029/runs/nextitnet-self_evolverec/self_evolverec/calls/01243"
+}

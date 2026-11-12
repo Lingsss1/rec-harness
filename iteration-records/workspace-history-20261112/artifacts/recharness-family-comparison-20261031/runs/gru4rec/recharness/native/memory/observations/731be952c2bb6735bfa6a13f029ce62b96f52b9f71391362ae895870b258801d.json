@@ -1,0 +1,98 @@
+{
+  "schema_version": 2,
+  "protocol_id": "63d884e335450b4c7d4c05470c02cfbc484d52d6b839640f603abc93a1b33219",
+  "record": {
+    "round_idx": 8,
+    "trial_group_id": "trialgrp_1793443378987_2865811",
+    "trial_id": 2,
+    "arm": "sequence_interest",
+    "selected_categories": [
+      "sequence_interest"
+    ],
+    "patch_summary": "Implement causal recency-blended GRU readout consistently for training and generated inference, saving readout settings in category metadata. Preserve one model per category and enforce the required GAGC_DATA_DIR lookup.",
+    "benchmark_score": 0.5375,
+    "val_score": 0.5375,
+    "is_winner": true,
+    "is_group_winner": true,
+    "valid": true,
+    "failure_type": null,
+    "delta_vs_prev_best": -0.0525,
+    "delta_vs_input": 0.0075,
+    "outcome": "improved",
+    "val_support": "improved",
+    "gpu_seconds": 407.55390025675297,
+    "trial_cap_seconds": 436.0,
+    "per_dataset_hr10": {
+      "Movies_and_TV": 0.595,
+      "Industrial_and_Scientific": 0.575,
+      "Electronics": 0.41,
+      "CDs_and_Vinyl": 0.57
+    },
+    "error": "",
+    "parameter_changes": [
+      {
+        "name": "DATA_DIR",
+        "before_expression": "os.environ.get('GAGC_DATA_DIR', './input/trainval')",
+        "after_expression": "os.environ['GAGC_DATA_DIR']"
+      }
+    ],
+    "changed_definitions": [
+      "GRU4RecModel",
+      "GRU4RecModel.__init__",
+      "GRU4RecModel._readout_states",
+      "GRU4RecModel.encode",
+      "GRU4RecModel.forward",
+      "train_one_dataset",
+      "write_predict_script"
+    ],
+    "summary": "Implement causal recency-blended GRU readout consistently for training and generated inference, saving readout settings in category metadata. Preserve one model per category and enforce the required GAGC_DATA_DIR lookup.",
+    "proposal_history": [
+      {
+        "attempt": 1,
+        "summary": "Implement causal recency-blended GRU readout consistently for training and generated inference, saving readout settings in category metadata. Preserve one model per category and enforce the required GAGC_DATA_DIR lookup."
+      }
+    ],
+    "hypothesis": "Across all four datasets, replace each GRU state's readout with 0.75 times that state plus 0.25 times a causal, exponentially weighted mean of nonpadding GRU states through that position, using half-life 3 interactions. Apply this identically at training positions and the final real inference position. Recent-state pooling may retain useful short-term interests without learned pooling parameters. Preserve history length, GRU backbone, embeddings, scoring, loss and optimizer; update the predictor writer consistently.",
+    "input_source_sha256": "5f70847776559b31f825b5486b64fbf927801e42e1b4cd92f7e9fdfff4012401",
+    "candidate_source_sha256": "2bd8f6f2b3fb0010b2941c4cb19ad1edcc17649add80efff21ffa68880a41e98",
+    "input_normalized_sha256": "6d962711424aaf05e5d3d1d32a488d67a83ce8e31c345294efabae4964780f59",
+    "candidate_normalized_sha256": "6a59a29c3a35f4f63be73f631a9345f4b8548907b0587a8194d1bd463d50ff62",
+    "patch_sha256": "4cd22ceed04e7f481895ccb40629c0220f322c486af95e9b169287313797e413",
+    "diff_excerpt": "--- \n+++ \n@@ -30,5 +30,5 @@\n ]\n \n-DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")\n+DATA_DIR = os.environ['GAGC_DATA_DIR']\n \n SEED = int(os.environ.get(\"GAGC_SEED\", \"42\"))\n@@ -188,6 +188,9 @@\n class GRU4RecModel(nn.Module):\n     def __init__(self, itemnum: int, hidden_units: int = 128, num_layers: int = 1,\n-                 dropout_rate: float = 0.1):\n+                 dropout_rate: float = 0.1, readout_mix: float = 0.25,\n+                 readout_half_life: float = 3.0):\n         super().__init__()\n+        self.readout_mix = readout_mix\n+        self.readout_half_life = readout_half_life\n         self.itemnum = itemnum\n         self.hidden_units = hidden_units\n@@ -205,8 +208,21 @@\n         )\n \n-    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n+    def _readout_states(self, seq: torch.Tensor) -> torch.Tensor:\n         emb = self.dropout(self.item_emb(seq))\n         out, _ = self.gru(emb)\n-        # Histories are LEFT padded; count-1 indexes padding on short histories.\n+        positions = torch.arange(seq.size(1), device=seq.device)\n+        ages = positions[:, None] - positions[None, :]\n+        weights = torch.exp2(\n+            -ages.clamp(min=0).to(out.dtype) / self.readout_half_life\n+        ).masked_fill(ages < 0, 0.0)\n+        valid = seq.ne(0).unsqueeze(-1).to(out.dtype)\n+        numerator = torch.matmul(weights, out * valid)\n+        denominator = torch.matmul(weights, valid).clamp(min=1e-12)\n+        pooled = numerator / denominator\n+        return ((1.0 - self.readout_mix) * out + self.readout_mix * pooled) * valid\n+\n+    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n+        out = self._readout_states(seq)\n+        # Histories are LEFT padded; select the final observed position.\n         positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n         last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n@@ -214,6 +230,5 @@\n \n     def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n-        emb = self.dropout(self.item_emb(seq))\n-        out, _ = self.gru(emb)\n+        out = self._readout_states(seq)\n         pos_scores = (out * self.output_emb(pos)).sum(dim=-1)\n         neg_scores = (out * self.output_emb(neg)).sum(dim=-1)\n@@ -293,4 +308,6 @@\n             \"num_layers\": NUM_LAYERS,\n             \"dropout_rate\": DROPOUT_RATE,\n+            \"readout_mix\": model.readout_mix,\n+            \"readout_half_life\": model.readout_half_life,\n         }, f)\n     print(f\"  [{dataset_name}] Best val HR@10={max(best_hr10, 0.0):.4f}  ckpt={ckpt_path}\", flush=True)\n@@ -353,4 +370,6 @@\n             num_layers=meta[\"num_layers\"],\n             dropout_rate=0.0,\n+            readout_mix=meta[\"readout_mix\"],\n+            readout_half_life=meta[\"readout_half_life\"],\n         ).to(_device)\n         model.load_state_dict(torch.load(ckpt_path, map_location=_device, weights_only=True))\n",
+    "category_rationales": [
+      {
+        "category": "sequence_interest",
+        "rationale": "Blend each GRU state with a causal exponential mean of observed, nonpadding states: 75% current state and 25% pooled state, with half-life three interactions. Apply the same readout during training and inference across all four categories. Preserve recurrent topology, embeddings, scoring, loss, optimizer and history length; checkpoint the readout settings and restore them through the predictor writer."
+      }
+    ],
+    "baseline_validation": 0.53,
+    "basin_id": "default|combination_jump@6",
+    "execution_status": "success",
+    "attempt_count": 1,
+    "training_attempt_count": 1,
+    "training_attempts": [
+      {
+        "id": "round-0007-slot-2-attempt-1",
+        "status": "success",
+        "source_sha256": "2bd8f6f2b3fb0010b2941c4cb19ad1edcc17649add80efff21ffa68880a41e98",
+        "allocated_gpu_seconds": 407.55390025675297,
+        "error": "",
+        "score": 0.5375
+      }
+    ],
+    "checkpoint_fingerprints": {
+      "Movies_and_TV_model.pt": "b24827f76162089228433351c125f9b3da07e69a8834410cd2556f1a58602a36",
+      "Industrial_and_Scientific_model.pt": "5fece29586d9a667c50831d25993757d3adcd2768a489fb98c18fbef65e04bfb",
+      "Electronics_model.pt": "9e56ba17e3cef20439ea290e9720e04fb2492e07f737acc0a1f66f7b9ef65e1e",
+      "CDs_and_Vinyl_model.pt": "23a8f9a24bc44e3467a1065e3e18376e4a08f2c4a91812f14fa73a14556249bb"
+    },
+    "repair_errors": [],
+    "phase": "retune",
+    "jump_window_id": "default|combination_jump@6",
+    "promoted": true,
+    "provisional": false,
+    "protocol_id": "63d884e335450b4c7d4c05470c02cfbc484d52d6b839640f603abc93a1b33219",
+    "evidence_id": "731be952c2bb6735bfa6a13f029ce62b96f52b9f71391362ae895870b258801d"
+  },
+  "record_sha256": "45858cff7fd3351eff747c006574d3630a6664b8b862a89f9f21ef01758d4ffd"
+}

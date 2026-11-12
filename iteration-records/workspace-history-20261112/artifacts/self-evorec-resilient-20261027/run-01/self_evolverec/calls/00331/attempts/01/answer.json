@@ -1,0 +1,66 @@
+{
+  "markdown_report": "At 0% progress, prioritize a small, testable extension: **recent-intent residual SASRec with multi-negative training**. Improvements remain hypotheses; no validation results are available.\n\n**Insights from the starting point.** (1) SASRec can attend across the entire prefix. This permits preference continuity but does not ensure that repeated recent interests outrank older associations. (2) Electronics has 14.95% sampled wrong ranks and a −0.4812 lower-decile margin. This motivates improving difficult-case separation, although training margins do not establish validation HR@10. (3) Embedding alignment is similar across categories. These measurements provide little justification for prioritizing collapse penalties.\n\n**Insights from related work.** (1) [gSASRec](https://www.ijcai.org/proceedings/2024/939) motivates calibrated multi-negative training. It supplies a useful loss control before introducing architectural complexity. (2) [R²NS](https://renzhaochun.github.io/assets/pdf/WWW_2026_Camera_Ready.pdf) supports uniform warm-up before harder sampling. False-negative uncertainty makes immediate hardest-negative mining unattractive here. (3) [LSIDN](https://arxiv.org/abs/2407.14743) motivates distinguishing persistent and current interests. Its findings motivate testing separate temporal views, without establishing that recent purchases satisfy needs.\n\n**Framework and candidate directions.** Separate temporal evidence, discrimination, and relation evidence. Full-prefix/recent-prefix encoders address temporal relevance; multi-negative objectives address discrimination; title/transition channels offer uncertain relation evidence.\n\nScores below are originality / future potential / user alignment / model alignment / implementation difficulty; 10 means highest, including difficulty. Each assessment gives a benefit (+) and limitation (−).\n\n| Candidate | Scores | Assessment by dimension |\n|---|---|---|\n| A: Multi-negative gBCE, unchanged SASRec | 2/7/4/9/2 | Originality: +targeted adaptation, −established; potential: +reusable control, −limited mechanism; user: +fewer weak competitors, −no temporal correction; model: +targets margins, −surrogate only; difficulty: +small loss change, −sampling exclusions. |\n| B: Recent residual plus multi-negative gBCE | 4/8/8/8/4 | Originality: +focused combination, −known components; potential: +adaptive temporal evidence, −domain dependence; user: +specificity and recency, −no compatibility guarantees; model: +stronger discrimination, −false negatives; difficulty: +shared encoder, −additional prefix encoding. |\n| C: Separate title-similarity and directed-transition channels | 6/7/8/6/7 | Originality: +relation-aware fusion, −prior precedents; potential: +purpose clues, −weak relation labels; user: +specific matching and complements, −ownership ambiguity; model: +extra evidence, −uncertain margin gains; difficulty: +available inputs, −feature pipeline. |\n\n**Selected: B.** Fuse SASRec’s full-prefix state with a shared-encoder state restricted to the latest five interactions. A scalar gate conditioned on both states and prefix length controls the recent residual. This explicitly targets stale historical influence and broadly plausible recommendations that dilute repeated recent interests. Multi-negative gBCE targets weak separation, especially in Electronics. It cannot establish compatibility or purchase satisfaction.\n\nCompare baseline, loss-only, recent-only, and combined variants using identical seeds and the pinned four-category macro validation HR@10. Record GPU cost; retain the combined variant only if validation supports it.",
+  "idea": {
+    "description": "Add a gated recent-prefix residual to SASRec and train with 32 uniform negatives using calibrated generalized BCE. Share encoder parameters between the full and recent prefixes, preserving independent models and routing for all four datasets.",
+    "motivation": "The user diagnosis identifies stale interests and broadly related recommendations crowding out specific current preferences. A recent-prefix branch supplies explicit local evidence while preserving full-history preferences. Electronics’ 14.95% sampled wrong-rank rate motivates testing stronger negative discrimination; these diagnostics are evidence for experimentation, not evidence of validation improvement.",
+    "implementation_notes": "Keep DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, unchanged splits, dataset routing, and the SASREC_EPOCHS environment default of 200. Use a five-item recent window initially. For each valid training position, form both views strictly from its causal prefix; never include its target or subsequent interactions. Reuse one encoder with positions reset inside each recent prefix. Compute h = LayerNorm(h_full + sigmoid(MLP([h_full, h_recent, log1p(prefix_length)])) * h_recent); use the same construction for inference. Initialize the gate bias to -2 to favor a small initial residual. Sample 32 uniform negatives, excluding padding, target, and known training positives; permit repeats when the eligible catalog is small. Implement the published gBCE calibration rather than treating ordinary multi-negative BCE as gBCE, and record its parameters. Bound the four ablations within the shared 43,200 GPU-second budget; use single-GPU trials and compare common validation checkpoints. Update the predictor writer and working/predict.py with the fused architecture, gate parameters, window configuration, and identical feature construction. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). Route diagnostic scoring through the fused log2feats and predict_score methods, return measured metrics with definitions, and omit unavailable category/review probes. Treat existing embedding alignment as descriptive rather than severe collapse. No metadata, ratings, reviews, pretrained weights, or hidden test data are required.",
+    "pseudocode": "for category in FOUR_DATASETS:\n    initialize_shared_SASRec_and_gate(seed=42)\n    for batch in training_loader:\n        full = causal_full_prefix_states(batch.sequence)\n        recent = encode_last_k_items_of_each_causal_prefix(batch.sequence, k=5)\n        gate = sigmoid(MLP(concat(full, recent, log1p(prefix_lengths))))\n        features = layer_norm(full + gate * recent)\n        negatives = uniform_training_unseen_items(count=32)\n        positive_logits = dot(features, embedding(batch.positive))\n        negative_logits = dot(features, embedding(negatives))\n        loss = published_calibrated_gBCE(positive_logits, negative_logits)\n        update_parameters(loss, valid_positions_only=True)\n    save_checkpoint_and_matching_predictor_under_trial_directory()\ncompare_ablation_checkpoints_using_pinned_macro_validation_HR_at_10()\nrun_compatible_diagnostics_without_using_them_as_selection_metrics()",
+    "originality": {
+      "score": 4,
+      "positive": "Combines explicit recent-prefix evidence with calibrated discrimination to address the supplied temporal and ranking failures.",
+      "negative": "Shared temporal encoders, gates, and multi-negative objectives are established components."
+    },
+    "future_potential": {
+      "score": 8,
+      "positive": "Provides a compact foundation for studying when recent evidence should override persistent preferences.",
+      "negative": "Recency may emphasize incidental interactions, and gains may vary across categories."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Reuses SASRec parameters and item scoring without requiring external data.",
+      "negative": "Efficient causal recent-window encoding, calibrated loss implementation, and predictor parity require care."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Provides the causal self-attention baseline and shared item-embedding scoring."
+      ],
+      "limitations": [
+        "Its architecture does not guarantee preference for specific recent intent over older associations."
+      ]
+    },
+    {
+      "title": "gSASRec — IJCAI 2024 proceedings entry",
+      "link": "https://www.ijcai.org/proceedings/2024/939",
+      "contributions": [
+        "Motivates calibrated generalized BCE with multiple sampled negatives."
+      ],
+      "limitations": [
+        "Published evidence does not establish gains under this pinned four-category evaluation."
+      ]
+    },
+    {
+      "title": "R²NS",
+      "link": "https://renzhaochun.github.io/assets/pdf/WWW_2026_Camera_Ready.pdf",
+      "contributions": [
+        "Supports uniform warm-up and progressive stochastic hard-negative sampling."
+      ],
+      "limitations": [
+        "Hard negatives can include unobserved positives; the initial proposal therefore uses uniform sampling."
+      ]
+    },
+    {
+      "title": "LSIDN",
+      "link": "https://arxiv.org/abs/2407.14743",
+      "contributions": [
+        "Motivates distinguishing persistent preferences from short-term interests."
+      ],
+      "limitations": [
+        "Does not establish that interactions reveal satisfied needs or product compatibility."
+      ]
+    }
+  ]
+}

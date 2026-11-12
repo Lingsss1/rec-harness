@@ -1,0 +1,82 @@
+--- g3-r0014-position_collapsed/model.py
++++ g3-r0015-position_shared_primary/model.py
+@@ -1,20 +1,19 @@
+-"""Task-owned position-by-feedback routing; prospective, unmeasured.
+-
+-Inherit g3-r0013-local_collapsed including its local bilinear route.
+-Add 320 zero-initialized parameters after the inherited initialization:
+-20 exposure/feedback-by-match features x four rank kernels x four tasks.
+-Rank counts valid supplied events to the right, without using timestamps.
+-Kernels are exp(-rank/tau), tau=(1,4,16,64) events. The replacement control
+-broadcasts their within-history mean to every event, retaining length and
+-kernel marginals but removing the event-to-position association. A second
+-factor collapses only this new route's feedback identities. Both positional
+-alternatives execute in all cells; inherited RNG and initial outputs match.
+-
+-The inherited self donor multiplies click gate logits by 1.5; click retains
+-coefficient-L1 redistribution and auxiliary gates retain their full gains.
+-Each new task matrix receives its own loss through this route. Shared
+-context and host clipping still couple optimization. This tests supplied
+-history position, not elapsed time, online availability, auxiliary-label
+-causality, or original-method priority. Tensor checks belong to the host.
++"""Position-route task sharing and gradient ownership; prospective, unmeasured.
++
++Inherit g3-r0014-position_collapsed without new parameters or RNG draws.
++Factor 1: task-private position logits or the click row broadcast to all tasks.
++Factor 2: joint loss gradients or stop only auxiliary position-logit gradients.
++All cells execute the inherited four projections and both rank contractions.
++Shared cells allocate all 320 position coefficients but use only the 80 in
++the click row; allocated capacity is matched, functional capacity is not.
++The shared joint/primary pair differs only in auxiliary backward ownership
++at fixed weights. In task/primary, unused auxiliary positional rows remain
++zero from initialization, while all other auxiliary pathways still train.
++
++The self donor still multiplies click gate logits by 1.5. Click coefficient
++L1 mass is preserved. Context and dense gradient clipping remain indirect
++task couplings. Rank counts supplied events, not time. Feedback visibility,
++labels, loss weights and host training are unchanged. No novelty or measured
++performance claim is made. Tensor/autograd checks belong to the host.
+ """
+ import copy
+@@ -26,5 +25,5 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'shared', 'position_aux_gradient': 'primary'}
+ 
+ 
+@@ -41,4 +40,5 @@
+                  gate_conditioning='local', conditioning_feedback_identity=False,
+                  position_scope='event', position_feedback_identity=False,
++                 position_sharing='shared', position_aux_gradient='primary',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+@@ -108,4 +108,12 @@
+         self.position_scope = position_scope
+         self.position_feedback_identity = position_feedback_identity
++        if position_scope != 'event' or position_feedback_identity:
++            raise ValueError('Ownership study fixes event position and collapsed feedback')
++        if position_sharing not in ('task', 'shared'):
++            raise ValueError('Position sharing must be task or shared')
++        if position_aux_gradient not in ('joint', 'primary'):
++            raise ValueError('Position gradient ownership must be joint or primary')
++        self.position_sharing = position_sharing
++        self.position_aux_gradient = position_aux_gradient
+         self.primary_gate_component = primary_gate_component
+         self.gate_transfer_source = gate_transfer_source
+@@ -310,4 +318,15 @@
+         marginal_logits = torch.stack(marginal_logits, dim=-1)
+         result = event_logits if self.position_scope == 'event' else marginal_logits
++        # Always calculate the shared alternative. Select the click row by
++        # label rather than assuming FeatureMap task order. Broadcast logits,
++        # not an average of matrices, so the click gradient scale is retained.
++        shared_result = (result * self._primary_channel).sum(dim=-1, keepdim=True)
++        if self.position_sharing == 'shared':
++            result = shared_result.expand_as(result)
++        if self.position_aux_gradient == 'primary':
++            # Only this input-only positional correction loses auxiliary
++            # gradients; auxiliary predictions, towers, private embeddings,
++            # score readout rows, and other gate parameters keep learning.
++            result = torch.where(self._primary_channel, result, result.detach())
+         return result.masked_fill(~valid.unsqueeze(-1), 0)
+ 

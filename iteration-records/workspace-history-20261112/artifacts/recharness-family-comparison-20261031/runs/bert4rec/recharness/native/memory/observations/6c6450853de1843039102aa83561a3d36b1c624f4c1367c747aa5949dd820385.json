@@ -1,0 +1,90 @@
+{
+  "schema_version": 2,
+  "protocol_id": "f08035801d41346837206fcb06602ae788921782d9cb4b30466bc6e659f659d9",
+  "record": {
+    "round_idx": 3,
+    "trial_group_id": "trialgrp_1793454476814_2921447",
+    "trial_id": 3,
+    "arm": "embedding_representation",
+    "selected_categories": [
+      "embedding_representation"
+    ],
+    "patch_summary": "Normalize the tied BERT4Rec item table to a fixed Xavier-scale row norm across context lookup, training logits and candidate scoring. Preserve zero padding, the exclusive mask ID and existing checkpoint shapes; the embedded predictor automatically imports the updated implementation.",
+    "benchmark_score": 0.5912,
+    "val_score": 0.5912,
+    "is_winner": true,
+    "is_group_winner": true,
+    "valid": true,
+    "failure_type": null,
+    "delta_vs_prev_best": 0.0375,
+    "delta_vs_input": 0.0375,
+    "outcome": "improved",
+    "val_support": "improved",
+    "gpu_seconds": 418.45758989453316,
+    "trial_cap_seconds": 6568.110118985176,
+    "per_dataset_hr10": {
+      "Movies_and_TV": 0.635,
+      "Industrial_and_Scientific": 0.6,
+      "Electronics": 0.435,
+      "CDs_and_Vinyl": 0.695
+    },
+    "error": "",
+    "parameter_changes": [],
+    "changed_definitions": [
+      "BERT4RecModel",
+      "BERT4RecModel.effective_item_weight",
+      "BERT4RecModel.encode_sequence",
+      "BERT4RecModel.forward",
+      "BERT4RecModel.score_candidates",
+      "bpr_sequence_loss"
+    ],
+    "summary": "Normalize the tied BERT4Rec item table to a fixed Xavier-scale row norm across context lookup, training logits and candidate scoring. Preserve zero padding, the exclusive mask ID and existing checkpoint shapes; the embedded predictor automatically imports the updated implementation.",
+    "proposal_history": [
+      {
+        "attempt": 1,
+        "summary": "Normalize the tied BERT4Rec item table to a fixed Xavier-scale row norm across context lookup, training logits and candidate scoring. Preserve zero padding, the exclusive mask ID and existing checkpoint shapes; the embedded predictor automatically imports the updated implementation."
+      }
+    ],
+    "hypothesis": "Across all four datasets, normalize every nonpadding item embedding to a fixed L2 norm sqrt(2*64/(itemnum+2+64)), matching the expected initial Xavier row norm. Use this effective tied table consistently for context lookup, masked-item cross-entropy and candidate scoring; keep padding zero and the exclusive mask as a separate ID. Removing item-norm variation may improve angular discrimination without increasing width, whose earlier expansion regressed. Preserve positional embeddings, topology, history, loss definition and optimizer; update the predictor writer consistently.",
+    "input_source_sha256": "5c15d91c518e4da19710a6b20bd6ce19665a9211fb7b9ad38320367f3a658ba8",
+    "candidate_source_sha256": "e13a5810a89dd20abd19b8b3bb58c028fcacfa5189315c3e0f3af580468d3d55",
+    "input_normalized_sha256": "f440597c7ef3899909e9ba5a861fb3a3e1324dbefbf2b8c3bc8d2d1c1419667b",
+    "candidate_normalized_sha256": "6004f2f469db196f47afed481e838d1f796992bd534b796ed8bfd3186661cbe9",
+    "patch_sha256": "ea951bdd2e70ae2bb7cf53cbc7edd9f8887099ac6e81201351f75c970ed4798b",
+    "diff_excerpt": "--- \n+++ \n@@ -163,5 +163,5 @@\n     # Only real item IDs 1..itemnum are prediction classes.\n     logits = torch.nn.functional.linear(\n-        masked_states, model.item_emb.weight[1:model.itemnum + 1]\n+        masked_states, model.effective_item_weight()[1:model.itemnum + 1]\n     )\n     return torch.nn.functional.cross_entropy(logits, targets, reduction=\"mean\")\n@@ -211,9 +211,19 @@\n             self.pos_emb.weight[0].zero_()\n \n+    def effective_item_weight(self) -> torch.Tensor:\n+        row_norm = math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))\n+        nonpadding = torch.nn.functional.normalize(\n+            self.item_emb.weight[1:], p=2, dim=-1, eps=1e-12\n+        ) * row_norm\n+        return torch.cat((torch.zeros_like(self.item_emb.weight[:1]), nonpadding), dim=0)\n+\n     def encode_sequence(self, seq: torch.Tensor) -> torch.Tensor:\n         batch, length = seq.shape\n         pos = torch.arange(length, device=seq.device).unsqueeze(0).expand(batch, -1) + 1\n         pos = pos * (seq != 0).long()\n-        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)\n+        item_vectors = torch.nn.functional.embedding(\n+            seq, self.effective_item_weight(), padding_idx=0\n+        )\n+        x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)\n         x = self.dropout(x)\n         padding = seq == 0\n@@ -225,6 +235,7 @@\n     def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n         out = self.encode_sequence(seq)\n-        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n-        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n+        item_weight = self.effective_item_weight()\n+        pos_scores = (out * torch.nn.functional.embedding(pos, item_weight, padding_idx=0)).sum(dim=-1)\n+        neg_scores = (out * torch.nn.functional.embedding(neg, item_weight, padding_idx=0)).sum(dim=-1)\n         return pos_scores, neg_scores\n \n@@ -235,5 +246,7 @@\n         out = self.encode_sequence(prediction_seq)\n         user_emb = out[0, -1]\n-        cand_emb = self.item_emb(candidates)\n+        cand_emb = torch.nn.functional.embedding(\n+            candidates, self.effective_item_weight(), padding_idx=0\n+        )\n         return torch.matmul(cand_emb, user_emb)\n \n",
+    "category_rationales": [
+      {
+        "category": "embedding_representation",
+        "rationale": "Across all four datasets, constrain every nonpadding embedding, including the exclusive mask embedding, to the expected initial Xavier row norm. Use the same effective tied table for context, masked-item cross-entropy and candidate scoring. This tests angular discrimination while preserving width, topology, loss, optimizer and histories. The generated predictor imports the updated model class, preserving checkpoint and inference consistency."
+      }
+    ],
+    "baseline_validation": 0.5537,
+    "basin_id": "default",
+    "execution_status": "success",
+    "attempt_count": 1,
+    "training_attempt_count": 1,
+    "training_attempts": [
+      {
+        "id": "round-0002-slot-3-attempt-1",
+        "status": "success",
+        "source_sha256": "e13a5810a89dd20abd19b8b3bb58c028fcacfa5189315c3e0f3af580468d3d55",
+        "allocated_gpu_seconds": 418.45758989453316,
+        "error": "",
+        "score": 0.5912
+      }
+    ],
+    "checkpoint_fingerprints": {
+      "Movies_and_TV_model.pt": "f6989e4dbb868ae7fe395de50e663078bb85a049ced7a4fe50eb261039b0898a",
+      "Industrial_and_Scientific_model.pt": "7048eabfa56b284eca2f264e3a4a256ac1b6126dd5d7edc787d5edd368a0dbcc",
+      "Electronics_model.pt": "974c240754e654877429d2b17beb7baf88638afd24749159d47ab0f9664befa6",
+      "CDs_and_Vinyl_model.pt": "539e40b53ed4984d508913b876c87f3862d522def9c5bd9a0187f512ab510e13"
+    },
+    "repair_errors": [],
+    "phase": "regular",
+    "promoted": true,
+    "provisional": false,
+    "protocol_id": "f08035801d41346837206fcb06602ae788921782d9cb4b30466bc6e659f659d9",
+    "evidence_id": "6c6450853de1843039102aa83561a3d36b1c624f4c1367c747aa5949dd820385"
+  },
+  "record_sha256": "3f9574b4f451920b5a52975be58296993cb8ea9f543d2dc179d9b4ae3248b7ba"
+}

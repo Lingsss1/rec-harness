@@ -1,0 +1,87 @@
+{
+  "category_edits": [
+    {
+      "category": "architecture_interaction",
+      "rationale": "Retain GRU recurrence and add a jointly trained gated scoring projection q=sigmoid(Wg h)*tanh(Wq h), shared by training and candidate inference. Preserve final-real-position readout. The generated predictor imports this updated class, so it restores the same projection parameters from each category's single checkpoint.",
+      "edits": [
+        {
+          "find": "        self.dropout = nn.Dropout(dropout_rate)",
+          "replace": "        self.dropout = nn.Dropout(dropout_rate)\n        self.query_gate = nn.Linear(hidden_units, hidden_units)\n        self.query_value = nn.Linear(hidden_units, hidden_units)"
+        },
+        {
+          "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:",
+          "replace": "    def project(self, states: torch.Tensor) -> torch.Tensor:\n        return torch.sigmoid(self.query_gate(states)) * torch.tanh(self.query_value(states))\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:"
+        },
+        {
+          "find": "        return out[torch.arange(seq.size(0), device=seq.device), last]",
+          "replace": "        return self.project(out[torch.arange(seq.size(0), device=seq.device), last])"
+        },
+        {
+          "find": "        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)",
+          "replace": "        query = self.project(out)\n        pos_scores = (query * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (query * self.item_emb(neg)).sum(dim=-1)"
+        }
+      ]
+    },
+    {
+      "category": "hyperparameter_tuning",
+      "rationale": "Couple the additional embedding and projection capacity with Adam learning rate 0.0007, dropout 0.15, weight decay 0.00001 and batch size 256. Preserve BPR, sampling, history length, epoch cap and batches per epoch. Require the supplied dataset directory explicitly.",
+      "edits": [
+        {
+          "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+          "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+        },
+        {
+          "find": "DROPOUT_RATE  = float(os.environ.get(\"GRU4REC_DROPOUT\", \"0.1\"))",
+          "replace": "DROPOUT_RATE  = float(os.environ.get(\"GRU4REC_DROPOUT\", \"0.15\"))"
+        },
+        {
+          "find": "LR            = float(os.environ.get(\"GRU4REC_LR\", \"1e-3\"))",
+          "replace": "LR            = float(os.environ.get(\"GRU4REC_LR\", \"0.0007\"))"
+        },
+        {
+          "find": "WEIGHT_DECAY  = float(os.environ.get(\"GRU4REC_WD\", \"0.0\"))",
+          "replace": "WEIGHT_DECAY  = float(os.environ.get(\"GRU4REC_WD\", \"0.00001\"))"
+        },
+        {
+          "find": "BATCH_SIZE    = int(os.environ.get(\"GRU4REC_BATCH\", \"128\"))",
+          "replace": "BATCH_SIZE    = int(os.environ.get(\"GRU4REC_BATCH\", \"256\"))"
+        }
+      ]
+    },
+    {
+      "category": "embedding_representation",
+      "rationale": "Use separate, jointly trained 96-dimensional input and output embedding tables with raw norms. This decouples recurrent inputs from ranking geometry across all four datasets. Existing metadata records the width, and the predictor imports the updated model class and strictly restores both tables and the gated projection.",
+      "edits": [
+        {
+          "find": "HIDDEN_UNITS  = int(os.environ.get(\"GRU4REC_HIDDEN\", \"128\"))",
+          "replace": "HIDDEN_UNITS  = int(os.environ.get(\"GRU4REC_HIDDEN\", \"96\"))"
+        },
+        {
+          "find": "    def __init__(self, itemnum: int, hidden_units: int = 128, num_layers: int = 1,",
+          "replace": "    def __init__(self, itemnum: int, hidden_units: int = 96, num_layers: int = 1,"
+        },
+        {
+          "find": "        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)",
+          "replace": "        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)\n        self.output_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)"
+        },
+        {
+          "find": "            nn.init.xavier_uniform_(self.item_emb.weight)\n            self.item_emb.weight[0].zero_()",
+          "replace": "            nn.init.xavier_uniform_(self.item_emb.weight)\n            self.item_emb.weight[0].zero_()\n            nn.init.xavier_uniform_(self.output_emb.weight)\n            self.output_emb.weight[0].zero_()"
+        },
+        {
+          "find": "self.item_emb(pos)",
+          "replace": "self.output_emb(pos)"
+        },
+        {
+          "find": "self.item_emb(neg)",
+          "replace": "self.output_emb(neg)"
+        },
+        {
+          "find": "        cand_emb = self.item_emb(candidates)",
+          "replace": "        cand_emb = self.output_emb(candidates)"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Across all four category models, use untied 96-dimensional embeddings and gated GRU scoring with coordinated learning-rate, dropout, weight-decay and batch-size changes. Preserve single-checkpoint routing, observed histories, BPR and the existing training limits. The predictor's shared-class loading keeps architecture and checkpoint shapes consistent."
+}

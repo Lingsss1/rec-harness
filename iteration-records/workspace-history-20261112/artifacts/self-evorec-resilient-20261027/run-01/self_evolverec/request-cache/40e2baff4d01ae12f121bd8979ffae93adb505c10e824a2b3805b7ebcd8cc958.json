@@ -1,0 +1,90 @@
+{
+  "request_sha256": "40e2baff4d01ae12f121bd8979ffae93adb505c10e824a2b3805b7ebcd8cc958",
+  "response": {
+    "markdown_report": "### Insights and directions\n\n**Starting-point insights.** (1) SASRec already models ordered preferences through causal attention. A small recent-history residual can test whether its final representation underweights current intent. (2) Users report both stale interests and broadly related recommendations displacing specific matches. These observations motivate recent-intent conditioning, although histories cannot establish compatibility or satisfied demand. (3) Electronics has 14.95% sampled wrong ranks and a −0.4812 lower-decile margin. These measurements motivate stronger ranking competition but do not identify its cause or establish validation HR@10.\n\n**Related-work insights.** (1) MSMT-LSI separates short- and long-term preferences; HyperHawkes models recurring intents. Both motivate adaptive fusion, while their reported results do not establish benefits here. (2) gSASRec motivates multiple negatives and objective calibration. Corrected-logQ research separately addresses sampling bias, so additional negatives alone should not be described as calibrated learning. (3) R²NS cautions against aggressive early hard mining. Uniform negatives provide a simpler initial experiment within the search budget.\n\n### Framework\n\n| Direction | Existing mechanism | Proposed experiment |\n|---|---|---|\n| Current intent | Short/long preference fusion | Gated recent-history residual |\n| Ranking discrimination | Multiple-negative objectives | Uniform sampled softmax |\n| Joint adaptation | Intent-conditioned ranking | Recent residual trained with multiple negatives |\n\n### Candidate assessment\n\nScores are 0–10; higher difficulty means harder implementation. Each cell gives a positive and a limitation.\n\n| Idea | Originality | Potential | User alignment | Model alignment | Difficulty |\n|---|---|---|---|---|---|\n| A: Recent residual | 3: targeted; familiar | 6: extensible; recency can mislead | 8: addresses stale/broad matches; specificity remains latent | 4: may improve margins; indirect | 2: small module; padding requires care |\n| B: Multiple-negative softmax | 2: established; limited novelty | 7: scalable competition; sampling-sensitive | 4: sharper ranking; no current-intent mechanism | 8: targets wrong ranks; false negatives remain | 3: simple loss; extra memory |\n| C: Gated recent residual plus B | 4: diagnostic combination; familiar components | 8: adaptable; gains unverified | 8: targets stale interests and broad associations; cannot verify utility | 8: targets weak margins; HR improvement uncertain | 4: modest changes; predictor synchronization required |\n\n### Selected idea: C\n\nAt 0% progress, prioritize this feasible combination. Blend SASRec’s causal features with an exponentially weighted representation of the latest five items using a learned scalar gate at each position. Train with 32 uniform negatives per valid target and sampled softmax. The recent branch targets stale-history influence and broad associations that dilute repeated recent interests; multiple-negative competition targets weak positive–negative separation, especially in Electronics. These are hypotheses, not demonstrated improvements.\n\nAblate baseline, A, B, and C. Select exclusively by pinned macro validation HR@10 across all four datasets; report category results and GPU cost. Preserve seeds, splits, routing, diagnostic interfaces, and predictor architecture. Do not infer ownership satisfaction, compatibility, or simulator traits.",
+    "idea": {
+      "description": "Add a gated recent-history residual to SASRec and train it with uniform multiple-negative sampled softmax. At each valid position, combine the original sequence feature with a projected, exponentially weighted mean of up to five recent item embeddings.",
+      "motivation": "The recent branch explicitly targets two reported user failures: historical interests overpowering current purpose, and broadly plausible associations displacing specific recent matches. Multiple-negative competition targets the measured weak ranking separation, particularly Electronics’ 14.95% sampled wrong-rank rate. Neither mechanism establishes compatibility or whether a previous purchase satisfied a need.",
+      "implementation_notes": "Keep DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, all four dataset routes, and the SASREC_EPOCHS environment default of 200. Exclude padding, targets, and known training positives from sampled negatives; skip positions without eligible negatives. Compute recent summaries causally and mask padding. Initialize the gate bias at -2 so the initial model stays close to SASRec. Use a fixed temperature of 1 initially; treat sampled softmax as a surrogate without claiming full-softmax calibration. Bound memory by chunking valid positions. Save projection and gate parameters, and update the predictor writer so working/predict.py reconstructs the exact architecture. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). Make view.log2feats return the fused features and view.predict_score use the same scoring function as inference; retain view.model as the actual module. Continue reporting measured embedding similarity and margin statistics with their definitions; omit unavailable category breakdowns or mark them unavailable. Treat diagnostics as supporting evidence, with checkpoint selection based on pinned macro validation HR@10. Run baseline/A/B/C sequentially within a single GPU and the remaining shared budget; no gains are asserted before evaluation.",
+      "pseudocode": "class RecentResidualSASRec(SASRec):\n    def log2feats(self, sequence):\n        h = super().log2feats(sequence)\n        # At position t, summarize only nonpadding sequence positions <= t.\n        r = causal_recent_weighted_mean(self.item_emb(sequence), sequence,\n                                        window=5, decay=0.7)\n        r = self.recent_projection(r)\n        g = sigmoid(self.gate(concat(h, r, h * r)))\n        return mask_padding((1 - g) * h + g * r, sequence)\n\nfor sequence, positive in training_batches:\n    features = model.log2feats(sequence)\n    for chunk in valid_position_chunks(features, positive):\n        negatives = sample_uniform_eligible_items(\n            count=32, exclude=padding_and_target_and_user_training_positives)\n        logits = model.predict_score(chunk.features,\n                                     concat(chunk.positive, negatives))\n        loss = cross_entropy(logits, target_column=0)\n        accumulate_correctly_normalized_gradients(loss)\n    optimizer.step()\n\n# Compare baseline, recent-only, loss-only, and combined configurations.\n# Use the unchanged pinned validation protocol for selection.\n# Save every inference parameter and emit the matching predictor architecture.",
+      "originality": {
+        "score": 4,
+        "positive": "Combines a small intent-adaptation mechanism with ranking competition in direct response to the supplied qualitative and quantitative diagnoses.",
+        "negative": "Both adaptive short/long preference fusion and multiple-negative training are established techniques; methodological novelty is limited."
+      },
+      "future_potential": {
+        "score": 8,
+        "positive": "Provides a controlled foundation for later timestamp-aware gates or multiple recent interests if the simple ablations succeed.",
+        "negative": "Recent interactions can reflect transient noise, and sampled-ranking improvements may not translate into higher macro validation HR@10."
+      },
+      "code_difficulty": {
+        "score": 4,
+        "positive": "Requires a small causal pooling branch, gate, and replacement loss while retaining SASRec’s shared item scoring.",
+        "negative": "Negative exclusion, memory-efficient loss computation, diagnostic consistency, and predictor reconstruction require careful integration."
+      }
+    },
+    "related_work": [
+      {
+        "title": "Self-Attentive Sequential Recommendation",
+        "link": "https://arxiv.org/abs/1808.09781",
+        "contributions": [
+          "Provides the causal self-attention baseline and shared item-embedding scoring architecture."
+        ],
+        "limitations": [
+          "Its architecture alone does not guarantee that current specific intent dominates broad historical associations."
+        ]
+      },
+      {
+        "title": "MSMT-LSI (2024)",
+        "link": "https://link.springer.com/article/10.1007/s44196-024-00460-5",
+        "contributions": [
+          "Separately models short- and long-term preferences and fuses their representations."
+        ],
+        "limitations": [
+          "Does not establish gains for the proposed minimal residual or this pinned benchmark."
+        ]
+      },
+      {
+        "title": "HyperHawkes (WWW 2025)",
+        "link": "https://evazangerle.at/publication/peintner-www-2025/",
+        "contributions": [
+          "Combines latent intents, recurrence modeling, and short-term attention mixtures."
+        ],
+        "limitations": [
+          "Its richer machinery adds implementation and tuning cost; consumed-item recurrence cannot directly serve unseen-item recommendations."
+        ]
+      },
+      {
+        "title": "gSASRec extended abstract (2024)",
+        "link": "https://www.ijcai.org/proceedings/2024/0939.pdf",
+        "contributions": [
+          "Motivates multiple-negative training and generalized BCE calibration."
+        ],
+        "limitations": [
+          "The proposed sampled-softmax experiment is a different objective and does not inherit gBCE calibration claims."
+        ]
+      },
+      {
+        "title": "Corrected logQ work (RecSys 2025)",
+        "link": "https://arxiv.org/abs/2507.09331",
+        "contributions": [
+          "Examines sampling-distribution correction while accounting for deterministic inclusion of the positive."
+        ],
+        "limitations": [
+          "Sampling correction does not resolve uncertain false negatives or establish current user intent."
+        ]
+      },
+      {
+        "title": "R²NS (WWW 2026)",
+        "link": "https://renzhaochun.github.io/assets/pdf/WWW_2026_Camera_Ready.pdf",
+        "contributions": [
+          "Motivates caution about aggressive hard-negative mining early in training."
+        ],
+        "limitations": [
+          "Does not demonstrate that uniform negatives are optimal for these four datasets."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/self-evorec-resilient-20261027/run-01/self_evolverec/calls/00197"
+}

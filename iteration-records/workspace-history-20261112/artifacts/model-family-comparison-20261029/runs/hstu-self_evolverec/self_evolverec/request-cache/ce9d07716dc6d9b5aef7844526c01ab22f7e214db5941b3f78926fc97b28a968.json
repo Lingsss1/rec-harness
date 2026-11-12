@@ -1,0 +1,70 @@
+{
+  "request_sha256": "ce9d07716dc6d9b5aef7844526c01ab22f7e214db5941b3f78926fc97b28a968",
+  "response": {
+    "markdown_report": "The recommended first experiment is **joint lexical-residual HSTU**: enrich the corrected backbone’s item embeddings with title/description features learned from scratch. This directly targets two reported user failures: broad associations replacing specific intent, and overlooked connector/format/dimension distinctions. Improvements remain hypotheses.\n\n**Insights and directions.** The starting evidence suggests three insights: (1) Electronics deserves particular attention because its sampled wrong-rank rate is 10.71%; these training diagnostics do not establish validation performance. (2) Collapse scores near 0.5 indicate approximately zero mean cosine similarity, so explicit anti-collapse regularization lacks support. (3) User complaints emphasize specificity and compatibility, motivating representations that preserve concrete textual distinctions; text cannot certify compatibility or fulfilled needs.\n\nRelated work suggests three further insights: (1) HSTU-BLaIR supports investigating content-enriched HSTU, but its pretrained encoder leaves the no-pretraining setting unresolved. (2) SimRec motivates textual supervision, although its pretrained features and SASRec backbone limit transfer claims. (3) Official HSTU supports multi-negative sampled softmax; Hard-BPR cautions that harder negatives can amplify unknown-positive errors.\n\nThese form three directions: **representation specificity**, **candidate discrimination**, and **temporal relevance**.\n\n**Framework and candidate assessment.** Scores are Originality / Potential / User alignment / Model alignment / Difficulty; higher difficulty means harder implementation. Each assessment includes a benefit (+) and limitation (−).\n\n| Idea | Scores | Critical assessment |\n|---|---|---|\n| A. Joint lexical-residual HSTU | 4/7/8/6/4 | Originality: + constrained adaptation, − established fusion. Potential: + shares evidence across sparse items, − sparse tokens may generalize poorly. User: + specific attributes and compatibility clues, − no compatibility labels. Model: + may improve Electronics discrimination, − unverified margins. Difficulty: + mean pooling is small, − tokenizer/checkpoint integration. |\n| B. Larger uniform-negative sampled softmax | 3/6/4/8/3 | Originality: + task-specific test, − standard objective. Potential: + stronger ranking supervision, − diminishing returns. User: + better candidate ordering, − no explicit attribute evidence. Model: + targets weak separation, − sampled margins may mislead. Difficulty: + existing scoring interface, − extra GPU cost. |\n| C. Bucketed historical time bias | 3/6/7/4/5 | Originality: + task adaptation, − native HSTU mechanism. Potential: + recent-intent modeling, − recency is imperfect. User: + current purpose and stale demand, − cannot identify completed needs. Model: + contextual discrimination, − no measured temporal failure. Difficulty: + internal bias, − timestamp plumbing. |\n\n**Selected experiment.** At 0% progress, choose A for feasibility and direct alignment with two user-facing failures plus Electronics’ weak separation. Preserve punctuation-bearing model identifiers and number-unit tokens; pool trainable token embeddings, project them, and add a learned, initially small lexical residual to ID embeddings. Retain HSTU attention, gating, causal training, and baseline loss. Use the same embedding function for history and candidate scoring.\n\nCompare against the supplied baseline using fixed macro validation HR@10. Retain all four routed category models, seeds, 200-epoch ceiling, 200 batches/epoch, and diagnostic contracts. Serialize vocabulary, lexical buffers, architecture configuration, and weights into each category’s single checkpoint; mirror the architecture in the predictor writer. No gains are claimed before evaluation.",
+    "idea": {
+      "description": "Joint lexical-residual HSTU: replace the baseline item-embedding lookup with a single jointly trained embedding module combining item identity and pooled title/description tokens. Keep the corrected HSTU backbone and baseline objective.",
+      "motivation": "The user diagnosis identifies broad thematic matching and missed connector, format, and dimension distinctions. Public text can supply specific evidence for these distinctions. Shared lexical parameters may also help discriminate sparse Electronics items, where measured negative-over-positive errors reach 10.71%, but this benefit must be validated.",
+      "implementation_notes": "Build a deterministic vocabulary from permitted public item titles/descriptions without external weights. Retain model identifiers, connector terms, formats, and number-unit tokens; cap description length and use a modest vocabulary. Implement item_emb as a module exposing forward(item_ids) and a differentiable effective weight property so ModelView and embedding probes see the actual combined representations. Compute e(i)=ID(i)+sigmoid(a)*LayerNorm(W*mean(Token(tokens_i))), with a initially -3; items without text receive a zero lexical residual and padding ID 0 always returns zero. Preserve the baseline embedding scale and downstream HSTU computation. Apply the same combined embeddings to input histories and output candidate scores. Keep log2feats(sequence), predict_score(features, items), family-specific sample_batch, and ModelView compatible. For left padding, read the maximum index whose item ID is nonzero, with an explicit all-padding fallback. Retain DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis); compute margins using actual model scores and describe the embedding probe as measuring effective combined embeddings. Do not access unavailable review/category fields or fabricate category breakdowns. Keep DATA_DIR=os.environ['GAGC_DATA_DIR'], all four category routes, preprocessing seed 0, training seed 42, at most 200 epochs and 200 batches per epoch, and single-GPU execution. Store all artifacts under the trial directory. Each category loads exactly one checkpoint containing the jointly trained network, token mappings/buffers, and configuration. Update the embedded predictor writer alongside training architecture changes. Select using the pinned macro validation HR@10; margin changes are diagnostic only. This is an implementation proposal because the supplied message contains no baseline source to patch safely.",
+      "pseudocode": "for category in FOUR_CATEGORIES:\n    data = baseline_load_and_split(os.environ['GAGC_DATA_DIR'], category, preprocessing_seed=0)\n    vocab, item_tokens = tokenize_permitted_titles_descriptions(data)\n    seed_everything(42)\n    model = corrected_baseline_HSTU(category_config)\n    model.item_emb = JointLexicalEmbedding(ID, Token, projection, item_tokens, gate_init=-3)\n    # forward(ids): ID(ids) + sigmoid(gate) * projected_pooled_text(ids)\n    # zero residual for missing text; zero entire representation for padding\n    # use this module consistently for history and candidate representations\n    for epoch in range(min(configured_epochs, 200)):\n        for step in range(200):\n            sequence, positive, negative = family_specific_sample_batch(data)\n            features = model.log2feats(sequence)\n            loss = unchanged_baseline_loss(features, positive, negative, model.predict_score)\n            optimizer_step(loss)\n        run_existing_validation_and_checkpoint_selection()\n    save_one_selected_checkpoint_with_config_vocabulary_and_buffers(category)\nwrite_predictor_with_identical_JointLexicalEmbedding_and_HSTU_definitions()\n# Predictor: route category, load its single checkpoint, and score with that model.\n# Final readout index = max(where(sequence != 0, arange(L), -1)); handle empty rows.",
+      "originality": {
+        "score": 4,
+        "positive": "Tests a constrained, jointly trained lexical adaptation of content-enriched HSTU without pretrained weights.",
+        "negative": "ID-plus-content representation fusion and mean token pooling are established techniques."
+      },
+      "future_potential": {
+        "score": 7,
+        "positive": "A successful result would support inexpensive sharing of specific item attributes across sparse catalog entries.",
+        "negative": "Sparse lexical supervision may fail to learn semantic equivalence or reliable compatibility."
+      },
+      "code_difficulty": {
+        "score": 4,
+        "positive": "Adds a small embedding module while preserving the HSTU backbone, sampler, and loss.",
+        "negative": "Requires consistent effective embeddings, serialized token buffers, diagnostic adaptation, and predictor generation."
+      }
+    },
+    "related_work": [
+      {
+        "title": "HSTU-BLaIR (2025)",
+        "link": "https://arxiv.org/abs/2504.10545",
+        "contributions": [
+          "Investigates enriching HSTU item representations with textual metadata embeddings."
+        ],
+        "limitations": [
+          "Uses pretrained BLaIR representations; its reported gains do not establish benefits from randomly initialized lexical encoders."
+        ]
+      },
+      {
+        "title": "SimRec (2024)",
+        "link": "https://arxiv.org/html/2410.22136v1",
+        "contributions": [
+          "Uses title-derived similarity distributions to supervise next-item scores."
+        ],
+        "limitations": [
+          "Uses pretrained text representations and a SASRec backbone; transfer to this HSTU experiment is unverified."
+        ]
+      },
+      {
+        "title": "Official HSTU sampled-softmax configuration",
+        "link": "https://github.com/meta-recsys/generative-recommenders/blob/main/configs/ml-1m/hstu-sampled-softmax-n128-final.gin",
+        "contributions": [
+          "Provides an HSTU configuration with 128 sampled negatives and normalized representations."
+        ],
+        "limitations": [
+          "MovieLens settings do not establish optimal negative counts or temperatures for these Amazon categories."
+        ]
+      },
+      {
+        "title": "Hard-BPR",
+        "link": "https://arxiv.org/abs/2403.19276",
+        "contributions": [
+          "Examines false-negative problems associated with hard sampling and motivates a robust ranking objective."
+        ],
+        "limitations": [
+          "Does not establish that hard-negative training improves the fixed HSTU Amazon benchmark."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/model-family-comparison-20261029/runs/hstu-self_evolverec/self_evolverec/calls/00159"
+}

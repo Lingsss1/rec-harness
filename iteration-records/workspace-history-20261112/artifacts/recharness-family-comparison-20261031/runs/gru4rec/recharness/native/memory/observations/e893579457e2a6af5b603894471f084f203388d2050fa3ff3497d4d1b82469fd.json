@@ -1,0 +1,89 @@
+{
+  "schema_version": 2,
+  "protocol_id": "63d884e335450b4c7d4c05470c02cfbc484d52d6b839640f603abc93a1b33219",
+  "record": {
+    "round_idx": 18,
+    "trial_group_id": "trialgrp_1793450438758_2865811",
+    "trial_id": 0,
+    "arm": "feature_construction",
+    "selected_categories": [
+      "feature_construction"
+    ],
+    "patch_summary": "Add training-count frequency-change scaling to history embeddings, with checkpointed counts and matching predictor metadata validation. Preserve one GRU4Rec model per category and existing training settings.",
+    "benchmark_score": 0.575,
+    "val_score": 0.575,
+    "is_winner": false,
+    "is_group_winner": false,
+    "valid": true,
+    "failure_type": null,
+    "delta_vs_prev_best": -0.0312,
+    "delta_vs_input": -0.0312,
+    "outcome": "regressed",
+    "val_support": "regressed",
+    "gpu_seconds": 358.96246483922005,
+    "trial_cap_seconds": 4899.925272427499,
+    "per_dataset_hr10": {
+      "Movies_and_TV": 0.61,
+      "Industrial_and_Scientific": 0.615,
+      "Electronics": 0.445,
+      "CDs_and_Vinyl": 0.63
+    },
+    "error": "",
+    "parameter_changes": [],
+    "changed_definitions": [
+      "GRU4RecModel",
+      "GRU4RecModel.__init__",
+      "GRU4RecModel._interest_states",
+      "train_one_dataset",
+      "write_predict_script"
+    ],
+    "summary": "Add training-count frequency-change scaling to history embeddings, with checkpointed counts and matching predictor metadata validation. Preserve one GRU4Rec model per category and existing training settings.",
+    "proposal_history": [
+      {
+        "attempt": 1,
+        "summary": "Add training-count frequency-change scaling to history embeddings, with checkpointed counts and matching predictor metadata validation. Preserve one GRU4Rec model per category and existing training settings."
+      }
+    ],
+    "hypothesis": "Across all four datasets, add a bounded frequency-change input feature: scale each nonpadding history embedding by 1+0.05*tanh(log(c_previous+1)-log(c_current+1)), using counts from supplied training interactions only; use scale 1 at the first real position. This may distinguish transitions toward niche versus common items without globally attenuating frequent items. Keep candidate embeddings, embedding parameterization, GRU, readout, loss and optimizer fixed. Store counts in each category checkpoint and reproduce the feature in the predictor writer.",
+    "input_source_sha256": "b5d6ac2ae54cf18e03e67777c6b1ae3ba7d56c657009b1b1c6b07656aefc6f4e",
+    "candidate_source_sha256": "82b747a9668416c31b7e2fda5a7c67cecadee3b0037ab25ef4ee350431e81b64",
+    "input_normalized_sha256": "b9e6da406acd309f2e850bfd4807c7a496a218a1e5c8910b6e8142948f71229c",
+    "candidate_normalized_sha256": "b0c90824fb9548843b78f67e8efd5e726e545b186d1ccc345fc2186e1746796c",
+    "patch_sha256": "5f363d31921eab4bcd2cbd41cc9accd54ea2975f12a63375e951128f8b22bd93",
+    "diff_excerpt": "--- \n+++ \n@@ -193,4 +193,5 @@\n         self.hidden_units = hidden_units\n         self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)\n+        self.register_buffer(\"training_item_counts\", torch.zeros(itemnum + 1, dtype=torch.float32))\n         dropout = dropout_rate if num_layers > 1 else 0.0\n         self.gru = nn.GRU(hidden_units, hidden_units, num_layers=num_layers,\n@@ -202,5 +203,10 @@\n \n     def _interest_states(self, seq: torch.Tensor) -> torch.Tensor:\n-        emb = self.dropout(self.item_emb(seq))\n+        log_counts = torch.log1p(self.training_item_counts[seq])\n+        previous_log_counts = torch.cat((log_counts[:, :1], log_counts[:, :-1]), dim=1)\n+        previous_real = torch.cat((torch.zeros_like(seq[:, :1], dtype=torch.bool), seq[:, :-1].ne(0)), dim=1)\n+        has_previous = seq.ne(0) & previous_real\n+        frequency_scale = 1.0 + 0.05 * torch.tanh(previous_log_counts - log_counts) * has_previous.to(log_counts.dtype)\n+        emb = self.dropout(self.item_emb(seq) * frequency_scale.unsqueeze(-1))\n         out, _ = self.gru(emb)\n         positions = torch.arange(seq.size(1), device=seq.device)\n@@ -246,4 +252,10 @@\n         dropout_rate=DROPOUT_RATE,\n     ).to(device)\n+    training_item_counts = np.zeros(itemnum + 1, dtype=np.float32)\n+    for items in user_train.values():\n+        np.add.at(training_item_counts, np.asarray(items, dtype=np.int64), 1.0)\n+    training_item_counts[0] = 0.0\n+    with torch.no_grad():\n+        model.training_item_counts.copy_(torch.as_tensor(training_item_counts, device=device))\n     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)\n \n@@ -301,4 +313,5 @@\n             \"dropout_rate\": DROPOUT_RATE,\n             \"sequence_readout\": \"gru_0.8_causal_mean_0.2_half_life_3\",\n+            \"input_feature\": \"training_frequency_change_tanh_0.05\",\n         }, f)\n     print(f\"  [{dataset_name}] Best val HR@10={max(best_hr10, 0.0):.4f}  ckpt={ckpt_path}\", flush=True)\n@@ -358,4 +371,6 @@\n         if meta.get(\"sequence_readout\") != \"gru_0.8_causal_mean_0.2_half_life_3\":\n             raise RuntimeError(f\"Incompatible GRU sequence readout for {ds}\")\n+        if meta.get(\"input_feature\") != \"training_frequency_change_tanh_0.05\":\n+            raise RuntimeError(f\"Incompatible GRU input feature for {ds}\")\n         model = ModelClass(\n             itemnum=meta[\"itemnum\"],\n",
+    "category_rationales": [
+      {
+        "category": "feature_construction",
+        "rationale": "Across all four datasets, add a bounded causal frequency-change feature to history inputs: 1+0.05*tanh(log1p(previous training count)-log1p(current training count)). The first real position uses scale 1. Counts come exclusively from training interactions and persist in each model checkpoint. Candidate embeddings, GRU, readout, loss and optimizer remain fixed."
+      }
+    ],
+    "baseline_validation": 0.6062,
+    "basin_id": "default",
+    "execution_status": "success",
+    "attempt_count": 1,
+    "training_attempt_count": 1,
+    "training_attempts": [
+      {
+        "id": "round-0017-slot-0-attempt-1",
+        "status": "success",
+        "source_sha256": "82b747a9668416c31b7e2fda5a7c67cecadee3b0037ab25ef4ee350431e81b64",
+        "allocated_gpu_seconds": 358.96246483922005,
+        "error": "",
+        "score": 0.575
+      }
+    ],
+    "checkpoint_fingerprints": {
+      "Movies_and_TV_model.pt": "7baa030e1ca9f9858baba6d8b5d7f89a4f1947f181eed6a2d4c6ae3b37ee269e",
+      "Industrial_and_Scientific_model.pt": "4a0c11922c2772fc9d24d655a8fcf3eb2484649c3a54b32e661fff581a781ecc",
+      "Electronics_model.pt": "cf925d9a65a784a8476f0347ef04180cf68457f31fc7bc0bd45b1eb28620434e",
+      "CDs_and_Vinyl_model.pt": "aa9035c340aaf1e4b1f838c7a2e728d3b2fc78c6b7ca7afae87920c19d550d9e"
+    },
+    "repair_errors": [],
+    "phase": "regular",
+    "promoted": false,
+    "provisional": false,
+    "protocol_id": "63d884e335450b4c7d4c05470c02cfbc484d52d6b839640f603abc93a1b33219",
+    "evidence_id": "e893579457e2a6af5b603894471f084f203388d2050fa3ff3497d4d1b82469fd"
+  },
+  "record_sha256": "be534669c94b1327975709239d7ea99934b89f516fea48fc567645a5cb788ff0"
+}

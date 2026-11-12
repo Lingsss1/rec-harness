@@ -1,0 +1,116 @@
+{
+  "markdown_report": "## Insights and directions\n\n**Starting point.** (1) SASRec already adapts attention to recent and distant interactions; pooling adds an inductive bias, not information. (2) Twenty-user judgments identify stale interests and broadly related recommendations as distinct failures, but provide limited evidence. (3) Electronics’ sampled wrong-rank rate is 14.95%, with lower-decile margin −0.4812. Alignment scores near 0.54–0.56 do not establish collapse as the cause.\n\n**Related work.** (1) gSASRec motivates multiple negatives, but reports sampled-softmax overconfidence; its calibration claims cannot transfer to our objective [1]. (2) LS4SRec motivates separate recent-context representations, without validating this gate [2]. (3) GLSRec motivates directed transition signals, which do not establish compatibility or complementarity [3].\n\n## Framework\n\n| Direction | Available evidence | Minimal intervention | Unresolved gap |\n|---|---|---|---|\n| Ranking objective | Training interactions | Multiple-negative loss | False negatives and calibration |\n| Current intent | Ordered recent history | Learned recent-context gate | Satisfaction remains unobserved |\n| Collaborative transitions | Training-only item pairs | Directed transition residual | Association lacks relation labels |\n\n## Candidate ideas and assessments\n\nScores are prospective judgments. Each cell gives **score; positive / negative**. Difficulty: higher means harder.\n\n| Idea | Originality | Potential | User alignment | Model alignment | Difficulty |\n|---|---|---|---|---|---|\n| A: 128-negative sampled softmax | 2; focused / established | 7; scalable / sampling-sensitive | 5; competition / stale intent remains | 8; separation / margins insufficient | 3; simple / masking overhead |\n| B: gated recent residual [2], with A | 3; focused combination / familiar | 7; extensible / redundant information | 8; two failures / compatibility unverified | 8; contextual separation / uncertain gain | 5; small branch / exact-gradient integration |\n| C: directed transition residual [3] | 4; additional signal / established | 7; pooled evidence / noisy associations | 6; specific transitions / redundancy risk | 7; ranking signal / popularity shortcut | 6; sparse graph / preprocessing cost |\n\n## Selected: B\n\nAt 0% progress, retain B conditionally: it targets **historical-interest persistence** and **broad associations outranking specific current interests**; A targets weak sampled separation. Gains remain hypotheses. Recency can overfit transient purchases and reinforce popular-item shortcuts.\n\nAt position `t`, pool nonpadding embeddings from `t−2:t`, dividing by valid count; mask empty outputs. Set `g=sigmoid(MLP([h,m]))`, `z=h+α*g*P(m)`. Initialize `α=0`, `P≠0`, preserving baseline outputs [4]; remove the previously proposed extra LayerNorm. Use identical causal pooling during inference.\n\nTrain valid positions with `−s_positive+logsumexp(all 129 scores)`. Draw uniform negatives with replacement, excluding padding and known training positives, retaining duplicates. This policy changes sampling support; it is neither gBCE nor calibrated catalog likelihood.\n\nPreregister baseline → A → B, fixed seeds, cadence and checkpoint rule, equal aggregate GPU-time caps, and a confirmation reserve within 43,200 GPU-seconds. Compare B with parameter-matched feature gating and ungated pooling; defer window sweeps. Select using pinned four-category macro validation HR@10, retaining baseline if inconclusive. Paired per-user bootstrap intervals remain conditional and selection-biased [5].\n\nKeep routing, splits, environment data path, trial artifacts, 200-epoch default, predictor writer and diagnostic entry points synchronized. Report measured definitions without unavailable metadata. Chunk complete candidate sets with exact gradient accumulation; verify against an unchunked reference.\n\nReferences: [1] [gSASRec](https://arxiv.org/abs/2308.07192); [2] [LS4SRec](https://doi.org/10.1145/3723173); [3] [GLSRec](https://doi.org/10.1016/j.datak.2026.102606); [4] [ReZero](https://arxiv.org/abs/2003.04887); [5] [Cawley–Talbot](https://jmlr.org/papers/v11/cawley10a.html).",
+  "idea": {
+    "description": "Add a baseline-preserving, gated recent-context residual to SASRec, evaluated separately from a 128-negative sampled-softmax objective. For each causal position, pool its last three nonpadding input item embeddings, condition a scalar gate on that pool and the SASRec state, and add a projected residual scaled by a learned scalar initialized to zero. Use the same fused representation for training, diagnostics and inference.",
+    "motivation": "The recent-context branch explicitly targets historical interests persisting after intent changes and broadly related associations displacing specific current matches. Multiple-negative competition targets weak positive–negative separation, especially Electronics’ 14.95% sampled wrong-rank rate. SASRec already receives these interactions, so the proposed benefit comes from easier access and an explicit recency bias. Neither mechanism establishes compatibility, satisfied needs, complementary function or causal intent. Objective-only A is the strongest simpler alternative and should remain eligible to win.",
+    "implementation_notes": "Preserve all four categories, dataset routing, input splits, preprocessing seed 0, training seed 42, DATA_DIR = os.environ['GAGC_DATA_DIR'], single-GPU execution and trial-local artifacts. Honor SASREC_EPOCHS, with the host default of 200. Do not inspect hidden test files or acquire additional datasets or pretrained weights.\n\nDefine h as the unchanged baseline SASRec features. Pool the same scaled input embeddings used by SASRec before positional addition and dropout: m_t is their nonpadding mean over positions max(0,t−2) through t. Use a D→D bias-free projection P and a scalar gate sigmoid(Linear(concat(h_t,m_t),1)). Set z_t=h_t+alpha*g_t*P(m_t), initialize alpha to zero and P with a nonzero standard initialization. Mask empty pooled outputs. Do not add post-fusion LayerNorm: that would break initial baseline equivalence and introduce a normalization confound. Alpha receives the initial residual gradient; gate and projection gradients begin after alpha moves from zero. Preserve baseline embedding tying, scoring scale, normalization, dropout and optimizer settings for attribution.\n\nFor each valid next-item target, draw K=128 uniform item IDs with replacement, rejecting padding and every known training interaction for that user, including the target. Retain duplicate negatives and never consult validation or test labels for rejection. Guard against users with no eligible negatives. This is a user-dependent sampling distribution and may exclude recurring positives that are valid at other positions; document this deliberate policy. Compare losses using exactly the same permitted training information. Compute uncorrected cross-entropy over the positive and all K negatives. No logQ correction or probability-calibration claim is made. gBCE is a distinct alternative requiring its own verified implementation and sampling assumptions; do not describe sampled softmax as gBCE.\n\nAvoid B×L×K×D materialization. Compute encoder features once, create a detached gradient-enabled feature proxy, and process chunks of valid positions, keeping all 129 candidates within each chunk. Backpropagate each chunk’s summed loss divided by the batch’s total valid-position count. Accumulate output-embedding gradients and proxy gradients, then backpropagate the proxy gradient through the encoder once. Clip gradients, if the baseline does, only after both paths accumulate, and step once. Tied item embeddings must receive both scoring and encoder gradients. Fix sampled IDs and compare losses and every parameter gradient with a tiny unchunked reference. Separate softmax denominators across negative chunks would change the objective.\n\nBefore running, preregister baseline, objective-only A and combined B, plus two fusion controls under A: parameter-matched gating of h without recent pooling, and an ungated recent residual with zero-initialized scale. Retain the baseline optimizer and batch settings; record their resolved values with all configuration and software versions. Fix validation cadence to every five completed epochs plus the terminal checkpoint, with earliest checkpoint winning ties. Use the same checkpoint rule for every configuration: maximal four-category macro validation HR@10 across synchronized category checkpoints. Allocate at most 30,000 aggregate GPU-seconds to these five configurations, at most 6,000 each, including their diagnostics and debugging; reserve 13,200 for failed-run recovery and confirmation. Log actual GPU-seconds, including failures, and stop before the shared 43,200 limit. Four slots alter concurrency, not this allowance. Budget truncation can produce unequal completed epochs; report those counts. Do not launch additional window or gate sweeps without revising and charging the fixed allocation. Reusing validation for confirmation does not provide independent evidence.\n\nUse only the pinned validation protocol: 200 users per category, 99 unique negative candidates, evaluation seed 42. Report each category and macro HR@10. Where the authorized evaluator exposes per-user hits, store paired indicators and bootstrap users jointly across models within each category, averaging the four category differences for 95% intervals. These intervals condition on fixed training seeds and candidates, exclude training variability and do not correct adaptive-selection bias. One changed hit changes category HR by 0.5 percentage points and macro HR by 0.125. Retain the baseline for inconclusive gains; never substitute diagnostic margins or simulator judgments for selection. Full-catalog unseen-item recommendations for twenty training users remain qualitative diagnostics, not the benchmark metric. Popularity and recent-item affinity may be shortcuts; inspect training-frequency and history-length strata descriptively without adding selection criteria or unavailable trait labels.\n\nSave the architecture configuration, residual parameters, category mappings and checkpoints. Update the predictor writer so working/predict.py reconstructs the actual trained model and uses identical causal pooling and scoring. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). view.model must be the trained nn.Module; log2feats must expose fused features and predict_score must use the trained scoring path. Handle loader tuples (None, sequence, positive, negative), each tensor B×L. Return metrics and metric_definitions; the interpreter prompt must use those measured values and definitions. Preserve user_train, meta_data and review_data compatibility without treating unavailable reviews, ratings, item categories, prices, stores or simulator traits as observed. Use only public histories, timestamps, titles and descriptions; omit unavailable category breakdowns or mark them unavailable rather than interpreting empty counts.",
+    "pseudocode": "preregister configurations, time allocations, seeds, validation cadence and checkpoint rule\nfor configuration in [baseline, A, B, feature_gate_control, ungated_pool_control]:\n    for category in four_categories:\n        initialize baseline with seed 42; initialize optional branch separately\n        for batch until epoch limit or allocated GPU-time limit:\n            h, input_embeddings = baseline_encode(sequence)\n            if configuration uses recent pooling:\n                m = causal_masked_mean(input_embeddings, window=3)\n            if configuration == B:\n                g = sigmoid(linear(concat(h, m)))\n                z = h + alpha * g * project(m)  # alpha starts at 0; project is nonzero\n            else:\n                z = specified_baseline_or_control_features(h, m)\n            if configuration == baseline:\n                optimize_unchanged_baseline_objective(z)\n            else:\n                valid = nonpadding_next_item_positions\n                ids = sample_128_uniform_with_replacement_excluding_training_positives()\n                proxy = detach(z[valid]).requires_grad_()\n                zero_optimizer_gradients()\n                for position_chunk in valid_position_chunks:\n                    scores = score(proxy[chunk], positive_and_all_128_negatives[chunk])\n                    loss = summed_cross_entropy(scores, target_column=0) / total_valid\n                    loss.backward()  # accumulates proxy and scoring-embedding gradients\n                z[valid].backward(proxy.grad)  # accumulates encoder gradients\n                apply_baseline_gradient_clipping_if_present()\n                optimizer.step()\n            charge_all_training_debugging_and_diagnostic_GPU_seconds()\n        save_category_checkpoint_and_resolved_configuration()\n    compare_synchronized_checkpoints_using_pinned_macro_validation_HR_at_10()\nreport_category_results_and_paired_differences_when_authorized_outputs_allow()\nretain_baseline_if_gain_is_inconclusive()\nwrite_predictor_matching_selected_architecture_and_scoring()\npreserve_and_validate_required_diagnostic_adapter_entry_points()",
+    "originality": {
+      "score": 3,
+      "positive": "The baseline-preserving recency residual provides a focused combination of established components aligned with two observed user-facing failures.",
+      "negative": "Recent-interest pooling, contextual gates, residual scaling and multiple-negative losses are established; the branch introduces no additional information."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "A small, controlled intervention can establish whether explicit recent-context access merits later temporal or candidate-conditioned modeling.",
+      "negative": "Benefits may disappear against objective-only or parameter-matched controls, and interaction histories cannot identify compatibility or satisfied needs reliably."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "The architectural addition requires only causal pooling, a projection, a gate and a residual scalar while retaining SASRec.",
+      "negative": "Exact memory-bounded gradients with tied embeddings, training-positive rejection, budget accounting and synchronized predictor and diagnostic serialization require careful implementation."
+    }
+  },
+  "related_work": [
+    {
+      "title": "gSASRec",
+      "link": "https://arxiv.org/abs/2308.07192",
+      "contributions": [
+        "Studies sampling-induced overconfidence, including sampled softmax, and proposes generalized binary cross-entropy.",
+        "Motivates evaluating substantially more sampled negatives."
+      ],
+      "limitations": [
+        "Its calibration claims do not apply to the proposed uncorrected sampled-softmax objective.",
+        "Training-positive rejection changes the sampling policy relative to the supplied official sampler; calibration assumptions require separate examination.",
+        "Does not establish gains on the pinned four-category benchmark or correct false-negative labels."
+      ]
+    },
+    {
+      "title": "LS4SRec",
+      "link": "https://doi.org/10.1145/3723173",
+      "contributions": [
+        "Combines separate long-term and short-term interest encoders with global transition information."
+      ],
+      "limitations": [
+        "Does not isolate or validate the proposed lightweight gated recent-mean residual.",
+        "Does not establish compatibility or satisfied-need recognition."
+      ]
+    },
+    {
+      "title": "GLSRec",
+      "link": "https://doi.org/10.1016/j.datak.2026.102606",
+      "contributions": [
+        "Uses directed global transitions to inform item representations before local sequence modeling."
+      ],
+      "limitations": [
+        "Transition association does not establish complementarity or substitutability.",
+        "Graph construction and propagation increase implementation and search costs."
+      ]
+    },
+    {
+      "title": "SASRec",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Uses causal self-attention to learn sequential recommendations and adapt access to recent and distant interactions."
+      ],
+      "limitations": [
+        "Already receives the recent interactions used by the proposed branch, so additional pooling requires controlled evidence of benefit.",
+        "Does not establish that a last-three embedding mean improves this benchmark."
+      ]
+    },
+    {
+      "title": "ReZero is All You Need: Fast Convergence at Large Depth",
+      "link": "https://arxiv.org/abs/2003.04887",
+      "contributions": [
+        "Introduces zero-initialized residual scaling, motivating a branch that initially preserves baseline outputs."
+      ],
+      "limitations": [
+        "Does not validate this recommendation architecture or establish improved HR@10.",
+        "An additional post-fusion normalization would prevent exact initial baseline equivalence."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://jmlr.org/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how repeated model selection can overfit finite validation estimates."
+      ],
+      "limitations": [
+        "Does not provide a benchmark-specific correction for this search.",
+        "Validation reuse and paired bootstrap intervals cannot create an independent confirmation set."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled recommendation metrics can produce model orderings different from full-catalog evaluation."
+      ],
+      "limitations": [
+        "Does not justify changing the pinned evaluator.",
+        "Does not predict the direction or size of any discrepancy for these four datasets."
+      ]
+    },
+    {
+      "title": "PyTorch Autograd Documentation",
+      "link": "https://docs.pytorch.org/docs/stable/autograd.html",
+      "contributions": [
+        "Documents gradient accumulation and vector–Jacobian products used by the proposed feature-proxy implementation."
+      ],
+      "limitations": [
+        "Correctness depends on preserving both tied-embedding gradient paths and the complete sampled-softmax denominator.",
+        "Numerical equivalence must be checked against a small unchunked reference."
+      ]
+    }
+  ]
+}

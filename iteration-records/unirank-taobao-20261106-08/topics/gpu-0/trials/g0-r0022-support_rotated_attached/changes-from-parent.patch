@@ -1,0 +1,118 @@
+--- g0-r0021-target_partition_uniform/model.py
++++ g0-r0022-support_rotated_attached/model.py
+@@ -1,8 +1,9 @@
+-"""Target-aligned block compression before nonlinear DIN scoring.
+-
+-The three replacement cells build and score the same seven-slot population
+-per block. Only the selected primary readout differs. Rotation preserves
+-match counts among valid positions; all inherited residual summaries and
+-auxiliary gradient ownership remain fixed. No new learned parameters.
++"""Compression-population and gradient controls for the DIN scorer.
++
++The primary readout always uses uniform block means. Extra target-partition
++rows affect Dice statistics but are never read out. The 2x2 study replaces
++aligned support with a count-matched rotated duplicate, and optionally stops
++gradients at support preactivations before each Dice layer. Learned modules,
++initialization, residual summaries and auxiliary ownership are inherited.
+ """
+ import torch
+@@ -13,5 +14,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached'}
+ 
+ 
+@@ -26,5 +27,6 @@
+                  curvature_detail='quadratic', joint_detail='duplicate_match',
+                  match_support='available', match_scaling='norm', coarse_extension='duplicate',
+-                 primary_partition='uniform', task='binary_classification', **kwargs):
++                 primary_partition='uniform', normalization_support='rotated_duplicate',
++                 support_gradient='attached', task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+@@ -82,5 +84,13 @@
+         if primary_partition not in ('aligned', 'rotated', 'uniform'):
+             raise ValueError('Unknown primary partition readout')
++        if primary_partition != 'uniform':
++            raise ValueError('This study fixes the primary uniform readout')
+         self.primary_partition = primary_partition
++        if normalization_support not in ('aligned_rotated', 'rotated_duplicate'):
++            raise ValueError('Unknown Dice support population')
++        if support_gradient not in ('attached', 'blocked'):
++            raise ValueError('Unknown support preactivation gradient')
++        self.normalization_support = normalization_support
++        self.support_gradient = support_gradient
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -435,5 +445,5 @@
+ 
+     def _compress_with_match(self, values, mask, auxiliary, match_union):
+-        """Same seven means in every cell; each pair partitions valid events.
++        """Seven rows with population-matched counts and support emptiness.
+ 
+         Valid-rank rotation operates inside a block, including noncontiguous
+@@ -449,7 +459,13 @@
+         matched = match_union.bool().reshape(batch, 10, 10) & valid
+         rotated = self._rotate_valid_membership(matched, valid)
++        # Both support pairs have identical per-block cardinalities and
++        # empty-slot patterns. Duplicate control removes only aligned value
++        # grouping; the target-match counts and rotated pair remain present.
++        first_support = (matched if self.normalization_support == 'aligned_rotated'
++                         else rotated)
+         assignment = torch.stack(
+             (valid, valid & ~feedback, feedback,
+-             valid & ~matched, matched, valid & ~rotated, rotated), dim=-2)
++             valid & ~first_support, first_support,
++             valid & ~rotated, rotated), dim=-2)
+         assignment = assignment.to(values.dtype).reshape(batch * 10, 7, 10)
+         counts = assignment.sum(dim=-1)
+@@ -483,4 +499,28 @@
+         query = target[:, None, :].expand(-1, slots, -1)
+         return torch.cat([query, keys, query - keys, query * keys, action], dim=-1).reshape(batch * slots, -1)
++
++    def _primary_activation(self, interactions):
++        """Forward-identical stop-gradient on nonreadout support rows.
++
++        Flattened order is batch, block, seven strata. The first three strata
++        retain the incumbent gradient paths. Before EACH Dice, rows 3..6
++        become constants for moment estimation in the blocked cell. This
++        removes their backward contribution to the preceding affine layer
++        and embedding sources, while preserving their forward activations,
++        batch moments and running-buffer updates at a fixed parameter state.
++        Selected rows still differentiate through their own batch moments;
++        shared scorer parameters and later updates can consequently differ.
++        No extra scorer pass, parameters, persistent state or RNG is added.
++        """
++        if not self.training or self.support_gradient == 'attached':
++            return self.local_activation(interactions)
++        retained = (torch.arange(interactions.shape[0], device=interactions.device)
++                    .remainder(7) < 3).unsqueeze(-1)
++        hidden = interactions
++        for layer in self.local_activation:
++            if isinstance(layer, Dice):
++                hidden = torch.where(retained, hidden, hidden.detach())
++            hidden = layer(hidden)
++        return hidden
+ 
+     def _auxiliary_activation(self, interactions):
+@@ -510,14 +550,10 @@
+         batch = values.shape[0]
+         all_values, all_counts = self._compress_with_match(values, mask, auxiliary, match_union)
+-        # All three cells expose EXACTLY the same ordered 70-slot population
+-        # to Dice and its running-state update. Select only AFTER scoring.
+-        primary_weights = self.local_activation(self._interactions(target, all_values))
++        # All four cells score 70 slots; only uniform slots enter the primary
++        # readout. Gradient pairs share exact forward populations. Population
++        # pairs preserve counts/empty rows, but change aligned support means.
++        primary_weights = self._primary_activation(self._interactions(target, all_values))
+         all_strata = self._pool_seven(primary_weights, all_values, all_counts)
+-        if self.primary_partition == 'aligned':
+-            uniform = all_strata[:, 3, :] + all_strata[:, 4, :]
+-        elif self.primary_partition == 'rotated':
+-            uniform = all_strata[:, 5, :] + all_strata[:, 6, :]
+-        else:
+-            uniform = all_strata[:, 0, :]
++        uniform = all_strata[:, 0, :]
+         # Auxiliary training retains the original ordered 30-slot population
+         # and the original scorer/item stop-gradient ownership. No extra

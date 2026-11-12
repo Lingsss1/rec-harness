@@ -1,0 +1,100 @@
+--- g0-r0031-adapter_context_only/model.py
++++ g0-r0035-adapter_identity_only/model.py
+@@ -1,12 +1,13 @@
+-"""Auxiliary context gradients through tower versus history adapter.
+-
+-Four cells retain identical learned modules, inputs, loss, forward arithmetic,
+-initialization and normalization populations. Independent stop-gradients gate
+-auxiliary context at the task adapter and direct prediction-tower inputs.
+-Click paths, auxiliary scorer/item ownership and running states are inherited.
+-The all-enabled/all-blocked cells bridge round 30; two partial gates isolate
+-where auxiliary supervision shapes shared context. Dense global clipping can
+-still couple task heads indirectly. No full-isolation or novelty claim.
+-Only static source checks are possible here; host tensor checks are required.
++"""Field-source attribution of auxiliary history-adapter context gradients.
++
++Identity and other-context backward edges form a complete two-factor design.
++Only the supplied encoded user_id field belongs to the identity group. The
++complement is every other inherited non-item/non-action model context field.
++No fields, labels, parameters, losses, normalization populations or RNG added.
++All/none fast paths preserve the inherited context/detach topology; mixed
++paths concatenate unchanged field slices and detach selected slices only.
++Click, item/action and scorer paths retain their inherited ownership. This
++is an empirical attribution study, not a new stop-gradient priority claim.
++PyTorch execution and all evaluation belong to the host, not this source jail.
+ """
+ import torch
+@@ -17,5 +18,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'aux_adapter_identity_context_grad': True, 'aux_adapter_other_context_grad': False}
+ 
+ 
+@@ -36,4 +37,6 @@
+                  block_aux_tower_context_grad=True,
+                  block_aux_adapter_context_grad=False,
++                 aux_adapter_identity_context_grad=True,
++                 aux_adapter_other_context_grad=False,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -62,4 +65,11 @@
+         self.block_aux_tower_context_grad = block_aux_tower_context_grad
+         self.block_aux_adapter_context_grad = block_aux_adapter_context_grad
++        if (not isinstance(aux_adapter_identity_context_grad, bool)
++                or not isinstance(aux_adapter_other_context_grad, bool)):
++            raise ValueError('Field-source gradient gates must be booleans')
++        if block_aux_adapter_context_grad is not False or block_aux_tower_context_grad is not True:
++            raise ValueError('This field-source study freezes adapter enabled and tower blocked')
++        self.aux_adapter_identity_context_grad = aux_adapter_identity_context_grad
++        self.aux_adapter_other_context_grad = aux_adapter_other_context_grad
+         if residual_input != 'match_detail':
+             raise ValueError('The original match-detail channel must be retained')
+@@ -133,4 +143,14 @@
+                             if spec.get('source') not in ('item', 'action')
+                             and spec['type'] != 'meta']
++        # Field order comes from the same FeatureMap used by _represent.
++        # Encoded user_id is an existing categorical input, never a raw ID
++        # or lookup index. The complementary group retains all other fields.
++        if 'user_id' not in self.user_fields or len(self.user_fields) < 2:
++            raise ValueError('Identity and other context fields are required')
++        for name in self.user_fields:
++            if feature_map.features[name].get('embedding_dim', embedding_dim) != embedding_dim:
++                raise ValueError('Inherited context concatenation requires uniform field width')
++        self._aux_context_field_width = embedding_dim
++        self._aux_identity_field_index = self.user_fields.index('user_id')
+         self.action_field = next((name for name, spec in feature_map.features.items()
+                                   if spec.get('source') == 'action'), None)
+@@ -651,4 +671,26 @@
+         return weighted.sum(dim=1)
+ 
++    def _gate_auxiliary_adapter_context(self, context):
++        """Forward-identical selection of context field backward edges.
++
++        No normalization is recomputed or split. The same full-batch tower
++        Dice still couples examples. These are field tensor-edge controls,
++        not loss-example selection or complete optimizer isolation.
++        """
++        identity = self.aux_adapter_identity_context_grad
++        other = self.aux_adapter_other_context_grad
++        if identity and other:
++            return context
++        if not identity and not other:
++            return context.detach()
++        if context.ndim != 2 or context.shape[-1] != len(self.user_fields) * self._aux_context_field_width:
++            raise ValueError('Context field-width mismatch')
++        fields = context.split(self._aux_context_field_width, dim=-1)
++        return torch.cat([
++            value if (identity if index == self._aux_identity_field_index else other)
++            else value.detach()
++            for index, value in enumerate(fields)
++        ], dim=-1)
++
+     def forward(self, inputs):
+         context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._represent(inputs)
+@@ -774,4 +816,5 @@
+             tower_context = task_context
+             if self.training and label != 'is_click':
++                adapter_context = self._gate_auxiliary_adapter_context(adapter_context)
+                 if self.block_aux_adapter_context_grad:
+                     adapter_context = adapter_context.detach()

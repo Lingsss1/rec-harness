@@ -1,0 +1,130 @@
+--- g3-r0022-selector_disabled/model.py
++++ g3-r0026-context_field_norm/model.py
+@@ -23,5 +23,5 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary', 'rank_evidence_scope': 'event', 'rank_evidence_location': 'route', 'rank_feedback_identity': False, 'retain_position_route': False, 'rank_primary_gain': 2.0, 'rank_aux_gradient': 'primary', 'selector_input_space': 'private', 'selector_input_gradient': 'detached', 'selector_transfer_source': 'none', 'selector_transfer_gradient': 'detached'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary', 'rank_evidence_scope': 'event', 'rank_evidence_location': 'route', 'rank_feedback_identity': False, 'retain_position_route': False, 'rank_primary_gain': 2.0, 'rank_aux_gradient': 'primary', 'selector_input_space': 'private', 'selector_input_gradient': 'detached', 'selector_transfer_source': 'none', 'selector_transfer_gradient': 'detached', 'context_gradient_rule': 'field_norm'}
+ 
+ 
+@@ -45,6 +45,12 @@
+                  selector_transfer_source='none',
+                  selector_transfer_gradient='detached',
++                 context_gradient_rule='field_norm',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
++        if context_gradient_rule not in ('field_project', 'field_norm',
++                                          'global_project', 'joint'):
++            raise ValueError('Unknown context gradient rule')
++        self.context_gradient_rule = context_gradient_rule
++        self._context_gradient_input = None
+         labels = list(feature_map.labels)
+         if num_tasks is not None and num_tasks != len(labels):
+@@ -183,4 +189,11 @@
+                             if spec.get('source') not in ('item', 'action')
+                             and spec['type'] != 'meta']
++        self.context_field_count = len(self.user_fields)
++        self.context_field_width = embedding_dim
++        if self.context_field_count == 0:
++            raise ValueError('At least one context field is required')
++        self.primary_task_index = labels.index('is_click')
++        self.context_aux_indices = [i for i, label in enumerate(labels)
++                                    if label != 'is_click']
+         self.action_field = next((name for name, spec in feature_map.features.items()
+                                   if spec.get('source') == 'action'), None)
+@@ -609,4 +622,6 @@
+ 
+     def forward(self, inputs):
++        # Clear an unused graph on every new training or inference forward.
++        self._context_gradient_input = None
+         if len(inputs) != 4 or inputs[3] is None:
+             raise ValueError('Historical feedback masks must be supplied by the host')
+@@ -629,4 +644,6 @@
+             values = torch.cat([keys, action], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
++        if self.training and torch.is_grad_enabled():
++            self._context_gradient_input = context
+         # Auxiliary target/history values remain private in every cell. The
+         # auxiliary selector can separately read primary or private geometry.
+@@ -696,2 +713,81 @@
+                 logits + correction[:, index:index + 1].to(dtype=logits.dtype))
+         return outputs
++
++
++    @staticmethod
++    def _project_auxiliary(primary, auxiliary, dimensions):
++        """One-sided Euclidean projection; both inputs are detached FP32 VJPs."""
++        dot = (primary * auxiliary).sum(dim=dimensions, keepdim=True)
++        primary_mass = primary.square().sum(dim=dimensions, keepdim=True)
++        safe_mass = torch.where(primary_mass > 0, primary_mass,
++                                torch.ones_like(primary_mass))
++        coefficient = dot.clamp_max(0.0) / safe_mass
++        return auxiliary - coefficient * primary
++
++    def training_loss(self, inputs, probabilities, train_labels):
++        """Keep BCE values/other paths; replace only auxiliary context gradient.
++
++        VJPs stop at the common context tensor, without populating parameter
++        .grad or replaying a forward. Frozen correction coefficients prevent
++        second derivatives and changes to any prediction tower derivative.
++        No label or gradient statistics enter inference or persistent state.
++        """
++        context = self._context_gradient_input
++        self._context_gradient_input = None
++        if not self.training or not torch.is_grad_enabled() or context is None:
++            raise RuntimeError('training_loss requires one matching training forward')
++        if (probabilities.ndim != 2 or probabilities.shape != train_labels.shape
++                or probabilities.shape[1] != len(self.towers)):
++            raise ValueError('Expected aligned [B,4] probabilities and labels')
++        if (context.ndim != 2 or context.shape[0] != probabilities.shape[0]
++                or context.shape[1] != self.context_field_count * self.context_field_width
++                or not context.requires_grad):
++            raise RuntimeError('Differentiable equal-width context fields are required')
++        with torch.autocast(device_type=probabilities.device.type, enabled=False):
++            # Same finite-probability BCE convention as the most recent suite.
++            # The matched joint control measures this hook against historical
++            # default-host BCE; exact historical equality is not assumed.
++            prediction = probabilities.float().clamp(1e-7, 1.0 - 1e-7)
++            losses = torch.nn.functional.binary_cross_entropy(
++                prediction, train_labels.detach().float(), reduction='none')
++            task_losses = losses.mean(dim=0)
++            primary_loss = task_losses[self.primary_task_index]
++            auxiliary_loss = task_losses[self.context_aux_indices].sum()
++            objective = task_losses.sum()
++            primary_vjp, = torch.autograd.grad(
++                primary_loss, context, retain_graph=True,
++                create_graph=False, allow_unused=False)
++            auxiliary_vjp, = torch.autograd.grad(
++                auxiliary_loss, context, retain_graph=True,
++                create_graph=False, allow_unused=False)
++            shape = (context.shape[0], self.context_field_count,
++                     self.context_field_width)
++            primary = primary_vjp.detach().float().reshape(shape)
++            auxiliary = auxiliary_vjp.detach().float().reshape(shape)
++            # Field statistics use all rows, never a per-row label gate. Thus
++            # positives and negatives both contribute, including BN coupling.
++            field_projected = self._project_auxiliary(primary, auxiliary, (0, 2))
++            global_projected = self._project_auxiliary(primary, auxiliary, (0, 1, 2))
++            original_norm = auxiliary.square().sum(dim=(0, 2), keepdim=True).sqrt()
++            projected_norm = field_projected.square().sum(dim=(0, 2), keepdim=True).sqrt()
++            safe_norm = torch.where(original_norm > 0, original_norm,
++                                    torch.ones_like(original_norm))
++            # Orthogonal projection cannot increase norm in exact arithmetic.
++            # Clamp only guards FP32 rounding of this magnitude-only control.
++            scale = (projected_norm / safe_norm).clamp(0.0, 1.0)
++            field_norm = auxiliary * scale
++            if self.context_gradient_rule == 'field_project':
++                selected = field_projected
++            elif self.context_gradient_rule == 'field_norm':
++                selected = field_norm
++            elif self.context_gradient_rule == 'global_project':
++                selected = global_projected
++            else:
++                selected = auxiliary
++            correction = (selected - auxiliary).detach().reshape_as(context)
++            displacement = context.float() - context.detach().float()
++            # Exactly zero scalar value at finite states. On final backward,
++            # the context receives g_click + selected_aux; every other edge
++            # receives the ordinary four-BCE derivative before host clipping.
++            surrogate = (displacement * correction).sum()
++            return objective + surrogate

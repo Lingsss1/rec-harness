@@ -17,6 +17,9 @@ from .store import Store
 
 def inspection_controller(directory):
     root=Path(directory)
+    if (root/'kuairand-auto.json').exists():
+        from .adapters.kuairand_research import KuaiRandResearch
+        return KuaiRandResearch(root)
     if (root/'project.json').exists():
         from .project import ResearchProject
         return ResearchProject(root)
@@ -193,8 +196,13 @@ def main(argv=None):
             result=project_report(args.directory)
             if args.format=='markdown':print(markdown_report(result));return 0
         elif args.command == 'status':
-            from .status import inspect_status
-            result=inspect_status(args.directory)
+            if (Path(args.directory)/'kuairand-auto.json').exists():
+                research = inspection_controller(args.directory)
+                try: result = research.status()
+                finally: research.store.close()
+            else:
+                from .status import inspect_status
+                result=inspect_status(args.directory)
         elif args.command in {"verify", "recover", "graph", "migrate", "memory"}:
             store = Store(Path(args.directory) / "memory")
             try:

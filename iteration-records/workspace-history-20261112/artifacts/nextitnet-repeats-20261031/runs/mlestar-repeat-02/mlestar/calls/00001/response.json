@@ -1,0 +1,35 @@
+{
+  "directions": [
+    {
+      "description": "Expand NextItNet’s causal receptive field. The authors’ implementation provides the reference dilated residual architecture: [NextItNet](https://github.com/fajieyuan/WSDM2019-nextitnet). This is a hypothesis for validation, not an established improvement on these four datasets.",
+      "urls": [
+        "https://github.com/fajieyuan/WSDM2019-nextitnet"
+      ],
+      "implementation": "Keep the corrected NextItNetModel and shifted causal targets. With maxlen=128, change the eight block dilations from [1,2,4,8,1,2,4,8] to [1,2,4,8,16,1,2,4]. Two kernel-3 convolutions per block then give a receptive field of 153 positions instead of 121. Keep hidden size 64, dropout 0.2 and the baseline BPR loss initially, isolating the architecture change. Preserve left-only convolution padding and zero padded positions after each block. Add log2feats(sequence) as an alias for encode_sequence, retain item_emb, and implement predict_score(features, items) using the same embedding dot products as inference. Save the dilation schedule in checkpoint metadata and update the predictor writer to reconstruct it exactly. For this and every direction: DATA_DIR = os.environ['GAGC_DATA_DIR']; retain all four categories and routing; use training seed 42, unchanged preprocessing seed 0, exactly 200 batches per epoch and at most 200 epochs. Write artifacts under the trial directory, train on one GPU, and retain exactly one selected checkpoint per category. Select using macro validation HR@10 under the pinned evaluator; never use test data or average checkpoints."
+    },
+    {
+      "description": "Replace single-negative BPR with multi-negative categorical cross-entropy. The authors’ experiments motivate transferring the loss improvement while retaining NextItNet: [Turning Dross Into Gold Loss](https://github.com/antklen/sasrec-bert4rec-recsys23).",
+      "urls": [
+        "https://arxiv.org/abs/2309.07602",
+        "https://github.com/antklen/sasrec-bert4rec-recsys23"
+      ],
+      "implementation": "Start independently from the corrected baseline architecture. Extend the family-specific sampler to produce K=64 distinct uniform negatives per user, excluding padding and every item in that user's training history; reuse this negative set across that user's supervised positions. Keep the sampler's existing sequence and positive-target outputs compatible with diagnosis. For each pos!=0 position, compute h=encode_sequence(seq), positive logit h dot item_emb(pos), and K negative logits. Apply F.cross_entropy(torch.cat([positive_logits[...,None], negative_logits], dim=-1)[pos!=0], zero_labels). Use raw dot products without a sigmoid and do not label this sampled objective as exact full-vocabulary softmax. Chunk valid positions if necessary to bound memory. Keep Adam lr=1e-3, batch size 128 and dropout 0.2 initially. Inference remains the trained NextItNet dot-product scorer, so no independent scoring component is introduced. Apply the same four-category, seed, budget, checkpoint, diagnostic-interface and predictor-consistency requirements specified in direction 1."
+    },
+    {
+      "description": "Use BPR-max to emphasize difficult sampled negatives. Transfer only the ranking objective and sampling idea from the authors’ [GRU4Rec implementation](https://github.com/hidasib/GRU4Rec), keeping the NextItNet backbone.",
+      "urls": [
+        "https://github.com/hidasib/GRU4Rec",
+        "https://github.com/hidasib/GRU4Rec/blob/master/gru4rec.py"
+      ],
+      "implementation": "Start independently from the corrected NextItNet baseline. Sample K=32 distinct uniform negatives per user from items outside the training history and padding, with an explicit eligibility check for small catalogs. At valid shifted-target positions compute positive score p and negative scores n_j using the shared item_emb. Set log_w=F.log_softmax(n, dim=-1); ranking_loss=-torch.logsumexp(log_w + F.logsigmoid(p.unsqueeze(-1)-n), dim=-1). Add score regularization 0.1*(log_w.exp()*n.square()).sum(-1), then average only over pos!=0. This is the softmax-weighted BPR-max objective, rather than an average of pairwise BPR losses. Keep the baseline architecture and optimizer initially. Sample negatives only from training-derived information and never modify evaluation candidates. Prediction uses one NextItNet checkpoint and its raw candidate dot products. Apply the shared constraints and compatibility requirements from direction 1."
+    },
+    {
+      "description": "Add dropout-based contrastive regularization to the same NextItNet network. The primary reference is DuoRec’s unsupervised stochastic-view objective: [authors’ implementation](https://github.com/RuihongQiu/DuoRec/blob/master/recbole/model/sequential_recommender/duorec.py).",
+      "urls": [
+        "https://arxiv.org/abs/2110.05730",
+        "https://github.com/RuihongQiu/DuoRec/blob/master/recbole/model/sequential_recommender/duorec.py"
+      ],
+      "implementation": "Start independently from the corrected baseline with its BPR objective. In training mode, encode the same left-padded batch twice through the same NextItNetModel, producing independent dropout masks and shared parameters. Gather each view at the final nonpadding position using masked position indices and max; never use count-1. L2-normalize these vectors, concatenate the two views into Z, and compute similarities Z@Z.T/0.2. Mask self-similarities; the paired view of each example is its positive. Mask other pairs with identical histories or the same final shifted positive target to reduce false negatives. Add 0.05 times the resulting InfoNCE cross-entropy to the sequence BPR loss. Reuse the first forward pass for recommendation scores. Both views remain causal and contain no appended target. At inference disable dropout and run one forward pass of the single saved NextItNet checkpoint; there is no second encoder, teacher, or score fusion. Apply the shared execution, routing, evaluation and predictor-consistency requirements from direction 1."
+    }
+  ]
+}

@@ -1,0 +1,146 @@
+{
+  "markdown_report": "The best first direction remains a **gated mixture of SASRec and recency-weighted history pooling**, evaluated through controlled history perturbations and matched aggregation controls. At 0% research progress, this offers a small, testable change before attempting semantic compatibility reasoning. Its advantage is a hypothesis; no supplied study establishes that this exact combination improves the matched benchmark.\n\n**Insights from the starting point.**\n\n1. Qualitative feedback favors recent, repeated, specific interests. This motivates testing aggregation, but neither establishes stronger recency weighting nor directly measures current intent.\n2. Existing margins measure separation against sampled training negatives. They cannot establish generalization, full-catalog accuracy, or a causal explanation of recommendation failures; their scale also changes with representation norms.\n3. Compatibility and satisfied needs are plausible concerns. Available histories and descriptions cannot establish ownership, prerequisites, or current demand, so unknown evidence must remain unknown. The generic metadata examples do not authorize unavailable ratings, reviews, categories, prices, or stores.\n\n**Insights from related work.**\n\n1. [Does It Look Sequential?](https://doi.org/10.1145/3640457.3688195) motivates testing ordering beyond history membership. Earlier-item shuffling with the last item fixed probes this distinction; sensitivity does not establish user intent.\n2. [Measuring Recency Bias](https://arxiv.org/abs/2409.09722) cautions against excessive recent-item emphasis. Compare recency weighting with uniform pooling rather than presuming an improvement.\n3. [Sampling reliability research](https://doi.org/10.1145/3705328.3748086) motivates retaining the pinned macro validation HR@10 objective. Diagnostic and full-catalog rankings remain supplementary.\n4. [HGN](https://arxiv.org/abs/1906.09217) supplies gating-and-pooling precedent, but gates embeddings rather than mixing SASRec with pooling. [SASRec](https://arxiv.org/abs/1808.09781) supplies a zero-attention-block control; [Harte et al.](https://arxiv.org/abs/2309.09261) compare aggregation rules using pretrained semantic embeddings, making their results indirect for this permitted ID-only experiment.\n\nThese insights organize three directions: measure order dependence, improve aggregation, and calibrate evidence limits.\n\n| Direction | Existing component | Proposed extension | Remaining gap |\n|---|---|---|---|\n| Order | SASRec sequence features | Last-item-fixed shuffle probe | Sensitivity does not establish intent |\n| Aggregation | Final sequence representation | Gated recency pooling with matched controls | Gate benefit and useful decay remain unproved |\n| Calibration | Training-negative margins | Paired validation hit differences | Adaptive selection uncertainty remains |\n\nThree atomic ideas follow. Scores are originality/potential/difficulty; higher difficulty means harder implementation. These are research judgments, not measurements.\n\n- **Controlled shuffle audit: 3/7/2.** Positive: cheap, interpretable comparison grounded in sequence-shuffling research. Negative: diagnostic only; no direct ranking improvement.\n- **Gated recency pooling: 3/6/5.** Positive: combines order-sensitive and aggregated evidence with a small architectural change. Negative: established components limit originality; SASRec redundancy, scaling, and predictor parity complicate implementation. Potential is promising but unverified.\n- **Evidence-backed compatibility adjustment: 6/6/8.** Positive: addresses functional fit, motivated by [ECCR](https://www.amazon.science/publications/eccr-explainable-and-coherent-complement-recommendation-based-on-large-language-models). Negative: sparse descriptions and uncertain compatibility make reliable scoring expensive; unsupported claims must not change scores.\n\nSelect gated pooling. Replace the original convex mixture with a near-zero residual branch: it avoids automatically shrinking the SASRec state. Keep the baseline state and its existing normalization unchanged; normalize the pooled branch separately. Adding another normalization to SASRec would confound baseline preservation.\n\n```text\nS = 0; Z = 0\nfor each position t:\n    if item[t] != 0:\n        S = a*S + embedding(item[t]); Z = a*Z + 1\n        pool[t] = S / max(Z, eps)\n    else:\n        pool[t] = 0                  # skip state updates\nh = baseline_SASRec(sequence)         # retain causal masking\nz = mask * (h + tanh(g) * LayerNorm(pool))\nscore(candidate) = dot(z, item_embedding(candidate))\n```\n\nUse FP32 accumulation, interaction-distance decay `a=0.9`, and one scalar gate per dataset initialized to `g=0.001`. Repeated IDs remain separate events; timestamps are unused. This is an engineering adaptation of [ReZero](https://proceedings.mlr.press/v161/bachlechner21a.html), not a demonstrated optimum. Retain the baseline loss, optimizer, dimensions, and sampling initially.\n\nPrespecify seven arms: baseline, mean-only, decay-only, last-item-only, fixed residual (`alpha=0.1`), learned uniform residual, and learned decay residual. Pool-only arms use normalized pooled features; the last-item arm uses the final observed embedding with the same branch normalization. Give arms equal compute caps and document parameter-count differences. Allow at most 5,400 GPU-seconds per arm, reserving 5,400 for diagnostics and failures; all work stays within 43,200. Honor `SASREC_EPOCHS` with default 200, evaluate every ten completed epochs and once at termination, and stop after four scheduled checks without strict improvement. Select checkpoints by macro HR@10; break ties by earlier checkpoint, then listed arm order. Partial runs and failures remain logged.\n\nPreserve all four datasets, routing, seeds, diagnostic interfaces, and predictor-writer parity. Verify pooling against explicit float64 prefix sums, suffix invariance, zero future-input gradients, repeated items, padding, single events, extreme decay, finite gradients, and checkpoint reload agreement. Restore the prior model mode after probes. With dropout disabled, training and prediction paths must agree for identical prefixes, positions, padding, and truncation.\n\nReport every attempted trial, compute, checkpoint-selection history, category scores, and macro HR@10. Bootstrap paired hit differences by resampling 200 users within each category and averaging category differences equally. These intervals condition on trained models and fixed candidates; they exclude training randomness and adaptive-search bias [Cawley–Talbot](https://www.jmlr.org/papers/v11/cawley10a.html). One changed hit moves macro HR by 0.00125. Audit popularity and history-length strata for shortcut reliance; aggregate scores alone cannot establish improved intent matching. Twenty-user full-catalog audits measure exposure, not accuracy. No experiments or measured improvements are claimed; independent host test performance remains unknown.",
+  "idea": {
+    "description": "Add a learned scalar residual gate per dataset that supplements baseline SASRec states with normalized, causally computed recency-weighted item-embedding means. Compare it with matched pooling and fixed-mixture controls before attributing any benefit to gating.",
+    "motivation": "Qualitative feedback suggests recent and repeated interests may be underused, but does not establish the correct recency strength. A minimal aggregation branch tests this hypothesis without inferring unavailable traits, ownership, compatibility, or current intent. Existing gating and pooling precedents reduce the novelty claim.",
+    "implementation_notes": "Retain Movies_and_TV, Industrial_and_Scientific, Electronics, and CDs_and_Vinyl and their routing. Keep DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, and SASREC_EPOCHS default 200. Write artifacts beneath the trial directory and use one GPU. Preserve baseline preprocessing, splits, loss, optimizer, dimensions, sampling, and causal attention. Pool only observed prefix events, retaining repeated IDs as separate occurrences. Maintain FP32 S and Z, update S=a*S+x and Z=a*Z+1 only on valid events, divide by Z.clamp_min(eps), and zero padded outputs. Use a=0.9 for decay and a=1 for uniform pooling; timestamps are unused. Fuse z=h+tanh(g)*LayerNorm(pool), remasking after normalization; initialize one scalar g per dataset to 0.001. Preserve the existing normalization of h without inserting another LayerNorm. The proposed residual approximates baseline behavior at initialization; g=0 reproduces its features exactly. Run the seven prespecified arms in the report, capped at 5,400 GPU-seconds each with 5,400 reserved for diagnostics and failures. Evaluate every ten completed epochs and at termination; stop after four scheduled checks without strict improvement. Choose by pinned four-category macro validation HR@10, breaking ties by earlier checkpoint and then listed arm order. Record every attempted run and checkpoint comparison. Save gate, normalization, decay, arm, baseline configuration, and weights; update the predictor writer so working/predict.py reconstructs identical features and scoring. Verify float64 prefix-reference agreement, causality, padding, repeated events, finite gradients, training/prediction feature parity with dropout disabled, and reload parity. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). Expose the actual nn.Module through view.model, mixed per-position features through log2feats, and compatible item_emb and predict_score. Return metrics and explicit metric_definitions, distinguish per-position training diagnostics from final-position ranking, and restore the prior train/eval mode even if a probe fails. Report unavailable probes as unavailable with reasons; do not fabricate category breakdowns or subjective acceptance metrics. For supplementary shuffle diagnostics, hold candidates and the last interaction fixed and record the shuffle seed. Report category and macro hits, paired bootstrap differences, popularity/history-length strata, and conditional uncertainty without claiming correction for adaptive selection. Full-catalog recommendations for five training users per category are exposure audits, not accuracy estimates. Never read hidden test files or fetch extra data or pretrained weights. No measured improvements are claimed.",
+    "pseudocode": "Prespecify arms = [baseline, mean_only, decay_only, last_item_only, fixed_decay_residual, learned_uniform_residual, learned_decay_residual].\nFor each arm, train all four dataset models sequentially on one GPU under the arm's total compute cap:\n  retain baseline training settings and seeds\n  initialize scalar gate g=0.001 where applicable\n  for each training batch:\n    valid = sequence != 0\n    x = item_emb(sequence)\n    h = baseline_SASRec(sequence)\n    pool = causal_FP32_prefix_mean(x, valid, a), skipping padding updates\n    p = LayerNorm(pool) * valid[..., None]\n    baseline: z = h\n    mean_only or decay_only: z = p\n    last_item_only: z = LayerNorm(x) * valid[..., None]\n    fixed_decay_residual: z = h + 0.1*p\n    learned residual: z = h + tanh(g)*p\n    remask z; score positives and negatives with baseline item embeddings\n    optimize the unchanged baseline loss on valid target positions\n  evaluate at prespecified checkpoints using unchanged pinned validation candidates\n  save complete architecture configuration and checkpoint\nSelect by macro validation HR@10, then earlier checkpoint, then listed arm order.\nUpdate predictor writer and verify reload/training-path parity.\nReport all trials, failures, compute, category scores, and paired category-stratified bootstrap differences; do not interpret selected-winner intervals as search-adjusted.",
+    "originality": {
+      "score": 3,
+      "positive": "Connecting controlled history diagnostics to a minimal residual aggregation experiment creates a concrete, falsifiable response to the supplied feedback.",
+      "negative": "Gating, pooling, recency weighting, and residual fusion are established components; the supplied evidence does not establish a novel mechanism."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "Matched controls could reveal when aggregation adds useful information beyond SASRec and motivate better history representations.",
+      "negative": "Benefits remain unmeasured and may reflect candidate sampling, popularity, or feature scaling rather than improved intent matching."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "The architecture adds one pooling branch, normalization, and a scalar gate per dataset.",
+      "negative": "Causal numerical stability, seven controlled variants, compute accounting, diagnostic compatibility, and exact predictor reconstruction require more work than the small architectural change suggests."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Does It Look Sequential?",
+      "link": "https://doi.org/10.1145/3640457.3688195",
+      "contributions": [
+        "Uses sequence shuffling to investigate sequential structure across recommendation datasets.",
+        "Motivates order-sensitivity controls alongside aggregation baselines."
+      ],
+      "limitations": [
+        "Its findings do not establish behavior on the four matched Amazon datasets.",
+        "Shuffle sensitivity does not identify user intent or recommendation correctness."
+      ]
+    },
+    {
+      "title": "Measuring Recency Bias",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "Introduces a dedicated recency metric and investigates excessive emphasis on recent interactions.",
+        "Motivates comparing recency weighting with uniform aggregation."
+      ],
+      "limitations": [
+        "Does not justify universally increasing recency weights.",
+        "Does not establish an optimal decay for this benchmark."
+      ]
+    },
+    {
+      "title": "On the Reliability of Sampling Strategies",
+      "link": "https://doi.org/10.1145/3705328.3748086",
+      "contributions": [
+        "Studies sampling reliability through agreement with full ranking, discrimination, robustness, and recovery of model rankings.",
+        "Supports treating sampled diagnostic rankings as conditional evidence."
+      ],
+      "limitations": [
+        "Does not validate training-margin diagnostics as predictors of validation misses.",
+        "Does not authorize modifying the pinned host evaluator."
+      ]
+    },
+    {
+      "title": "ECCR: Explainable and Coherent Complement Recommendation Based on Large Language Models",
+      "link": "https://www.amazon.science/publications/eccr-explainable-and-coherent-complement-recommendation-based-on-large-language-models",
+      "contributions": [
+        "Distinguishes coherent complementarity from co-purchase frequency.",
+        "Motivates checking functional relationships when sufficient item evidence exists."
+      ],
+      "limitations": [
+        "Functional complementarity does not establish specific interface compatibility.",
+        "Available evidence cannot reliably establish ownership or unmet needs."
+      ]
+    },
+    {
+      "title": "Hierarchical Gating Networks for Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1906.09217",
+      "contributions": [
+        "Combines feature and instance gating with pooled interaction representations.",
+        "Provides a practical gating-and-aggregation precedent and comparisons with SASRec."
+      ],
+      "limitations": [
+        "Gates embeddings rather than mixing a SASRec state with an exponential-pooling branch.",
+        "Reported ablations do not isolate the proposed gate's advantage over matched ungated pooling."
+      ]
+    },
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Introduces SASRec and evaluates attention-block ablations.",
+        "Motivates preserving causal masking and testing a last-item control."
+      ],
+      "limitations": [
+        "Its ablations do not establish superiority over matched fixed-decay pooling.",
+        "Published results do not establish outcomes under this pinned candidate protocol."
+      ]
+    },
+    {
+      "title": "Leveraging Large Language Models for Sequential Recommendation",
+      "link": "https://arxiv.org/abs/2309.09261",
+      "contributions": [
+        "Compares mean, decay, and last-item aggregation in LLMSeqSim alongside SASRec.",
+        "Motivates treating aggregation choice as an empirical question."
+      ],
+      "limitations": [
+        "Uses pretrained semantic embeddings, making evidence indirect for the proposed ID-only setting.",
+        "Its results do not establish a learned gate's advantage."
+      ]
+    },
+    {
+      "title": "ReZero Is All You Need: Fast Convergence at Large Depth",
+      "link": "https://proceedings.mlr.press/v161/bachlechner21a.html",
+      "contributions": [
+        "Provides precedent for residual branches controlled by initially zero scalar gates.",
+        "Motivates conservative initialization of the added pooling branch."
+      ],
+      "limitations": [
+        "The proposed near-zero recommendation gate is an engineering adaptation.",
+        "Does not establish optimal initialization or ranking improvements here."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how optimizing model-selection criteria can overfit evaluation noise.",
+        "Supports prespecifying trial limits and recording checkpoint comparisons."
+      ],
+      "limitations": [
+        "Prespecification does not eliminate selection bias.",
+        "A bootstrap interval for the selected winner does not provide search-adjusted coverage."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled evaluation can yield conclusions inconsistent with full-catalog evaluation.",
+        "Supports limiting claims to the pinned 99-negative candidate protocol."
+      ],
+      "limitations": [
+        "Does not invalidate the required benchmark objective.",
+        "Does not provide full-catalog relevance labels for the twenty training-user audits."
+      ]
+    }
+  ]
+}

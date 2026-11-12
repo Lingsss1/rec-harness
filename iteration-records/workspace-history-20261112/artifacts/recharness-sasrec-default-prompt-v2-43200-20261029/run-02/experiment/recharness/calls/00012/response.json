@@ -1,0 +1,45 @@
+{
+  "category_edits": [
+    {
+      "category": "learning_objective",
+      "rationale": "Weight the existing positive and negative BCE losses toward recent targets, normalizing by total valid-position weight. Preserve sampling, optimizer and training schedule, with the required 200-epoch cap.",
+      "edits": [
+        {
+          "find": "NUM_EPOCHS   = int(os.environ.get(\"SASREC_EPOCHS\",    \"300\"))",
+          "replace": "NUM_EPOCHS   = min(200, int(os.environ.get(\"SASREC_EPOCHS\", \"200\")))"
+        },
+        {
+          "find": "    bce_criterion = nn.BCEWithLogitsLoss()",
+          "replace": "    bce_criterion = nn.BCEWithLogitsLoss(reduction=\"none\")"
+        },
+        {
+          "find": "            pos_labels = torch.ones(pos_logits[indices].shape, device=device)\n            neg_labels = torch.zeros(neg_logits[indices].shape, device=device)\n            loss = bce_criterion(pos_logits[indices], pos_labels)\n            loss = loss + bce_criterion(neg_logits[indices], neg_labels)",
+          "replace": "            pos_labels = torch.ones(pos_logits[indices].shape, device=device)\n            neg_labels = torch.zeros(neg_logits[indices].shape, device=device)\n            pos_loss = bce_criterion(pos_logits[indices], pos_labels)\n            neg_loss = bce_criterion(neg_logits[indices], neg_labels)\n            # Targets are right-aligned: the latest target has distance zero.\n            distance = torch.arange(\n                pos_t.shape[1] - 1, -1, -1,\n                device=device, dtype=pos_logits.dtype,\n            )\n            position_weights = 0.5 + 0.5 * torch.exp(-distance / 10.0)\n            weights = position_weights.unsqueeze(0).expand_as(pos_logits)[indices]\n            loss = ((pos_loss + neg_loss) * weights).sum() / weights.sum().clamp_min(1e-8)"
+        }
+      ]
+    },
+    {
+      "category": "feature_construction",
+      "rationale": "Expose repeated interests by scaling each existing input embedding using only earlier occurrences in its supplied causal prefix. The same SASRec class supplies this feature during training and prediction, without new learned embeddings or separate scorers.",
+      "edits": [
+        {
+          "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+          "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+        },
+        {
+          "find": "        seq_emb = self.item_emb(seq) * (self.hidden_units ** 0.5)\n\n        pos = torch.arange(M, device=seq.device).unsqueeze(0).expand(B, -1)",
+          "replace": "        earlier = torch.tril(\n            torch.ones((M, M), dtype=torch.bool, device=seq.device), diagonal=-1\n        )\n        matches = seq.unsqueeze(2).eq(seq.unsqueeze(1))\n        repeat_count = (matches & earlier.unsqueeze(0)).sum(dim=-1)\n        repeat_scale = 1.0 + 0.25 * torch.log1p(\n            repeat_count.to(dtype=self.item_emb.weight.dtype)\n        ).clamp(max=2.0)\n        repeat_scale = repeat_scale * seq.ne(0).to(repeat_scale.dtype)\n        seq_emb = self.item_emb(seq) * (self.hidden_units ** 0.5)\n        seq_emb = seq_emb * repeat_scale.unsqueeze(-1)\n\n        pos = torch.arange(M, device=seq.device).unsqueeze(0).expand(B, -1)"
+        },
+        {
+          "find": "            \"itemnum\": itemnum,\n            \"hidden_units\": HIDDEN_UNITS,",
+          "replace": "            \"itemnum\": itemnum,\n            \"input_feature\": \"causal_prefix_repeat_v1\",\n            \"hidden_units\": HIDDEN_UNITS,"
+        },
+        {
+          "find": "        with open(meta_path, \"rb\") as f:\n            meta = pickle.load(f)\n        _metas[ds] = meta",
+          "replace": "        with open(meta_path, \"rb\") as f:\n            meta = pickle.load(f)\n        if meta.get(\"input_feature\") != \"causal_prefix_repeat_v1\":\n            raise ValueError(f\"Unexpected input feature configuration for {ds}\")\n        # The imported SASRec computes causal prefix-repeat scaling in log2feats.\n        _metas[ds] = meta"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Combine causal prefix-repeat input scaling with normalized recency-weighted BCE. Preserve the SASRec backbone and one checkpoint per category, retain all four dataset routes, and cap training at 200 epochs."
+}

@@ -1,0 +1,348 @@
+--- g1-r0066-no_sign_bridge/model.py
++++ g1-r0067-coarse_axis/model.py
+@@ -1,10 +1,10 @@
+-"""Prospective two-linear-moment sign attribution; performance unmeasured.
+-
+-Keep the inherited supplied/reversed preparation and supplied-only route bridge.
+-Average shared-model predictions over selective signs of local/coarse linear
+-summaries. Full event fields, masks, compression and all other summaries stay
+-on their supplied route. This tests directional utility, not full order
+-invariance. Joint sign reversal preserves relative signs. Native tensor,
+-autograd, BF16, resource and predictive checks belong to the authorized host.
++"""Single-view sign quotient of inherited local/coarse history moments.
++
++A selected moment m is oriented so its first maximum-absolute coordinate
++is nonnegative. This retains the whole vector up to one global sign,
++without averaging learned predictions or adding a second loss view.
++All four cells compute both orientations; only the two selections vary.
++No full event-reversal/permutation invariance or novelty is asserted.
++Native tensor, gradient, BF16, parity and cost checks are host-owned.
+ """
+ import torch
+@@ -15,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'pair_treatment': 'reversal', 'view_objective': 'per_view', 'reverse_compression': False, 'reverse_details': False, 'reflect_local': False, 'reflect_coarse': False}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'canonicalize_local': False, 'canonicalize_coarse': True}
+ 
+ 
+@@ -35,7 +35,5 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16, summary_placement='block',
+-                 pair_treatment='reversal', view_objective='per_view',
+-                 reverse_compression=False, reverse_details=False,
+-                 reflect_local=False, reflect_coarse=False,
++                 canonicalize_local=False, canonicalize_coarse=True,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -49,27 +47,9 @@
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+-        if pair_treatment not in ('reversal', 'supplied', 'path', 'lexical'):
+-            raise ValueError('Unknown two-view history treatment')
+-        self.pair_treatment = pair_treatment
+-        if pair_treatment not in ('reversal', 'supplied'):
+-            raise ValueError('This objective study uses reversal or supplied pairs')
+-        if view_objective not in ('mean', 'per_view'):
+-            raise ValueError('Unknown view supervision objective')
+-        self.view_objective = view_objective
+-        if pair_treatment != 'reversal' or view_objective != 'per_view':
+-            raise ValueError('Route factorial fixes supplied/reversed preparation and per-view BCE')
+-        if (not isinstance(reverse_compression, bool)
+-                or not isinstance(reverse_details, bool)):
+-            raise ValueError('Route selectors must be booleans')
+-        self.reverse_compression = reverse_compression
+-        self.reverse_details = reverse_details
+-        if not isinstance(reflect_local, bool) or not isinstance(reflect_coarse, bool):
+-            raise ValueError('Linear reflection selectors must be booleans')
+-        if reverse_compression or reverse_details:
+-            raise ValueError('Sign attribution freezes every raw route to supplied')
+-        self.reflect_local = reflect_local
+-        self.reflect_coarse = reflect_coarse
+-        self._loss_views = None
+         self.compression_routes = compression_routes
++        if not isinstance(canonicalize_local, bool) or not isinstance(canonicalize_coarse, bool):
++            raise ValueError('Moment orientation switches must be booleans')
++        self.canonicalize_local = canonicalize_local
++        self.canonicalize_coarse = canonicalize_coarse
+         if block_aux_scorer_grad is not True:
+             raise ValueError('Auxiliary scorer parameter gradients must stay blocked')
+@@ -252,226 +232,5 @@
+         self.model_to_device()
+ 
+-    @staticmethod
+-    def _path_sources(ranks, packed, count, positions):
+-        """Exact minimum of forward/reverse valid-event tuple sequences.
+-
+-        Ranks preserve complete-tuple lexical order, including historical
+-        action and every eligibility bit. The first unequal valid rank
+-        selects orientation. Palindromes (including length zero/one) select
+-        forward, but their tuple sequence is identical in either direction.
+-        No event crosses the original endpoint cut except by full reversal.
+-        """
+-        length = positions.shape[1]
+-        active = positions < count
+-        reverse_index = (count - 1 - positions).clamp_min(0)
+-        reversed_ranks = ranks.gather(1, reverse_index)
+-        different = active & (ranks != reversed_ranks)
+-        first = torch.where(different, positions,
+-                            torch.full_like(positions, length)).min(
+-                                dim=1, keepdim=True).values
+-        safe_first = first.clamp_max(length - 1)
+-        choose_reverse = ((first < length)
+-                          & (reversed_ranks.gather(1, safe_first)
+-                             < ranks.gather(1, safe_first)))
+-        return torch.where(choose_reverse, packed.gather(1, reverse_index), packed)
+-
+-    def _view_sources(self, item, mask, task_masks):
+-        """Compute complete-event lexical, open-path and reversed layouts.
+-
+-        Destinations are always the original valid positions. Every field,
+-        historical action and eligibility bit travels together. Padding and
+-        the current target never participate in sorting or reversal.
+-        """
+-        batch, length = mask.shape
+-        if length != 100 or len(task_masks) != self.num_tasks:
+-            raise ValueError('Frozen history and four eligibility masks required')
+-        for eligibility in task_masks:
+-            if eligibility.shape != mask.shape:
+-                raise ValueError('Historical task mask shape mismatch')
+-        names = self.item_fields + [self.action_field]
+-        if set(item) != set(names):
+-            raise ValueError('Every supplied event field must enter the tuple key')
+-        for field in item.values():
+-            if field.ndim != 2 or field.shape != (batch, length + 1):
+-                raise ValueError('Expected event fields with unchanged target')
+-        valid = mask.bool()
+-        positions = torch.arange(length, device=mask.device, dtype=torch.long)
+-        positions = positions.unsqueeze(0).expand(batch, -1)
+-        raw_keys = [item[name][:, :-1] for name in names] + list(task_masks)
+-        keys = [torch.where(valid, key, torch.zeros_like(key)) for key in raw_keys]
+-        lexical = positions
+-        for key in reversed(keys):
+-            lexical = lexical.gather(1, torch.argsort(
+-                key.gather(1, lexical), dim=1, stable=True))
+-        lexical = lexical.gather(1, torch.argsort(
+-            (~valid).long().gather(1, lexical), dim=1, stable=True))
+-        different = torch.zeros_like(valid[:, 1:])
+-        for key in keys:
+-            ordered_key = key.gather(1, lexical)
+-            different = different | (ordered_key[:, 1:] != ordered_key[:, :-1])
+-        changes = torch.cat([torch.ones_like(positions[:, :1]), different.long()], dim=1)
+-        lexical_ranks = changes.cumsum(dim=1) - 1
+-        original_ranks = torch.zeros_like(lexical_ranks).scatter(1, lexical, lexical_ranks)
+-        packed = positions.gather(1, torch.argsort((~valid).long(), dim=1, stable=True))
+-        ranks = original_ranks.gather(1, packed)
+-        count = valid.long().sum(dim=1, keepdim=True)
+-        path = self._path_sources(ranks, packed, count, positions)
+-        reversed_packed = packed.gather(1, (count - 1 - positions).clamp_min(0))
+-        destinations = (valid.long().cumsum(dim=1) - 1).clamp_min(0)
+-        path, lexical, reverse = [
+-            torch.where(valid, order.gather(1, destinations), positions)
+-            for order in (path, lexical, reversed_packed)]
+-        return positions, reverse, path, lexical
+-
+-    def _paired_inputs(self, inputs):
+-        if len(inputs) != 4:
+-            raise ValueError('Released historical task masks are required')
+-        supplied = inputs[3]
+-        if isinstance(supplied, (list, tuple)):
+-            if len(supplied) != self.num_tasks:
+-                raise ValueError('Wrong number of historical task masks')
+-        elif torch.is_tensor(supplied):
+-            if supplied.ndim != 3 or supplied.shape[0] != self.num_tasks:
+-                raise ValueError('Expected historical masks with shape [4,B,100]')
+-        else:
+-            raise ValueError('Released historical task masks are required')
+-        # Upstream get_inputs assigns device copies into item_dict. Give it
+-        # a fresh mapping so no caller-owned dictionary is mutated.
+-        copied = (inputs[0], dict(inputs[1]), inputs[2], supplied)
+-        user, item, mask, task_masks = self.get_inputs(copied, return_multi_masks=True)
+-        if mask.ndim != 2 or mask.shape[1] != 100:
+-            raise ValueError('Frozen protocol requires 100 history positions')
+-        identity, reverse, path, lexical = self._view_sources(item, mask, task_masks)
+-        if self.pair_treatment == 'reversal':
+-            first, second = identity, reverse
+-        elif self.pair_treatment == 'path':
+-            first, second = path, path
+-        elif self.pair_treatment == 'lexical':
+-            first, second = lexical, lexical
+-        else:
+-            first, second = identity, identity
+-        paired_item = {}
+-        for name, field in item.items():
+-            a = torch.cat([field[:, :-1].gather(1, first), field[:, -1:]], dim=1)
+-            b = torch.cat([field[:, :-1].gather(1, second), field[:, -1:]], dim=1)
+-            paired_item[name] = torch.cat([a, b], dim=0)
+-        paired_masks = [torch.cat([eligibility.gather(1, first),
+-                                  eligibility.gather(1, second)], dim=0)
+-                        for eligibility in task_masks]
+-        paired_user = {name: torch.cat([value, value], dim=0)
+-                       for name, value in user.items()}
+-        return (paired_user, paired_item, torch.cat([mask, mask], dim=0), paired_masks)
+-
+-    def forward(self, inputs):
+-        # One call shares learned functions and a native joint Dice update.
+-        # Selective sign averaging is even in the chosen representation
+-        # direction during eval. Joint signs are averaged simultaneously,
+-        # not independently; other channels retain supplied-order signals.
+-        # Host loss/labels still have B rows and use the returned predictor.
+-        batch = inputs[2].shape[0]
+-        probabilities = self._single_orientation(self._paired_inputs(inputs))
+-        # Transient current-forward graph only; no labels/sample IDs,
+-        # registered buffers or checkpoint state enter this cache.
+-        first = torch.cat([probabilities[label + '_pred'][:batch].float()
+-                           for label in self.feature_map.labels], dim=1)
+-        second = torch.cat([probabilities[label + '_pred'][batch:].float()
+-                            for label in self.feature_map.labels], dim=1)
+-        self._loss_views = (first, second) if self.training else None
+-        return {name: (value[:batch].float() + value[batch:].float()) * 0.5
+-                for name, value in probabilities.items()}
+-
+-    def training_loss(self, inputs, probabilities, train_labels):
+-        """Sum four task BCE means; each view receives half weight.
+-
+-        Both losses and backward graphs execute in every factorial cell.
+-        No extra network forward, normalization update or inference change.
+-        Labels enter only this authorized training hook, never forward.
+-        """
+-        views = self._loss_views
+-        self._loss_views = None
+-        if views is None:
+-            raise RuntimeError('training_loss requires the immediately preceding training forward')
+-        first, second = views
+-        if (probabilities.shape != first.shape or train_labels.shape != first.shape
+-                or first.ndim != 2 or first.shape[1] != self.num_tasks):
+-            raise ValueError('Expected aligned probabilities and labels [B,4]')
+-        # BCE must run outside autocast. All cells use identical clipping;
+-        # host native preflight must check agreement with its default BCE.
+-        with torch.autocast(device_type=probabilities.device.type, enabled=False):
+-            labels = train_labels.float()
+-            average = probabilities.float().clamp(1e-7, 1.0 - 1e-7)
+-            first = first.float().clamp(1e-7, 1.0 - 1e-7)
+-            second = second.float().clamp(1e-7, 1.0 - 1e-7)
+-            mean_loss = torch.nn.functional.binary_cross_entropy(
+-                average, labels, reduction='none').mean(dim=0).sum()
+-            first_loss = torch.nn.functional.binary_cross_entropy(
+-                first, labels, reduction='none').mean(dim=0).sum()
+-            second_loss = torch.nn.functional.binary_cross_entropy(
+-                second, labels, reduction='none').mean(dim=0).sum()
+-            view_loss = 0.5 * (first_loss + second_loss)
+-            if self.view_objective == 'per_view':
+-                return view_loss + 0.0 * mean_loss
+-            return mean_loss + 0.0 * view_loss
+-
+-    @staticmethod
+-    def _route_second_view(value, use_reversed):
+-        """Retain view one; choose view two without detaching either route.
+-
+-        Inputs are already concatenated as [supplied B, reversed B]. Both
+-        choices execute a same-shaped cat; the selected graph naturally
+-        sums gradients when the supplied representation is duplicated.
+-        """
+-        if value.shape[0] % 2:
+-            raise ValueError('Expected paired 2B representation')
+-        half = value.shape[0] // 2
+-        first, second = value[:half], value[half:]
+-        return torch.cat([first, second if use_reversed else first], dim=0)
+-
+-    @staticmethod
+-    def _reflect_second_view(value, reflect):
+-        """Change only the second-view linear summary sign, without new state.
+-
+-        Both cells execute the same multiplication and concatenation. This
+-        operator preserves magnitude/support, masks, all other channels and
+-        differentiation. It is a representation intervention, not a claim
+-        that an event permutation exists with every other summary fixed.
+-        """
+-        if value.shape[0] % 2:
+-            raise ValueError('Expected paired 2B representation')
+-        half = value.shape[0] // 2
+-        sign = -1.0 if reflect else 1.0
+-        return torch.cat([value[:half], value[half:] * sign], dim=0)
+-
+     def _represent(self, inputs):
+-        """Cross two existing order routes before any learned normalization.
+-
+-        Compression owns values, feedback eligibility and match membership;
+-        keeping all three on the same event layout preserves alignment.
+-        Explicit details own all five global summaries. Raw mask positions
+-        are unchanged by valid-rank reversal, and target/context/counts are
+-        invariant. No partial statistics, buffer, parameter, RNG or label
+-        is introduced. Both raw representations execute in every cell.
+-        """
+-        raw = self._unrouted_represent(inputs)
+-        (context, target, values, mask, auxiliary, detail, position_detail,
+-         block_detail, curvature_detail, joint_detail,
+-         match_counts, match_union) = raw
+-        values, auxiliary, match_union = [
+-            self._route_second_view(value, self.reverse_compression)
+-            for value in (values, auxiliary, match_union)]
+-        detail, position_detail, block_detail, curvature_detail, joint_detail = [
+-            self._route_second_view(value, self.reverse_details)
+-            for value in (detail, position_detail, block_detail,
+-                          curvature_detail, joint_detail)]
+-        # Every raw route above is supplied-only. Reflect just the selected
+-        # linear summaries in view two, including their use in BOTH adapter
+-        # and context/history correction. No event or eligibility is moved.
+-        position_detail = self._reflect_second_view(position_detail, self.reflect_local)
+-        block_detail = self._reflect_second_view(block_detail, self.reflect_coarse)
+-        return (context, target, values, mask, auxiliary, detail, position_detail,
+-                block_detail, curvature_detail, joint_detail,
+-                match_counts, match_union)
+-
+-    def _unrouted_represent(self, inputs):
+         # Do not allow the framework fallback that treats every event as
+         # positive for every task when historical masks are missing.
+@@ -487,5 +246,8 @@
+         else:
+             raise ValueError('Released historical task masks are required')
+-        user, item, mask, task_masks = self.get_inputs(inputs, return_multi_masks=True)
++        # The framework may assign device copies into item_dict. Keep the
++        # caller-owned mapping intact; no tensor is mutated here.
++        copied = (inputs[0], dict(inputs[1]), inputs[2], supplied)
++        user, item, mask, task_masks = self.get_inputs(copied, return_multi_masks=True)
+         if mask.ndim != 2 or mask.shape[1] != 100:
+             raise ValueError('Frozen protocol requires 100 history positions')
+@@ -505,5 +267,34 @@
+         detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._target_match_summary(
+             item, values, mask)
++        # Select before ANY learned consumer, including every auxiliary
++        # adapter and context/history projection. Other channels stay intact.
++        # Compute both alternatives in every cell, including signed_bridge.
++        canonical_local = self._canonical_moment(position_detail)
++        canonical_coarse = self._canonical_moment(block_detail)
++        position_detail = canonical_local if self.canonicalize_local else position_detail
++        block_detail = canonical_coarse if self.canonicalize_coarse else block_detail
+         return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union
++
++    @staticmethod
++    def _canonical_moment(moment):
++        """[B,D] -> representative of {m,-m}, with no added learned state.
++
++        FP32 detached pivot selection uses the first maximum-absolute
++        coordinate. Ties therefore resolve identically for m and -m; zero
++        uses positive orientation and remains zero. Multiply the WHOLE
++        vector, preserving norm, relative coordinate signs and outer product.
++        This is not coordinatewise abs. The local Jacobian away from pivot
++        boundaries is orientation * identity; the discrete choice has no
++        gradient. Learned embeddings can cross those boundaries, which is
++        an optimization confound to measure rather than hide.
++        """
++        if moment.ndim != 2 or moment.shape[1] < 1:
++            raise ValueError('Expected a nonempty-width moment matrix [B,D]')
++        detached = moment.detach().float()
++        index = detached.abs().argmax(dim=-1, keepdim=True)
++        pivot = detached.gather(-1, index)
++        orientation = torch.where(pivot < 0, -torch.ones_like(pivot),
++                                  torch.ones_like(pivot)).to(moment.dtype)
++        return moment * orientation
+ 
+     def _target_match_summary(self, item, values, mask):
+@@ -967,5 +758,5 @@
+         return self.interaction_outputs[index](fused.to(history.dtype))
+ 
+-    def _single_orientation(self, inputs):
++    def forward(self, inputs):
+         context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._represent(inputs)
+         batch = values.shape[0]

@@ -1,0 +1,15 @@
+{
+  "category_edits": [
+    {
+      "category": "interest_aggregation",
+      "rationale": "Replace each recurrent-state readout with a normalized causal exponential average of nonpadding states, using decay 0.8. This may smooth noisy recent interactions while preserving recent intent. Training and inference share the readout; the generated predictor imports the updated model class directly. Preserve the GRU backbone, embeddings, scoring, loss, optimizer, histories and category routing.",
+      "edits": [
+        {
+          "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(torch.nn.functional.normalize(self.item_emb(seq), p=2, dim=-1))\n        out, _ = self.gru(emb)\n        # Histories are LEFT padded; count-1 indexes padding on short histories.\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(torch.nn.functional.normalize(self.item_emb(seq), p=2, dim=-1))\n        out, _ = self.gru(emb)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores",
+          "replace": "    def _pool_states(self, out: torch.Tensor, seq: torch.Tensor) -> torch.Tensor:\n        numerator = out.new_zeros(out.size(0), out.size(2))\n        denominator = out.new_zeros(out.size(0), 1)\n        pooled = []\n        for timestep in range(out.size(1)):\n            valid = (seq[:, timestep] != 0).to(out.dtype).unsqueeze(-1)\n            numerator = 0.8 * numerator + valid * out[:, timestep]\n            denominator = 0.8 * denominator + valid\n            pooled.append(numerator / denominator.clamp_min(1e-8))\n        return torch.stack(pooled, dim=1)\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(torch.nn.functional.normalize(self.item_emb(seq), p=2, dim=-1))\n        out, _ = self.gru(emb)\n        out = self._pool_states(out, seq)\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(torch.nn.functional.normalize(self.item_emb(seq), p=2, dim=-1))\n        out, _ = self.gru(emb)\n        out = self._pool_states(out, seq)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Use causal exponential pooling with decay 0.8 at every supervised timestep and at inference. No checkpoint shape changes are required; the existing predictor writer imports the updated model."
+}

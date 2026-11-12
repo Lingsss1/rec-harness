@@ -1,0 +1,423 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "proposal": {
+        "category_edits": [
+          {
+            "category": "feature_construction",
+            "rationale": "Replace prefix-repeat scaling with a fixed training-frequency input feature: scale item inputs by 1 - 0.15*log1p(count)/max(log1p(count)). This may reduce ubiquitous items' influence while preserving positional inputs, learned embeddings, backbone, readout, loss and optimizer. Store training counts and normalization in each model checkpoint for identical prediction behavior.",
+            "edits": [
+              {
+                "find": "        self.itemnum = itemnum\n\n        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)",
+                "replace": "        self.itemnum = itemnum\n        self.register_buffer(\"item_train_counts\", torch.zeros(itemnum + 1, dtype=torch.long))\n        self.register_buffer(\"frequency_log_max\", torch.ones(()))\n\n        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)"
+              },
+              {
+                "find": "        earlier = torch.tril(\n            torch.ones((M, M), dtype=torch.bool, device=seq.device), diagonal=-1\n        )\n        matches = seq.unsqueeze(2).eq(seq.unsqueeze(1))\n        repeat_count = (matches & earlier.unsqueeze(0)).sum(dim=-1)\n        repeat_scale = 1.0 + 0.25 * torch.log1p(\n            repeat_count.to(dtype=self.item_emb.weight.dtype)\n        ).clamp(max=2.0)\n        repeat_scale = repeat_scale * seq.ne(0).to(repeat_scale.dtype)\n        seq_emb = self.item_emb(seq) * (self.hidden_units ** 0.5)\n        seq_emb = seq_emb * repeat_scale.unsqueeze(-1)",
+                "replace": "        frequency_scale = 1.0 - 0.15 * torch.log1p(\n            self.item_train_counts[seq].to(dtype=self.item_emb.weight.dtype)\n        ) / self.frequency_log_max\n        seq_emb = self.item_emb(seq) * (self.hidden_units ** 0.5)\n        seq_emb = seq_emb * frequency_scale.unsqueeze(-1)"
+              },
+              {
+                "find": "    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.98))",
+                "replace": "    # Fixed input features use occurrences from the supplied training split only.\n    counts = np.zeros(itemnum + 1, dtype=np.int64)\n    for history in user_train.values():\n        np.add.at(counts, np.asarray(history, dtype=np.int64), 1)\n    counts[0] = 0\n    with torch.no_grad():\n        model.item_train_counts.copy_(torch.as_tensor(counts, device=device))\n        model.frequency_log_max.copy_(\n            torch.log1p(model.item_train_counts.to(dtype=model.item_emb.weight.dtype)).max().clamp_min(1e-8)\n        )\n\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.98))"
+              },
+              {
+                "find": "            \"input_feature\": \"causal_prefix_repeat_v1\",",
+                "replace": "            \"input_feature\": \"train_frequency_attenuation_0.15_v1\","
+              },
+              {
+                "find": "        if meta.get(\"input_feature\") != \"causal_prefix_repeat_v1\":\n            raise ValueError(f\"Unexpected input feature configuration for {ds}\")",
+                "replace": "        if meta.get(\"input_feature\") != \"train_frequency_attenuation_0.15_v1\":\n            raise ValueError(f\"Unexpected input feature configuration for {ds}\")\n        # Training counts and their normalization load from the model checkpoint."
+              }
+            ]
+          }
+        ],
+        "change_summary": "Apply bounded training-frequency attenuation to history item inputs across all four datasets, replacing repeat scaling. Checkpoint buffers reproduce the feature in the generated predictor; all other model and training behavior remains unchanged.",
+        "edits": [
+          {
+            "find": "        self.itemnum = itemnum\n\n        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)",
+            "replace": "        self.itemnum = itemnum\n        self.register_buffer(\"item_train_counts\", torch.zeros(itemnum + 1, dtype=torch.long))\n        self.register_buffer(\"frequency_log_max\", torch.ones(()))\n\n        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)"
+          },
+          {
+            "find": "        earlier = torch.tril(\n            torch.ones((M, M), dtype=torch.bool, device=seq.device), diagonal=-1\n        )\n        matches = seq.unsqueeze(2).eq(seq.unsqueeze(1))\n        repeat_count = (matches & earlier.unsqueeze(0)).sum(dim=-1)\n        repeat_scale = 1.0 + 0.25 * torch.log1p(\n            repeat_count.to(dtype=self.item_emb.weight.dtype)\n        ).clamp(max=2.0)\n        repeat_scale = repeat_scale * seq.ne(0).to(repeat_scale.dtype)\n        seq_emb = self.item_emb(seq) * (self.hidden_units ** 0.5)\n        seq_emb = seq_emb * repeat_scale.unsqueeze(-1)",
+            "replace": "        frequency_scale = 1.0 - 0.15 * torch.log1p(\n            self.item_train_counts[seq].to(dtype=self.item_emb.weight.dtype)\n        ) / self.frequency_log_max\n        seq_emb = self.item_emb(seq) * (self.hidden_units ** 0.5)\n        seq_emb = seq_emb * frequency_scale.unsqueeze(-1)"
+          },
+          {
+            "find": "    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.98))",
+            "replace": "    # Fixed input features use occurrences from the supplied training split only.\n    counts = np.zeros(itemnum + 1, dtype=np.int64)\n    for history in user_train.values():\n        np.add.at(counts, np.asarray(history, dtype=np.int64), 1)\n    counts[0] = 0\n    with torch.no_grad():\n        model.item_train_counts.copy_(torch.as_tensor(counts, device=device))\n        model.frequency_log_max.copy_(\n            torch.log1p(model.item_train_counts.to(dtype=model.item_emb.weight.dtype)).max().clamp_min(1e-8)\n        )\n\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.98))"
+          },
+          {
+            "find": "            \"input_feature\": \"causal_prefix_repeat_v1\",",
+            "replace": "            \"input_feature\": \"train_frequency_attenuation_0.15_v1\","
+          },
+          {
+            "find": "        if meta.get(\"input_feature\") != \"causal_prefix_repeat_v1\":\n            raise ValueError(f\"Unexpected input feature configuration for {ds}\")",
+            "replace": "        if meta.get(\"input_feature\") != \"train_frequency_attenuation_0.15_v1\":\n            raise ValueError(f\"Unexpected input feature configuration for {ds}\")\n        # Training counts and their normalization load from the model checkpoint."
+          }
+        ],
+        "scope_validation": "exact categories and nontrivial AST changes; semantic labels prompt-enforced"
+      }
+    }
+  ],
+  "receipt": {
+    "id": "round-0008-slot-1-attempt-1",
+    "status": "success",
+    "gpu": 5,
+    "allocated_gpu_seconds": 1947.4717773497105,
+    "output": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-sasrec-default-prompt-v2-43200-20261029/run-02/experiment/recharness/trials/round-0008-slot-1-attempt-1",
+    "source_sha256": "5c31d022708ac165a334de933a0de886aa4b95ffa15b9a014512f9100fd21e01",
+    "score": 0.5163,
+    "aggregate": {
+      "HR@5": 0.3762,
+      "HR@10": 0.5163,
+      "HR@20": 0.65,
+      "NDCG@5": 0.2791,
+      "NDCG@10": 0.3243,
+      "NDCG@20": 0.3583,
+      "Movies_and_TV/HR@5": 0.455,
+      "Movies_and_TV/HR@10": 0.59,
+      "Movies_and_TV/HR@20": 0.72,
+      "Movies_and_TV/NDCG@5": 0.3479,
+      "Movies_and_TV/NDCG@10": 0.392,
+      "Movies_and_TV/NDCG@20": 0.4246,
+      "Industrial_and_Scientific/HR@5": 0.41,
+      "Industrial_and_Scientific/HR@10": 0.55,
+      "Industrial_and_Scientific/HR@20": 0.69,
+      "Industrial_and_Scientific/NDCG@5": 0.3067,
+      "Industrial_and_Scientific/NDCG@10": 0.3511,
+      "Industrial_and_Scientific/NDCG@20": 0.3864,
+      "Electronics/HR@5": 0.285,
+      "Electronics/HR@10": 0.455,
+      "Electronics/HR@20": 0.535,
+      "Electronics/NDCG@5": 0.2122,
+      "Electronics/NDCG@10": 0.2669,
+      "Electronics/NDCG@20": 0.2874,
+      "CDs_and_Vinyl/HR@5": 0.355,
+      "CDs_and_Vinyl/HR@10": 0.47,
+      "CDs_and_Vinyl/HR@20": 0.655,
+      "CDs_and_Vinyl/NDCG@5": 0.2496,
+      "CDs_and_Vinyl/NDCG@10": 0.2873,
+      "CDs_and_Vinyl/NDCG@20": 0.3347
+    },
+    "per_dataset": {
+      "Movies_and_TV": {
+        "metrics": {
+          "HR@5": 0.455,
+          "HR@10": 0.59,
+          "HR@20": 0.72,
+          "NDCG@5": 0.3479,
+          "NDCG@10": 0.392,
+          "NDCG@20": 0.4246
+        },
+        "n_users": 200
+      },
+      "Industrial_and_Scientific": {
+        "metrics": {
+          "HR@5": 0.41,
+          "HR@10": 0.55,
+          "HR@20": 0.69,
+          "NDCG@5": 0.3067,
+          "NDCG@10": 0.3511,
+          "NDCG@20": 0.3864
+        },
+        "n_users": 200
+      },
+      "Electronics": {
+        "metrics": {
+          "HR@5": 0.285,
+          "HR@10": 0.455,
+          "HR@20": 0.535,
+          "NDCG@5": 0.2122,
+          "NDCG@10": 0.2669,
+          "NDCG@20": 0.2874
+        },
+        "n_users": 200
+      },
+      "CDs_and_Vinyl": {
+        "metrics": {
+          "HR@5": 0.355,
+          "HR@10": 0.47,
+          "HR@20": 0.655,
+          "NDCG@5": 0.2496,
+          "NDCG@10": 0.2873,
+          "NDCG@20": 0.3347
+        },
+        "n_users": 200
+      }
+    },
+    "evaluation_seconds": 3.450512155890465,
+    "predictor_sha256": "64ba17796a12aa7f6e81e2b4afb2bef6ef26409d8061146d938e97db2b50e78d"
+  },
+  "native_result": {
+    "spec": {
+      "dimension": "feature_construction",
+      "delta": -1.0,
+      "estimated_cost_secs": 4638.524063441902,
+      "code_diff": "",
+      "code_edits": [],
+      "code_content": "",
+      "arm": "feature_construction",
+      "composite_dims": [
+        "feature_construction"
+      ],
+      "strategy_arm": null,
+      "round_role": "lowlevel_routing",
+      "parallel_group_estimated_wall_secs": 18554.09625376761,
+      "budget_safe_if_global_budget_gte": 18554.09625376761,
+      "budget_accounting": "Parallel group cost is sum(estimated_cost_secs) across the selected candidates.",
+      "code_hint": "REGULAR MUTATION: change only this one direction. 特征构造: Construct input features solely from supplied training interactions, such as frequency or recency indicators. No external metadata, independent scorer or score fusion. Keep learned embedding design, SASRec topology, readout, loss and optimizer fixed.\nMaintain shape, checkpoint and predictor consistency for changes in the selected directions; preserve the registered direction boundaries.",
+      "hypothesis": "Thompson: uncertain (0.44, 0 obs) — explore; Memory available in state; agent should write a short arm-specific hypothesis; Agent hypothesis: Across all four categories, change only feature construction: compute item occurrence counts from training interactions and scale each input item embedding by 1-0.15*log1p(count_i)/max_j(log1p(count_j)), leaving positional inputs unchanged. This fixed, bounded frequency feature may reduce domination by ubiquitous items while retaining their identity. Preserve learned embedding design, history selection, backbone, readout, scoring, loss and training settings. Save counts with each model and reproduce scaling in the predictor writer; use one model per category.",
+      "is_jumping": false,
+      "implementation_backend": "claude_code",
+      "implementation_prompt": "REGULAR MUTATION: change only this one direction. 特征构造: Construct input features solely from supplied training interactions, such as frequency or recency indicators. No external metadata, independent scorer or score fusion. Keep learned embedding design, SASRec topology, readout, loss and optimizer fixed.\nMaintain shape, checkpoint and predictor consistency for changes in the selected directions; preserve the registered direction boundaries.",
+      "allowed_files": [
+        "train.py",
+        "predict.py"
+      ],
+      "claude_attempts": 3,
+      "arm_design": "eight_directions_v3",
+      "selected_categories": [
+        "feature_construction"
+      ],
+      "hypothesis_key": "slot-1",
+      "sampling_draw": {
+        "slot": 1,
+        "rank": 2,
+        "arm": "feature_construction",
+        "sampled_values": {
+          "feature_construction": 0.7960657343110489,
+          "embedding_representation": 0.1859758466230337,
+          "interaction_mechanism": 0.7158822690577124,
+          "network_architecture": 0.45314577818849844,
+          "sequence_modeling": 0.7087089407661888,
+          "interest_aggregation": 0.8127527476872618,
+          "learning_objective": 0.7820885841203696,
+          "training_strategy": 0.21396011552656075
+        }
+      },
+      "max_trial_gpu_seconds": 4638.524063441902,
+      "protected_gpu_seconds": 0.0,
+      "jump_trigger": null,
+      "predict_code_edits": [],
+      "predict_code_content": "",
+      "agent_hypothesis": "Across all four categories, change only feature construction: compute item occurrence counts from training interactions and scale each input item embedding by 1-0.15*log1p(count_i)/max_j(log1p(count_j)), leaving positional inputs unchanged. This fixed, bounded frequency feature may reduce domination by ubiquitous items while retaining their identity. Preserve learned embedding design, history selection, backbone, readout, scoring, loss and training settings. Save counts with each model and reproduce scaling in the predictor writer; use one model per category.",
+      "gagc_memory_context": {
+        "experiment_skill": "# RecHarness Experiment Skill\n\n## Objective\nUse benchmark val_score as the search and winner criterion.\nDo not use held-out test metrics during search.\nThompson Sampling chooses arms; this skill only guides how to edit code within selected arms.\n\n## Recent Patch Lessons\n- Round 1 winner established the benchmark reference using baseline/baseline ↓.\n- Round 4 winner improved validation score by +0.0075 using combination_jump/combination_jump ↑. Val score also improved — high confidence direction.\n- Round 8 winner improved validation score by +0.0112 using interest_aggregation/interest_aggregation ↓. Val score also improved — high confidence direction.\n\n## Concrete Avoids\nNo concrete patch-level avoids yet.\n",
+        "recent_text_gradients": [
+          "Round 1 winner established the benchmark reference using baseline/baseline ↓.",
+          "Round 4 winner improved validation score by +0.0075 using combination_jump/combination_jump ↑. Val score also improved — high confidence direction.",
+          "Round 8 winner improved validation score by +0.0112 using interest_aggregation/interest_aggregation ↓. Val score also improved — high confidence direction."
+        ],
+        "failure_memory": [],
+        "skill_notes": "Round 8: best_ever=0.5237, recent=0.5237, trend=improving. Top arms: interest_aggregation, feature_construction, interaction_mechanism."
+      },
+      "trial_group_id": "trialgrp_1793261724506_1644398",
+      "trial_id": 1
+    },
+    "wall_time_secs": 1947.4717773497105,
+    "timed_out": false,
+    "oom": false,
+    "val_score": 0.5163,
+    "val_metrics": {
+      "Movies_and_TV": {
+        "HR@5": 0.455,
+        "HR@10": 0.59,
+        "HR@20": 0.72,
+        "NDCG@5": 0.3479,
+        "NDCG@10": 0.392,
+        "NDCG@20": 0.4246
+      },
+      "Industrial_and_Scientific": {
+        "HR@5": 0.41,
+        "HR@10": 0.55,
+        "HR@20": 0.69,
+        "NDCG@5": 0.3067,
+        "NDCG@10": 0.3511,
+        "NDCG@20": 0.3864
+      },
+      "Electronics": {
+        "HR@5": 0.285,
+        "HR@10": 0.455,
+        "HR@20": 0.535,
+        "NDCG@5": 0.2122,
+        "NDCG@10": 0.2669,
+        "NDCG@20": 0.2874
+      },
+      "CDs_and_Vinyl": {
+        "HR@5": 0.355,
+        "HR@10": 0.47,
+        "HR@20": 0.655,
+        "NDCG@5": 0.2496,
+        "NDCG@10": 0.2873,
+        "NDCG@20": 0.3347
+      }
+    },
+    "test_score": null,
+    "test_metrics": null,
+    "convergence_trace": [
+      0.285,
+      0.42,
+      0.4,
+      0.4,
+      0.405,
+      0.425,
+      0.46,
+      0.475,
+      0.495,
+      0.485,
+      0.49,
+      0.48,
+      0.505,
+      0.505,
+      0.515,
+      0.51,
+      0.52,
+      0.535,
+      0.55,
+      0.56,
+      0.55,
+      0.545,
+      0.55,
+      0.54,
+      0.55,
+      0.545,
+      0.555,
+      0.555,
+      0.555,
+      0.56,
+      0.56,
+      0.56,
+      0.555,
+      0.54,
+      0.555,
+      0.55,
+      0.555,
+      0.555,
+      0.57,
+      0.575,
+      0.215,
+      0.4,
+      0.425,
+      0.445,
+      0.45,
+      0.45,
+      0.44,
+      0.46,
+      0.46,
+      0.46,
+      0.465,
+      0.46,
+      0.495,
+      0.485,
+      0.49,
+      0.495,
+      0.495,
+      0.51,
+      0.545,
+      0.53,
+      0.56,
+      0.555,
+      0.57,
+      0.56,
+      0.54,
+      0.555,
+      0.555,
+      0.545,
+      0.55,
+      0.55,
+      0.53,
+      0.525,
+      0.525,
+      0.52,
+      0.52,
+      0.495,
+      0.51,
+      0.5,
+      0.49,
+      0.53,
+      0.225,
+      0.335,
+      0.38,
+      0.38,
+      0.385,
+      0.37,
+      0.37,
+      0.365,
+      0.355,
+      0.38,
+      0.375,
+      0.37,
+      0.38,
+      0.39,
+      0.375,
+      0.38,
+      0.39,
+      0.4,
+      0.41,
+      0.425,
+      0.41,
+      0.415,
+      0.425,
+      0.425,
+      0.41,
+      0.425,
+      0.46,
+      0.445,
+      0.44,
+      0.43,
+      0.42,
+      0.425,
+      0.425,
+      0.415,
+      0.435,
+      0.43,
+      0.42,
+      0.4,
+      0.395,
+      0.405,
+      0.18,
+      0.3,
+      0.3,
+      0.3,
+      0.3,
+      0.295,
+      0.295,
+      0.32,
+      0.305,
+      0.295,
+      0.305,
+      0.33,
+      0.36,
+      0.37,
+      0.365,
+      0.385,
+      0.41,
+      0.435,
+      0.435,
+      0.435,
+      0.445,
+      0.43,
+      0.435,
+      0.45,
+      0.435,
+      0.455,
+      0.45,
+      0.46,
+      0.47,
+      0.47,
+      0.46,
+      0.445,
+      0.45,
+      0.44,
+      0.46,
+      0.445,
+      0.48,
+      0.5,
+      0.51,
+      0.515
+    ],
+    "error_message": null,
+    "stdout_tail": "epoch  70/200  loss=1.0907  val_score: 0.3700  HR@20=0.4950  NDCG@10=0.2032\n  [CDs_and_Vinyl] epoch  75/200  loss=1.0718  val_score: 0.3650  HR@20=0.5200  NDCG@10=0.1960\n  [CDs_and_Vinyl] epoch  80/200  loss=1.0530  val_score: 0.3850  HR@20=0.5250  NDCG@10=0.2045\n  [CDs_and_Vinyl] epoch  85/200  loss=1.0311  val_score: 0.4100  HR@20=0.5500  NDCG@10=0.2242\n  [CDs_and_Vinyl] epoch  90/200  loss=1.0088  val_score: 0.4350  HR@20=0.5600  NDCG@10=0.2365\n  [CDs_and_Vinyl] epoch  95/200  loss=0.9851  val_score: 0.4350  HR@20=0.5700  NDCG@10=0.2383\n  [CDs_and_Vinyl] epoch 100/200  loss=0.9600  val_score: 0.4350  HR@20=0.5750  NDCG@10=0.2411\n  [CDs_and_Vinyl] epoch 105/200  loss=0.9368  val_score: 0.4450  HR@20=0.5750  NDCG@10=0.2458\n  [CDs_and_Vinyl] epoch 110/200  loss=0.9126  val_score: 0.4300  HR@20=0.5800  NDCG@10=0.2410\n  [CDs_and_Vinyl] epoch 115/200  loss=0.8896  val_score: 0.4350  HR@20=0.5850  NDCG@10=0.2551\n  [CDs_and_Vinyl] epoch 120/200  loss=0.8654  val_score: 0.4500  HR@20=0.5750  NDCG@10=0.2603\n  [CDs_and_Vinyl] epoch 125/200  loss=0.8423  val_score: 0.4350  HR@20=0.5950  NDCG@10=0.2525\n  [CDs_and_Vinyl] epoch 130/200  loss=0.8168  val_score: 0.4550  HR@20=0.5850  NDCG@10=0.2708\n  [CDs_and_Vinyl] epoch 135/200  loss=0.7951  val_score: 0.4500  HR@20=0.5800  NDCG@10=0.2666\n  [CDs_and_Vinyl] epoch 140/200  loss=0.7702  val_score: 0.4600  HR@20=0.5900  NDCG@10=0.2795\n  [CDs_and_Vinyl] epoch 145/200  loss=0.7469  val_score: 0.4700  HR@20=0.5900  NDCG@10=0.2733\n  [CDs_and_Vinyl] epoch 150/200  loss=0.7242  val_score: 0.4700  HR@20=0.6050  NDCG@10=0.2768\n  [CDs_and_Vinyl] epoch 155/200  loss=0.7029  val_score: 0.4600  HR@20=0.5950  NDCG@10=0.2750\n  [CDs_and_Vinyl] epoch 160/200  loss=0.6807  val_score: 0.4450  HR@20=0.5800  NDCG@10=0.2706\n  [CDs_and_Vinyl] epoch 165/200  loss=0.6583  val_score: 0.4500  HR@20=0.5900  NDCG@10=0.2702\n  [CDs_and_Vinyl] epoch 170/200  loss=0.6398  val_score: 0.4400  HR@20=0.5800  NDCG@10=0.2713\n  [CDs_and_Vinyl] epoch 175/200  loss=0.6183  val_score: 0.4600  HR@20=0.6300  NDCG@10=0.2748\n  [CDs_and_Vinyl] epoch 180/200  loss=0.5988  val_score: 0.4450  HR@20=0.6100  NDCG@10=0.2742\n  [CDs_and_Vinyl] epoch 185/200  loss=0.5795  val_score: 0.4800  HR@20=0.6200  NDCG@10=0.2834\n  [CDs_and_Vinyl] epoch 190/200  loss=0.5619  val_score: 0.5000  HR@20=0.6450  NDCG@10=0.2886\n  [CDs_and_Vinyl] epoch 195/200  loss=0.5450  val_score: 0.5100  HR@20=0.6300  NDCG@10=0.2934\n  [CDs_and_Vinyl] epoch 200/200  loss=0.5307  val_score: 0.5150  HR@20=0.6500  NDCG@10=0.3032\n  [CDs_and_Vinyl] Best val HR@10=0.5150  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-sasrec-default-prompt-v2-43200-20261029/run-02/experiment/recharness/trials/round-0008-slot-1-attempt-1/working/CDs_and_Vinyl_model.pt\npredict.py written → /home/liuzhishan/lhr/rec-harness/artifacts/recharness-sasrec-default-prompt-v2-43200-20261029/run-02/experiment/recharness/trials/round-0008-slot-1-attempt-1/working/predict.py\n\nAll datasets done. Average val HR@10 = 0.5300\n",
+    "stderr_tail": ""
+  },
+  "gpu_seconds_all_attempts": 1947.4717773497105
+}

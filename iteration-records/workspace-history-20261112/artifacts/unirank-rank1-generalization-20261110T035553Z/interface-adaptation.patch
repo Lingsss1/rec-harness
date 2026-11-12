@@ -1,0 +1,127 @@
+--- rank1-taobao-original.py
++++ native-schema-model.py
+@@ -1,3 +1,5 @@
++# Schema adaptation of validation rank 1: g3-r0018-pair_occupancy_task_private_linear.
++# Native field pairs and task cardinalities; five temporal bins and open gradients retained.
+ """Prospective transfer: committed task-private readout on pair-rank occupancy.
+ 
+ Preserve the complete g0-r0017 representation, masking and initialization.
+@@ -27,15 +29,17 @@
+ Overlapping task masks are allowed. No signed-weight normalization is used.
+ """
+ 
+-    def __init__(self, item_width, width, heads, source, layout):
++    def __init__(self, item_width, width, heads, source, layout, num_tasks=4, group_count=7):
+         super().__init__()
+         self.source = source
+         self.layout = layout
+         self.item_width = item_width
++        self.num_tasks = num_tasks
++        self.group_count = group_count
+         self.heads = heads
+         self.head_width = width // heads
+         self.input_projection = nn.Linear(item_width + 1, width)
+-        self.identity = nn.Parameter(torch.empty(1, 5, 4, width))
++        self.identity = nn.Parameter(torch.empty(1, 5, self.num_tasks, width))
+         self.query_norm = nn.LayerNorm(width)
+         self.key_norm = nn.LayerNorm(width)
+         self.query = nn.Linear(width, width, bias=False)
+@@ -49,22 +53,22 @@
+         batch, length, _ = values.shape
+         # Empty tensors still have five bins, four feedbacks and fixed width.
+         if not length:
+-            content = values.new_zeros((batch, 5, 4, self.item_width),
++            content = values.new_zeros((batch, 5, self.num_tasks, self.item_width),
+                                        dtype=torch.float32)
+-            counts = values.new_zeros((batch, 5, 4, 1), dtype=torch.float32)
++            counts = values.new_zeros((batch, 5, self.num_tasks, 1), dtype=torch.float32)
+             return content, counts
+         with torch.autocast(device_type=values.device.type, enabled=False):
+             temporal = (temporal_masks.bool() & valid[:, None, :]).float()
+             items = values[..., :self.item_width].float()
+             weighted = temporal * weights.float()[:, None, :]
+-            total = torch.bmm(weighted, items) / math.sqrt(7.0)
++            total = torch.bmm(weighted, items) / math.sqrt(self.group_count)
+             bin_count = temporal.sum(dim=-1, keepdim=True).clamp_min(1.0)
+             joint_parts, rate_parts, count_parts = [], [], []
+             for task_mask in task_masks:
+                 feedback = (task_mask.bool() & valid).float()[:, None, :]
+                 selected = temporal * feedback
+                 count = selected.sum(dim=-1, keepdim=True)
+-                joint = torch.bmm(weighted * feedback, items) / math.sqrt(7.0)
++                joint = torch.bmm(weighted * feedback, items) / math.sqrt(self.group_count)
+                 joint_parts.append(joint)
+                 rate_parts.append(count / bin_count)
+                 count_parts.append(count)
+@@ -87,15 +91,15 @@
+         memory = self.input_projection(torch.cat([content, counts], dim=-1))
+         memory = (memory + self.identity.to(memory.dtype)).flatten(1, 2)
+         memory_valid = temporal_masks.bool().any(dim=-1)
+-        memory_valid = memory_valid[:, :, None].expand(-1, -1, 4).flatten(1)
++        memory_valid = memory_valid[:, :, None].expand(-1, -1, self.num_tasks).flatten(1)
+         memory = memory * memory_valid.unsqueeze(-1).to(memory.dtype)
+         batch, count, width = tokens.shape
+         query = self.query(self.query_norm(tokens)).reshape(
+             batch, count, self.heads, self.head_width).transpose(1, 2)
+         key = self.key(self.key_norm(memory)).reshape(
+-            batch, 20, self.heads, self.head_width).transpose(1, 2)
++            batch, 5 * self.num_tasks, self.heads, self.head_width).transpose(1, 2)
+         value = self.value(memory).reshape(
+-            batch, 20, self.heads, self.head_width).transpose(1, 2)
++            batch, 5 * self.num_tasks, self.heads, self.head_width).transpose(1, 2)
+         with torch.autocast(device_type=tokens.device.type, enabled=False):
+             scores = torch.matmul(query.float(), key.float().transpose(-1, -2))
+             scores = scores / math.sqrt(self.head_width)
+@@ -164,8 +168,9 @@
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+-        if list(feature_map.labels) != ['is_click', 'cart', 'fav', 'buy']:
+-            raise ValueError('This study requires the frozen four-task order')
++        labels = list(feature_map.labels)
++        if len(labels) < 2 or len(set(labels)) != len(labels):
++            raise ValueError('Native tasks must contain at least two distinct labels')
+         if slot_mode not in ('pooled', 'recency'):
+             raise ValueError('Unknown slot construction')
+         if token_dim <= 0 or num_heads <= 0 or token_dim % num_heads:
+@@ -261,10 +266,8 @@
+         self.static_count = len(self.user_fields) + len(self.item_fields)
+         # All moment arms keep the parent's 35 summary tokens and equal parameters.
+         value_fields = self.item_fields + [self.action_field]
+-        expected = {'item_id', 'cate_id', 'campaign_id', 'customer_id',
+-                    'brand', 'price_bucket', 'action'}
+-        if set(value_fields) != expected or len(value_fields) != 7:
+-            raise ValueError('Expected the frozen six item fields plus action')
++        if len(set(value_fields)) != len(value_fields) or len(self.item_fields) < 2:
++            raise ValueError('Pair relations require at least two distinct native item fields')
+         self.group_count = len(value_fields)
+         self.token_count = self.static_count + 5 * self.group_count
+         # Keep the parent's nonrandom buffer and module construction order.
+@@ -325,13 +328,14 @@
+         # Append after all inherited initialization, without consuming RNG.
+         # Four maps shared over every bin/relation; only item fields enter.
+         self.feedback_content_bank = nn.Parameter(
+-            torch.zeros(4, self.key_width, token_dim))
++            torch.zeros(self.num_tasks, self.key_width, token_dim))
+         # New modules are constructed only after inherited reset/initialization.
+         # Forking CPU RNG preserves inherited weights and subsequent host draws.
+         # Every cell has exactly the same added modules and zero-start output.
+         with torch.random.fork_rng(devices=[]):
+             self.feedback_memory = FeedbackMemory(
+-                self.key_width, token_dim, num_heads, memory_source, memory_layout)
++                self.key_width, token_dim, num_heads, memory_source, memory_layout,
++                num_tasks=self.num_tasks, group_count=self.group_count)
+         # No constructor or random draw follows inherited initialization.
+         # Relation zero is global; pair indices address only the six fields.
+         pairs = [(left + 1, right + 1)
+@@ -806,8 +810,8 @@
+         if len(inputs) != 4 or inputs[3] is None:
+             raise ValueError('Frozen historical task masks are required')
+         user, item, mask, task_masks = self.get_inputs(inputs, return_multi_masks=True)
+-        if len(task_masks) != 4:
+-            raise ValueError('Expected four historical task masks')
++        if len(task_masks) != self.num_tasks:
++            raise ValueError('Expected one historical mask per native task')
+         valid = mask.bool()
+         batch, length = valid.shape
+         # Sanitize padded IDs before embedding and before batch-coupled Dice.

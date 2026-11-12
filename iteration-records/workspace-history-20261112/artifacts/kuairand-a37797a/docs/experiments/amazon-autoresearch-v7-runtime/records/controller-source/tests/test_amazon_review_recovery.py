@@ -1,0 +1,126 @@
+from pathlib import Path
+import tempfile
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+from contextlib import nullcontext
+from rec_harness.core import Artifacts,ContractError,digest,file_hash,read_json,write_json
+from rec_harness.store import Store
+from rec_harness.adapters.amazon_review_recovery import reuse_design,audit_frozen_rescore,retry_review
+from rec_harness.adapters.amazon_auto_audit import verify_reused_role
+from rec_harness.adapters.amazon_memory import validate_export_bindings
+
+
+class ReviewReuseTests(unittest.TestCase):
+    def test_review_retry_preserves_charges_and_recovers_partial_archival(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);store=Store(root/'memory');store.configure_budget(9)
+            store.reserve('calls',6);store.settle('calls',6,'failed');before=store.budget()
+            controller=SimpleNamespace(root=root,store=store,config={'review_only':True},
+                artifacts=Artifacts(root/'artifacts/objects'),lock=nullcontext,close=lambda:None)
+            folder=root/'rounds/round-1'
+            for name in ['evaluation','evaluation-rejected-1']:
+                write_json(folder/name/'rejection.json',{'reason':'local launch failed'})
+            original=Path.rename;calls=[]
+            def interrupted(path,target):
+                calls.append(str(path))
+                if len(calls)==2:raise OSError('rename interruption')
+                return original(path,target)
+            try:
+                with patch('rec_harness.adapters.amazon_review_recovery.AmazonAutoresearch',return_value=controller):
+                    with patch.object(Path,'rename',interrupted):
+                        with self.assertRaisesRegex(OSError,'rename interruption'):retry_review(root,'fix home')
+                    result=retry_review(root,'fix home')
+                    self.assertEqual(retry_review(root,'fix home'),result)
+                self.assertEqual(store.budget(),before)
+                self.assertEqual(len([e for e in store.events() if e['kind']=='amazon_review_role_reopened']),1)
+                self.assertFalse((folder/'evaluation').exists())
+                self.assertEqual(len(list(Path(result['archive']).glob('*/rejection.json'))),2)
+            finally:store.close()
+
+    def test_frozen_scorer_changes_fail_before_process_launch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);worker=root/'package/adapters/score_worker.py'
+            worker.parent.mkdir(parents=True);worker.write_text('original')
+            directory=root/'scores'
+            write_json(directory/'inference/request.json',{'inputs':{'worker.py':{'path':str(worker)}}})
+            execution={'code_hashes':{'adapters/score_worker.py':file_hash(worker)}}
+            worker.write_text('changed')
+            with patch('rec_harness.adapters.amazon_review_recovery.run_process') as launch:
+                with self.assertRaisesRegex(ContractError,'scorer package changed'):
+                    audit_frozen_rescore(SimpleNamespace(root=root),directory,{},execution)
+                launch.assert_not_called()
+                (worker.parent/'extra.py').write_text('unexpected')
+                with self.assertRaisesRegex(ContractError,'inventory differs'):
+                    audit_frozen_rescore(SimpleNamespace(root=root),directory,{},execution)
+                launch.assert_not_called()
+
+    def test_review_only_controller_cannot_enter_training_loop(self):
+        from rec_harness.adapters.amazon_autonomous import AmazonAutoresearch
+        controller=AmazonAutoresearch.__new__(AmazonAutoresearch)
+        controller.config={'review_only':True}
+        with self.assertRaisesRegex(ContractError,'cannot run training'):
+            controller.run()
+
+    def test_event_bound_design_copy_is_idempotent_and_rejects_changed_source_receipts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);source=root/'original/rounds/round-1';target=root/'new/rounds/round-1'
+            cards={'gap':{'gap_id':'g'},'method':{'method_id':'m'},'proposal':{'proposal_id':'p'}}
+            model=source/'experiment/model/model.py';model.parent.mkdir(parents=True);model.write_text('candidate')
+            control=model.with_name('control-1.py');control.write_text('distinct control')
+            versions={'candidate':{'model_version':'candidate','source':{'sha256':file_hash(model)}},
+                      'controls':[{'model_version':'base','source':{'sha256':'base'}},
+                                  {'model_version':'control-1','source':{'sha256':file_hash(control)}}]}
+            plan={'cards':cards,'versions':versions};write_json(source/'handoff.json',plan)
+            store=Store(root/'original/memory');store.configure_budget(10)
+            store.reserve('calls',3);store.settle('calls',3,'success')
+            objects=Artifacts(root/'original/artifacts/objects')
+            experiment_response={'changed_files':['model.py','control-1.py'],'implementation_checks':['shape check reported'],
+                                 'limitations':['No checkpoint intervention performed.']}
+            for role,response in [('evidence',cards['gap']),('hypothesis',{k:cards[k] for k in ['method','proposal']}),('experiment',experiment_response)]:
+                folder=source/role
+                context={'role':role}
+                if role=='experiment':context['generated_controls']=[{'file':'control-1.py'}]
+                for name,value in [('context.json',context),('response.json',response),('request.json',{}),('schema.json',{}),('resources.json',{'status':'success'})]:
+                    write_json(folder/name,value)
+                accepted={'response_hash':digest(response),'context_hash':digest(context)}
+                if role=='experiment':
+                    accepted['source_hash']=file_hash(model)
+                    accepted['model_source_hashes']={'model.py':file_hash(model),'control-1.py':file_hash(control)}
+                write_json(folder/'accepted.json',accepted)
+                write_json(folder/'returned-workspace/manifest.json',{'files':['model.py','control-1.py']})
+                store.event('role_completed',{'task':'round-1-'+role+'-1','role':role,**accepted,
+                    'archive':objects.snapshot(folder,['context.json','response.json','resources.json','returned-workspace/manifest.json'])})
+            before=store.verify();store.close()
+            first=reuse_design(None,source,target,plan)
+            self.assertEqual((target/'experiment/model/control-1.py').read_text(),'distinct control')
+            self.assertEqual(reuse_design(None,source,target,plan),first)
+            write_json(target/'handoff.json',plan)
+            validate_export_bindings(target,[])
+            write_json(target/'handoff.json',{'cards':{'forged':'design'}})
+            with self.assertRaisesRegex(ContractError,'handoff differs'):
+                validate_export_bindings(target,[])
+            write_json(target/'handoff.json',plan)
+            self.assertEqual(first[1]['charged_or_reserved'],3)
+            for role in ['evidence','hypothesis','experiment']:
+                self.assertEqual(verify_reused_role(target/role,read_json(target/role/'accepted.json')),
+                                 read_json(target/role/'reuse.json'))
+            self.assertEqual(read_json(target/'experiment/reuse.json')['source_response_hash'],digest(experiment_response))
+            from rec_harness.adapters.amazon_review_evidence import experiment_report
+            report=experiment_report(target,[])
+            self.assertEqual(report['reported_limitations'],experiment_response['limitations'])
+            self.assertEqual(report['source_hashes'],{'model.py':file_hash(model),'control-1.py':file_hash(control)})
+            self.assertFalse(report['checks_verified_by_this_report'])
+            copied=target/'experiment/model/model.py';copied.write_text('changed after reuse')
+            with self.assertRaisesRegex(ContractError,'source changed'):experiment_report(target,[])
+            copied.write_text(model.read_text())
+            store=Store(root/'original/memory',read_only=True)
+            self.assertEqual(store.verify(),before);store.close()
+            write_json(source/'evidence/resources.json',{'status':'success','wall_seconds':0})
+            with self.assertRaisesRegex(ContractError,'committed role archive changed'):
+                reuse_design(None,source,target,plan)
+            with self.assertRaisesRegex(ContractError,'committed artifact changed'):
+                verify_reused_role(target/'evidence',read_json(target/'evidence/accepted.json'))
+            model.write_text('changed')
+            with self.assertRaisesRegex(ContractError,'registered candidate'):
+                reuse_design(None,source,target,plan)

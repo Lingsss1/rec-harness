@@ -1,0 +1,103 @@
+{
+  "schema_version": 2,
+  "protocol_id": "97a67bc481965bdf605ed5f51a555bf4a1316b95ae29a06149dfed38c0ebbf14",
+  "record": {
+    "round_idx": 5,
+    "trial_group_id": "trialgrp_1793459642264_2946412",
+    "trial_id": 3,
+    "arm": "combination_jump",
+    "selected_categories": [
+      "feature_construction",
+      "architecture_interaction"
+    ],
+    "patch_summary": "Add causal relative-frequency input features and context-dependent residual gates across all four category models, with checkpoint-consistent prediction. Preserve NextItNet, one checkpoint per category, routing, splits, seeds, loss and training caps.",
+    "benchmark_score": 0.5375,
+    "val_score": 0.5375,
+    "is_winner": false,
+    "is_group_winner": false,
+    "valid": true,
+    "failure_type": null,
+    "delta_vs_prev_best": -0.0187,
+    "delta_vs_input": -0.0187,
+    "outcome": "regressed",
+    "val_support": "regressed",
+    "gpu_seconds": 507.41652666032314,
+    "trial_cap_seconds": 637.0,
+    "per_dataset_hr10": {
+      "Movies_and_TV": 0.555,
+      "Industrial_and_Scientific": 0.625,
+      "Electronics": 0.405,
+      "CDs_and_Vinyl": 0.565
+    },
+    "error": "",
+    "parameter_changes": [
+      {
+        "name": "DATA_DIR",
+        "before_expression": "os.environ.get('GAGC_DATA_DIR', './input/trainval')",
+        "after_expression": "os.environ['GAGC_DATA_DIR']"
+      }
+    ],
+    "changed_definitions": [
+      "NextItNetBlock",
+      "NextItNetBlock.__init__",
+      "NextItNetBlock.forward",
+      "NextItNetModel",
+      "NextItNetModel.__init__",
+      "NextItNetModel.encode_sequence",
+      "train_one_dataset",
+      "write_predict_script"
+    ],
+    "summary": "Add causal relative-frequency input features and context-dependent residual gates across all four category models, with checkpoint-consistent prediction. Preserve NextItNet, one checkpoint per category, routing, splits, seeds, loss and training caps.",
+    "proposal_history": [
+      {
+        "attempt": 1,
+        "summary": "Add causal relative-frequency input features and context-dependent residual gates across all four category models, with checkpoint-consistent prediction. Preserve NextItNet, one checkpoint per category, routing, splits, seeds, loss and training caps."
+      }
+    ],
+    "hypothesis": "Across all four categories, construct the causal feature log1p(training_count[item]) minus its cumulative mean over the observed prefix; project this scalar into historical inputs, with padding zero. Within each existing NextItNet block, replace the residual update with residual+sigmoid(W*norm(residual)+b)*y, using a jointly trained channel gate initialized with b=2. Relative frequency highlights shifts between common and niche items, while gates allow context-dependent convolution updates rather than uniformly halving residuals, which regressed. Preserve all existing hyperparameters, embeddings, scoring, readout and pointwise loss. Save training-count buffers and update the predictor writer; retain one checkpoint/category and fixed seeds and caps.",
+    "input_source_sha256": "19ac0d1003bf0d5268911395ff645d8a669fb4ac89dff3ec01535ad8cf53b05d",
+    "candidate_source_sha256": "e8339b1938d66ba38f459d59dc1bfb80a3fd36fc9ef6ab9c03543f9917153c2e",
+    "input_normalized_sha256": "f6d87843e0988e2477758da86aacd12b6399923c508e1bf9e2783c26b6c3b35f",
+    "candidate_normalized_sha256": "e355f6f4bd174b23faf745cff5f1e8a35e944ad7bae44998cc96aef178193343",
+    "patch_sha256": "be202e822a6f593b2d1ef4983fd7cac47a703673ff4df4acbab1aed2a7e90806",
+    "diff_excerpt": "--- \n+++ \n@@ -30,5 +30,5 @@\n ]\n \n-DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")\n+DATA_DIR = os.environ['GAGC_DATA_DIR']\n \n SEED = int(os.environ.get(\"GAGC_SEED\", \"42\"))\n@@ -188,4 +188,7 @@\n         self.dropout = nn.Dropout(dropout_rate)\n         self.activation = nn.GELU()\n+        self.residual_gate = nn.Linear(hidden_units, hidden_units)\n+        nn.init.zeros_(self.residual_gate.weight)\n+        nn.init.constant_(self.residual_gate.bias, 2.0)\n \n     def _causal_conv(self, conv: nn.Conv1d, x: torch.Tensor) -> torch.Tensor:\n@@ -196,5 +199,6 @@\n     def forward(self, x: torch.Tensor) -> torch.Tensor:\n         residual = x\n-        y = self.norm1(x).transpose(1, 2)\n+        normalized_residual = self.norm1(x)\n+        y = normalized_residual.transpose(1, 2)\n         y = self._causal_conv(self.conv1, y).transpose(1, 2)\n         y = self.dropout(self.activation(y))\n@@ -202,10 +206,12 @@\n         y = self._causal_conv(self.conv2, y).transpose(1, 2)\n         y = self.dropout(y)\n-        return residual + y\n+        gate = torch.sigmoid(self.residual_gate(normalized_residual))\n+        return residual + gate * y\n \n \n class NextItNetModel(nn.Module):\n     def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 8,\n-                 kernel_size: int = 3, dropout_rate: float = 0.2, maxlen: int = 128):\n+                 kernel_size: int = 3, dropout_rate: float = 0.2, maxlen: int = 128,\n+                 item_log_counts: torch.Tensor | None = None):\n         super().__init__()\n         self.itemnum = itemnum\n@@ -226,4 +232,11 @@\n             nn.init.xavier_uniform_(self.pos_emb.weight)\n             self.pos_emb.weight[0].zero_()\n+        counts = (torch.zeros(itemnum + 1, dtype=torch.float32)\n+                  if item_log_counts is None\n+                  else item_log_counts.detach().to(dtype=torch.float32).clone())\n+        counts[0] = 0.0\n+        self.register_buffer(\"item_log_counts\", counts)\n+        self.frequency_projection = nn.Linear(1, hidden_units, bias=False)\n+        nn.init.normal_(self.frequency_projection.weight, mean=0.0, std=0.02)\n \n     def encode_sequence(self, seq: torch.Tensor) -> torch.Tensor:\n@@ -232,4 +245,9 @@\n         pos = pos * (seq != 0).long()\n         x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)\n+        observed = (seq != 0).to(dtype=x.dtype)\n+        log_frequency = self.item_log_counts[seq] * observed\n+        prefix_mean = log_frequency.cumsum(dim=1) / observed.cumsum(dim=1).clamp(min=1.0)\n+        relative_frequency = (log_frequency - prefix_mean) * observed\n+        x = x + self.frequency_projection(relative_frequency.unsqueeze(-1))\n         x = self.dropout(x)\n         for block in self.blocks:\n@@ -260,6 +278,15 @@\n         raise RuntimeError(f\"empty dataset or item vocabulary for {dataset_name}\")\n \n+    training_items = np.fromiter(\n+        (item for history in user_train.values() for item in history),\n+        dtype=np.int64,\n+    )\n+    training_coun",
+    "category_rationales": [
+      {
+        "category": "feature_construction",
+        "rationale": "Across all four categories, project training log-frequency relative to its observed-prefix mean into historical inputs. Mask padding and checkpoint the frequency buffer. Preserve candidate embeddings, scoring, loss and training settings; update the predictor writer to restore the same feature configuration."
+      },
+      {
+        "category": "architecture_interaction",
+        "rationale": "Retain every NextItNet causal convolution and add a jointly trained channel gate to each residual update. Gates use the normalized current-position residual, with zero weights and bias 2 initially, allowing context-dependent updates within each category's single model. The predictor imports this same architecture."
+      }
+    ],
+    "baseline_validation": 0.5562,
+    "basin_id": "default",
+    "execution_status": "success",
+    "attempt_count": 1,
+    "training_attempt_count": 1,
+    "training_attempts": [
+      {
+        "id": "round-0004-slot-3-attempt-1",
+        "status": "success",
+        "source_sha256": "e8339b1938d66ba38f459d59dc1bfb80a3fd36fc9ef6ab9c03543f9917153c2e",
+        "allocated_gpu_seconds": 507.41652666032314,
+        "error": "",
+        "score": 0.5375
+      }
+    ],
+    "checkpoint_fingerprints": {
+      "Movies_and_TV_model.pt": "aae5c27ff2a3365152837f8124aa00b3ff77a54e4a9f54fa909e68c4bde17d3e",
+      "Industrial_and_Scientific_model.pt": "f32bc2f49008d31b8520687241bc394e2db78ec84e0af10a45e6d91327272977",
+      "Electronics_model.pt": "ff165d243abd40629a6f622978e433818a27afd60ac06b4705cacd18cf2889d1",
+      "CDs_and_Vinyl_model.pt": "97f5993cfa23e5359320af6eb75b0824e022dbe8e1ac3e8ede916f78416b1529"
+    },
+    "repair_errors": [],
+    "phase": "jump",
+    "promoted": false,
+    "provisional": false,
+    "protocol_id": "97a67bc481965bdf605ed5f51a555bf4a1316b95ae29a06149dfed38c0ebbf14",
+    "evidence_id": "4eb80c08cd86a2cb7addaa409a25b9fe22ad5cf1f669ce6cee656a9fa69438df"
+  },
+  "record_sha256": "923a4e3c8adda1aaf02a08d64e498b32651086ccf2819e15ab1c453fca16c79e"
+}

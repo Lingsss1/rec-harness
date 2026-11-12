@@ -1,0 +1,222 @@
+--- g2-r0007-aligned_blocked/model.py
++++ g2-r0008-encode_pool_blocked/model.py
+@@ -1,16 +1,18 @@
+-"""Prospective task/target-conditioned relational content compression.
+-
+-Keep the exact-count UF ancestor and append twelve masked content means:
+-all exposures/cart/fav/buy crossed with category/brand/joint target matches.
+-An auxiliary residual combines six means, target products and exact counts.
+-Aligned and rotated membership cells have identical capacity and count inputs;
+-rotation is within each example's valid history, never across examples. Cross
+-this contrast with the auxiliary item/action gradient gate. No new ID banks.
+-
+-New final layers are zero initialized under a restored CPU RNG stream, after
+-all inherited initialization. No new normalization state or scoring passes.
+-This source has only static checks in the coding workspace. Host numerical,
+-masking, ownership and initialization checks are required before training.
+-No improvement, sufficient-statistic property or architecture novelty asserted.
++"""Prospective compression-timing x source-gradient factorial.
++
++Encode each visible event using its fields/action, target-field products and
++supplied context/target. The candidate averages ReLU codes; the replacement
++control applies ReLU after averaging the same affine codes. Both execute the
++same 100-event projections and twelve masked reductions with the same weights.
++Only the location/count of elementwise ReLU operations differs. Cross this
++contrast with blocked/shared auxiliary item-and-action embedding gradients.
++
++Keep the ancestor UF scorer, towers, exact-count branch and source gates.
++The new encoder learns from auxiliary losses even in the blocked cell: detach
++source embeddings BEFORE encoding, never the learned codes. No new ID tables,
++normalization state, current-label inputs or training-loss hook are introduced.
++The three new readout final layers start at zero; inherited initialization and
++CPU RNG stream are preserved. Numerical checks are host prerequisites.
++No measured gain, sufficient-statistic property or novelty is claimed.
+ """
+ import math
+@@ -33,11 +35,12 @@
+     'count_view': 'exact',
+     'count_hidden_units': 32,
+-    'moment_alignment': 'aligned',
+-    'moment_hidden_units': 32,
++    'code_timing': 'before_pool',
++    'code_width': 32,
++    'code_head_hidden_units': 32,
+ }
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='RelationalContentCompression', gpu=-1,
++    def __init__(self, feature_map, model_id='CompressionTiming', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+@@ -45,5 +48,6 @@
+                  block_aux_context_grad=False, block_aux_item_grad=True,
+                  count_view='exact', count_hidden_units=32,
+-                 moment_alignment='aligned', moment_hidden_units=32, num_tasks=None,
++                 code_timing='before_pool', code_width=32,
++                 code_head_hidden_units=32, num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -69,9 +73,10 @@
+         if count_view != 'exact':
+             raise ValueError('The exact-count sidecar is frozen in every cell')
+-        if moment_alignment not in ('aligned', 'rotated'):
+-            raise ValueError('moment_alignment must be aligned or rotated')
+-        if moment_hidden_units != 32:
+-            raise ValueError('Matched moment head capacity is fixed at 32')
+-        self.moment_alignment = moment_alignment
++        if code_timing not in ('before_pool', 'after_pool'):
++            raise ValueError('code_timing must be before_pool or after_pool')
++        if code_width != 32 or code_head_hidden_units != 32:
++            raise ValueError('Matched encoder and readout widths are fixed at 32')
++        self.code_timing = code_timing
++        self.code_width = code_width
+         if count_hidden_units != 32:
+             raise ValueError('Matched sidecar capacity is fixed to 32 hidden units')
+@@ -129,19 +134,22 @@
+                 nn.init.zeros_(head[-1].weight)
+                 nn.init.zeros_(head[-1].bias)
+-        # The inherited count-head fork restores the same CPU RNG state as
+-        # its ancestor. Allocate the new heads in another restoring scope.
+-        # There are six moments per task: three exposure relations plus three
+-        # matching relations for that task. Target action is never included.
+-        self.moment_input_width = 40 + self.key_width + 6 * (self.value_width + self.key_width)
++        # A separate restoring scope leaves every inherited tensor and the
++        # host CPU RNG stream untouched. All factorial cells allocate modules
++        # in this exact order, independently of their two switches.
++        context_width = len(self.user_fields) * embedding_dim
++        self.code_input_width = 40 + self.key_width + 6 * code_width
+         with torch.random.fork_rng(devices=[]):
+-            self.moment_heads = nn.ModuleDict({
+-                label: nn.Sequential(nn.Linear(self.moment_input_width, moment_hidden_units),
+-                                     nn.ReLU(), nn.Linear(moment_hidden_units, 1))
++            self.event_projection = nn.Linear(self.value_width, code_width, bias=False)
++            self.product_projection = nn.Linear(self.key_width, code_width, bias=False)
++            self.condition_projection = nn.Linear(context_width + self.key_width, code_width)
++            self.code_heads = nn.ModuleDict({
++                label: nn.Sequential(nn.Linear(self.code_input_width, code_head_hidden_units),
++                                     nn.ReLU(), nn.Linear(code_head_hidden_units, 1))
+                 for label in feature_map.labels if label != 'is_click'
+             })
+-            for head in self.moment_heads.values():
++            for head in self.code_heads.values():
+                 nn.init.zeros_(head[-1].weight)
+                 nn.init.zeros_(head[-1].bias)
+-        self.aux_moment_groups = {'cart': 1, 'fav': 2, 'buy': 3}
++        self.aux_code_groups = {'cart': 1, 'fav': 2, 'buy': 3}
+         self.model_to_device()
+ 
+@@ -177,6 +185,5 @@
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
+         exact_stats, support_stats, assignment = self._count_statistics(item, mask, task_masks)
+-        moments = self._content_moments(values, assignment, mask)
+-        return context, target, values, mask, auxiliary, exact_stats, support_stats, moments
++        return context, target, values, mask, auxiliary, exact_stats, support_stats, assignment
+ 
+     def _count_statistics(self, item, mask, task_masks):
+@@ -225,5 +232,5 @@
+                                   (counts / totals.clamp_min(1).unsqueeze(-1)).flatten(1)), dim=-1)
+             # Keep all five groups for the identical count sidecar. Only all
+-            # exposures and the three auxiliary types need content moments.
++            # exposures and the three auxiliary types need content codes.
+             selected_groups = [0] + [index + 1 for index in self.auxiliary_indices]
+             task_groups = group_mask[:, selected_groups, :]
+@@ -232,40 +239,29 @@
+             return vector(matches), vector(supports), assignment.reshape(mask.shape[0], 12, 100)
+ 
+-    def _content_moments(self, values, assignment, mask):
+-        # Rotate the ENTIRE joint membership by half the valid-event count.
+-        # Padding may be arbitrary: build rank->physical-position using only
+-        # valid events rather than rolling the physical 100 padded positions.
+-        # The same index/gather/reduction operators execute in aligned cells.
+-        valid = mask.bool()
+-        batch, length = valid.shape
+-        positions = torch.arange(length, device=mask.device).expand(batch, -1)
+-        ranks = (valid.long().cumsum(dim=1) - 1).clamp_min(0)
+-        lengths = valid.long().sum(dim=1, keepdim=True)
+-        physical_by_rank = torch.zeros_like(positions).scatter_add(
+-            1, ranks, positions * valid.long())
+-        shift = lengths // 2
+-        if self.moment_alignment == 'aligned':
+-            shift = torch.zeros_like(shift)
+-        source_ranks = (ranks + shift).remainder(lengths.clamp_min(1))
+-        source_positions = physical_by_rank.gather(1, source_ranks)
+-        assignment = assignment.gather(
+-            2, source_positions[:, None, :].expand(-1, 12, -1))
+-        assignment = assignment * valid[:, None, :].to(assignment.dtype)
++    def _encoded_moments(self, context, target, values, assignment):
++        # Affine in each event for a fixed context/target. Thus for nonempty
++        # groups mean(z) equals encoding the raw mean BEFORE the ReLU. This
++        # equivalence does not require an extra trained model or extra labels.
++        # Both cells deliberately keep projections at 100 events to match the
++        # major matrix operations; report cost rather than assume equality.
++        products = values[:, :, :self.key_width] * target[:, None, :]
++        condition = self.condition_projection(torch.cat((context, target), dim=-1))
++        codes = (self.event_projection(values) + self.product_projection(products)
++                 + condition[:, None, :])
++        if self.code_timing == 'before_pool':
++            codes = torch.relu(codes)
+         counts = assignment.sum(dim=-1)
+-        # No per-event learned scorer or new embeddings. Values retain their
+-        # original chronological positions; only membership changes in the
+-        # negative control. Counts/overlaps are exactly preserved by rotation.
+-        sums = torch.bmm(assignment.to(values.dtype), values)
++        sums = torch.bmm(assignment.to(codes.dtype), codes)
+         means = sums / counts.to(sums.dtype).clamp_min(1).unsqueeze(-1)
+-        return means.reshape(batch, 4, 3, self.value_width)
+-
+-    def _moment_features(self, label, target, moments, exact_stats):
+-        group = self.aux_moment_groups[label]
+-        means = torch.cat((moments[:, 0], moments[:, group]), dim=1)
+-        keys = means[:, :, :self.key_width]
+-        products = target[:, None, :] * keys
+-        return torch.cat((exact_stats.to(target.dtype), target,
+-                          means.flatten(1), products.flatten(1)), dim=-1)
+-
++        if self.code_timing == 'after_pool':
++            means = torch.relu(means)
++        # Empty groups are zero in both cells, including the query/bias part.
++        # No stochastic layers or batch statistics enter this new branch.
++        return means.reshape(values.shape[0], 4, 3, self.code_width)
++
++    def _code_features(self, label, target, codes, exact_stats):
++        group = self.aux_code_groups[label]
++        selected = torch.cat((codes[:, 0], codes[:, group]), dim=1)
++        return torch.cat((exact_stats.to(target.dtype), target, selected.flatten(1)), dim=-1)
+ 
+     def _compress_both(self, values, mask, auxiliary):
+@@ -316,5 +312,6 @@
+ 
+     def forward(self, inputs):
+-        context, target, values, mask, auxiliary, exact_stats, support_stats, moments = self._represent(inputs)
++        context, target, values, mask, auxiliary, exact_stats, support_stats, assignment = self._represent(inputs)
++        raw_values = values
+         count_stats = exact_stats if self.count_view == 'exact' else support_stats
+         values, counts = self._compress_both(values, mask, auxiliary)
+@@ -333,5 +330,5 @@
+             aux_target = target.detach() if self.block_aux_item_grad else target
+             aux_values = values.detach() if self.block_aux_item_grad else values
+-            aux_moments = moments.detach() if self.block_aux_item_grad else moments
++            aux_raw_values = raw_values.detach() if self.block_aux_item_grad else raw_values
+             aux_weights = self._auxiliary_activation(self._interactions(aux_target, aux_values))
+             aux_strata = self._pool(aux_weights, aux_values, counts)
+@@ -340,6 +337,9 @@
+             # just one scorer pass for every factorial cell.
+             aux_context, aux_target = context, target
+-            aux_moments = moments
++            aux_raw_values = raw_values
+             aux_strata = primary_strata
++        # Detach only the sources above: these new projection parameters
++        # must still learn in the blocked cells. Context gradients stay open.
++        codes = self._encoded_moments(aux_context, aux_target, aux_raw_values, assignment)
+         feedback = aux_strata[:, 1, :] + aux_strata[:, 2, :]
+         predictions = {}
+@@ -352,6 +352,6 @@
+             if label != 'is_click':
+                 logit = logit + self.count_heads[label](count_stats)
+-                moment_features = self._moment_features(label, aux_target, aux_moments, exact_stats)
+-                logit = logit + self.moment_heads[label](moment_features)
++                code_features = self._code_features(label, aux_target, codes, exact_stats)
++                logit = logit + self.code_heads[label](code_features)
+             predictions[label + '_pred'] = torch.sigmoid(logit)
+         return predictions

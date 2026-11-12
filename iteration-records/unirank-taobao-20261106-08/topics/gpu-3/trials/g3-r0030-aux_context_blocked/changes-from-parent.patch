@@ -1,0 +1,76 @@
+--- g0-r0039-context_product/model.py
++++ g3-r0030-aux_context_blocked/model.py
+@@ -1,11 +1,9 @@
+-"""Prospective context/history fusion study on the frozen compressed-history model.
+-
+-Append rank-16 task-specific context and compressed-history projections to the
+-incumbent. Product versus sum fusion is crossed with the existing auxiliary
+-adapter-context gradient gate. All four cells have identical learned capacity,
+-initialization order and native Dice populations. New zero output matrices
+-preserve the parent's initial predictions, not its subsequent training path.
+-Fusion uses ordinary differentiable FP32 arithmetic, not a surrogate gradient.
+-No novelty or predictive benefit is established. Host tensor checks are required.
++"""Prospective auxiliary-supervision controls on the frozen joint model.
++
++All representation operators, learned modules, initialization, normalization
++populations and forward outputs are inherited. Only the training objective
++and the existing auxiliary adapter context-gradient gate vary. A within-batch
++cyclic label replacement is a negative control, not a valid-label task model.
++No predictive or mechanism result is claimed; host execution is required.
+ """
+ import torch
+@@ -16,5 +14,8 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': True, 'context_fusion': 'product', 'interaction_rank': 16}
++
++# Prospective module-local loss intervention, not a host recipe override.
++AUXILIARY_OBJECTIVE = 'joint'
+ 
+ 
+@@ -34,5 +35,5 @@
+                  auxiliary_train_population='primary', auxiliary_eval_population='primary',
+                  block_aux_tower_context_grad=True,
+-                 block_aux_adapter_context_grad=False,
++                 block_aux_adapter_context_grad=True,
+                  context_fusion='product', interaction_rank=16,
+                  task='binary_classification', **kwargs):
+@@ -838,2 +839,37 @@
+             predictions[label + '_pred'] = torch.sigmoid(tower(features))
+         return predictions
++
++    def training_loss(self, inputs, probabilities, train_labels):
++        """Training-only objective; never reads labels in forward.
++
++        Keep the four per-task BCE graphs even in click-only mode. Zero-weight
++        auxiliary terms yield zero gradients rather than removing parameters
++        or skipping their forward/state updates. The host keeps the original
++        labels for scoring. A fixed half-batch cyclic shift preserves the
++        auxiliary label triple and its marginal counts, but does not prove
++        feature/label independence. It consumes no RNG or persistent state.
++        """
++        if (probabilities.ndim != 2 or train_labels.ndim != 2
++                or probabilities.shape != train_labels.shape
++                or probabilities.shape[1] != len(self.feature_map.labels)):
++            raise ValueError('Expected aligned prediction and training-label matrices [B,4]')
++        if AUXILIARY_OBJECTIVE not in ('joint', 'click_only', 'batch_roll'):
++            raise ValueError('Unknown auxiliary training objective')
++        if probabilities.shape[0] < 2:
++            raise ValueError('This frozen full-batch training study requires at least two examples')
++        # BCE is unsafe inside CUDA autocast. FP32 arithmetic here leaves
++        # gradients into the original probabilities and parameters intact.
++        with torch.autocast(device_type=probabilities.device.type, enabled=False):
++            truth = train_labels.detach().to(dtype=torch.float32)
++            shifted = torch.roll(truth, shifts=truth.shape[0] // 2, dims=0)
++            losses = []
++            for index, label in enumerate(self.feature_map.labels):
++                target = (shifted[:, index]
++                          if AUXILIARY_OBJECTIVE == 'batch_roll' and label != 'is_click'
++                          else truth[:, index])
++                task_loss = nn.functional.binary_cross_entropy(
++                    probabilities[:, index].float(), target, reduction='mean')
++                weight = (0.0 if AUXILIARY_OBJECTIVE == 'click_only'
++                          and label != 'is_click' else 1.0)
++                losses.append(weight * task_loss)
++            return torch.stack(losses).sum()

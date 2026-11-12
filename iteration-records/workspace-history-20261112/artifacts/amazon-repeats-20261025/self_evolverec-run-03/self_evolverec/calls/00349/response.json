@@ -1,0 +1,140 @@
+{
+  "markdown_report": "The best next experiment remains **uniform multi-negative candidate-set softmax**, keeping SASRec unchanged. At 0% progress, this isolates an objective hypothesis; eight negatives is a starting candidate, not an established optimum.\n\n**Insights from the starting point.** Electronics has the weakest observed training separation: negatives win at 13.08% of measured positions. This motivates discrimination experiments, not a claim of deficient validation performance. The recent residual tests local similarity; changing the objective provides a complementary intervention. Qualitative feedback identifies unsupported practical associations, but missing ownership or intent evidence must not become negative labels.\n\n**Insights from related work.** Sampling reliability [1] limits extrapolation from sampled evaluation to full-catalog retrieval. Frequency-dependent sampling tradeoffs [2] motivate training-popularity strata. BSARec [3] motivates smoothing investigations, although current alignment statistics do not establish smoothing. Many-negative SASRec cross-entropy [4] directly precedes this proposal; gSASRec [5] motivates separating competitor count from loss calibration.\n\n**Framework and directions.**\n\n| Direction | Intervention | Evidence needed |\n|---|---|---|\n| Ranking discrimination | Loss × uniform competitor count | Host macro HR@10 versus GPU seconds |\n| History specificity | Existing recent residual | Backbone/residual controls |\n| Evidence sufficiency | Supported/conflict/unknown audit | Explicit history or text evidence |\n\n**Candidate ideas.** Scores are originality/potential/difficulty, out of ten; higher difficulty means harder implementation. Each assessment includes a benefit and limitation.\n\n| Idea | Originality | Potential | Difficulty |\n|---|---|---|---|\n| Eight-negative softmax [4] | 2: distinct experiment; established method | 6: tests competition; false negatives persist | 4: small loss change; reproducible sampling costs |\n| Last-item versus five-item residual | 3: isolates window benefit; established precedent | 6: tests context; redundancy shortcut possible | 3: small branch; predictor parity required |\n| TF-IDF competitor mixture [2] | 4: tests specificity; familiar mining | 6: challenges broad matches; false negatives likely | 5: no pretrained weights; indexing costs |\n| Matched-count generalized BCE [5] | 2: useful calibration control; existing method | 6: separates calibration; adds tuning | 4: simple formula; normalization matters |\n\n**Selected algorithm.** Score each observed next item against eight unique uniform eligible items and minimize joint cross-entropy. One-negative softmax equals BPR, not BCE; joint multi-negative softmax differs from averaged pairwise BPR [6]. The uncorrected objective intentionally ranks sampled candidate sets; it does not estimate full-catalog softmax [7].\n\n```text\nvalid = gather_nonpadding_prediction_positions(batch)\nnegative_ids = exact_uniform_unique(eligible_training_items, K=8)\nloss = sum_valid CE([positive_score, negative_scores], target=0) / count(valid)\nupdate(loss + unchanged_baseline_regularization)\n```\n\nCompare baseline BCE, one-negative softmax and eight-negative softmax; add eight-negative BCE before expanding counts or testing gBCE. Preserve architecture, optimizer, masking, baseline BCE reduction and regularization semantics. Match tuning budgets and report cumulative GPU seconds; equal epochs alone are insufficient.\n\nUse seeded complement sampling, exclude padding/current positives/training-history items, and handle insufficient eligible items explicitly. Gather valid positions before embedding lookup. Preserve all four routes, seeds, splits, environment paths, default 200 epochs, predictor parity and DiagnosisProbe mode restoration. Separate loader-negative diagnostics from training competitors. Select solely by unchanged host macro validation HR@10; interpret twenty-user audits as exploratory. No test or full-catalog improvement is established.\n\nReferences: [1](https://doi.org/10.1145/3705328.3748086), [2](https://arxiv.org/abs/2410.17276), [3](https://ojs.aaai.org/index.php/AAAI/article/view/28747), [4](https://arxiv.org/abs/2309.07602), [5](https://arxiv.org/abs/2308.07192), [6](https://arxiv.org/abs/2411.07770), [7](https://proceedings.mlr.press/v80/blanc18a/blanc18a.pdf).",
+  "idea": {
+    "description": "Replace baseline SASRec's training data loss with uncorrected candidate-set cross-entropy over one observed positive and eight unique uniform eligible negatives per valid causal position. Keep architecture and inference scoring unchanged, and distinguish objective effects from competitor-count effects through matched controls.",
+    "motivation": "Electronics has the weakest supplied training margins, while qualitative feedback suggests broad associations can outrank specific matches. Multiple competitors test ranking discrimination without adding a history branch or treating uncertain ownership, compatibility or intent as dislike. Many-negative SASRec cross-entropy is established prior work; the contribution here is a controlled, budget-aware application with reproducible sampling and faithful diagnostic interfaces. Neither the diagnostics nor prior results establish improvement on the pinned validation benchmark.",
+    "implementation_notes": "Use DATA_DIR = os.environ['GAGC_DATA_DIR']. Preserve Movies_and_TV, Industrial_and_Scientific, Electronics and CDs_and_Vinyl, their routing, original splits, preprocessing seed 0, training seed 42, and SASREC_EPOCHS environment behavior with default 200. Run each trial on one GPU, write artifacts beneath its trial directory, and charge all training, diagnostics, debugging and failures to the shared 43,200 GPU-second budget. Do not access hidden tests, fetch datasets or pretrained weights, or change the host evaluator.\n\nKeep baseline architecture, initialization, batches, optimizer, checkpoint rules and tied-embedding inference scores. Preserve the exact baseline regularization mechanism, including which parameters or embedding rows it affects and whether it is an additive penalty or optimizer weight decay. Verify baseline BCE reduction: positive-plus-negative BCE summed per valid position differs by a factor of two from averaging both labels. For the eight-negative BCE control, use softplus(-positive) plus the mean negative softplus term per valid position, preserving the one-negative data-term convention. Cross-entropy is averaged over valid positions at temperature 1. Losses still have different gradient scales; record data loss, regularization and gradient norms rather than assuming identical optimization dynamics.\n\nUse baseline BCE, one-negative softmax and eight-negative softmax as the primary comparisons. Add eight-negative BCE as the first additional control to complete the loss-by-count comparison. One-negative softmax is exactly pairwise BPR at the same temperature and reduction. Joint multi-negative softmax is log(1 + sum(exp(negative_score - positive_score))), not averaged BPR. Eight is a predeclared candidate, not a claimed optimum; test larger counts or generalized BCE only after primary controls and only within the remaining budget. Give conditions equal tuning allocations, record completed epochs and cumulative single-GPU seconds, and compare host HR@10 against compute. Equal epochs alone do not establish compute fairness. Preserve the baseline checkpoint-selection rule and log every evaluated configuration.\n\nFor each user, sort and deduplicate catalog-valid training-history IDs. Preserve baseline history exclusions and explicitly exclude padding and the current positive. Use only allowed training information, never validation/test histories. If a shifted training target is absent from the stored history representation, insert it into the exclusion set for that position. Catalog eligibility must follow the baseline item mapping without consulting held-out interactions. Unobserved eligible items remain potentially relevant; exclusions do not eliminate false negatives.\n\nFor exact uniform sampling without replacement, convert eligible catalog IDs 1..N to zero-based indices 0..N-1. Let sorted excluded indices be h, a[j] = h[j] - j, and M = N - len(h). Draw min(K,M) distinct complement ranks using Floyd's algorithm with a dedicated seeded generator. Map each rank r to index r + searchsorted(a, r, right=True), then add one to recover item IDs. Floyd sampling uses O(K) auxiliary storage; avoid allocating randperm(M) or catalog-sized weights per position. Sort sampled ranks for stable ordering. When M<K, use all eligible items and mask absent slots. When M=0, the positive-only softmax contributes zero data loss; retain that position in the declared valid-position denominator and report its count. Assert uniqueness and exclusion invariants in sampler checks.\n\nGather valid prediction positions before candidate embedding lookup, avoiding B×L×K×D allocation for padded positions. Start with this simple implementation for K=8. If memory requires chunking, release candidate-scoring graphs during backward and normalize each chunk by the total valid-position count. Because chunks share backbone features, use an explicitly verified feature-gradient accumulation scheme or recomputation; repeated backward through a freed encoder graph is invalid, and summing all chunk losses before backward retains their graphs. Apply additive regularization once per optimizer step. Shared negatives would change dependence between positions and must be a separately named variant.\n\nUse explicit random generators, stable user ordering and deterministic worker seeds. Save sampler, Python, NumPy, CPU/CUDA RNG, optimizer and scheduler states for resumed runs. Record software versions and determinism settings; seeded execution does not guarantee portability across platforms. Unit-check exact complement mapping on tiny catalogs, including consecutive exclusions and K>M. Validate empirical sampling frequencies separately from model evaluation.\n\nThe uncorrected objective deliberately optimizes sampled candidate-set competition. It needs no probability correction to define that objective, but is not an unbiased full-catalog softmax estimator. Uniform negative probabilities do not cancel against a forced positive. Any future full-softmax approximation must explicitly specify its sampling design and correction; without-replacement inclusion probability is K/M, and excluded items cannot be recovered through correction.\n\nInference remains the trained dot-product scorer. Preserve the predictor writer, save objective/sampler configuration with checkpoints, and verify eval-mode candidate-score parity before and after reload through generated working/predict.py for all four routes. Preserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. view.model is the actual trained nn.Module; view.item_emb, log2feats, predict_score, user_train, meta_data and review_data retain their compatibility contracts. Restore the actual module's previous mode in finally. Preserve existing loader-negative diagnostics, distinguish optional multi-competitor diagnostics, keep unavailable metadata breakdowns empty and return null for undefined statistics.\n\nSelect exclusively using the unchanged host benchmark: 200 validation users per category, 99 unique negative candidates, evaluation seed 42, and equal-weight macro HR@10. Report category results. If authorized per-user outputs are available, derive popularity strata solely from training counts, freeze stratum boundaries before comparisons, and report denominators without changing selection. Training margins may improve through memorization or popularity shortcuts; monitor validation behavior rather than treating larger margins as generalization. The twenty training users' full-catalog recommendations remain exploratory qualitative evidence. Do not infer equipment ownership, satisfied needs, ratings, unavailable categories or simulator traits. Repeated adaptive selection on fixed validation users can overfit; limit and log configurations, and leave final held-out evaluation to the host.",
+    "pseudocode": "import torch\nimport torch.nn.functional as F\n\n# Catalog IDs are 1..N; 0 is padding.\ndef sample_complement(N, excluded_ids, K, generator):\n    h = torch.tensor(sorted({int(x)-1 for x in excluded_ids\n                             if 1 <= int(x) <= N}), dtype=torch.long)\n    M = N - h.numel()\n    k = min(K, M)\n    # Floyd's algorithm: an exact uniform subset of complement ranks.\n    selected = set()\n    for j in range(M-k, M):\n        t = int(torch.randint(j+1, (), generator=generator).item())\n        selected.add(j if t in selected else t)\n    ranks = torch.tensor(sorted(selected), dtype=torch.long)\n    adjusted = h - torch.arange(h.numel())\n    ids = ranks + torch.searchsorted(adjusted, ranks, right=True) + 1\n    result = torch.zeros(K, dtype=torch.long)\n    result[:k] = ids\n    return result\n\n\ndef multi_negative_loss(features, positive, negatives, item_emb):\n    # features [B,L,D], positive [B,L], negatives [B,L,K].\n    valid = positive.ne(0)\n    f = features[valid]\n    p = positive[valid]\n    n = negatives[valid]\n    if p.numel() == 0:\n        return features.sum() * 0.0\n    candidates = torch.cat([p[:, None], n], dim=1)\n    # Gather valid positions before lookup; K=8 normally needs no chunking.\n    logits = torch.einsum('vd,vkd->vk', f, item_emb(candidates))\n    logits = logits.masked_fill(candidates.eq(0), float('-inf'))\n    labels = torch.zeros(p.numel(), dtype=torch.long, device=f.device)\n    return F.cross_entropy(logits, labels, reduction='sum') / p.numel()\n\n# Precompute each user's deduplicated training-history exclusion set.\n# For each valid position, union its positive ID into that set and sample.\n# Use an explicitly seeded CPU generator; save its state for resumption.\n# Train unchanged SASRec with candidate-set CE + baseline regularization.\n# Compare baseline BCE, K=1 CE/BPR, K=8 CE; prioritize K=8 BCE next.\n# Verify sampler invariants, causal masking, finite gradients and reload parity.\n# Keep category routing and the predictor writer consistent with checkpoints.\n# Log runtime and all trials; select only through pinned host macro HR@10.\n\n# DiagnosisProbe.run_full_diagnosis(loader):\n#     prior_mode = view.model.training\n#     try:\n#         view.model.eval()\n#         with torch.no_grad():\n#             compute existing loader-negative diagnostics\n#             return {'metrics': metrics,\n#                     'metric_definitions': metric_definitions}\n#     finally:\n#         view.model.train(prior_mode)",
+    "originality": {
+      "score": 2,
+      "positive": "Provides an objective-level experiment distinct from the previous recent-history residual, with explicit controls for competitor count and reproducible eligibility sampling.",
+      "negative": "Many-negative SASRec cross-entropy, BPR equivalence and calibration alternatives have direct precedent; this is a controlled application rather than a new algorithmic principle."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "Creates a tractable foundation for distinguishing competitor-count, objective and calibration effects across four categories under a fixed compute budget.",
+      "negative": "False negatives, popularity shortcuts and adaptive validation overfitting remain; sampled validation improvements need not transfer to full-catalog utility or resolve unsupported practical recommendations."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Architecture, checkpoint reconstruction and inference scoring remain unchanged, and eight competitors permit a compact loss implementation.",
+      "negative": "Exact unique sampling, reproducible resumption, loss and regularization normalization, memory handling and compute-matched controls require more care than the loss formula suggests."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Sampling reliability study, RecSys 2025",
+      "link": "https://doi.org/10.1145/3705328.3748086",
+      "contributions": [
+        "The supplied summary distinguishes sampled-metric resolution, fidelity, robustness and recovery of model rankings."
+      ],
+      "limitations": [
+        "Does not establish that increasing training negatives improves the pinned benchmark.",
+        "Sampled validation gains do not establish full-catalog gains."
+      ]
+    },
+    {
+      "title": "Sequential recommendation negative-sampling study, 2024",
+      "link": "https://arxiv.org/abs/2410.17276",
+      "contributions": [
+        "The supplied summary reports different head, middle and tail behavior across negative-sampling methods.",
+        "Motivates separating aggregate accuracy from training-frequency-stratified behavior."
+      ],
+      "limitations": [
+        "Tradeoffs depend on datasets and evaluation settings.",
+        "Popularity-based, semantic or harder negatives can contain relevant unobserved items."
+      ]
+    },
+    {
+      "title": "BSARec, 2024",
+      "link": "https://ojs.aaai.org/index.php/AAAI/article/view/28747",
+      "contributions": [
+        "Investigates attention oversmoothing and introduces frequency-based sequential modeling."
+      ],
+      "limitations": [
+        "The supplied embedding alignment statistics do not establish oversmoothing in the current model.",
+        "An architectural intervention introduces additional factors beyond the selected objective experiment."
+      ]
+    },
+    {
+      "title": "Turning Dross Into Gold: Loss Function Matters for Sequential Recommendation, 2023",
+      "link": "https://arxiv.org/abs/2309.07602",
+      "contributions": [
+        "Provides direct precedent for retaining SASRec while replacing one-negative BCE with full or sampled cross-entropy.",
+        "The supplied results show benefits from substantially larger negative counts on Amazon Beauty under different conditions."
+      ],
+      "limitations": [
+        "Does not establish eight negatives as optimal for these four categories.",
+        "Different splits, evaluation and early-stopping conditions prevent direct transfer of reported gains or compute efficiency."
+      ]
+    },
+    {
+      "title": "gSASRec: Reducing Overconfidence in Sequential Recommendation Trained with Negative Sampling, 2023",
+      "link": "https://arxiv.org/abs/2308.07192",
+      "contributions": [
+        "Connects negative sampling with overconfidence and proposes generalized BCE.",
+        "Motivates comparing loss calibration at matched competitor counts."
+      ],
+      "limitations": [
+        "Does not establish that calibration explains the supplied diagnostic margins.",
+        "Adds a tuning dimension and does not identify the optimal loss or negative count for this benchmark."
+      ]
+    },
+    {
+      "title": "Di Teodoro et al., 2024: one-negative softmax and BPR equivalence",
+      "link": "https://arxiv.org/abs/2411.07770",
+      "contributions": [
+        "Establishes the equivalence of uncorrected one-negative softmax and BPR under matched temperature and reduction.",
+        "Clarifies why one-negative softmax is an objective change relative to independent positive/negative BCE."
+      ],
+      "limitations": [
+        "The equivalence does not imply identical optimization to BCE.",
+        "Joint multi-negative cross-entropy is not the average of pairwise BPR losses."
+      ]
+    },
+    {
+      "title": "Adaptive Sampled Softmax with Kernel Based Sampling, Blanc and Rendle, 2018",
+      "link": "https://proceedings.mlr.press/v80/blanc18a/blanc18a.pdf",
+      "contributions": [
+        "Explains sampled-softmax probability corrections and finite-sample gradient bias.",
+        "Supports distinguishing candidate-set ranking objectives from approximations to full-catalog softmax."
+      ],
+      "limitations": [
+        "Its correction cannot be transferred blindly to without-replacement, history-excluded sampling.",
+        "Uniform negative probabilities do not cancel against an always-included positive, and correction cannot restore excluded support."
+      ]
+    },
+    {
+      "title": "PyTorch searchsorted documentation",
+      "link": "https://docs.pytorch.org/docs/stable/generated/torch.searchsorted.html",
+      "contributions": [
+        "Documents the right-bound insertion operation used in the derived complement-rank mapping."
+      ],
+      "limitations": [
+        "The documentation supplies the primitive, not a recommendation-specific sampler or proof of its eligibility rules."
+      ]
+    },
+    {
+      "title": "PyTorch multinomial documentation",
+      "link": "https://docs.pytorch.org/docs/stable/generated/torch.multinomial.html",
+      "contributions": [
+        "Provides a straightforward without-replacement sampling reference using positive weights on eligible items."
+      ],
+      "limitations": [
+        "Catalog-sized eligibility weights can be expensive, especially when batched.",
+        "The requested count must not exceed the eligible support."
+      ]
+    },
+    {
+      "title": "PyTorch reproducibility guidance",
+      "link": "https://docs.pytorch.org/docs/stable/notes/randomness.html",
+      "contributions": [
+        "Documents RNG controls, worker seeding and deterministic execution considerations."
+      ],
+      "limitations": [
+        "Reproducibility is not guaranteed across releases, platforms or all operations.",
+        "Resuming faithfully also requires saving application-specific sampler and optimizer states."
+      ]
+    }
+  ]
+}

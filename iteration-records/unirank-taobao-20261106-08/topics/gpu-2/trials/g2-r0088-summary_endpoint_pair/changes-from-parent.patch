@@ -1,0 +1,154 @@
+--- g2-r0087-summary_newest_anchor/model.py
++++ g2-r0088-summary_endpoint_pair/model.py
+@@ -15,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'pooling_view': 'supplied', 'moment_view': 'supplied', 'moment_within_shuffle': False, 'moment_block_shuffle': True, 'moment_block_anchor': 'newest'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'pooling_view': 'supplied', 'moment_view': 'supplied', 'moment_within_shuffle': False, 'moment_block_shuffle': True, 'moment_block_anchor': 'endpoints'}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -888,5 +888,5 @@
+                  pooling_view='supplied', moment_view='supplied',
+                  moment_within_shuffle=False, moment_block_shuffle=False,
+-                 moment_block_anchor='newest',
++                 moment_block_anchor='endpoints',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -910,6 +910,6 @@
+         if moment_within_shuffle:
+             raise ValueError('Endpoint study preserves within-block event order')
+-        if moment_block_anchor not in ('none', 'newest', 'oldest'):
+-            raise ValueError('Unknown full-block endpoint anchor')
++        if moment_block_anchor not in ('none', 'newest', 'oldest', 'newest_two', 'endpoints', 'oldest_two'):
++            raise ValueError('Unknown full-block anchor set')
+         self.moment_block_anchor = moment_block_anchor
+         self.compression_routes = compression_routes
+@@ -1175,5 +1175,5 @@
+         values = torch.cat([keys, item_emb[self.action_field][:, :-1]], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
+-        # Compute identical canonical index work in every endpoint cell.
++        # Compute identical canonical index work in every anchor-set cell.
+         # Embeddings are evaluated once in supplied order. Both history paths
+         # gather from that tensor, so parameter ownership and initialization
+@@ -1182,5 +1182,5 @@
+         identity = torch.arange(100, device=mask.device).expand(mask.shape[0], -1)
+         # Retain canonical index work as in the previous identity bridge.
+-        # Build all endpoint maps in EVERY cell, including identity,
++        # Build all anchor-set maps in EVERY cell, including identity,
+         # so all four cells consume the same training RNG stream and work.
+         # Eval uses no global RNG or mutable state. Its draw depends on batch
+@@ -1968,15 +1968,31 @@
+ 
+ 
++def _summary_anchor_sets(full):
++    """Boolean anchor sets from supplied full-block ranks; no state or RNG."""
++    block_ids = torch.arange(10, device=full.device).view(1, 10).expand_as(full)
++    newest = block_ids.masked_fill(~full, -1).amax(dim=1, keepdim=True)
++    oldest = block_ids.masked_fill(~full, 10).amin(dim=1, keepdim=True)
++    rank = full.long().cumsum(dim=1) - 1
++    count = full.sum(dim=1, keepdim=True)
++    return {
++        'none': torch.zeros_like(full),
++        'newest': full & (block_ids == newest),
++        'oldest': full & (block_ids == oldest),
++        'newest_two': full & (rank >= count - 2),
++        'endpoints': full & ((block_ids == newest) | (block_ids == oldest)),
++        'oldest_two': full & (rank < 2),
++    }
++
++
+ def _summary_group_orders(mask, generator=None):
+-    """Joint destination-to-source maps preserving all invalid positions.
+-
+-    Draw the same 100 within-block and ten block priorities per row as the
+-    previous factorial. Build all endpoint modes in every cell; selection
+-    introduces no extra RNG. Randomize only fully occupied ten-slot blocks,
+-    excluding the selected endpoint. Every field, action and membership moves
+-    with its event. Latest/earliest mean greatest/least supplied slot index,
+-    with no assertion of clock-time recency. Nonfull blocks remain fixed.
+-    Conditional on the eligible blocks each permutation is uniform, apart
+-    from negligible float64-priority ties. Identity draws remain admissible.
++    """Destination-to-source maps; invalid and nonfull blocks stay fixed.
++
++    Use exactly the inherited 100 within-block and ten block priorities per
++    row. All anchor sets are computed in every cell, using shared priorities.
++    Only eligible full blocks exchange complete ten-event tuples. Original
++    within-block offsets are unchanged. At most two full blocks means every
++    two-anchor map is identity. Three full blocks also leave only one eligible
++    block and hence identity; population movement must be measured for >=4.
++    No timestamp, sample identity, learned ranking, persistent RNG or cache.
+     """
+     if mask.ndim != 2 or mask.shape[1] != 100:
+@@ -1995,13 +2011,7 @@
+     block_noise = torch.rand((batch, 10), device=mask.device,
+                              dtype=torch.float64, generator=generator)
+-    newest = block_ids.masked_fill(~full, -1).amax(dim=1, keepdim=True)
+-    oldest = block_ids.masked_fill(~full, 10).amin(dim=1, keepdim=True)
+     block_orders = {}
+-    for mode in ('none', 'newest', 'oldest'):
+-        eligible = full
+-        if mode == 'newest':
+-            eligible = full & (block_ids != newest)
+-        elif mode == 'oldest':
+-            eligible = full & (block_ids != oldest)
++    for mode, anchors in _summary_anchor_sets(full).items():
++        eligible = full & ~anchors
+         sources = block_noise.masked_fill(~eligible, float('inf')).argsort(dim=1, stable=True)
+         ranks = (eligible.long().cumsum(dim=1) - 1).clamp_min(0)
+@@ -2020,5 +2030,5 @@
+     device = torch.device(device)
+     lengths = (0, 1, 2, 17, 20, 30, 64, 99, 100)
+-    mask = torch.zeros((11, 100), device=device)
++    mask = torch.zeros((12, 100), device=device)
+     for row, count in enumerate(lengths):
+         mask[row, 100-count:] = 1
+@@ -2027,4 +2037,7 @@
+         mask[9, lo:hi] = 1
+     mask[10, torch.arange(0, 100, 3, device=device)] = 1
++    # Irregular four-full-block fixture: independent anchor-set oracle below.
++    for block in (0, 2, 5, 9):
++        mask[11, 10*block:10*block+10] = 1
+     valid = mask.bool()
+     batch = mask.shape[0]
+@@ -2057,4 +2070,14 @@
+     moved_fractions = {}
+     eligible_counts = {}
++    anchor_sets = _summary_anchor_sets(full)
++    # Explicit expected sets, independent of vectorized rank construction.
++    expected_fixture = {
++        'none': [], 'newest': [9], 'oldest': [0],
++        'newest_two': [5, 9], 'endpoints': [0, 9], 'oldest_two': [0, 2],
++    }
++    for mode, expected_blocks in expected_fixture.items():
++        assert anchor_sets[mode][11].nonzero().flatten().tolist() == expected_blocks
++    for mode in ('newest_two', 'endpoints', 'oldest_two'):
++        assert torch.equal(anchor_sets[mode].sum(dim=1), full.sum(dim=1).clamp_max(2))
+     for mode, order in [('supplied', positions)] + list(orders.items()):
+         assert torch.equal(order.sort(dim=1).values, positions)
+@@ -2066,12 +2089,10 @@
+         assert bool(full.gather(1, donor)[full].all())
+         eligible = full
+-        if mode in ('newest', 'oldest'):
+-            anchor = (bpos.masked_fill(~full, -1).amax(dim=1, keepdim=True)
+-                      if mode == 'newest' else bpos.masked_fill(~full, 10).amin(dim=1, keepdim=True))
+-            anchored = full & (bpos == anchor)
++        if mode in anchor_sets:
++            anchored = anchor_sets[mode]
+             assert torch.equal(donor[anchored], bpos[anchored])
+             eligible = full & ~anchored
+-            # With <=2 full blocks anchoring leaves at most one movable unit.
+-            small = full.sum(dim=1) <= 2
++            assert torch.equal(eligible.gather(1, donor), eligible)
++            small = eligible.sum(dim=1) <= 1
+             assert torch.equal(order[small], positions[small])
+         if mode != 'supplied':
+@@ -2097,4 +2118,9 @@
+         moved_fractions[mode] = float(((order != positions) & valid).sum() / valid.sum().clamp_min(1))
+     assert torch.equal(eligible_counts['newest'], eligible_counts['oldest'])
++    assert torch.equal(eligible_counts['newest_two'], eligible_counts['endpoints'])
++    assert torch.equal(eligible_counts['newest_two'], eligible_counts['oldest_two'])
++    for mode in ('newest_two', 'endpoints', 'oldest_two'):
++        assert torch.equal(orders[mode][full.sum(dim=1) <= 3],
++                           positions[full.sum(dim=1) <= 3])
+     return {'contract': 'passed', 'fixture_moved_fractions': moved_fractions,
+             'population_treatment_strength': 'requires host measurement'}

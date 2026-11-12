@@ -1,0 +1,325 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "proposal": {
+        "category_edits": [
+          {
+            "category": "network_architecture",
+            "rationale": "Add a fixed 5% residual memory path to every GRU layer: h_t = 0.95 * GRUCell(x_t, h_prev) + 0.05 * h_prev. Batched input projections reduce loop overhead. Preserve GRU parameters, padding processing, embeddings, readout, scoring, loss, optimizer and dataset routing. The generated predictor already imports GRU4RecModel from train.py, so it automatically uses the identical recurrence and checkpoint layout.",
+            "edits": [
+              {
+                "find": "class GRU4RecModel(nn.Module):",
+                "replace": "@torch.jit.script\ndef _residual_gru_steps(projected: torch.Tensor, hidden: torch.Tensor,\n                        weight_hh: torch.Tensor, bias_hh: torch.Tensor):\n    states = torch.jit.annotate(list[torch.Tensor], [])\n    for t in range(projected.size(1)):\n        input_r, input_z, input_n = projected[:, t].chunk(3, dim=-1)\n        hidden_r, hidden_z, hidden_n = torch.nn.functional.linear(\n            hidden, weight_hh, bias_hh\n        ).chunk(3, dim=-1)\n        reset = torch.sigmoid(input_r + hidden_r)\n        update = torch.sigmoid(input_z + hidden_z)\n        candidate = torch.tanh(input_n + reset * hidden_n)\n        gru_hidden = (1.0 - update) * candidate + update * hidden\n        hidden = 0.95 * gru_hidden + 0.05 * hidden\n        states.append(hidden)\n    return torch.stack(states, dim=1), hidden\n\n\nclass ResidualMemoryGRU(nn.GRU):\n    def forward(self, input: torch.Tensor, hx=None):\n        layer_input = input if self.batch_first else input.transpose(0, 1)\n        if hx is None:\n            hx = layer_input.new_zeros(\n                self.num_layers, layer_input.size(0), self.hidden_size\n            )\n        final_states = []\n        for layer in range(self.num_layers):\n            projected = torch.nn.functional.linear(\n                layer_input,\n                getattr(self, f'weight_ih_l{layer}'),\n                getattr(self, f'bias_ih_l{layer}'),\n            )\n            layer_input, last_hidden = _residual_gru_steps(\n                projected, hx[layer],\n                getattr(self, f'weight_hh_l{layer}'),\n                getattr(self, f'bias_hh_l{layer}'),\n            )\n            final_states.append(last_hidden)\n            if layer + 1 < self.num_layers and self.dropout > 0.0:\n                layer_input = torch.nn.functional.dropout(\n                    layer_input, p=self.dropout, training=self.training\n                )\n        output = layer_input if self.batch_first else layer_input.transpose(0, 1)\n        return output, torch.stack(final_states, dim=0)\n\n\nclass GRU4RecModel(nn.Module):"
+              },
+              {
+                "find": "self.gru = nn.GRU(hidden_units, hidden_units, num_layers=num_layers,\n                          batch_first=True, dropout=dropout)",
+                "replace": "self.gru = ResidualMemoryGRU(hidden_units, hidden_units, num_layers=num_layers,\n                          batch_first=True, dropout=dropout)"
+              },
+              {
+                "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+                "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+              },
+              {
+                "find": "NUM_EPOCHS    = int(os.environ.get(\"GRU4REC_EPOCHS\", \"200\"))",
+                "replace": "NUM_EPOCHS    = min(200, int(os.environ.get(\"GRU4REC_EPOCHS\", \"200\")))"
+              }
+            ]
+          }
+        ],
+        "change_summary": "Apply the 95% GRU / 5% previous-state recurrence across all four category models, retaining one checkpoint per category. Preserve existing prediction imports and training behavior; enforce the required data directory and 200-epoch cap.",
+        "edits": [
+          {
+            "find": "class GRU4RecModel(nn.Module):",
+            "replace": "@torch.jit.script\ndef _residual_gru_steps(projected: torch.Tensor, hidden: torch.Tensor,\n                        weight_hh: torch.Tensor, bias_hh: torch.Tensor):\n    states = torch.jit.annotate(list[torch.Tensor], [])\n    for t in range(projected.size(1)):\n        input_r, input_z, input_n = projected[:, t].chunk(3, dim=-1)\n        hidden_r, hidden_z, hidden_n = torch.nn.functional.linear(\n            hidden, weight_hh, bias_hh\n        ).chunk(3, dim=-1)\n        reset = torch.sigmoid(input_r + hidden_r)\n        update = torch.sigmoid(input_z + hidden_z)\n        candidate = torch.tanh(input_n + reset * hidden_n)\n        gru_hidden = (1.0 - update) * candidate + update * hidden\n        hidden = 0.95 * gru_hidden + 0.05 * hidden\n        states.append(hidden)\n    return torch.stack(states, dim=1), hidden\n\n\nclass ResidualMemoryGRU(nn.GRU):\n    def forward(self, input: torch.Tensor, hx=None):\n        layer_input = input if self.batch_first else input.transpose(0, 1)\n        if hx is None:\n            hx = layer_input.new_zeros(\n                self.num_layers, layer_input.size(0), self.hidden_size\n            )\n        final_states = []\n        for layer in range(self.num_layers):\n            projected = torch.nn.functional.linear(\n                layer_input,\n                getattr(self, f'weight_ih_l{layer}'),\n                getattr(self, f'bias_ih_l{layer}'),\n            )\n            layer_input, last_hidden = _residual_gru_steps(\n                projected, hx[layer],\n                getattr(self, f'weight_hh_l{layer}'),\n                getattr(self, f'bias_hh_l{layer}'),\n            )\n            final_states.append(last_hidden)\n            if layer + 1 < self.num_layers and self.dropout > 0.0:\n                layer_input = torch.nn.functional.dropout(\n                    layer_input, p=self.dropout, training=self.training\n                )\n        output = layer_input if self.batch_first else layer_input.transpose(0, 1)\n        return output, torch.stack(final_states, dim=0)\n\n\nclass GRU4RecModel(nn.Module):"
+          },
+          {
+            "find": "self.gru = nn.GRU(hidden_units, hidden_units, num_layers=num_layers,\n                          batch_first=True, dropout=dropout)",
+            "replace": "self.gru = ResidualMemoryGRU(hidden_units, hidden_units, num_layers=num_layers,\n                          batch_first=True, dropout=dropout)"
+          },
+          {
+            "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+            "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+          },
+          {
+            "find": "NUM_EPOCHS    = int(os.environ.get(\"GRU4REC_EPOCHS\", \"200\"))",
+            "replace": "NUM_EPOCHS    = min(200, int(os.environ.get(\"GRU4REC_EPOCHS\", \"200\")))"
+          }
+        ],
+        "scope_validation": "exact categories and nontrivial AST changes; semantic labels prompt-enforced"
+      }
+    }
+  ],
+  "receipt": {
+    "id": "round-0050-slot-2-attempt-1",
+    "status": "success",
+    "gpu": 6,
+    "allocated_gpu_seconds": 1490.6939949989319,
+    "output": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/run-01/experiment/recharness/trials/round-0050-slot-2-attempt-1",
+    "source_sha256": "0d526141cc4e548302d2f4027a37fb6a16c3f5b6b807e5195fd113d951369f5a",
+    "score": 0.5613,
+    "aggregate": {
+      "HR@5": 0.435,
+      "HR@10": 0.5613,
+      "HR@20": 0.6975,
+      "NDCG@5": 0.3113,
+      "NDCG@10": 0.3519,
+      "NDCG@20": 0.3866,
+      "Movies_and_TV/HR@5": 0.435,
+      "Movies_and_TV/HR@10": 0.57,
+      "Movies_and_TV/HR@20": 0.725,
+      "Movies_and_TV/NDCG@5": 0.329,
+      "Movies_and_TV/NDCG@10": 0.3719,
+      "Movies_and_TV/NDCG@20": 0.4115,
+      "Industrial_and_Scientific/HR@5": 0.46,
+      "Industrial_and_Scientific/HR@10": 0.605,
+      "Industrial_and_Scientific/HR@20": 0.71,
+      "Industrial_and_Scientific/NDCG@5": 0.3278,
+      "Industrial_and_Scientific/NDCG@10": 0.3752,
+      "Industrial_and_Scientific/NDCG@20": 0.4023,
+      "Electronics/HR@5": 0.305,
+      "Electronics/HR@10": 0.425,
+      "Electronics/HR@20": 0.58,
+      "Electronics/NDCG@5": 0.2127,
+      "Electronics/NDCG@10": 0.2507,
+      "Electronics/NDCG@20": 0.2901,
+      "CDs_and_Vinyl/HR@5": 0.54,
+      "CDs_and_Vinyl/HR@10": 0.645,
+      "CDs_and_Vinyl/HR@20": 0.775,
+      "CDs_and_Vinyl/NDCG@5": 0.3758,
+      "CDs_and_Vinyl/NDCG@10": 0.4097,
+      "CDs_and_Vinyl/NDCG@20": 0.4426
+    },
+    "per_dataset": {
+      "Movies_and_TV": {
+        "metrics": {
+          "HR@5": 0.435,
+          "HR@10": 0.57,
+          "HR@20": 0.725,
+          "NDCG@5": 0.329,
+          "NDCG@10": 0.3719,
+          "NDCG@20": 0.4115
+        },
+        "n_users": 200
+      },
+      "Industrial_and_Scientific": {
+        "metrics": {
+          "HR@5": 0.46,
+          "HR@10": 0.605,
+          "HR@20": 0.71,
+          "NDCG@5": 0.3278,
+          "NDCG@10": 0.3752,
+          "NDCG@20": 0.4023
+        },
+        "n_users": 200
+      },
+      "Electronics": {
+        "metrics": {
+          "HR@5": 0.305,
+          "HR@10": 0.425,
+          "HR@20": 0.58,
+          "NDCG@5": 0.2127,
+          "NDCG@10": 0.2507,
+          "NDCG@20": 0.2901
+        },
+        "n_users": 200
+      },
+      "CDs_and_Vinyl": {
+        "metrics": {
+          "HR@5": 0.54,
+          "HR@10": 0.645,
+          "HR@20": 0.775,
+          "NDCG@5": 0.3758,
+          "NDCG@10": 0.4097,
+          "NDCG@20": 0.4426
+        },
+        "n_users": 200
+      }
+    },
+    "evaluation_seconds": 5.929588198661804,
+    "predictor_sha256": "9b957238ca2570687d70762138c6df377c487b20206a43b079fbdfcf86acaed3"
+  },
+  "native_result": {
+    "spec": {
+      "dimension": "network_architecture",
+      "delta": -1.0,
+      "estimated_cost_secs": 12197.908127695322,
+      "code_diff": "",
+      "code_edits": [],
+      "code_content": "",
+      "arm": "network_architecture",
+      "composite_dims": [
+        "network_architecture"
+      ],
+      "strategy_arm": null,
+      "round_role": "lowlevel_routing",
+      "parallel_group_estimated_wall_secs": 48791.63251078129,
+      "budget_safe_if_global_budget_gte": 48791.63251078129,
+      "budget_accounting": "Parallel group cost is sum(estimated_cost_secs) across the selected candidates.",
+      "code_hint": "REGULAR MUTATION: change only this one direction. 网络架构: GRU depth, recurrent gates, residual paths and internal network topology. Retain the GRU recurrent backbone. Preserve input features, embedding design, scoring mechanism, history selection/readout, loss and optimizer.\nOnly minimal shape/checkpoint/predictor consistency edits outside the chosen directions are allowed; they must not introduce another modeling or training change.",
+      "hypothesis": "Thompson: low success rate (0.08, 34 obs) — explore cautiously; Memory available in state; agent should write a short arm-specific hypothesis; Agent hypothesis: Network architecture: across all four datasets, replace each GRU hidden-state update with h_t = 0.95*GRUCell(x_t, h_prev) + 0.05*h_prev, within the existing recurrent layers. This small residual memory path may stabilize preference retention while adding no trainable parameters or recurrent depth. Preserve padding behavior, features, embeddings, readout, scoring, loss and optimizer; mirror the recurrence in the predictor writer.",
+      "is_jumping": false,
+      "implementation_backend": "claude_code",
+      "implementation_prompt": "REGULAR MUTATION: change only this one direction. 网络架构: GRU depth, recurrent gates, residual paths and internal network topology. Retain the GRU recurrent backbone. Preserve input features, embedding design, scoring mechanism, history selection/readout, loss and optimizer.\nOnly minimal shape/checkpoint/predictor consistency edits outside the chosen directions are allowed; they must not introduce another modeling or training change.",
+      "allowed_files": [
+        "train.py",
+        "predict.py"
+      ],
+      "claude_attempts": 3,
+      "arm_design": "eight_directions_v3",
+      "selected_categories": [
+        "network_architecture"
+      ],
+      "hypothesis_key": "slot-2",
+      "sampling_draw": {
+        "slot": 2,
+        "rank": 3,
+        "arm": "network_architecture",
+        "sampled_values": {
+          "feature_construction": 0.07237969142575112,
+          "embedding_representation": 0.039499995296910145,
+          "interaction_mechanism": 0.014605785097083492,
+          "network_architecture": 0.04981842333127283,
+          "sequence_modeling": 0.016060808404337656,
+          "interest_aggregation": 0.025905769105907576,
+          "learning_objective": 0.04078913776041615,
+          "training_strategy": 0.10656348604138399
+        }
+      },
+      "max_trial_gpu_seconds": 12197.908127695322,
+      "protected_gpu_seconds": 0.0,
+      "jump_trigger": null,
+      "predict_code_edits": [],
+      "predict_code_content": "",
+      "agent_hypothesis": "Network architecture: across all four datasets, replace each GRU hidden-state update with h_t = 0.95*GRUCell(x_t, h_prev) + 0.05*h_prev, within the existing recurrent layers. This small residual memory path may stabilize preference retention while adding no trainable parameters or recurrent depth. Preserve padding behavior, features, embeddings, readout, scoring, loss and optimizer; mirror the recurrence in the predictor writer.",
+      "gagc_memory_context": {
+        "experiment_skill": "# RecHarness Experiment Skill\n\n## Objective\nUse benchmark val_score as the search and winner criterion.\nDo not use held-out test metrics during search.\nThompson Sampling chooses arms; this skill only guides how to edit code within selected arms.\n\n## Recent Patch Lessons\n- Round 7 winner changed validation score by -0.0050 using interest_aggregation/interest_aggregation ↓. Val score also improved — high confidence direction.\n- Round 14 winner improved validation score by +0.0050 using training_strategy/training_strategy ↓. Val score also improved — high confidence direction. Per-dataset HR@10 was imbalanced; prefer follow-ups that preserve weaker datasets, not only aggregate gain.\n- Round 15 winner improved validation score by +0.0125 using interest_aggregation/interest_aggregation ↓. Val score also improved — high confidence direction. Per-dataset HR@10 was imbalanced; prefer follow-ups that preserve weaker datasets, not only aggregate gain.\n\n## Concrete Avoids\n- Do not repeat `training_strategy/training_strategy ↓` — caused timeout. Reduce model size or batch size.\n- Do not repeat `sequence_modeling/sequence_modeling ↓` — caused timeout. Reduce model size or batch size.\n- Do not repeat `network_architecture/network_architecture ↓` — caused timeout. Reduce model size or batch size.\n- Do not repeat `interest_aggregation/interest_aggregation ↓` — caused timeout. Reduce model size or batch size.\n",
+        "recent_text_gradients": [
+          "Round 7 winner changed validation score by -0.0050 using interest_aggregation/interest_aggregation ↓. Val score also improved — high confidence direction.",
+          "Round 14 winner improved validation score by +0.0050 using training_strategy/training_strategy ↓. Val score also improved — high confidence direction. Per-dataset HR@10 was imbalanced; prefer follow-ups that preserve weaker datasets, not only aggregate gain.",
+          "Round 15 winner improved validation score by +0.0125 using interest_aggregation/interest_aggregation ↓. Val score also improved — high confidence direction. Per-dataset HR@10 was imbalanced; prefer follow-ups that preserve weaker datasets, not only aggregate gain."
+        ],
+        "failure_memory": [
+          {
+            "round_idx": 10,
+            "arm": "sequence_modeling",
+            "failure_type": "timeout",
+            "patch_pattern": "sequence_modeling/sequence_modeling ↓",
+            "normalized_pattern": "sequence_modeling/sequence_modeling ↓",
+            "avoid_rule": "Do not repeat `sequence_modeling/sequence_modeling ↓` — caused timeout. Reduce model size or batch size.",
+            "count": 3
+          },
+          {
+            "round_idx": 9,
+            "arm": "network_architecture",
+            "failure_type": "timeout",
+            "patch_pattern": "network_architecture/network_architecture ↓",
+            "normalized_pattern": "network_architecture/network_architecture ↓",
+            "avoid_rule": "Do not repeat `network_architecture/network_architecture ↓` — caused timeout. Reduce model size or batch size.",
+            "count": 1
+          },
+          {
+            "round_idx": 10,
+            "arm": "interest_aggregation",
+            "failure_type": "timeout",
+            "patch_pattern": "interest_aggregation/interest_aggregation ↓",
+            "normalized_pattern": "interest_aggregation/interest_aggregation ↓",
+            "avoid_rule": "Do not repeat `interest_aggregation/interest_aggregation ↓` — caused timeout. Reduce model size or batch size.",
+            "count": 1
+          }
+        ],
+        "skill_notes": "Round 50: best_ever=0.5825, recent=0.5825, trend=plateau. Top arms: combination_jump, training_strategy, network_architecture."
+      },
+      "trial_group_id": "trialgrp_1793225388694_1512370",
+      "trial_id": 2
+    },
+    "wall_time_secs": 1490.6939949989319,
+    "timed_out": false,
+    "oom": false,
+    "val_score": 0.5613,
+    "val_metrics": {
+      "Movies_and_TV": {
+        "HR@5": 0.435,
+        "HR@10": 0.57,
+        "HR@20": 0.725,
+        "NDCG@5": 0.329,
+        "NDCG@10": 0.3719,
+        "NDCG@20": 0.4115
+      },
+      "Industrial_and_Scientific": {
+        "HR@5": 0.46,
+        "HR@10": 0.605,
+        "HR@20": 0.71,
+        "NDCG@5": 0.3278,
+        "NDCG@10": 0.3752,
+        "NDCG@20": 0.4023
+      },
+      "Electronics": {
+        "HR@5": 0.305,
+        "HR@10": 0.425,
+        "HR@20": 0.58,
+        "NDCG@5": 0.2127,
+        "NDCG@10": 0.2507,
+        "NDCG@20": 0.2901
+      },
+      "CDs_and_Vinyl": {
+        "HR@5": 0.54,
+        "HR@10": 0.645,
+        "HR@20": 0.775,
+        "NDCG@5": 0.3758,
+        "NDCG@10": 0.4097,
+        "NDCG@20": 0.4426
+      }
+    },
+    "test_score": null,
+    "test_metrics": null,
+    "convergence_trace": [
+      0.525,
+      0.615,
+      0.57,
+      0.61,
+      0.615,
+      0.605,
+      0.535,
+      0.565,
+      0.6,
+      0.58,
+      0.595,
+      0.6,
+      0.615,
+      0.63,
+      0.595,
+      0.58,
+      0.61,
+      0.55,
+      0.41,
+      0.41,
+      0.39,
+      0.4,
+      0.42,
+      0.455,
+      0.455,
+      0.4,
+      0.43,
+      0.405,
+      0.415,
+      0.5,
+      0.57,
+      0.62,
+      0.61,
+      0.61,
+      0.605,
+      0.655,
+      0.645,
+      0.66,
+      0.655,
+      0.63,
+      0.645,
+      0.615
+    ],
+    "error_message": null,
+    "stdout_tail": "s=0.5857  val_score: 0.4100  HR@20=0.5350  NDCG@10=0.2342\n  [Electronics] epoch  10/200  loss=0.5459  val_score: 0.4100  HR@20=0.5800  NDCG@10=0.2317\n  [Electronics] epoch  15/200  loss=0.5144  val_score: 0.3900  HR@20=0.5750  NDCG@10=0.2310\n  [Electronics] epoch  20/200  loss=0.4832  val_score: 0.4000  HR@20=0.5800  NDCG@10=0.2311\n  [Electronics] epoch  25/200  loss=0.4599  val_score: 0.4200  HR@20=0.5800  NDCG@10=0.2424\n  [Electronics] epoch  30/200  loss=0.4470  val_score: 0.4550  HR@20=0.5900  NDCG@10=0.2529\n  [Electronics] epoch  35/200  loss=0.4399  val_score: 0.4550  HR@20=0.5950  NDCG@10=0.2615\n  [Electronics] epoch  40/200  loss=0.4329  val_score: 0.4000  HR@20=0.5800  NDCG@10=0.2416\n  [Electronics] epoch  45/200  loss=0.4153  val_score: 0.4300  HR@20=0.5850  NDCG@10=0.2447\n  [Electronics] epoch  50/200  loss=0.4056  val_score: 0.4050  HR@20=0.5650  NDCG@10=0.2311\n  [Electronics] Early stopping at epoch 50\n  [Electronics] Best val HR@10=0.4550  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/run-01/experiment/recharness/trials/round-0050-slot-2-attempt-1/working/Electronics_model.pt\n  [CDs_and_Vinyl] users=18481  items=30951\n  [CDs_and_Vinyl] epoch   5/200  loss=0.5796  val_score: 0.4150  HR@20=0.6050  NDCG@10=0.2270\n  [CDs_and_Vinyl] epoch  10/200  loss=0.5181  val_score: 0.5000  HR@20=0.6800  NDCG@10=0.2917\n  [CDs_and_Vinyl] epoch  15/200  loss=0.4858  val_score: 0.5700  HR@20=0.7300  NDCG@10=0.3070\n  [CDs_and_Vinyl] epoch  20/200  loss=0.4649  val_score: 0.6200  HR@20=0.7550  NDCG@10=0.3563\n  [CDs_and_Vinyl] epoch  25/200  loss=0.4462  val_score: 0.6100  HR@20=0.7600  NDCG@10=0.3566\n  [CDs_and_Vinyl] epoch  30/200  loss=0.4226  val_score: 0.6100  HR@20=0.7450  NDCG@10=0.3596\n  [CDs_and_Vinyl] epoch  35/200  loss=0.3938  val_score: 0.6050  HR@20=0.7600  NDCG@10=0.3917\n  [CDs_and_Vinyl] epoch  40/200  loss=0.3797  val_score: 0.6550  HR@20=0.7450  NDCG@10=0.4001\n  [CDs_and_Vinyl] epoch  45/200  loss=0.3709  val_score: 0.6450  HR@20=0.7700  NDCG@10=0.3964\n  [CDs_and_Vinyl] epoch  50/200  loss=0.3618  val_score: 0.6600  HR@20=0.7600  NDCG@10=0.3943\n  [CDs_and_Vinyl] epoch  55/200  loss=0.3538  val_score: 0.6550  HR@20=0.7750  NDCG@10=0.3942\n  [CDs_and_Vinyl] epoch  60/200  loss=0.3482  val_score: 0.6300  HR@20=0.7600  NDCG@10=0.3951\n  [CDs_and_Vinyl] epoch  65/200  loss=0.3411  val_score: 0.6450  HR@20=0.7650  NDCG@10=0.3888\n  [CDs_and_Vinyl] epoch  70/200  loss=0.3280  val_score: 0.6150  HR@20=0.7600  NDCG@10=0.3738\n  [CDs_and_Vinyl] Early stopping at epoch 70\n  [CDs_and_Vinyl] Best val HR@10=0.6600  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/run-01/experiment/recharness/trials/round-0050-slot-2-attempt-1/working/CDs_and_Vinyl_model.pt\npredict.py written -> /home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/run-01/experiment/recharness/trials/round-0050-slot-2-attempt-1/working/predict.py\n\nAll datasets done. Average val HR@10 = 0.5900\n",
+    "stderr_tail": ""
+  },
+  "gpu_seconds_all_attempts": 1490.6939949989319
+}

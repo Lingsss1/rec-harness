@@ -1,0 +1,135 @@
+--- g2-r0052-joint_rank_reference/model.py
++++ g2-r0053-joint_partition_semantic/model.py
+@@ -1,9 +1,8 @@
+-"""Rank versus nonlinear breadth in the context-owning buy head.
+-
+-All parent construction and initialization finish before the intervention.
+-An optional two-affine linear factorization replaces only buy's first affine.
+-Its truncated SVD uses the fresh random template, never data or a checkpoint.
+-Balanced and output-heavy factors have the same real-arithmetic initial map,
+-but distinct optimizer geometry. No priority or measured-utility claim.
++"""Shared-context sparse direct connectivity in the buy first affine.
++
++The parent construction/reset/RNG sequence finishes before any intervention.
++Packed branches physically discard selected direct first-affine connections,
++retain all112 nonlinear channels and share every context input. The full-input
++buy residual still precedes this layer. No priority or measured-utility claim.
+ """
+ import torch
+@@ -14,5 +13,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic'}
+ 
+ 
+@@ -74,4 +73,77 @@
+ 
+ 
++class _PartitionedAffine(nn.Module):
++    """Two packed affine row groups with common context and local inputs.
++
++    Parameter slices come only from a freshly initialized parent. Constructor
++    indexing consumes no RNG; no checkpoint/data/label inspection occurs.
++    Full dense template weights are not retained, masked or rebuilt. Both
++    partitions execute the same two gathers/affines/concatenation in train
++    and eval. The following Dice and second dense layer belong to the parent.
++    """
++    def __init__(self, linear, context_width, key_width, value_width,
++                 embedding_dim, partition):
++        super().__init__()
++        if not isinstance(linear, nn.Linear) or linear.bias is None:
++            raise ValueError('Expected the inherited biased first affine')
++        if partition not in ('semantic', 'mixed'):
++            raise ValueError('Unknown packed input partition')
++        if linear.in_features != context_width + key_width + value_width:
++            raise ValueError('First affine inputs must be context,target,pooled')
++        if linear.out_features != 112:
++            raise ValueError('Partition contrast must retain112 nonlinear channels')
++        if embedding_dim < 2 or embedding_dim % 2 or key_width % embedding_dim:
++            raise ValueError('Mixed control requires even field dimensions')
++        if value_width != key_width + embedding_dim:
++            raise ValueError('Expected item fields followed by historical action')
++        self.in_features = linear.in_features
++        self.out_features = linear.out_features
++        self.row_split = linear.out_features // 2
++        target_start = context_width
++        pooled_start = context_width + key_width
++        if partition == 'semantic':
++            local_first = list(range(target_start, pooled_start))
++        else:
++            # Half of every target field and the corresponding pooled field.
++            # Action coordinates stay in the complementary local group.
++            local_first = [start + field + coordinate
++                           for start in (target_start, pooled_start)
++                           for field in range(0, key_width, embedding_dim)
++                           for coordinate in range(embedding_dim // 2)]
++        local_set = set(local_first)
++        local_second = [index for index in range(context_width, self.in_features)
++                        if index not in local_set]
++        if (len(local_first) != key_width or len(local_second) != value_width
++                or len(local_set) != key_width
++                or local_set.intersection(local_second)
++                or local_set.union(local_second) != set(range(context_width, self.in_features))):
++            raise ValueError('Local groups must exactly partition target and pool')
++        common = list(range(context_width))
++        first_columns = torch.tensor(common + local_first, dtype=torch.long,
++                                     device=linear.weight.device)
++        second_columns = torch.tensor(common + local_second, dtype=torch.long,
++                                      device=linear.weight.device)
++        self.register_buffer('first_columns', first_columns)
++        self.register_buffer('second_columns', second_columns)
++        with torch.no_grad():
++            self.first_weight = nn.Parameter(
++                linear.weight[:self.row_split].index_select(1, first_columns).detach().clone(),
++                requires_grad=linear.weight.requires_grad)
++            self.second_weight = nn.Parameter(
++                linear.weight[self.row_split:].index_select(1, second_columns).detach().clone(),
++                requires_grad=linear.weight.requires_grad)
++            self.bias = nn.Parameter(linear.bias.detach().clone(),
++                                     requires_grad=linear.bias.requires_grad)
++
++    def forward(self, features):
++        first = torch.nn.functional.linear(
++            features.index_select(-1, self.first_columns), self.first_weight,
++            self.bias[:self.row_split])
++        second = torch.nn.functional.linear(
++            features.index_select(-1, self.second_columns), self.second_weight,
++            self.bias[self.row_split:])
++        return torch.cat((first, second), dim=-1)
++
++
+ class Model(MultiTaskModel):
+     def __init__(self, feature_map, model_id='TargetMatchOrderMoment', gpu=-1,
+@@ -100,4 +172,5 @@
+                  owner_initialization_scale='inherited',
+                  owner_affine_rank=0, owner_factor_balance='balanced',
++                 owner_input_partition='dense',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -112,4 +185,10 @@
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         self.compression_routes = compression_routes
++        if owner_input_partition not in ('dense', 'semantic', 'mixed'):
++            raise ValueError('Unknown owner input partition')
++        if owner_input_partition != 'dense' and owner_affine_rank != 0:
++            raise ValueError('Partition and rank interventions cannot be combined')
++        if owner_input_partition != 'dense' and owner_initialization_scale != 'inherited':
++            raise ValueError('Partition contrast freezes inherited initialization scale')
+         if isinstance(owner_affine_rank, bool) or not isinstance(owner_affine_rank, int) or owner_affine_rank < 0:
+             raise ValueError('Owner affine rank must be a nonnegative integer; zero disables it')
+@@ -406,4 +485,14 @@
+                     tower[0] = _RankAffine(tower[0], owner_affine_rank,
+                                            owner_factor_balance)
++        # Install after ALL inherited initialization and reductions. Dense
++        # mode is a strict no-op. Only packed Parameters and integer buffers
++        # persist; the old affine and discarded coefficients have no owner.
++        if owner_input_partition != 'dense':
++            for label, tower in zip(feature_map.labels, self.towers):
++                if label == 'buy':
++                    tower[0] = _PartitionedAffine(
++                        tower[0], len(self.user_fields) * embedding_dim,
++                        self.key_width, self.value_width, embedding_dim,
++                        owner_input_partition)
+         self.model_to_device()
+ 

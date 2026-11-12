@@ -1,0 +1,112 @@
+--- g2-r0058-context_boundary_full112/model.py
++++ g2-r0059-context_fold_dense_fused/model.py
+@@ -1,9 +1,9 @@
+-"""Bounded context-rank utility study, from fresh inherited weights.
+-
+-Only CONFIG differs across the four standalone modules. Compare balanced
+-rank56/rank70 context maps with full112 factors and a separate dense map.
+-No initialization-energy, factor-balance, nonlinear-width, masking, gradient
+-ownership, loss or host-training change. SVD is constructor-only. New ranks
+-have no local tensor, quality, latency or novelty claim; see proposal.json.
++"""Prediction-time folding of the inherited buy-context affine.
++
++Training, Parameters, initialization, gradient ownership and masks are inherited.
++The folded modes form fresh derived weights each eval call, with no cache or
++state mutation. Real-arithmetic identities do not imply BF16 equivalence.
++Full-rank factors are training capacity, not a parameter-reduction claim.
++Prospective controls and quality/cost gates are recorded in proposal.json.
+ """
+ import torch
+@@ -14,5 +14,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'full_rank_control', 'owner_context_rank': 112, 'owner_context_scale': 'inherited', 'owner_context_balance': 'balanced'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'separate', 'owner_context_rank': 0, 'owner_context_scale': 'inherited', 'owner_context_balance': 'balanced', 'owner_context_evaluation': 'fused'}
+ 
+ 
+@@ -155,5 +155,6 @@
+     affine, checkpoint, data, spectral tensor or derived cache persists.
+     """
+-    def __init__(self, source, context_width, projection, rank, scale, balance):
++    def __init__(self, source, context_width, projection, rank, scale, balance,
++                 evaluation='native'):
+         super().__init__()
+         if not isinstance(source, _PartitionedAffine):
+@@ -183,4 +184,7 @@
+         self.projection = projection
+         self.rank = rank
++        if evaluation not in ('native', 'folded', 'fused'):
++            raise ValueError('Unknown prediction-time context implementation')
++        self.evaluation = evaluation
+         with torch.no_grad():
+             expected = torch.arange(context_width, device=source.first_columns.device)
+@@ -244,5 +248,46 @@
+                     requires_grad=source.first_weight.requires_grad)
+ 
++    def _evaluation_forward(self, features):
++        """Fold linear factors, then optionally absorb context into both branches.
++
++        Derive W = context_output @ context_input in FP32, outside autocast.
++        Rebuild it every call, so load_state_dict, optimizer updates, device
++        moves and eval/train transitions cannot leave a stale derived cache.
++        There is no detach, persistent tensor, state update or hidden fallback.
++        The per-call product, concatenations and gathers count toward timing.
++        """
++        if self.training:
++            raise ValueError('Context folding is evaluation-only')
++        if self.projection == 'separate':
++            weight = self.context_weight
++        else:
++            with torch.autocast(device_type=features.device.type, enabled=False):
++                weight = self.context_output.float() @ self.context_input.float()
++            weight = weight.to(dtype=self.context_input.dtype)
++        context = features[..., :self.context_width]
++        first_features = features.index_select(-1, self.first_columns)
++        second_features = features.index_select(-1, self.second_columns)
++        if self.evaluation == 'fused':
++            # Match the inherited packed semantic connectivity, with no dense
++            # zero-filled backing matrix and no new trainable coefficients.
++            first = torch.nn.functional.linear(
++                torch.cat((context, first_features), dim=-1),
++                torch.cat((weight[:self.row_split], self.first_weight), dim=-1),
++                self.bias[:self.row_split])
++            second = torch.nn.functional.linear(
++                torch.cat((context, second_features), dim=-1),
++                torch.cat((weight[self.row_split:], self.second_weight), dim=-1),
++                self.bias[self.row_split:])
++            return torch.cat((first, second), dim=-1)
++        context = torch.nn.functional.linear(context, weight)
++        first = torch.nn.functional.linear(
++            first_features, self.first_weight, self.bias[:self.row_split])
++        second = torch.nn.functional.linear(
++            second_features, self.second_weight, self.bias[self.row_split:])
++        return torch.cat((first, second), dim=-1) + context
++
+     def forward(self, features):
++        if not self.training and self.evaluation != 'native':
++            return self._evaluation_forward(features)
+         context = features[..., :self.context_width]
+         if self.projection == 'separate':
+@@ -290,4 +335,5 @@
+                  owner_context_scale='inherited',
+                  owner_context_balance='balanced',
++                 owner_context_evaluation='native',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -302,4 +348,8 @@
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         self.compression_routes = compression_routes
++        if owner_context_evaluation not in ('native', 'folded', 'fused'):
++            raise ValueError('Unknown prediction-time context implementation')
++        if owner_context_evaluation != 'native' and owner_context_projection == 'fused':
++            raise ValueError('Context folding requires an explicit context map')
+         if owner_context_projection not in ('fused', 'separate', 'rank', 'full_rank_control'):
+             raise ValueError('Unknown context projection')
+@@ -638,5 +688,6 @@
+                         tower[0], len(self.user_fields) * embedding_dim,
+                         owner_context_projection, owner_context_rank,
+-                        owner_context_scale, owner_context_balance)
++                        owner_context_scale, owner_context_balance,
++                        owner_context_evaluation)
+         self.model_to_device()
+ 

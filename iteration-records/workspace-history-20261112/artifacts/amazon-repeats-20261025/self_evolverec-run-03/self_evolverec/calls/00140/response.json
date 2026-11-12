@@ -1,0 +1,130 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting point.** (1) Feedback favors recent, narrow interests; test recency without assuming benefit. (2) Training margins cannot establish pinned HR@10 gains. (3) Histories and metadata leave compatibility and purchase intent uncertain; preserve unknowns.\n\n**Related work.** (1) Recency Bias [1] motivates bounded, ablated recency contributions. (2) History-shuffling results [2] separate ordering dependence from predictive usefulness. (3) Sampling Reliability [3] distinguishes sampled selection from full-catalog diagnostics. (4) CORE, STAMP and HGN [4–6] establish pooling, recent-interest and gating precedents, reducing originality; SASRec already retains input information through residual connections [7].\n\n### Framework\n\n| Direction | Intervention | Evidence | Limitation |\n|---|---|---|---|\n| Temporal specificity | Normalized recent-history residual | Paired validation HR@10 | Recency may hurt |\n| Diagnostic calibration | Matched removals and shuffles | Rank changes and overlap | Dependence is not causality |\n| Representation health | Effective rank and collapse controls | Spectrum, branch norms | Health does not imply accuracy |\n\n### Candidate ideas\n\nScores denote originality/potential/implementation difficulty; higher difficulty means harder implementation.\n\n1. **Calibrated perturbation adapter — 3/7/3.** Originality: unified controls, established techniques. Potential: reusable, indirect accuracy benefits. Difficulty: simple hooks, delicate masking [2].\n2. **Normalized recent-history residual — 3/6/4, selected.** Originality: explicit ablation, substantial precedents. Potential: cheap and falsifiable, limited intent modeling. Difficulty: small architecture change, demanding scoring parity [4–7].\n3. **Training-only transition residual — 3/6/4.** Originality: interpretable, established. Potential: useful local associations, sparse-count overfitting. Difficulty: straightforward counting, pruning required.\n\n### Selected algorithm\n\nRetain category-specific SASRec and add the normalized mean of its last three nonpadding input occurrences. Initialize a learned scalar gate near zero. Normalization addresses raw-branch scale mismatch; bounding the coefficient alone does not bound the original branch norm.\n\n```text\nh[t] = causal_SASRec(sequence)[t]\nr[t] = mean(last_three_nonpadding_inputs_at_or_before(t))\nz[t] = r[t] / sqrt(mean(r[t]^2) + 1e-8)\nfeatures[t] = valid[t] * (h[t] + sigmoid(gate_logit)*z[t])\nscore(items) = dot(features, item_embeddings(items))\n```\n\nAt 0% progress, prioritize feasibility over a larger architecture. Preserve baseline loss, seeds, routing, splits, environment data path, trial-local artifacts and the 200-epoch environment default. Serialize architecture and gate; update the predictor writer and compatibility view. Preserve `DiagnosisProbe(view, device)`, actual `view.model`, and return schema; restore model mode, return null statistics for empty samples, and leave unavailable category breakdowns empty.\n\nVerify causal pooling against loops, suffix invariance, and reloaded predictor logits. Track branch norms, gate values, recent-versus-matched-older removals and fixed-candidate rank changes. Gate magnitude alone cannot establish dependence. Shared embeddings permit self-similarity and popularity shortcuts.\n\nPrespecify one residual comparison, baseline-equivalent checkpoint cadence, baseline-favoring ties and remaining GPU budget. Select by pinned macro HR@10; report category differences and paired user-bootstrap intervals [8], conditional on seed 42 and fixed candidates. Adaptive checkpoint selection makes intervals exploratory [9]. Freeze selection before held-out evaluation. Keep residual-only, k=1, longer/whole-history windows, raw branches, fixed gates and CORE pooling as budgeted follow-ups. No gain, compatibility knowledge or causal intent inference is claimed.",
+  "idea": {
+    "description": "Add a normalized, scalar-gated mean of the last three input interaction embeddings to each category-specific SASRec representation. Evaluate this single prespecified intervention against unchanged SASRec using pinned macro validation HR@10.",
+    "motivation": "Qualitative feedback identifies weak attention to recent, narrow interests, but does not establish that recency improves next-item prediction. CORE, STAMP and HGN make this an incremental architectural hypothesis rather than a novel model family. At 0% research progress, a small intervention with explicit controls is preferable to a larger replacement architecture.",
+    "implementation_notes": "Retain all four categories and their routing. DATA_DIR remains os.environ['GAGC_DATA_DIR']; write checkpoints, configurations and generated working/predict.py beneath the trial directory. Preserve preprocessing seed 0, training seed 42, baseline loss and optimizer settings, and SASREC_EPOCHS with environment default 200. Execute training sequentially on one GPU. Record actual training, diagnostics, debugging and failed-trial GPU time against the shared 43,200 GPU-second budget; do not assume the entire budget remains available.\n\nFor every training position, pool the last k=3 nonpadding input occurrences at or before that position. Preserve repeated IDs. With m=sequence.ne(0) and c=m.long().cumsum(1), include j when m[j], j<=t, and 0<=c[t]-c[j]<k. Divide by the actual count clamped to one. Never pool positive targets or negatives. For strictly left-padded inputs, masked trailing-window sums provide an equivalent efficient implementation. Keep encoder attention causal and preserve positional indices. Mask padding-query outputs to zero.\n\nNormalize the pooled vector by sqrt(mean(r*r)+1e-8) in FP32, then add sigmoid(gate_logit)*normalized_r to the final SASRec feature. Initialize the category-specific gate logit to -4. This supplies an approximately sqrt(d)-norm branch for nondegenerate vectors, comparable to the initial scale of a LayerNorm output; learned LayerNorm parameters can change that relationship. Log the actual base, raw-pool and normalized-pool norms, residual/base norm ratio and gate. A bounded coefficient does not guarantee a bounded relative effect. Preserve the original candidate dot-product scoring and tied embedding table. Do not add cosine scoring or temperature changes in this first comparison.\n\nThe compatibility view's log2feats returns the combined causal features; predict_score uses exactly the inference candidate dot product, including any baseline scoring terms. view.model must reference the actual trained nn.Module. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), metrics and metric_definitions. Use evaluation mode and disabled gradients, restoring the previous training mode in try/finally. Exclude padding and return null plus valid-sample counts for undefined statistics. Keep unavailable metadata category breakdowns empty. Use only public histories, timestamps, titles and descriptions; ignore the generic input examples advertising unavailable ratings, categories, prices, stores and reviews. Missing equipment evidence remains unknown, and recent purchases support only a possible-substitute flag.\n\nVerify vectorized pooling against an explicit prefix loop for repeated IDs, short histories, internal padding, all-padding inputs, k=1 and k>L. Check pooled features and positive/negative logits at valid positions. Change suffix items after t and confirm features and scores through t are unchanged. With dropout disabled, compare final-position training-style scores against inference scores for identical ordered candidates. For left-padded nonempty histories, the final valid position is L-1, not length-1. Handle empty histories according to the baseline predictor contract. Save weights and architecture/pooling configuration, reload through the generated predictor, and check finite FP32 scores with rtol=1e-5 and atol=1e-6; report maximum absolute error and verify category routing.\n\nCalibrate perturbation probes on training-only pseudo-holdouts, without changing official splits. Compare recent removal with matched older/random removal, preserve padding conventions, and keep candidate sets fixed. Report sensitivity separately from predictive usefulness. Repetition ablations must retain one occurrence; title/description clusters remain noisy auxiliary evidence. Inspect embedding effective rank and popularity correlation, because tied embeddings can encourage self-similarity, item-frequency shortcuts and scale compensation. These diagnostics cannot prove compatibility, satisfied needs or causal intent.\n\nBefore training, record one candidate configuration, the baseline checkpoint-evaluation cadence, identical maximum epochs, the remaining budget and the selection rule. Evaluate only through the authorized pinned validation procedure; do not reconstruct or modify the host evaluator. Select the best checkpoint by macro validation HR@10 using the same cadence for both methods, break checkpoint ties by earlier epoch, and retain baseline on a model-level tie. Log every evaluated checkpoint and comparison. If the host exposes paired per-user hits, bootstrap users independently within each category, preserving model pairs, with 10,000 replicates and bootstrap seed 42. Report the macro difference and its 95% percentile interval plus category differences. One changed hit among the fixed 800 users moves macro HR@10 by 0.125 percentage points. If per-user outputs are unavailable, report the aggregate results without fabricating an interval.\n\nIntervals after checkpoint selection are exploratory and exclude selection optimism, training-seed variation and candidate-sampling uncertainty. Do not infer full-catalog ranking from sampled HR@10 or pairwise margins. Freeze selection before the host's held-out evaluation; never access test labels. Keep residual-only scoring, k=1, longer windows, whole-history means, raw versus normalized pooling, fixed versus learned gates and CORE-style weighting as explicit follow-up hypotheses, not an unreported sweep. Further trials require remaining budget and a recorded comparison plan.",
+    "pseudocode": "class RecentResidualSASRec:\n    gate_logit = Parameter(-4.0)\n    pooling_k = 3\n    normalization_eps = 1e-8\n\n    def log2feats(sequence):\n        base = causal_sasrec.log2feats(sequence)\n        valid_query = sequence.ne(0)\n        # Pool input occurrences only; repeated IDs remain separate.\n        recent_ids, valid_occurrences = causal_last_nonzero_inputs(sequence, k=3)\n        pooled = masked_mean(item_emb(recent_ids), valid_occurrences,\n                             denominator_min=1)\n        scale = sqrt(mean(pooled.float() ** 2, dim=-1, keepdim=True) + 1e-8)\n        normalized = (pooled.float() / scale).to(base.dtype)\n        combined = base + sigmoid(gate_logit) * normalized\n        return combined * valid_query.unsqueeze(-1)\n\n    def predict_score(features, items):\n        return baseline_candidate_scoring(features, item_emb(items))\n\nrecord_seeds_budget_checkpoint_cadence_and_selection_rule()\nverify_pooling_against_prefix_loop_and_suffix_invariance()\nfor category in FOUR_CATEGORIES:\n    train_with_baseline_loss_and_optimizer(category, seed=42)\n    save_weights_gate_and_architecture_config_under_trial(category)\nwrite_predictor_with_identical_architecture_and_routing()\nverify_reloaded_predictor_raw_score_parity(rtol=1e-5, atol=1e-6)\n# Host evaluates identical pinned users and candidates.\nselect_by_macro_validation_HR10(retain_baseline_on_tie=True)\nif authorized_paired_user_hits_are_available:\n    paired_stratified_user_bootstrap(replicates=10000, seed=42)\nreport_category_results_and_conditional_exploratory_intervals()\nfreeze_selection_before_host_heldout_evaluation()",
+    "originality": {
+      "score": 3,
+      "positive": "Provides a specific, ablatable SASRec residual with explicit causal pooling, scale control and diagnostic parity.",
+      "negative": "Recent-interest pooling, sigmoid gates and item–item scoring have substantial precedents in CORE, STAMP and HGN; the combination is incremental."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "Offers an inexpensive test of whether explicit recent-item associations add predictive value beyond SASRec and a basis for later contextual gating.",
+      "negative": "A category-level scalar cannot model individual intent changes or infer compatibility and replacement needs; apparent gains may reflect popularity or self-similarity shortcuts."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Reuses the existing embedding table, encoder, loss, optimizer and category routing with one additional parameter per model.",
+      "negative": "Reliable causal pooling, scale monitoring, checkpoint selection, predictor reconstruction and raw-score equivalence require more care than the small architectural change suggests."
+    }
+  },
+  "related_work": [
+    {
+      "title": "[1] Measuring Recency Bias (2024)",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "Introduces a recency-bias metric and reports improvements from mitigating excessive recent-interaction emphasis."
+      ],
+      "limitations": [
+        "Does not establish that adding a recent-history residual improves this benchmark; both benefit and harm require measurement."
+      ]
+    },
+    {
+      "title": "[2] Does It Look Sequential? (2024)",
+      "link": "https://arxiv.org/abs/2408.12008",
+      "contributions": [
+        "Uses history shuffling across 15 datasets to investigate the importance of sequential structure."
+      ],
+      "limitations": [
+        "Shuffle sensitivity measures ordering dependence, not necessarily useful personalization or causal correctness."
+      ]
+    },
+    {
+      "title": "[3] Sampling Reliability (RecSys 2025)",
+      "link": "https://doi.org/10.1145/3705328.3748086",
+      "contributions": [
+        "Examines resolution, fidelity, robustness and recovery of model rankings under sampled evaluation."
+      ],
+      "limitations": [
+        "Does not make sampled HR@10 interchangeable with full-catalog ranking or account for training-seed uncertainty."
+      ]
+    },
+    {
+      "title": "[4] CORE implementation",
+      "link": "https://github.com/RUCAIBox/CORE",
+      "contributions": [
+        "CORE-ave pools original item embeddings uniformly over a session.",
+        "CORE-trm uses Transformer-produced weights to combine original item embeddings, with normalized representations and temperature-scaled cosine scoring."
+      ],
+      "limitations": [
+        "Neither variant establishes the benefit of an additive SASRec recent-window residual.",
+        "Its scoring normalization differs from the proposed unchanged SASRec candidate dot product."
+      ]
+    },
+    {
+      "title": "[5] STAMP: Short-Term Attention/Memory Priority Model for Session-based Recommendation",
+      "link": "https://www.kdd.org/kdd2018/accepted-papers/view/stamp-short-term-attentionmemory-priority-model-for-session-based-recommend",
+      "contributions": [
+        "Combines session-context interests with last-click interests."
+      ],
+      "limitations": [
+        "Is not a Transformer residual architecture and does not validate the proposed benchmark-specific intervention."
+      ]
+    },
+    {
+      "title": "[6] Hierarchical Gating Networks for Sequential Recommendation",
+      "link": "https://arxiv.org/html/1906.09217",
+      "contributions": [
+        "Uses feature-level and interaction-level sigmoid gates, pooled recent embeddings and explicit item–item scoring."
+      ],
+      "limitations": [
+        "Uses separate input/output item embeddings and gates information rather than a SASRec residual coefficient."
+      ]
+    },
+    {
+      "title": "[7] SASRec reference implementation",
+      "link": "https://github.com/kang205/SASRec/blob/master/model.py",
+      "contributions": [
+        "Provides causal next-item scoring, shared item embeddings, input scaling, residual connections and final LayerNorm."
+      ],
+      "limitations": [
+        "Existing residual pathways may make an added recent-history branch redundant.",
+        "The local RecHarness implementation must remain the operational baseline; reference code alone does not establish its exact configuration."
+      ]
+    },
+    {
+      "title": "[8] SciPy paired bootstrap documentation",
+      "link": "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.bootstrap.html",
+      "contributions": [
+        "Documents preserving paired observations when estimating uncertainty through resampling."
+      ],
+      "limitations": [
+        "The four-category stratified macro-difference procedure must be implemented explicitly.",
+        "User resampling does not capture training variation, candidate variation or adaptive model-selection optimism."
+      ]
+    },
+    {
+      "title": "[9] On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how optimizing model-selection criteria can overfit finite evaluation samples and bias reported performance."
+      ],
+      "limitations": [
+        "Prespecification reduces avoidable adaptation but does not make checkpoint-selected validation results independent confirmation."
+      ]
+    },
+    {
+      "title": "PyTorch: Saving and Loading Models",
+      "link": "https://docs.pytorch.org/tutorials/beginner/saving_loading_models.html",
+      "contributions": [
+        "Documents checkpoint saving, architecture reconstruction, parameter loading and evaluation-mode inference."
+      ],
+      "limitations": [
+        "Loading successfully does not prove preprocessing, candidate ordering, category routing or scoring equivalence; explicit numerical checks remain necessary."
+      ]
+    }
+  ]
+}

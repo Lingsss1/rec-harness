@@ -1,0 +1,23 @@
+{
+  "request_sha256": "ee9b3b625f928461caab46ce5905afb16de0817ebc2f860dd33204b5a9e7757f",
+  "response": {
+    "category_edits": [
+      {
+        "category": "network_architecture",
+        "rationale": "Normalize the reset, update and candidate preactivations independently inside each GRU layer to reduce gate saturation while preserving recurrent depth, hidden width, embeddings, readout, scoring, loss and optimizer. The generated predictor imports the modified model class, so training and inference use identical gate equations and checkpoint parameters.",
+        "edits": [
+          {
+            "find": "class GRU4RecModel(nn.Module):",
+            "replace": "@torch.jit.script\ndef _normalized_gru_sequence(projected: torch.Tensor, weight_hh: torch.Tensor,\n                             bias_hh: torch.Tensor, gate_scale: torch.Tensor,\n                             gate_bias: torch.Tensor):\n    hidden = projected.new_zeros((projected.size(0), weight_hh.size(1)))\n    outputs = torch.jit.annotate(list[torch.Tensor], [])\n    width = weight_hh.size(1)\n    for t in range(projected.size(1)):\n        recurrent = torch.nn.functional.linear(hidden, weight_hh, bias_hh)\n        ir, iz, inn = projected[:, t].chunk(3, dim=-1)\n        hr, hz, hn = recurrent.chunk(3, dim=-1)\n        reset = torch.sigmoid(torch.nn.functional.layer_norm(\n            ir + hr, [width], gate_scale[0], gate_bias[0], 1e-5))\n        update = torch.sigmoid(torch.nn.functional.layer_norm(\n            iz + hz, [width], gate_scale[1], gate_bias[1], 1e-5))\n        candidate = torch.tanh(torch.nn.functional.layer_norm(\n            inn + reset * hn, [width], gate_scale[2], gate_bias[2], 1e-5))\n        hidden = (1.0 - update) * candidate + update * hidden\n        outputs.append(hidden)\n    return torch.stack(outputs, dim=1), hidden\n\n\nclass LayerNormGRULayer(nn.Module):\n    def __init__(self, hidden_units: int):\n        super().__init__()\n        self.weight_ih = nn.Parameter(torch.empty(3 * hidden_units, hidden_units))\n        self.weight_hh = nn.Parameter(torch.empty(3 * hidden_units, hidden_units))\n        self.bias_ih = nn.Parameter(torch.empty(3 * hidden_units))\n        self.bias_hh = nn.Parameter(torch.empty(3 * hidden_units))\n        self.gate_scale = nn.Parameter(torch.ones(3, hidden_units))\n        self.gate_bias = nn.Parameter(torch.zeros(3, hidden_units))\n        bound = hidden_units ** -0.5\n        for parameter in (self.weight_ih, self.weight_hh, self.bias_ih, self.bias_hh):\n            nn.init.uniform_(parameter, -bound, bound)\n\n    def forward(self, inputs: torch.Tensor):\n        projected = torch.nn.functional.linear(inputs, self.weight_ih, self.bias_ih)\n        return _normalized_gru_sequence(\n            projected, self.weight_hh, self.bias_hh, self.gate_scale, self.gate_bias)\n\n\nclass LayerNormGRU(nn.Module):\n    def __init__(self, hidden_units: int, num_layers: int, dropout: float):\n        super().__init__()\n        self.layers = nn.ModuleList([\n            LayerNormGRULayer(hidden_units) for _ in range(num_layers)\n        ])\n        self.interlayer_dropout = nn.Dropout(dropout)\n\n    def forward(self, inputs: torch.Tensor):\n        out = inputs\n        final_states = []\n        for index, layer in enumerate(self.layers):\n            out, hidden = layer(out)\n            final_states.append(hidden)\n            if index + 1 < len(self.layers):\n                out = self.interlayer_dropout(out)\n        return out, torch.stack(final_states, dim=0)\n\n\nclass GRU4RecModel(nn.Module):"
+          },
+          {
+            "find": "        self.gru = nn.GRU(hidden_units, hidden_units, num_layers=num_layers,\n                          batch_first=True, dropout=dropout)",
+            "replace": "        self.gru = LayerNormGRU(hidden_units, num_layers=num_layers, dropout=dropout)"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Replace standard GRU gates with independently layer-normalized reset, update and candidate gates across all four category models. Preserve existing training and prediction behavior outside the recurrent architecture; the predictor imports the updated class directly."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/run-01/experiment/recharness/calls/00100"
+}

@@ -45,13 +45,14 @@ def dispatch(argv=None):
         command.add_argument("--root", type=Path, required=True)
         if name == "init":
             command.add_argument("--backend", choices=["docker", "local"], default="docker")
+            command.add_argument("--profile", choices=["movies-nextitnet-v1"])
         if name == "preflight":
             command.add_argument("--check-images", "--check-environment", dest="check_images", action="store_true")
         if name == "prepare-fml":
             command.add_argument("--checkout", type=Path, required=True)
             command.add_argument("--assets", type=Path, required=True)
         if name == "run":
-            command.add_argument("--task", choices=["colored_mnist", "openood", "opacus"], required=True)
+            command.add_argument("--task", choices=["colored_mnist", "openood", "opacus", "movies_nextitnet"], required=True)
             command.add_argument("--arm", choices=list("ABCD"), required=True)
             command.add_argument("--replicate", type=int, choices=range(1, 6), required=True)
         if name in ("report", "evaluate"):
@@ -63,12 +64,12 @@ def dispatch(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command == "init":
-            print(initialize(args.root, args.backend))
+            print(initialize(args.root, args.backend, args.profile))
         elif args.command == "evaluate":
             result = evaluate_study(args.root, args.output, config_path=args.config,
                                    check_only=args.check_only, keep_going=args.keep_going)
             print(json.dumps(result, ensure_ascii=False, indent=2))
-            return 0 if result["ready"] and (args.check_only or result.get("completed_trajectories") == 60) else 1
+            return 0 if result["ready"] and (args.check_only or result.get("completed_trajectories") == result["trajectories"]) else 1
         elif args.command == "prepare-fml":
             prepare_fml(args.root, args.checkout, args.assets)
             print("Exported public task source; evaluators/environment/data still need binding. No training performed.")
@@ -89,7 +90,7 @@ def dispatch(argv=None):
             registration = load_registration(args.root)
             if args.command == "report":
                 result = report(args.root, registration, args.output)
-                print("Completed %d / 60; report: %s" % (result["completed_trajectories"], args.output))
+                print("Completed %d / %d; report: %s" % (result["completed_trajectories"], result["expected_trajectories"], args.output))
             else:
                 errors = check_config(registration["config"], args.root, check_images=True)
                 if errors:

@@ -1,0 +1,19 @@
+{
+  "category_edits": [
+    {
+      "category": "interest_aggregation",
+      "rationale": "Replace exponential pooling with a bounded, jointly learned blend of the current and previous valid recurrent states. The gate starts at 0.05 and remains below 0.1; the first valid state is unchanged. Training readouts remain causal. The generated predictor imports this same model class and restores its gate through the existing state_dict loader, so no predictor-writer change is necessary.",
+      "edits": [
+        {
+          "find": "        self.dropout = nn.Dropout(dropout_rate)\n        with torch.no_grad():",
+          "replace": "        self.dropout = nn.Dropout(dropout_rate)\n        self.readout_logit = nn.Parameter(torch.zeros(()))\n        with torch.no_grad():"
+        },
+        {
+          "find": "    def aggregate_states(self, out: torch.Tensor, seq: torch.Tensor) -> torch.Tensor:\n        # Prefix normalization yields weight 2**(-age/5) at every valid step.\n        positions = torch.arange(seq.size(1), device=out.device, dtype=torch.float32)\n        weights = torch.exp2((positions - (seq.size(1) - 1)) / 5.0)\n        weights = weights.unsqueeze(0) * seq.ne(0).float()\n        numerator = torch.cumsum(out.float() * weights.unsqueeze(-1), dim=1)\n        denominator = torch.cumsum(weights, dim=1).unsqueeze(-1)\n        pooled = numerator / denominator.clamp_min(torch.finfo(torch.float32).tiny)\n        return pooled.to(out.dtype)",
+          "replace": "    def aggregate_states(self, out: torch.Tensor, seq: torch.Tensor) -> torch.Tensor:\n        valid = seq.ne(0)\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        latest = positions.masked_fill(~valid, -1).cummax(dim=1).values\n        previous_positions = torch.cat(\n            (torch.full_like(latest[:, :1], -1), latest[:, :-1]), dim=1\n        )\n        previous = out.gather(\n            1,\n            previous_positions.clamp_min(0).unsqueeze(-1).expand_as(out),\n        )\n        has_previous = valid & previous_positions.ge(0)\n        gate = (0.1 * torch.sigmoid(self.readout_logit)).to(out.dtype)\n        gate = gate * has_previous.unsqueeze(-1).to(out.dtype)\n        return (1.0 - gate) * out + gate * previous"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Change only recurrent-state aggregation to a causal, bounded previous-state blend across all four category models; preserve the GRU, scoring, loss, optimizer, routing, and epoch settings."
+}

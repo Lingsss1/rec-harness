@@ -1,0 +1,145 @@
+--- g0-r0066-summary_removed/model.py
++++ g0-r0067-native_rescaled/model.py
+@@ -1,10 +1,11 @@
+-"""Prospective product-backward branch attribution; outcomes unmeasured.
+-
+-Hold the incumbent forward and live RMS Jacobian fixed. Factor mean removal
+-from the incoming product VJP across its context-query and history-summary
+-branches. The two single-branch cells localize a previously harmful combined
+-intervention; native and both-removed cells are same-suite parity controls.
++"""Prospective summary-gradient direction versus magnitude study.
++
++Retain the incumbent forward, all parameters, query derivative and live RMS
++Jacobian. Cross native/mean-removed summary VJP direction with native/removed
++per-row norms AFTER product multiplication. The norm-restored candidate tests
++whether the failed summary intervention was mainly a magnitude effect.
++Controls retain raw removal, rescale the native direction, and replay native.
+ This is an intentional first-order surrogate derivative, not a new forward
+-representation or an established mechanism. No extra learned capacity enters.
++architecture or a verified novelty claim. Host results remain unmeasured.
+ """
+ import torch
+@@ -15,26 +16,34 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'query_mean_removal': False, 'summary_mean_removal': True}
+-
+-
+-class _BranchProductVJP(torch.autograd.Function):
+-    """Exact product forward; specified first-order branch derivatives.
+-
+-    With v = J_R(q*s)^T g and P(v)=v-mean(v), return
+-    dq = (P(v) if query_removed else v) * s,
+-    ds = (P(v) if summary_removed else v) * q.
+-    Projection precedes each branch multiplication, matching the archived
+-    pre-RMS mean-removal intervention when both switches are enabled.
+-    Both native and projected products execute for every factorial cell.
+-    Downstream branch norms are NOT matched; location and magnitude effects
+-    are not separated by this experiment. Zero/constant v is handled without
+-    a division or arbitrary tolerance. No RNG or persistent state is used.
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'summary_vjp_control': 'native_rescaled'}
++
++
++class _SummaryProductVJP(torch.autograd.Function):
++    """Exact product forward with a first-order summary-branch intervention.
++
++    Let v be the incoming VJP AFTER the unchanged live RMS Jacobian,
++    N = v*q and R = (v-mean(v))*q. Query derivative always remains v*s.
++    Four cells cross N/R direction with N/R per-example L2 norm, measured
++    after multiplication by q and before tanh/block-aggregation backward.
++    This does not match parameter gradients, sparse accumulated gradients,
++    optimizer steps or the dense clipping multiplier across trajectories.
++    All four candidate derivatives are computed in every training cell.
++    A zero direction borrows the other direction at its requested norm;
++    these degenerate rows cannot identify a direction effect. No epsilon,
++    ratio clipping, new state, RNG or second-order derivative is introduced.
+     """
+     @staticmethod
+-    def forward(ctx, query, summary, query_removed, summary_removed):
++    def forward(ctx, query, summary, mode):
+         ctx.save_for_backward(query, summary)
+-        ctx.query_removed = query_removed
+-        ctx.summary_removed = summary_removed
++        ctx.mode = mode
+         return query * summary
++
++    @staticmethod
++    def _row_norm(vector):
++        # Scale before squaring to avoid avoidable FP32 over/underflow.
++        scale = vector.abs().amax(dim=-1, keepdim=True)
++        safe_scale = torch.where(scale > 0, scale, torch.ones_like(scale))
++        return scale * torch.sqrt((vector / safe_scale).square().sum(
++            dim=-1, keepdim=True))
+ 
+     @staticmethod
+@@ -44,12 +53,28 @@
+         v = grad_output.float()
+         projected = v - v.mean(dim=-1, keepdim=True)
+-        native_query = v * summary.float()
+-        native_summary = v * query.float()
+-        removed_query = projected * summary.float()
+-        removed_summary = projected * query.float()
+-        query_grad = removed_query if ctx.query_removed else native_query
+-        summary_grad = removed_summary if ctx.summary_removed else native_summary
+-        return (query_grad.to(query.dtype), summary_grad.to(summary.dtype),
+-                None, None)
++        query_grad = v * summary.float()
++        native = v * query.float()
++        removed = projected * query.float()
++        native_norm = _SummaryProductVJP._row_norm(native)
++        removed_norm = _SummaryProductVJP._row_norm(removed)
++        safe_native = torch.where(native_norm > 0, native_norm,
++                                  torch.ones_like(native_norm))
++        safe_removed = torch.where(removed_norm > 0, removed_norm,
++                                   torch.ones_like(removed_norm))
++        restored = torch.where(removed_norm > 0,
++                               (removed / safe_removed) * native_norm, native)
++        rescaled = torch.where(native_norm > 0,
++                               (native / safe_native) * removed_norm, removed)
++        if ctx.mode == 'removed_restored':
++            summary_grad = restored
++        elif ctx.mode == 'removed':
++            summary_grad = removed
++        elif ctx.mode == 'native_rescaled':
++            summary_grad = rescaled
++        elif ctx.mode == 'native':
++            summary_grad = native
++        else:
++            raise ValueError('Unknown summary VJP control')
++        return query_grad.to(query.dtype), summary_grad.to(summary.dtype), None
+ 
+ 
+@@ -71,5 +96,5 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16, summary_placement='block',
+-                 query_mean_removal=False, summary_mean_removal=True,
++                 summary_vjp_control='native_rescaled',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -108,11 +133,10 @@
+             raise ValueError('Unknown history projection placement')
+         self.summary_placement = summary_placement
+-        if (not isinstance(query_mean_removal, bool)
+-                or not isinstance(summary_mean_removal, bool)):
+-            raise ValueError('Product branch controls must be booleans')
++        if summary_vjp_control not in ('removed_restored', 'removed',
++                                       'native_rescaled', 'native'):
++            raise ValueError('Unknown summary VJP control')
+         if interaction_rank < 2:
+-            raise ValueError('Branch direction study needs rank >= 2')
+-        self.query_mean_removal = query_mean_removal
+-        self.summary_mean_removal = summary_mean_removal
++            raise ValueError('Summary direction study needs rank >= 2')
++        self.summary_vjp_control = summary_vjp_control
+         if context_fusion != 'product':
+             raise ValueError('This placement study fixes product fusion')
+@@ -760,7 +784,6 @@
+         if self.context_fusion == 'product':
+             if self.training:
+-                fused = _BranchProductVJP.apply(
+-                    query, summary, self.query_mean_removal,
+-                    self.summary_mean_removal)
++                fused = _SummaryProductVJP.apply(
++                    query, summary, self.summary_vjp_control)
+             else:
+                 fused = query * summary

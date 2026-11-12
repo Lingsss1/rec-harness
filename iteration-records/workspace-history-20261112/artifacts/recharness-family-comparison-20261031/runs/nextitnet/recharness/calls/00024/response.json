@@ -1,0 +1,27 @@
+{
+  "category_edits": [
+    {
+      "category": "feature_construction",
+      "rationale": "Test whether attenuating common historical items improves validation HR@10 alongside the existing pointwise loss and prefix-length feature. Compute normalized log-frequency solely from each category's training interactions and scale historical item embeddings by 1-0.3*f_i. Keep candidate embeddings, learned parameters, causal backbone, readout, loss and optimizer unchanged. The registered buffer is saved in each checkpoint and restored by the generated predictor's existing model-class import and strict state loading.",
+      "edits": [
+        {
+          "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+          "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+        },
+        {
+          "find": "        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)\n        self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)",
+          "replace": "        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)\n        self.register_buffer(\"input_log_frequency\", torch.zeros(itemnum + 1))\n        self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)"
+        },
+        {
+          "find": "        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)",
+          "replace": "        input_scale = 1.0 - 0.3 * self.input_log_frequency[seq]\n        x = self.item_emb(seq) * input_scale.unsqueeze(-1) * (self.hidden_units ** 0.5) + self.pos_emb(pos)"
+        },
+        {
+          "find": "    ).to(device)\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)",
+          "replace": "    ).to(device)\n    training_counts = np.zeros(itemnum + 1, dtype=np.float64)\n    for history in user_train.values():\n        np.add.at(training_counts, np.asarray(history, dtype=np.int64), 1.0)\n    training_counts[0] = 0.0\n    frequency_feature = np.log1p(training_counts)\n    frequency_feature /= max(float(frequency_feature.max()), 1.0)\n    with torch.no_grad():\n        model.input_log_frequency.copy_(torch.as_tensor(\n            frequency_feature,\n            dtype=model.input_log_frequency.dtype,\n            device=device,\n        ))\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Add checkpoint-backed, training-only frequency attenuation to historical inputs across all four category models. Preserve predictor compatibility, one checkpoint per category and existing training settings."
+}

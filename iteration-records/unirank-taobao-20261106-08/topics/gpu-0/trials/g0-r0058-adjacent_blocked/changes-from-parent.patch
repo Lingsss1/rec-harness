@@ -1,0 +1,148 @@
+--- g0-r0052-block_nonlinear_transfer/model.py
++++ g0-r0058-adjacent_blocked/model.py
+@@ -1,11 +1,10 @@
+-"""Prospective blockwise nonlinear summary study; validation results unmeasured.
+-
+-Reuse ten frozen compressed blocks and every learned parameter of the incumbent.
+-Compare mean_j tanh(W [M*b_j, global_details]) with tanh(W [sum_j b_j,
+-global_details]), crossed with the existing auxiliary adapter-context gate.
+-Both summary paths execute in every cell for a measured work-matched contrast.
+-The original signed pooled base and five detail paths remain intact. This tests
+-projection/aggregation order, not a new attention mechanism or verified novelty.
+-Native tensor, BF16, autograd and resource checks belong to the host.
++"""Prospective occupied-block locality x auxiliary-context transfer study.
++
++Use the incumbent rank16 history projection and frozen compression. Average
++symmetric pairs of occupied-block preactivations before tanh, contrasting
++neighboring with separated chronological ranks. Both pairings preserve the
++same pre-tanh mean, support, pair multiplicities and newest odd singleton.
++No learned matrix, normalization state or RNG operation is added. Host owns
++native tensor/BF16/autograd acceptance, training and measured performance.
+ """
+ import torch
+@@ -16,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': True, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'block_pairing': 'adjacent'}
+ 
+ 
+@@ -34,6 +33,7 @@
+                  auxiliary_train_population='primary', auxiliary_eval_population='primary',
+                  block_aux_tower_context_grad=True,
+-                 block_aux_adapter_context_grad=False,
++                 block_aux_adapter_context_grad=True,
+                  context_fusion='product', interaction_rank=16, summary_placement='block',
++                 block_pairing='adjacent',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -72,4 +72,9 @@
+             raise ValueError('Unknown history projection placement')
+         self.summary_placement = summary_placement
++        if summary_placement != 'block':
++            raise ValueError('This locality study freezes block placement')
++        if block_pairing not in ('adjacent', 'separated', 'none'):
++            raise ValueError('Unknown occupied-block pairing')
++        self.block_pairing = block_pairing
+         if context_fusion != 'product':
+             raise ValueError('This placement study fixes product fusion')
+@@ -681,14 +686,55 @@
+         return weighted if return_blocks else weighted.sum(dim=1)
+ 
++    @staticmethod
++    def _block_pair_indices(occupied):
++        """Symmetric partners in occupied chronological rank; no learned state.
++
++        Pack only occupied original positions. For even E<=M, both pairings
++        pair ranks0..E-1; if M is odd, the newest rank M-1 pairs with itself.
++        The two maps are involutions with identical fixed points/support.
++        Invalid positions may point to rank0 but are excluded before/after use.
++        All index operations depend solely on the authorized history mask.
++        """
++        batch, length = occupied.shape
++        positions = torch.arange(length, device=occupied.device, dtype=torch.long)
++        positions = positions.unsqueeze(0).expand(batch, -1)
++        valid = occupied.to(torch.long)
++        ranks = (valid.cumsum(dim=1) - 1).clamp_min(0)
++        packed_positions = torch.zeros_like(positions).scatter_add(
++            1, ranks, positions * valid)
++        number = valid.sum(dim=1, keepdim=True)
++        even = number - number.remainder(2)
++        paired = occupied & (ranks < even)
++        adjacent_rank = ranks + 1 - 2 * ranks.remainder(2)
++        separated_rank = (ranks + even // 2).remainder(even.clamp_min(1))
++        adjacent_rank = torch.where(paired, adjacent_rank, ranks)
++        separated_rank = torch.where(paired, separated_rank, ranks)
++        adjacent = packed_positions.gather(1, adjacent_rank)
++        separated = packed_positions.gather(1, separated_rank)
++        return adjacent, separated
++
++    @staticmethod
++    def _paired_block_summary(preactivation, occupied, partner, number):
++        # Both operands are FP32. Scale before adding to avoid gratuitous
++        # overflow from adding two large finite same-sign preactivations.
++        safe = torch.where(occupied.unsqueeze(-1), preactivation,
++                           torch.zeros_like(preactivation))
++        partner_values = safe.gather(
++            1, partner.unsqueeze(-1).expand(-1, -1, safe.shape[-1]))
++        paired = 0.5 * safe + 0.5 * partner_values
++        hidden = torch.tanh(paired)
++        hidden = torch.where(occupied.unsqueeze(-1), hidden,
++                             torch.zeros_like(hidden))
++        return hidden.sum(dim=1) / number.clamp_min(1.0)
++
+     def _context_history_correction(self, index, context, history, block_base, block_counts):
+-        """Test tied nonlinear projection before versus after block aggregation.
+-
+-        b_j is the existing signed target-scored contribution of block j;
+-        r contains the original global counts and five detail summaries.
+-        For M occupied blocks, the mean of [M*b_j, r] is [sum(b_j), r].
+-        Only the location of tanh relative to this averaging is changed.
+-        No softmax, new learned matrix, target label or unmasked event enters.
+-        Both paths execute in every cell, including backward via an algebraic
+-        zero. This is a work-matched diagnostic, with actual costs host-measured.
++        """Local versus distant smoothing at identical learned capacity.
++
++        Original z_j = W_h[M*b_j,r], with unchanged shared global details r.
++        Replace z_j with (z_j+z_partner)/2 under an occupied-rank involution.
++        Each pair appears twice, retaining M-row mean and newest singleton.
++        The identity of paired blocks is the only new forward factor. Both
++        pairings, original block and aggregate paths run in every cell;
++        unused paths have zero loss derivatives. Actual cost is host-measured.
+         """
+         query = torch.tanh(self.context_queries[index](context).float())
+@@ -697,6 +743,4 @@
+         support = occupied.to(torch.float32)
+         number = support.sum(dim=1, keepdim=True)
+-        # Mask before projection as well as after it: invalid block values
+-        # cannot affect the local input, even in a noncontiguous support case.
+         safe_blocks = torch.where(occupied.unsqueeze(-1), block_base,
+                                   torch.zeros_like(block_base))
+@@ -705,14 +749,21 @@
+             -1, block_base.shape[1], -1)
+         local_inputs = torch.cat([local_base, shared_detail], dim=-1)
+-        local_hidden = torch.tanh(self.history_projections[index](local_inputs).float())
++        local_pre = self.history_projections[index](local_inputs).float()
++        local_hidden = torch.tanh(local_pre)
+         local_hidden = torch.where(occupied.unsqueeze(-1), local_hidden,
+                                    torch.zeros_like(local_hidden))
+         local = local_hidden.sum(dim=1) / number.clamp_min(1.0)
+-        if self.summary_placement == 'block':
+-            summary = local + 0.0 * aggregate
++        adjacent_index, separated_index = self._block_pair_indices(occupied)
++        adjacent = self._paired_block_summary(
++            local_pre, occupied, adjacent_index, number)
++        separated = self._paired_block_summary(
++            local_pre, occupied, separated_index, number)
++        if self.block_pairing == 'adjacent':
++            summary = adjacent + 0.0 * separated + 0.0 * local + 0.0 * aggregate
++        elif self.block_pairing == 'separated':
++            summary = separated + 0.0 * adjacent + 0.0 * local + 0.0 * aggregate
+         else:
+-            summary = aggregate + 0.0 * local
+-        # Same product and RMS normalization as the incumbent. Global base,
+-        # residual adapter and all five moment paths outside this branch stay.
++            # Native common-weight parity diagnostic; no extra training cell.
++            summary = local + 0.0 * aggregate + 0.0 * adjacent + 0.0 * separated
+         if self.context_fusion == 'product':
+             fused = query * summary

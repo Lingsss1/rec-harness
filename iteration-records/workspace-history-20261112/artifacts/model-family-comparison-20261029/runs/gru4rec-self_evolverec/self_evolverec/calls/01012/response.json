@@ -1,0 +1,71 @@
+{
+  "markdown_report": "At 20% progress, select **heterogeneous initialization of GRU4Rec’s existing update gates**: a small, controlled experiment preserving the supplied backbone.\n\n**Insights from the starting point.** (1) Existing gates already provide retention control. Initialization therefore tests the memory hypothesis without adding parameters. (2) All four categories pass reported execution checks. Exported-predictor parity still requires verification. (3) Electronics has 8.08% sampled training ranking errors, rising to 14.49% for frequency-1–4 positives. These identify diagnostic targets, without establishing their cause or held-out improvement.\n\n**Insights from related work.** (1) [Chrono initialization](https://arxiv.org/abs/1804.11188) motivates multiple nominal retention horizons. Its benefits do not establish recommendation gains. (2) [GRU Jacobian analysis](https://proceedings.mlr.press/v107/can20a.html) distinguishes gate retention from actual state persistence. Consequently, biases require behavioral diagnostics. (3) [GRU4Rec’s objective study](https://hidasi.eu/assets/pdf/gru4rec_v2_cikm18.pdf) motivates emphasizing competitive negatives. This is a separate ranking intervention and should initially leave memory initialization unchanged.\n\nThe framework separates three directions:\n\n| Direction | Atomic experiment | Mechanism and remaining gap |\n|---|---|---|\n| Memory initialization | Heterogeneous update biases | Short and longer carry paths; useful horizons remain unknown |\n| Ranking objective | Regularized BPR-max | Competitive-negative gradients; no direct intent representation |\n| Shared item evidence | Jointly learned title-token features | Rare-item parameter sharing; textual similarity can misrepresent demand |\n\nScores below use O=originality, P=potential, U=user alignment, M=model alignment, D=implementation difficulty; higher D means harder. Each cell gives a positive and a limitation.\n\n| Idea | O | P | U | M | D |\n|---|---|---|---|---|---|---|\n| Gate initialization | 3: focused adaptation / established method | 6: interpretable / task dependent | 7: recent specificity / intent unobserved | 6: ranking target / cause unknown | 2: bias edit / parity checks |\n| BPR-max | 2: strong precedent / little novelty | 7: ranking pressure / false negatives | 4: stronger competition / no purpose cues | 8: margin focus / training proxy | 4: compact loss / pool integration |\n| Shared title tokens | 4: constrained integration / known fusion | 7: rare-item sharing / sparse supervision | 7: specification cues / no fit guarantee | 7: frequency gap / possible shortcuts | 6: small encoder / export changes |\n\nChoose gate initialization because it directly hypothesizes remedies for two user failures: broad historical interests obscuring recent specific interests, and loosely related items displacing stronger current matches. It also targets Electronics’ weak sampled separation. These are eligibility mechanisms, not demonstrated improvements; compatibility and satisfied ownership remain unresolved.\n\nInitialize nominal horizons logarithmically from 2 to 32 observed events, using retention r=exp(−1/τ). Compare baseline, heterogeneous biases, and uniform biases matching mean retention, holding everything else fixed. Measure valid-position margins by frequency and existing history-perturbation effects; omitted temporal results remain unavailable. Select exclusively through pinned four-category macro validation HR@10, within the shared budget. Each category retains one independently trained checkpoint.",
+  "idea": {
+    "description": "Initialize the corrected GRU4Rec’s existing update-gate coordinates with logarithmically spaced nominal retention horizons of 2–32 observed interactions. Compare with the corrected baseline and a uniform initialization matching the heterogeneous configuration’s mean bias-only retention. Add no gates, parameters, independently fitted components, or score combinations.",
+    "motivation": "Short-retention coordinates could emphasize recent, specific evidence while longer-retention coordinates preserve repeated preferences. This explicitly addresses broad historical interests obscuring recent interests and loosely related recommendations displacing stronger current matches. The model-facing target is weak sampled positive/negative separation, particularly Electronics’ 8.08% overall wrong-rank rate and 14.49% rate for frequency-1–4 positives. Neither these training measurements nor omitted temporal effects establish excessive retention. The experiment tests that hypothesis rather than assuming it, and cannot infer ownership satisfaction, equipment compatibility, or current intent.",
+    "implementation_notes": "Apply only to the supplied corrected GRU4Rec after its ordinary initialization and before constructing the optimizer. Inherit its architecture, loss, sampler, optimizer, dropout, dimensions, training schedule and scoring semantics. The code below supports ordinary PyTorch nn.GRU, whose gate ordering is reset/update/new and whose update convention is h=z*h_previous+(1-z)*candidate. For a custom GRU, verify its convention and gate slices before adapting the same initialization; reverse the logit sign if its update gate weights the candidate instead of the carry.\n\nUse deterministic log-spaced horizons from 2 to 32, not random draws. These are proposed event-count horizons, not empirically selected values or elapsed-time estimates. For every layer, set the input-side update bias to logit(r), and its recurrent-side update bias to zero, so the summed update bias equals the intended value. Leave all weights and reset/candidate biases unchanged. Apply only at fresh initialization, never after loading a trained checkpoint. Matching mean retention controls one-step bias-only carry, not longer-horizon decay, saturation, or effective memory.\n\nRun the corrected baseline first, then the heterogeneous proposal, then the uniform control if the remaining shared 43,200 GPU-second budget permits. All configurations contain one independent model per category; their predictions are never combined. Unrun controls must be reported as unrun. Preserve preprocessing seed 0, training seed 42, maximum 200 epochs, exactly 200 batches per completed epoch, single-GPU execution, all four dataset routes, and DATA_DIR=os.environ['GAGC_DATA_DIR']. Write artifacts beneath the trial directory and retain supplied splits and the pinned evaluator. Charge diagnostics, integration checks and failures to the same budget.\n\nInitialization alone changes no inference equations: the selected checkpoint's learned state_dict carries the result. Record initialization variant and horizon settings in checkpoint metadata. Preserve the existing predictor writer and actual architecture, and explicitly verify that the generated working/predict.py reconstructs that architecture and reproduces selected-model scores. Read the greatest nonpadding position, never count-1; preserve padding-invariant recurrence, zero padded diagnostic features and the host's empty-history fallback. Each category loads exactly one selected checkpoint.\n\nRetain DiagnosisProbe(view, device), run_full_diagnosis(train_loader), diagnosis_interpreter_prompt(raw_diagnosis), actual-module view.model, and the existing ModelView interfaces. Keep log2feats(sequence), item_emb and predict_score(features, items) compatible; loader tuples remain (None, sequence, positive, negative), each tensor B x L. Preserve measured metrics and definitions, frequency-stratified margins and execution checks. Use existing matched history perturbations only after checks pass, without fabricating omitted effect estimates. If actual trained gate values are instrumented, define their valid-position population explicitly; do not describe bias-only nominal retention as measured state persistence.\n\nSelect using the unchanged macro validation HR@10 across Movies_and_TV, Industrial_and_Scientific, Electronics and CDs_and_Vinyl, with 200 validation users/category, 99 unique negatives and evaluation seed 42. Preserve native full-catalog recommendations for five training users/category to inspect whether recent-specific choices improve. Training diagnostics and qualitative judgments are supplementary evidence, not substitutes for validation. No hidden test access, additional datasets, pretrained weights, other-trial checkpoints, unavailable metadata or independent scoring components are involved.",
+    "pseudocode": "import math\nimport torch\nfrom torch import nn\n\n@torch.no_grad()\ndef initialize_update_retention(gru, variant='heterogeneous', tau_min=2.0, tau_max=32.0):\n    \"\"\"Call once after baseline initialization, before optimizer creation.\n    Does not replace the corrected host model or its training pipeline.\n    \"\"\"\n    if not isinstance(gru, nn.GRU):\n        raise TypeError('Adapt explicitly to the actual GRU gate convention')\n    if gru.bidirectional:\n        raise ValueError('Preserve the supplied causal GRU4Rec backbone')\n    if variant not in {'baseline', 'heterogeneous', 'uniform_mean'}:\n        raise ValueError(variant)\n    if variant == 'baseline':\n        return\n    if not gru.bias:\n        raise ValueError('The supplied GRU must already expose update biases')\n    if not (1.0 < tau_min <= tau_max):\n        raise ValueError('Invalid nominal horizon bounds')\n\n    width = gru.hidden_size\n    for layer in range(gru.num_layers):\n        b_ih = getattr(gru, f'bias_ih_l{layer}')\n        b_hh = getattr(gru, f'bias_hh_l{layer}')\n        tau = torch.linspace(\n            math.log(tau_min), math.log(tau_max), width,\n            device=b_ih.device, dtype=torch.float64,\n        ).exp()\n        retention = torch.exp(-1.0 / tau)\n        if variant == 'uniform_mean':\n            retention = retention.mean().expand_as(retention)\n        total_bias = torch.log(retention) - torch.log1p(-retention)\n        # PyTorch nn.GRU gate order: reset, update, new.\n        b_ih[width:2 * width].copy_(total_bias.to(b_ih.dtype))\n        b_hh[width:2 * width].zero_()\n\n# Host integration:\n# For each permitted configuration, retain all four category routes.\n# Reset training seed to 42; construct the corrected baseline normally.\n# initialize_update_retention(actual_gru_module, selected_variant)\n# Train using unchanged family-specific sample_batch, loss and optimizer.\n# Complete exactly 200 batches/epoch, at most 200 epochs, within budget.\n# Save one selected model/checkpoint/category; never combine configurations.\n# Generate the existing matching predictor and verify reload score parity.\n# Run required diagnostic interfaces with measured metrics/definitions.\n# Compare only the pinned four-category macro validation HR@10.",
+    "originality": {
+      "score": 3,
+      "positive": "A controlled heterogeneous-versus-mean-retention comparison isolates a specific initialization hypothesis within corrected GRU4Rec.",
+      "negative": "Chrono initialization and update-gate timescale control are established; this is a task-specific adaptation."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "A low-cost comparison could establish whether memory initialization deserves further recommendation-specific investigation.",
+      "negative": "Learned gates may quickly erase initialization differences, and event-count horizons cannot identify current demand or practical fit."
+    },
+    "code_difficulty": {
+      "score": 2,
+      "positive": "The core implementation edits existing bias slices without changing inference equations or adding parameters.",
+      "negative": "Correct integration still requires verifying gate convention, initialization order, padding semantics and exported-predictor parity."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Can recurrent neural networks warp time? Chrono initialization",
+      "link": "https://arxiv.org/abs/1804.11188",
+      "contributions": [
+        "Motivates initializing recurrent gates around anticipated temporal scales.",
+        "Provides the conceptual basis for heterogeneous nominal retention initialization."
+      ],
+      "limitations": [
+        "Does not establish effectiveness on the supplied recommendation benchmark.",
+        "Bias-defined retention does not determine the trained network’s effective memory."
+      ]
+    },
+    {
+      "title": "GRU Jacobian analysis",
+      "link": "https://proceedings.mlr.press/v107/can20a.html",
+      "contributions": [
+        "Analyzes how GRU gates influence recurrent dynamics and slow modes."
+      ],
+      "limitations": [
+        "Dynamical properties alone do not establish useful next-item dependence or improved HR@10."
+      ]
+    },
+    {
+      "title": "Recurrent Neural Networks with Top-k Gains for Session-based Recommendations",
+      "link": "https://hidasi.eu/assets/pdf/gru4rec_v2_cikm18.pdf",
+      "contributions": [
+        "Introduces ranking objectives emphasizing competitive negatives, including regularized BPR-max.",
+        "Motivates an independent objective experiment within the GRU4Rec family."
+      ],
+      "limitations": [
+        "Changing negative aggregation does not directly represent current intent, ownership satisfaction or compatibility.",
+        "Its experimental results do not establish gains under the pinned four-category evaluation."
+      ]
+    },
+    {
+      "title": "Recformer",
+      "link": "https://arxiv.org/abs/2305.13731",
+      "contributions": [
+        "Motivates sharing textual information across items for recommendation."
+      ],
+      "limitations": [
+        "Uses a different architecture and pretraining procedure.",
+        "Does not validate a randomly initialized title-token encoder inside category-local GRU4Rec under this task’s restrictions."
+      ]
+    }
+  ]
+}

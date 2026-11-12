@@ -1,0 +1,2315 @@
+import torch
+import numpy as np
+import torch.nn.functional as F
+import json
+import random
+from collections import Counter
+
+### >>> Self_EvolveRec-BLOCK-START: Bounded NextItNet fault calibration without another fitted model
+"""Diagnostic execution only; never imported by the production predictor."""
+
+import hashlib
+import inspect
+import json
+import math
+import os
+import random
+import tempfile
+import time
+from contextlib import contextmanager
+
+import numpy as np
+import torch
+
+CATEGORIES = (
+    "Movies_and_TV",
+    "Industrial_and_Scientific",
+    "Electronics",
+    "CDs_and_Vinyl",
+)
+RTOL, FLOOR, CLEAN_CEILING = 1e-5, 1e-6, 1e-4
+
+
+def unavailable(reason):
+    return {"value": None, "reason": reason}
+
+
+def same(a, b):
+    if a.shape != b.shape or a.dtype != b.dtype:
+        return False
+    if a.is_floating_point() or a.is_complex():
+        return bool(torch.allclose(a, b, atol=0, rtol=0, equal_nan=True))
+    return bool(torch.equal(a, b))
+
+
+class Snapshot:
+    """Clone live tensors, including nonpersistent buffers, without aliasing."""
+
+    def __init__(self, model):
+        self.model = model
+        self.modes = [(m, m.training) for m in model.modules()]
+        tensors = list(model.parameters())
+        tensors += [
+            b for m in model.modules() for b in m._buffers.values() if b is not None
+        ]
+        self.tensors = []
+        seen = set()
+        for t in tensors:
+            if id(t) not in seen:
+                seen.add(id(t))
+                self.tensors.append((t, t.detach().cpu().clone()))
+        self.grads = [
+            (p, p.grad, None if p.grad is None else p.grad.detach().cpu().clone())
+            for p in model.parameters()
+        ]
+        self.py = random.getstate()
+        ns = np.random.get_state()
+        self.np = (ns[0], ns[1].copy(), *ns[2:])
+        self.cpu = torch.random.get_rng_state().clone()
+        self.cuda = (
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        )
+        self.hooks = [
+            (m, name, dict(getattr(m, name)))
+            for m in model.modules()
+            for name in ("_forward_hooks", "_forward_pre_hooks", "_backward_hooks")
+        ]
+        self.methods = [
+            (name, name in model.__dict__, getattr(model, name))
+            for name in ("log2feats", "predict_score", "score_candidates")
+            if hasattr(model, name)
+        ]
+        self.bytes = sum(t.numel() * t.element_size() for _, t in self.tensors)
+        self.bytes += sum(
+            g.numel() * g.element_size() for _, _, g in self.grads if g is not None
+        )
+
+    def restore(self):
+        with torch.no_grad():
+            for tensor, backup in self.tensors:
+                value = backup.to(tensor.device)
+                # Avoid changing version counters for untouched parameters.
+                if not same(tensor, value):
+                    tensor.copy_(value)
+            for parameter, original, backup in self.grads:
+                parameter.grad = original
+                if original is not None and not same(
+                    original, backup.to(original.device)
+                ):
+                    original.copy_(backup.to(original.device))
+        for module, training in self.modes:
+            module.training = training
+        random.setstate(self.py)
+        np.random.set_state(self.np)
+        torch.random.set_rng_state(self.cpu)
+        if self.cuda is not None:
+            torch.cuda.set_rng_state_all(self.cuda)
+
+    def check(self):
+        ns = np.random.get_state()
+        cuda_ok = self.cuda is None or all(
+            torch.equal(a, b) for a, b in zip(self.cuda, torch.cuda.get_rng_state_all())
+        )
+        return {
+            "tensors_equal": all(same(t, b.to(t.device)) for t, b in self.tensors),
+            "gradients_equal": all(
+                p.grad is original
+                and (original is None or same(original, b.to(original.device)))
+                for p, original, b in self.grads
+            ),
+            "individual_modes_equal": all(m.training == mode for m, mode in self.modes),
+            "entrypoint_methods_equal": all(
+                (name in self.model.__dict__) == present
+                and getattr(self.model, name) == method
+                for name, present, method in self.methods
+            ),
+            "preexisting_hooks_equal": all(
+                dict(getattr(m, name)) == hooks for m, name, hooks in self.hooks
+            ),
+            "rngs_equal": (
+                random.getstate() == self.py
+                and ns[0] == self.np[0]
+                and np.array_equal(ns[1], self.np[1])
+                and ns[2:] == self.np[2:]
+                and torch.equal(torch.random.get_rng_state(), self.cpu)
+                and cuda_ok
+            ),
+        }
+
+
+@contextmanager
+def attributes(obj, **changes):
+    """Restore instance attribute presence as well as its original value."""
+    old = {name: (name in obj.__dict__, obj.__dict__.get(name)) for name in changes}
+    try:
+        for name, value in changes.items():
+            setattr(obj, name, value)
+        yield
+    finally:
+        for name, (present, value) in old.items():
+            if present:
+                setattr(obj, name, value)
+            else:
+                delattr(obj, name)
+
+
+def discrepancy(actual, reference):
+    if actual.shape != reference.shape:
+        raise ValueError("Diagnostic comparison shape mismatch")
+    if not (torch.isfinite(actual).all() and torch.isfinite(reference).all()):
+        raise ValueError("Nonfinite diagnostic outputs")
+    difference = (actual.double() - reference.double()).abs()
+    return {
+        "absolute": float(difference.max()),
+        "excess": float(
+            (difference - RTOL * reference.double().abs()).clamp_min(0).max()
+        ),
+    }
+
+
+def binary_summary(values):
+    values = np.asarray(values, dtype=np.int64)
+    n, k = len(values), int(values.sum())
+    if not n:
+        return {"users": 0, "events": 0, "rate": None, "ci95": None}
+    draws = np.random.default_rng(42).integers(n, size=(2000, n))
+    result = {
+        "users": n,
+        "events": k,
+        "rate": k / n,
+        "paired_user_bootstrap_ci95": np.quantile(
+            values[draws].mean(1), [0.025, 0.975]
+        ).tolist(),
+    }
+    if k == 0 or k == n:
+        result["boundary_binomial_two_sided95_reference"] = (
+            [0.0, 1 - 0.025 ** (1 / n)] if k == 0 else [0.025 ** (1 / n), 1.0]
+        )
+        result["boundary_binomial_one_sided95_reference"] = (
+            [0.0, 1 - 0.05 ** (1 / n)] if k == 0 else [0.05 ** (1 / n), 1.0]
+        )
+    return result
+
+
+def isolated_batches(histories, itemnum, maxlen):
+    """Local replica of supplied NextItNet sampling; no active loader access."""
+    rng = random.Random(42)
+    users = [
+        u
+        for u in sorted(histories, key=lambda x: (type(x).__name__, str(x)))
+        if len(histories[u]) >= 2
+        and all(1 <= int(i) <= itemnum for i in histories[u])
+        and len(set(histories[u])) < itemnum
+    ]
+    if not users:
+        return []
+    batches = []
+    for _ in range(10):
+        seq, pos, neg = [np.zeros((32, maxlen), dtype=np.int64) for _ in range(3)]
+        for row in range(32):
+            history = histories[rng.choice(users)]
+            excluded = set(history)
+            nxt = history[-1]
+            for column, item in zip(range(maxlen - 1, -1, -1), reversed(history[:-1])):
+                seq[row, column], pos[row, column] = item, nxt
+                candidate = rng.randint(1, itemnum)
+                while candidate in excluded:
+                    candidate = rng.randint(1, itemnum)
+                neg[row, column] = candidate
+                nxt = item
+        batches.append((None, seq, pos, neg))
+    return batches
+
+
+def source_hash(method):
+    try:
+        return hashlib.sha256(inspect.getsource(method).encode()).hexdigest()
+    except (OSError, TypeError):
+        return None
+
+
+@torch.no_grad()
+def fault_panel(probe):
+    view, model, device = probe.view, probe.view.model, probe.device
+    categories = [getattr(obj, "dataset_name", None) for obj in (view, model)]
+    supplied = [c for c in categories if c is not None]
+    category = (
+        supplied[0]
+        if supplied and len(set(supplied)) == 1 and supplied[0] in CATEGORIES
+        else None
+    )
+    result = {
+        "category": category,
+        "category_aggregation": unavailable(
+            "One category only or explicit routing identity unavailable"
+        ),
+        "category_sources": [str(c) if c is not None else None for c in categories],
+        "scope": "design-time operators; disjoint-user input assessment only",
+        "reserved_operator_transfer": unavailable(
+            "No independently reserved operator family supplied"
+        ),
+        "objective_contract": unavailable(
+            "No verified loss/sampler execution contract supplied"
+        ),
+        "padding_mask_suppression": unavailable(
+            "No safe independently verified mask-injection interface"
+        ),
+        "contract": {"supported": False},
+    }
+    required = ("itemnum", "maxlen", "hidden_units", "norm", "score_candidates")
+    if not isinstance(model, torch.nn.Module) or any(
+        not hasattr(model, x) for x in required
+    ):
+        result["contract"][
+            "reason"
+        ] = "Required actual NextItNet interfaces unavailable"
+        return result
+    if type(model).__name__ != "NextItNetModel" or int(model.maxlen) < 3:
+        result["contract"]["reason"] = "Bounded panel requires NextItNet and width >= 3"
+        return result
+    if view.item_emb is not model.item_emb:
+        result["contract"]["reason"] = "ModelView embedding identity is unverified"
+        return result
+    histories = probe.user_train.get("History", probe.user_train)
+    if not isinstance(histories, dict):
+        result["contract"]["reason"] = "Mapped training history dictionary unavailable"
+        return result
+    limit, width = int(model.itemnum), int(model.maxlen)
+    if (
+        limit < 3
+        or model.item_emb.weight.ndim != 2
+        or model.item_emb.weight.shape[0] <= limit
+        or model.item_emb.weight.shape[1] != int(model.hidden_units)
+    ):
+        result["contract"][
+            "reason"
+        ] = "Vocabulary must support distinct perturbations and match embedding dimensions"
+        return result
+    valid = {}
+    exclusions = CounterLocal()
+    for uid in sorted(histories, key=lambda x: (type(x).__name__, str(x))):
+        h = np.asarray(histories[uid], dtype=np.int64)
+        if h.ndim != 1 or len(h) < 3 or np.any((h < 1) | (h > limit)):
+            exclusions.add("invalid_or_short_history")
+        else:
+            valid[uid] = h
+    observed = np.asarray(
+        sorted({int(i) for h in valid.values() for i in h}), dtype=np.int64
+    )
+    eligible = []
+    for uid, h in valid.items():
+        if len(observed[~np.isin(observed, h)]) >= 99:
+            eligible.append(uid)
+        else:
+            exclusions.add("insufficient_unseen_observed_items")
+    rng = np.random.default_rng(42)
+    chosen = rng.choice(len(eligible), min(64, len(eligible)), replace=False).tolist()
+    users = [eligible[i] for i in chosen]
+    ncal = min(32, (len(users) + 1) // 2)
+    records = []
+    for index, uid in enumerate(users):
+        h = valid[uid]
+        seq = torch.zeros((1, width), dtype=torch.long, device=device)
+        retained = h[:-1][-width:]
+        seq[0, -len(retained) :] = torch.as_tensor(retained, device=device)
+        pool = observed[~np.isin(observed, h)]
+        items = torch.as_tensor(
+            np.concatenate(([h[-1]], rng.choice(pool, 99, replace=False))),
+            dtype=torch.long,
+            device=device,
+        )
+        records.append(
+            {
+                "uid": str(uid),
+                "partition": "calibration" if index < ncal else "assessment",
+                "seq": seq,
+                "items": items,
+            }
+        )
+    result.update(
+        exclusions=exclusions.data,
+        eligible_users=len(eligible),
+        selection="seed-42 permutation after deterministic typed-ID sorting; cap 64",
+        calibration_users=ncal,
+        assessment_users=len(users) - ncal,
+    )
+    if not records or ncal == len(records):
+        result["contract"][
+            "reason"
+        ] = "Disjoint nonempty calibration and assessment panels unavailable"
+        return result
+    first = records[0]
+    features = view.log2feats(first["seq"])
+    expected_shape = (1, width, int(model.hidden_units))
+    if tuple(features.shape) != expected_shape:
+        result["contract"]["reason"] = "Feature shape mismatch"
+        return result
+    direct = view.predict_score(features[0, -1], first["items"])
+    production = model.score_candidates(first["seq"], first["items"])
+    contract_difference = discrepancy(production, direct)
+    if contract_difference["excess"] > FLOOR:
+        result["contract"]["reason"] = "Production and ModelView scorer disagree"
+        return result
+    result["contract"] = {
+        "supported": True,
+        "mapping": "mapped integer IDs checked against actual embedding vocabulary",
+        "scorer_comparison": contract_difference,
+        "entrypoint": "actual model.score_candidates",
+        "feature_entrypoint": "view.log2feats",
+        "source_sha256": {
+            name: source_hash(getattr(model, name))
+            for name in ("encode_sequence", "score_candidates", "predict_score")
+        },
+    }
+    calls = {"child_forward_calls": 0}
+
+    def count(module, args, output):
+        calls["child_forward_calls"] += 1
+
+    handle = model.norm.register_forward_hook(count)
+    try:
+        before = calls["child_forward_calls"]
+        view.log2feats(first["seq"])
+        model.score_candidates(first["seq"], first["items"])
+        if calls["child_forward_calls"] - before < 2:
+            raise RuntimeError("Child counter did not execute through both entrypoints")
+    finally:
+        handle.remove()
+
+    class Sentinel(RuntimeError):
+        pass
+
+    def sentinel(module, args, output):
+        raise Sentinel("audit sentinel")
+
+    sentinel_checks = []
+    for entry in (
+        lambda: view.log2feats(first["seq"]),
+        lambda: model.score_candidates(first["seq"], first["items"]),
+    ):
+        state = Snapshot(model)
+        reached = False
+        handle = model.norm.register_forward_hook(sentinel)
+        try:
+            entry()
+        except Sentinel:
+            reached = True
+        finally:
+            handle.remove()
+            state.restore()
+        restored_state = state.check()
+        sentinel_checks.append({"exception_reached_caller": reached, **restored_state})
+        if not reached or not all(restored_state.values()):
+            raise RuntimeError(
+                "Sentinel execution or exception-state restoration failed"
+            )
+    result["hook_contract"] = {**calls, "exception_regressions": sentinel_checks}
+
+    try:
+        width_supported = "valid.long().cumsum" in inspect.getsource(
+            model.encode_sequence
+        )
+    except (OSError, TypeError):
+        width_supported = False
+
+    def clean_suite(record):
+        seq, items = record["seq"], record["items"]
+        reference = model.score_candidates(seq, items)
+        measures = [discrepancy(model.score_candidates(seq, items), reference)]
+        # A controlled input perturbation supplies a distinct batch companion;
+        # it is not claimed to be an independently observed real history.
+        companion = seq.clone()
+        nz = torch.where(companion[0] != 0)[0]
+        companion[0, nz[0]] = companion[0, nz[0]] % limit + 1
+        batch = torch.cat((seq, companion))
+        a = model.score_candidates(batch, items)
+        b = model.score_candidates(batch.flip(0), items).flip(0)
+        measures.extend((discrepancy(a, b), discrepancy(a[0], reference)))
+        leading = int(torch.where(seq[0] != 0)[0][0])
+        if width_supported and leading:
+            measures.append(
+                discrepancy(model.score_candidates(seq[:, leading:], items), reference)
+            )
+        # Calibrate the complete numerical suite, including the feature-space
+        # causality comparison used during assessment. Score-space controls
+        # alone cannot calibrate this additional endpoint.
+        positions = torch.where(seq[0] != 0)[0]
+        pivot, source = int(positions[-2]), int(positions[-1])
+        altered = seq.clone()
+        altered[0, source] = altered[0, source] % limit + 1
+        measures.append(
+            discrepancy(
+                view.log2feats(altered)[0, : pivot + 1],
+                view.log2feats(seq)[0, : pivot + 1],
+            )
+        )
+        return {
+            "absolute": max(m["absolute"] for m in measures),
+            "excess": max(m["excess"] for m in measures),
+        }
+
+    calibration = [clean_suite(r) for r in records[:ncal]]
+    atol = max(FLOOR, max(m["excess"] for m in calibration))
+    calibration_valid = atol <= CLEAN_CEILING
+    result["tolerance"] = {
+        "rtol": RTOL,
+        "atol": atol,
+        "floor": FLOOR,
+        "clean_excess_ceiling": CLEAN_CEILING,
+        "valid": calibration_valid,
+        "rule": "max positive clean-suite residual; frozen before assessment",
+        "calibration_user_maxima": calibration,
+        "leading_padding_control_supported": width_supported,
+    }
+
+    def causal_probe(encode, a, b, pivot):
+        # This scorer sees no fault name, injection flags or witness records.
+        return discrepancy(encode(b)[0, : pivot + 1], encode(a)[0, : pivot + 1])
+
+    def copy_hook(pivot, source, trace):
+        def apply(module, args, output):
+            changed = output.clone()
+            changed[:, pivot] = output[:, source]
+            trace.append(
+                {
+                    "destination": pivot,
+                    "source": source,
+                    "copied_source_exactly": bool(
+                        torch.equal(changed[:, pivot], output[:, source])
+                    ),
+                }
+            )
+            return changed
+
+        return apply
+
+    def oracle(call, seq):
+        # Frozen exact oracle; independent of the implementation under test.
+        expected = torch.where(seq[0] != 0)[0][-1].item()
+        value = call(seq, first["items"])
+        return {
+            "expected_index": expected,
+            "selected_code": float(value[0]),
+            "alarm": bool(not torch.all(value == expected)),
+        }
+
+    def readout_cases(record):
+        seq = record["seq"]
+        cases = []
+        for length in sorted({1, max(1, width // 2), width}):
+            synthetic = torch.zeros_like(seq)
+            synthetic[0, -length:] = int(seq[0, -1])
+            codes = torch.arange(
+                width, device=device, dtype=model.item_emb.weight.dtype
+            )
+            coded = codes.view(1, width, 1).expand(1, width, model.hidden_units)
+            trace = []
+
+            def code_scores(feature, items):
+                return feature[..., :1].expand(feature.shape[0], len(items))
+
+            def faulty(sequence, candidates):
+                feature = model.log2feats(sequence)
+                index = sequence.ne(0).sum(1) - 1
+                trace.append(int(index[0]))
+                score = model.predict_score(
+                    feature[torch.arange(len(sequence), device=device), index],
+                    candidates,
+                )
+                return score[0]
+
+            with attributes(
+                model, log2feats=lambda sequence: coded, predict_score=code_scores
+            ):
+                original = oracle(model.score_candidates, synthetic)
+                mutant = oracle(faulty, synthetic)
+            executed = trace[0]
+            cases.append(
+                {
+                    "synthetic_length": length,
+                    "expected_index": width - 1,
+                    "executed_mutant_index": executed,
+                    "structurally_witnessed": executed != width - 1,
+                    "original_oracle": original,
+                    "mutant_oracle": mutant,
+                }
+            )
+        return cases
+
+    rows = []
+    baselines = [model.score_candidates(r["seq"], r["items"]).clone() for r in records]
+    for record in records[ncal:]:
+        seq = record["seq"]
+        positions = torch.where(seq[0] != 0)[0]
+        pivot, source = int(positions[-2]), int(positions[-1])
+        assessment = seq.clone()
+        verification = seq.clone()
+        assessment[0, source] = assessment[0, source] % limit + 1
+        verification[0, source] = (verification[0, source] + 1) % limit + 1
+        if torch.equal(verification, seq) or torch.equal(verification, assessment):
+            raise RuntimeError(
+                "Distinct independent verification perturbation unavailable"
+            )
+        clean = clean_suite(record)
+        clean_causal = causal_probe(view.log2feats, seq, assessment, pivot)
+        raw_a = view.log2feats(seq)
+        raw_v = view.log2feats(verification)
+        witness_effect = discrepancy(raw_v[0, source], raw_a[0, source])
+        trace = []
+        handle = model.norm.register_forward_hook(copy_hook(pivot, source, trace))
+        try:
+            verified_a, verified_v = view.log2feats(seq), view.log2feats(verification)
+            witness = discrepancy(verified_v[0, pivot], verified_a[0, pivot])
+            # Source equality verifies the injected path independently of the probe.
+            provenance = bool(
+                torch.equal(verified_a[0, pivot], raw_a[0, source])
+                and torch.equal(verified_v[0, pivot], raw_v[0, source])
+            )
+            measured = causal_probe(view.log2feats, seq, assessment, pivot)
+        finally:
+            handle.remove()
+        readout = readout_cases(record)
+        active = bool(
+            provenance and witness["excess"] > atol and witness_effect["excess"] > atol
+        )
+        rows.append(
+            {
+                "user_id": record["uid"],
+                "clean_suite": clean,
+                "clean_causality": clean_causal,
+                "clean_any_alarm": (
+                    bool(
+                        clean["excess"] > atol
+                        or clean_causal["excess"] > atol
+                        or any(c["original_oracle"]["alarm"] for c in readout)
+                    )
+                    if calibration_valid
+                    else None
+                ),
+                "clean_exact_readout_alarm": any(
+                    c["original_oracle"]["alarm"] for c in readout
+                ),
+                "readout_instances": readout,
+                "readout_user_detection": any(
+                    c["structurally_witnessed"] and c["mutant_oracle"]["alarm"]
+                    for c in readout
+                ),
+                "future_copy": {
+                    "installed": bool(trace),
+                    "trace": trace,
+                    "structural_provenance_verified": provenance,
+                    "independent_witness": witness,
+                    "source_effect": witness_effect,
+                    "independently_active": active,
+                    "probe_measurement": measured,
+                    "detected": (
+                        bool(measured["excess"] > atol)
+                        if active and calibration_valid
+                        else None
+                    ),
+                },
+            }
+        )
+    restored = [
+        discrepancy(model.score_candidates(r["seq"], r["items"]), b)
+        for r, b in zip(records, baselines)
+    ]
+    result.update(
+        users=rows,
+        original_scores_restored={
+            "comparisons": restored,
+            "passed": all(m["excess"] <= atol for m in restored),
+        },
+        clean_user_any_alarm=binary_summary(
+            [r["clean_any_alarm"] for r in rows if r["clean_any_alarm"] is not None]
+        ),
+        clean_exact_readout_user_alarm=binary_summary(
+            [r["clean_exact_readout_alarm"] for r in rows]
+        ),
+        readout_user_detection=binary_summary(
+            [
+                r["readout_user_detection"]
+                for r in rows
+                if any(c["structurally_witnessed"] for c in r["readout_instances"])
+            ]
+        ),
+        future_copy_conditional_detection=binary_summary(
+            [
+                r["future_copy"]["detected"]
+                for r in rows
+                if r["future_copy"]["detected"] is not None
+            ]
+        ),
+        future_copy_counts={
+            "eligible_users": len(rows),
+            "installed": sum(r["future_copy"]["installed"] for r in rows),
+            "independently_active": sum(
+                r["future_copy"]["independently_active"] for r in rows
+            ),
+            "unresolved_or_inactive": sum(
+                not r["future_copy"]["independently_active"] for r in rows
+            ),
+        },
+        readout_instance_counts={
+            "total": sum(len(r["readout_instances"]) for r in rows),
+            "witnessed_index_faults": sum(
+                c["structurally_witnessed"]
+                for r in rows
+                for c in r["readout_instances"]
+            ),
+            "detected_witnessed_faults": sum(
+                c["structurally_witnessed"] and c["mutant_oracle"]["alarm"]
+                for r in rows
+                for c in r["readout_instances"]
+            ),
+        },
+    )
+    result["panel_manifest"] = [
+        {
+            "user_id": r["uid"],
+            "partition": r["partition"],
+            "sequence": r["seq"][0].cpu().tolist(),
+            "candidate_ids": r["items"].cpu().tolist(),
+        }
+        for r in records
+    ]
+    return result
+
+
+class CounterLocal:
+    def __init__(self):
+        self.data = {}
+
+    def add(self, name):
+        self.data[name] = self.data.get(name, 0) + 1
+
+
+def run_isolated_diagnosis(probe, existing, train_loader):
+    model, device = probe.view.model, probe.device
+    if not isinstance(model, torch.nn.Module):
+        raise TypeError("view.model must be the actual trained nn.Module")
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    started = time.perf_counter()
+    snapshot = Snapshot(model)
+    snapshot_seconds = time.perf_counter() - started
+    result = {"metrics": {}, "metric_definitions": {}}
+    counters = {"final_norm_forward_calls": 0}
+    handle = None
+    try:
+        model.eval()
+
+        def count(module, args, output):
+            counters["final_norm_forward_calls"] += 1
+
+        if hasattr(model, "norm"):
+            handle = model.norm.register_forward_hook(count)
+        panel = fault_panel(probe)
+        # Preserve completed measurements if a later legacy probe fails.
+        result["metrics"]["fault_calibration"] = panel
+        if panel["contract"]["supported"]:
+            histories = probe.user_train.get("History", probe.user_train)
+            batches = isolated_batches(histories, int(model.itemnum), int(model.maxlen))
+            legacy = existing(batches)
+            result["metrics"].update(legacy["metrics"])
+            result["metric_definitions"].update(legacy["metric_definitions"])
+        else:
+            result["metrics"]["existing_diagnostics"] = unavailable(
+                "Skipped because initial execution contract was not verified"
+            )
+    except Exception as error:
+        import warnings
+
+        warnings.warn(
+            f"NextItNet diagnostic execution failed: {type(error).__name__}: {error}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        result["metrics"]["diagnostic_execution_failure"] = {
+            "type": type(error).__name__,
+            "message": str(error),
+            "remaining_panels": "unavailable; no automatic retry or threshold change",
+        }
+    finally:
+        if handle is not None:
+            handle.remove()
+        snapshot.restore()
+    restoration = snapshot.check()
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elapsed = time.perf_counter() - started
+    result["metrics"]["diagnostic_execution_contract"] = {
+        "restoration": restoration,
+        "snapshot_bytes": snapshot.bytes,
+        "snapshot_wall_seconds": snapshot_seconds,
+        "synchronized_wall_seconds": elapsed,
+        "counts": counters,
+        "active_train_loader_consumed": False,
+        "legacy_inputs": "10 isolated local NextItNet sampler batches, 32 rows each; seed 42",
+        "precision": str(probe.view.item_emb.weight.dtype),
+        "torch_version": str(torch.__version__),
+        "device": str(device),
+        "hardware": (
+            torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU"
+        ),
+        "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "cudnn_benchmark": torch.backends.cudnn.benchmark,
+        "tf32_matmul": torch.backends.cuda.matmul.allow_tf32,
+        "next_batch_and_optimizer_step": unavailable(
+            "Optimizer and continuing iterator state not supplied"
+        ),
+        "mutable_cache_preservation": unavailable(
+            "Arbitrary model-local caches were not inspected"
+        ),
+        "full_training_continuation": unavailable(
+            "Only listed execution state is verified"
+        ),
+    }
+    result["metric_definitions"]["fault_calibration"] = (
+        "Diagnostic-only design-time count-minus-one and future-feature-copy injections on the same network. "
+        "At most 64 mapped training users, up to 32 clean calibration and 32 disjoint assessment users. "
+        "Candidates and inputs are recorded; targets are training interactions. Frozen tolerance compares "
+        "abs(actual-reference) <= atol+rtol*abs(reference). Calibration exceeding the declared ceiling "
+        "invalidates numerical endpoints. Calibration includes score controls and the clean feature-causality "
+        "comparison; their user-suite maximum uses one conservative absolute tolerance. Clean any-alarm "
+        "also includes exact original-readout failures when numerical calibration is valid. Exact original-readout "
+        "alarms are additionally reported independently of numerical calibration. Exact synthetic readout checks "
+        "are separate from recommendation evidence. Future-copy detection "
+        "conditions on independently active dependencies witnessed using a different suffix perturbation. "
+        "Unresolved cases remain in raw counts. Binary intervals resample whole users with 2000 seed-42 draws; "
+        "boundary binomial intervals are only independent-Bernoulli superpopulation references. Any-instance "
+        "user detection can conceal poor instance coverage. No reserved-operator or held-out transfer is measured."
+    )
+    result["metric_definitions"]["diagnostic_execution_contract"] = (
+        "CPU-cloned parameters, all registered buffers including nonpersistent buffers, existing gradient "
+        "objects/values, individual modes and global Python/NumPy/Torch RNG states are restored in finally. "
+        "Only audit-owned hooks and temporary method overrides are removed. The active loader is untouched; "
+        "legacy position statistics now use a declared isolated diagnostic sampler. Sentinel exception tests "
+        "verify child-hook execution and cleanup. Optimizer, iterator and arbitrary cache continuation are unavailable. "
+        "Runtime includes snapshots, existing probes, panel and restoration and consumes the shared budget."
+    )
+    directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "working")
+    os.makedirs(directory, exist_ok=True)
+    category = (
+        result["metrics"].get("fault_calibration", {}).get("category") or "unknown"
+    )
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        prefix="fault_calibration_" + category + "_",
+        suffix=".json",
+        dir=directory,
+        delete=False,
+    ) as stream:
+        json.dump(result, stream, indent=2, allow_nan=False)
+        path = stream.name
+    result["metrics"]["diagnostic_execution_contract"]["artifact_path"] = path
+    return result
+
+
+### <<< Self_EvolveRec-BLOCK-END
+
+
+def diagnosis_interpreter_prompt(raw_diagnosis):
+    return f"""
+    You are a Senior AI Researcher analyzing the mathematical health of a Recommendation System.
+    
+    Here are the raw mathematical metrics measured from the current model:
+    {json.dumps(raw_diagnosis['metrics'], indent=2)}
+    
+    Here are the definitions of what these metrics mean:
+    {json.dumps(raw_diagnosis['metric_definitions'], indent=2)}
+    
+    Your task: produce a concise diagnosis summary that captures ONLY the core findings and implications.
+    Do NOT propose web searches or action plans. Do NOT list "what to look up".
+
+    Strictly follow the JSON format below.
+
+    Output Format (JSON):
+    {{
+    "status": <CRITICAL | NEEDS_IMPROVEMENT | STABLE>,
+    "core_findings": [
+        "<1-2 sentences: the most important interpretation of the metrics>",
+        "<1-2 sentences: the second most important interpretation (only if truly necessary)>"
+    ],
+    "key_implications": [
+        "<1 sentence: what this implies about model behavior>",
+        "<1 sentence: what this implies about training dynamics or representation>",
+        "<optional 1 sentence: risk/trade-off if relevant>"
+    ],
+    "evidence": {{
+        "headline_metrics": {{
+        "<metric_name>": <value>,
+        "<metric_name>": <value>
+        }},
+        "brief_metric_read": {{
+        "<metric_name>": "<very short interpretation tied to its definition>",
+        "<metric_name>": "<very short interpretation tied to its definition>"
+        }}
+    }}
+    }}
+
+    Rules:
+    ### >>> Self_EvolveRec-BLOCK-START: Evidence-limited temporal diagnosis interpretation
+    - Distinguish position-weighted training separation, training-user score sensitivity,
+      in-sample training-prefix ranking audits, and held-out validation ranking.
+      Held-out ranking is unavailable through this adapter.
+    - Under nested negative sets, target rank cannot improve and hit-at-10 cannot
+      increase; a strict decline is not inevitable and does not establish poor
+      generalization. Exact hypergeometric expectations describe
+      uniform sampling conditional on the fitted scores and declared tie order.
+    - Candidate repetitions are not independent users. Paired bootstrap intervals
+      condition on repetition zero; repetition SD measures candidate variability,
+      and SD/sqrt(10) is only Monte Carlo error with users and models fixed.
+    - Report depth eligibility, common-user counts, strata and exclusions. Raw
+      tenth-negative margins depend on score scale. Training-prefix targets may
+      have been optimized during training; do not infer validation gains, current
+      intent, causality, memorization or exposure bias from these diagnostics.
+    - This category report cannot establish a four-category macro result. Combine
+      categories equally only when all four category reports are available.
+    - Cite eligible counts, controls, missingness, and uncertainty for every finding.
+    - A score change is not evidence of relevance, improved HR, user intent, simulator
+      traits, or feedback effects. Angular alignment and covariance rank do not establish
+      useful ranking. The margin threshold 0.5 is scale dependent.
+    - Stale-content hypotheses require corroboration across deletion, geometry controls,
+      zero replacement, and frequency-matched nonzero replacement. Otherwise label them
+      exploratory. Interior zeros and replacement items introduce distribution shifts.
+    - Bootstrap intervals condition on fitted models, users, and fixed candidates;
+      they exclude training-seed, candidate-sampling, and adaptive-search uncertainty.
+      Do not infer p-values or confirmatory significance from these intervals.
+    - Missing categories, validation interventions, or unavailable metadata are unavailable
+      evidence. Do not invent measurements or recommend ensembles or fitted score fusion.
+    ### <<< Self_EvolveRec-BLOCK-END
+    ### >>> Self_EvolveRec-BLOCK-START: Interpret independently witnessed fault calibration
+    - Separate original-execution control alarms from injected-fault detections.
+      Report installation, structural witnesses, independent numerical witnesses,
+      unresolved cases and detections with their own denominators.
+    - Synthetic position codes test readout contracts, not recommendations.
+      Injected future-feature copying is not evidence of an existing convolution bug.
+    - Numerical tolerances are frozen using disjoint calibration users. Report
+      invalid calibration and clean assessment alarms without increasing thresholds.
+    - User partitions assess input transfer only. Reserved-operator transfer,
+      validation gains and optimizer/iterator continuation are unavailable unless
+      explicitly measured. Mutation instances are not independent users.
+    - Boundary binomial intervals are superpopulation reference intervals under
+      independent Bernoulli user assumptions, not finite-population guarantees.
+    - Restoration checks cover the recorded tensors, gradients, modes, hooks,
+      methods and RNGs; do not infer preservation of uninspected mutable caches.
+    ### <<< Self_EvolveRec-BLOCK-END
+    - Keep it short: core_findings <= 3 bullets, key_implications <= 3 bullets.
+    - Use technical terms only when they are essential (e.g., 'gradient', 'loss landscape', 'inductive bias'), and keep them brief.
+    - Every statement must be grounded in the provided metric values/definitions.
+    - If metrics look healthy, status should remain STABLE and implications should focus on "what is already working" plus one potential risk to monitor.
+    """
+
+
+class DiagnosisProbe:
+    ### >>> Self_EvolveRec-BLOCK-START: Preserve the family-specific ModelView boundary
+    def __init__(self, view, device):
+        self.view = view
+        self.model = view
+        self.device = torch.device(device)
+        self.meta_data = getattr(view, "meta_data", {})
+        self.review_data = getattr(view, "review_data", {})
+        self.user_train = view.user_train
+
+    ### <<< Self_EvolveRec-BLOCK-END
+
+    def _get_categories(self, item_id: int):
+        key = str(int(item_id))
+        info = self.meta_data.get(key, None)
+        if not isinstance(info, dict):
+            return []
+        cats = info.get("categories", [])
+        if isinstance(cats, list):
+            return [c for c in cats if isinstance(c, str)]
+        return []
+
+    def analyze_embeddings_collapse_cosine(
+        self, sample_size: int = 2048, seed: int = 42
+    ):
+        with torch.no_grad():
+            emb = self.model.item_emb.weight.detach()
+            emb = emb[
+                1 : self.model.model.itemnum + 1
+            ]  # exclude padding and reserved mask tokens
+
+            n = emb.size(0)
+            if n <= 2:
+                return 0.0
+
+            g = torch.Generator(device=emb.device)
+            g.manual_seed(seed)
+
+            k = min(sample_size, n)
+            idx = torch.randperm(n, generator=g, device=emb.device)[:k]
+            x = emb.index_select(0, idx)
+            x = F.normalize(x, p=2, dim=-1)
+
+            gram = x @ x.t()
+            offdiag_sum = gram.sum() - gram.diag().sum()
+            offdiag_cnt = k * (k - 1)
+            mean_cos = (offdiag_sum / offdiag_cnt).clamp(-1, 1).item()
+
+            collapse_score = (mean_cos + 1.0) * 0.5
+            return round(float(collapse_score), 4)
+
+    @torch.no_grad()
+    def analyze_pos_neg_margin_with_category_breakdown(
+        self,
+        dataloader,
+        num_batches: int = 10,
+        eps: float = 0.5,
+        topk_categories: int = 20,
+    ):
+        self.model.eval()
+
+        margins_all = []
+        low_pos_cat, low_neg_cat = Counter(), Counter()
+        wrong_pos_cat, wrong_neg_cat = Counter(), Counter()
+        low_total, wrong_total = 0, 0
+
+        for step, batch in enumerate(dataloader):
+            if step >= num_batches:
+                break
+            if not (isinstance(batch, (list, tuple)) and len(batch) >= 4):
+                continue
+
+            _, seq, pos, neg = batch[0], batch[1], batch[2], batch[3]
+
+            seq_np = seq.cpu().numpy() if isinstance(seq, torch.Tensor) else seq
+            log_feats = self.model.log2feats(seq_np)
+
+            pos_t = torch.as_tensor(pos, device=self.device, dtype=torch.long)
+            neg_t = torch.as_tensor(neg, device=self.device, dtype=torch.long)
+
+            # DEBUG: Score B x L item tensors separately to match NextItNet's
+            # B x L x D features and avoid an incompatible candidate dimension.
+            pos_logits = self.model.predict_score(log_feats, pos_t)
+            neg_logits = self.model.predict_score(log_feats, neg_t)
+            margin = pos_logits - neg_logits
+
+            valid = pos_t != 0
+            if valid.any():
+                margins_all.append(margin[valid].detach().float().cpu())
+
+            margin_cpu = margin.detach().float().cpu().numpy()
+            pos_cpu = pos_t.detach().cpu().numpy()
+            neg_cpu = neg_t.detach().cpu().numpy()
+            valid_cpu = pos_cpu != 0
+
+            low_mask = valid_cpu & (margin_cpu < float(eps))
+            wrong_mask = valid_cpu & (margin_cpu < 0.0)
+
+            for b, l in np.argwhere(low_mask):
+                low_total += 1
+                pid = int(pos_cpu[b, l])
+                nid = int(neg_cpu[b, l])
+                for c in self._get_categories(pid):
+                    low_pos_cat[c] += 1
+                for c in self._get_categories(nid):
+                    low_neg_cat[c] += 1
+
+            for b, l in np.argwhere(wrong_mask):
+                wrong_total += 1
+                pid = int(pos_cpu[b, l])
+                nid = int(neg_cpu[b, l])
+                for c in self._get_categories(pid):
+                    wrong_pos_cat[c] += 1
+                for c in self._get_categories(nid):
+                    wrong_neg_cat[c] += 1
+
+        if len(margins_all) == 0:
+            margin_metrics = {
+                "mean": 0.0,
+                "p10": 0.0,
+                "neg_beats_pos_rate": 0.0,
+                "small_margin_rate": 0.0,
+            }
+        else:
+            m = torch.cat(margins_all, dim=0)
+            N = m.numel()
+
+            k = max(1, int(np.ceil(0.10 * N)))
+            p10 = float(torch.kthvalue(m, k).values.item())
+
+            margin_metrics = {
+                "mean": round(float(m.mean().item()), 4),
+                "p10": round(p10, 4),
+                "neg_beats_pos_rate": round(float((m < 0.0).float().mean().item()), 4),
+                "small_margin_rate": round(
+                    float((m < float(eps)).float().mean().item()), 4
+                ),
+            }
+
+        def _topk(counter: Counter, k: int):
+            return [{"category": c, "count": int(n)} for c, n in counter.most_common(k)]
+
+        breakdown = {
+            "eps": float(eps),
+            "low_margin_total_positions": int(low_total),
+            "wrong_rank_total_positions": int(wrong_total),
+            "low_margin_top_categories": {
+                "pos_item": _topk(low_pos_cat, topk_categories),
+                "neg_item": _topk(low_neg_cat, topk_categories),
+            },
+            "wrong_rank_top_categories": {
+                "pos_item": _topk(wrong_pos_cat, topk_categories),
+                "neg_item": _topk(wrong_neg_cat, topk_categories),
+            },
+        }
+
+        return margin_metrics, breakdown
+
+    ### >>> Self_EvolveRec-BLOCK-START: Validated candidate-depth calibration with bounded bootstrap memory
+    @torch.no_grad()
+    def _candidate_depth_audit(self, exact_limit=50):
+        import hashlib
+        import math
+
+        # DEBUG: Replace unavailable SciPy with the exact hypergeometric CDF
+        # using standard-library integer combinations. This preserves the
+        # conditional sampling expectation without floating-point underflow.
+        def hypergeom_cdf(k, N, M, m):
+            if not (0 <= M <= N and 0 <= m <= N):
+                raise ValueError("Invalid hypergeometric population or sample size")
+            lower = max(0, m - (N - M))
+            upper = min(m, M)
+            cutoff = math.floor(k)
+            if cutoff < lower:
+                return 0.0
+            if cutoff >= upper:
+                return 1.0
+            favorable = sum(
+                math.comb(M, successes) * math.comb(N - M, m - successes)
+                for successes in range(lower, cutoff + 1)
+            )
+            return favorable / math.comb(N, m)
+
+        view, network = self.view, self.view.model
+        histories = self.user_train.get("History", self.user_train)
+        if not isinstance(histories, dict):
+            raise TypeError("Candidate audit requires mapped training histories")
+        if int(network.maxlen) <= 0:
+            raise ValueError("Candidate audit requires a positive model.maxlen")
+        if not isinstance(exact_limit, (int, np.integer)) or exact_limit < 0:
+            raise ValueError("exact_limit must be a nonnegative integer")
+        category = str(
+            getattr(view, "dataset_name", getattr(network, "dataset_name", "unknown"))
+        )
+        categories = [
+            "Movies_and_TV",
+            "Industrial_and_Scientific",
+            "Electronics",
+            "CDs_and_Vinyl",
+        ]
+        category_index = categories.index(category) if category in categories else 4
+
+        def local_rng(uid, repetition):
+            digest = hashlib.sha256(str(uid).encode("utf-8")).digest()
+            return np.random.default_rng(
+                np.random.SeedSequence(
+                    [
+                        42,
+                        category_index,
+                        int.from_bytes(digest[:8], "little"),
+                        repetition,
+                    ]
+                )
+            )
+
+        real_limit = min(int(network.itemnum), len(view.item_emb.weight) - 1)
+        frequencies, eligible, exclusions = Counter(), [], Counter()
+        ordered = sorted(histories, key=lambda uid: (type(uid).__name__, str(uid)))
+        for uid in ordered:
+            history = np.asarray(histories[uid], dtype=np.int64)
+            if history.ndim != 1 or np.any((history < 1) | (history > real_limit)):
+                exclusions["unmapped_or_invalid_history"] += 1
+                continue
+            frequencies.update(history.tolist())
+            if len(history) < 2:
+                exclusions["no_training_prefix"] += 1
+            else:
+                eligible.append(uid)
+        selection_rng = np.random.default_rng(
+            np.random.SeedSequence([42, category_index])
+        )
+        chosen = sorted(
+            selection_rng.choice(
+                len(eligible), min(200, len(eligible)), replace=False
+            ).tolist()
+        )
+        users = [eligible[i] for i in chosen]
+        exact_indices = set(
+            selection_rng.choice(
+                len(users), min(max(0, exact_limit), 50, len(users)), replace=False
+            ).tolist()
+        )
+        catalog = np.asarray(sorted(frequencies), dtype=np.int64)
+        by_frequency = sorted(frequencies, key=lambda item: (-frequencies[item], item))
+        bands = {
+            item: (
+                "head"
+                if rank < int(np.ceil(0.2 * len(catalog)))
+                else "middle" if rank < int(np.ceil(0.5 * len(catalog))) else "tail"
+            )
+            for rank, item in enumerate(by_frequency)
+        }
+        depths, records, exact, unavailable = (99, 499, 999), [], [], Counter()
+        recommended, recommendation_frequencies = set(), []
+
+        def scores(feature, items):
+            chunks = []
+            for start in range(0, len(items), 4096):
+                item_tensor = torch.as_tensor(
+                    items[start : start + 4096], device=self.device, dtype=torch.long
+                )
+                value = (
+                    view.predict_score(feature, item_tensor)
+                    .detach()
+                    .float()
+                    .cpu()
+                    .numpy()
+                    .reshape(-1)
+                )
+                if len(value) != len(item_tensor) or not np.isfinite(value).all():
+                    raise RuntimeError(
+                        "Candidate audit requires one finite score per item"
+                    )
+                chunks.append(value)
+            return np.concatenate(chunks) if chunks else np.empty(0)
+
+        def preceding(items, values, target, positive):
+            return (values > positive) | ((values == positive) & (items < target))
+
+        for user_index, uid in enumerate(users):
+            history = np.asarray(histories[uid], dtype=np.int64)
+            prefix, target = history[:-1], int(history[-1])
+            sequence = torch.zeros(
+                (1, int(network.maxlen)), dtype=torch.long, device=self.device
+            )
+            retained = prefix[-sequence.shape[1] :]
+            sequence[0, -len(retained) :] = torch.as_tensor(
+                retained, device=self.device
+            )
+            endpoint = torch.where(sequence[0] != 0)[0][-1]
+            feature = view.log2feats(sequence)[0, endpoint]
+            positive = float(scores(feature, np.asarray([target]))[0])
+            pool = catalog[~np.isin(catalog, history)]
+            N = len(pool)
+            row = {
+                "user_id": str(uid),
+                "prefix_length": len(prefix),
+                "retained_length": len(retained),
+                "cutoff_training_index": len(history) - 1,
+                "target": target,
+                "pool_size": N,
+                "frequency_band": bands[target],
+                "length_bin": (
+                    "1-5"
+                    if len(prefix) <= 5
+                    else "6-20" if len(prefix) <= 20 else "21+"
+                ),
+                "repeated_target": bool(target in prefix),
+                "repetitions": [],
+            }
+            for repetition in range(10):
+                negatives = local_rng(uid, repetition).choice(
+                    pool, min(999, N), replace=False
+                )
+                negative_scores = scores(feature, negatives)
+                measurements = {}
+                previous_rank = 1
+                for depth in depths:
+                    if N < depth:
+                        unavailable[str(depth) + ":insufficient_unique_negatives"] += 1
+                        continue
+                    rank = 1 + int(
+                        preceding(
+                            negatives[:depth], negative_scores[:depth], target, positive
+                        ).sum()
+                    )
+                    if rank < previous_rank:
+                        raise RuntimeError(
+                            "Nested candidate ranks must be nondecreasing"
+                        )
+                    previous_rank = rank
+                    measurements[str(depth)] = {
+                        "rank": rank,
+                        "hit_at_10": int(rank <= 10),
+                        "margin_to_tenth_negative": positive
+                        - float(np.partition(negative_scores[:depth], -10)[-10]),
+                    }
+                row["repetitions"].append(measurements)
+            records.append(row)
+            if user_index in exact_indices:
+                M, top_items, top_scores = 0, np.empty(0, dtype=np.int64), np.empty(0)
+                for start in range(0, N, 4096):
+                    items = pool[start : start + 4096]
+                    values = scores(feature, items)
+                    M += int(preceding(items, values, target, positive).sum())
+                    top_items, top_scores = np.concatenate(
+                        (top_items, items)
+                    ), np.concatenate((top_scores, values))
+                    keep = np.lexsort((top_items, -top_scores))[:10]
+                    top_items, top_scores = top_items[keep], top_scores[keep]
+                recommended.update(top_items.tolist())
+                recommendation_frequencies.extend(
+                    frequencies[int(item)] for item in top_items
+                )
+                exact.append(
+                    {
+                        "user_id": str(uid),
+                        "N": N,
+                        "M": M,
+                        "full_eligible_pool_rank": 1 + M,
+                        "expected": {
+                            str(m): {
+                                # DEBUG: Execute the dependency-free exact CDF.
+                                "hit_at_10": hypergeom_cdf(9, N, M, m),
+                                "rank": 1 + m * M / N,
+                            }
+                            for m in depths
+                            if m <= N
+                        },
+                        "top10_eligible_negative_items": top_items.tolist(),
+                    }
+                )
+        fields = ("hit_at_10", "rank", "margin_to_tenth_negative")
+        bootstrap_weights = {}
+
+        def aggregate(rows, requested):
+            common = [
+                r for r in rows if all(str(d) in r["repetitions"][0] for d in requested)
+            ]
+            if not common:
+                return {
+                    "users": 0,
+                    "estimates": None,
+                    "reason": "No common eligible users",
+                }
+            values = np.asarray(
+                [
+                    [
+                        [r["repetitions"][rep][str(d)][field] for field in fields]
+                        for d in requested
+                    ]
+                    for r in common
+                    for rep in range(10)
+                ]
+            )
+            values = values.reshape(len(common), 10, len(requested), len(fields))
+            n = len(common)
+            if n not in bootstrap_weights:
+                draws = np.random.default_rng(42).integers(n, size=(2000, n))
+                counts = np.zeros((2000, n), dtype=np.float64)
+                np.add.at(counts, (np.arange(2000)[:, None], draws), 1.0)
+                bootstrap_weights[n] = counts / n
+            # Multiplicities reproduce the same paired user resamples without
+            # materializing a resample x user x depth x field tensor.
+            bootstrap = (bootstrap_weights[n] @ values[:, 0].reshape(n, -1)).reshape(
+                2000, len(requested), len(fields)
+            )
+            repetition_means = values.mean(axis=0)
+            estimates, contrasts = {}, {}
+            for j, depth in enumerate(requested):
+                estimates[str(depth)] = {
+                    field: {
+                        "mean_over_ten_repetitions": float(values[:, :, j, k].mean()),
+                        "repetition_zero_mean": float(values[:, 0, j, k].mean()),
+                        "repetition_zero_user_ci95": np.quantile(
+                            bootstrap[:, j, k], [0.025, 0.975]
+                        ).tolist(),
+                        "repetition_sd": float(repetition_means[:, j, k].std(ddof=1)),
+                        "monte_carlo_se_of_ten_repetition_mean": float(
+                            repetition_means[:, j, k].std(ddof=1) / np.sqrt(10)
+                        ),
+                    }
+                    for k, field in enumerate(fields)
+                }
+                if j:
+                    contrasts[str(depth) + "_minus_" + str(requested[0])] = {
+                        field: {
+                            "repetition_zero_mean_difference": float(
+                                (values[:, 0, j, k] - values[:, 0, 0, k]).mean()
+                            ),
+                            "paired_user_ci95": np.quantile(
+                                bootstrap[:, j, k] - bootstrap[:, 0, k], [0.025, 0.975]
+                            ).tolist(),
+                        }
+                        for k, field in enumerate(fields)
+                    }
+            return {
+                "users": len(common),
+                "estimates": estimates,
+                "paired_contrasts": contrasts,
+            }
+
+        by_id = {r["user_id"]: r for r in records}
+        calibration = {}
+        for depth in depths:
+            key = str(depth)
+            cohort = [e for e in exact if key in e["expected"]]
+            calibration[key] = {
+                "users": len(cohort),
+                "expected_hit_at_10": None,
+                "observed_mean_hit_at_10": None,
+            }
+            if cohort:
+                expected = float(
+                    np.mean([e["expected"][key]["hit_at_10"] for e in cohort])
+                )
+                observed = float(
+                    np.mean(
+                        [
+                            by_id[e["user_id"]]["repetitions"][rep][key]["hit_at_10"]
+                            for e in cohort
+                            for rep in range(10)
+                        ]
+                    )
+                )
+                calibration[key].update(
+                    expected_hit_at_10=expected,
+                    observed_mean_hit_at_10=observed,
+                    observed_minus_expected=observed - expected,
+                )
+        return {
+            "category": category,
+            "category_seed_index": category_index,
+            "eligible_training_users": len(eligible),
+            "selected_users": len(users),
+            "selected_fraction_of_eligible": (
+                len(users) / len(eligible) if eligible else None
+            ),
+            "selected_user_ids": [str(uid) for uid in users],
+            "exclusions": dict(exclusions),
+            "unavailable_user_repetition_depths": dict(unavailable),
+            "nested_monotonicity_violations": 0,
+            "depth_specific": {str(d): aggregate(records, [d]) for d in depths},
+            "common_eligible_comparisons": {
+                str(a) + ":" + str(b): aggregate(records, [a, b])
+                for a, b in ((99, 499), (99, 999), (499, 999))
+            },
+            "all_depth_common_users": aggregate(records, depths),
+            "strata": {
+                field: {
+                    str(value): {
+                        "selected_users": sum(r[field] == value for r in records),
+                        "depths": {
+                            str(d): aggregate(
+                                [r for r in records if r[field] == value], [d]
+                            )
+                            for d in depths
+                        },
+                    }
+                    for value in sorted(set(r[field] for r in records), key=str)
+                }
+                for field in ("frequency_band", "length_bin", "repeated_target")
+            },
+            "exact_pool_records": exact,
+            "sampling_calibration": calibration,
+            "eligible_pool_recommendations": {
+                "audited_users": len(exact),
+                "unique_top10_items": len(recommended),
+                "training_catalog_size": len(catalog),
+                "catalog_coverage": (
+                    len(recommended) / len(catalog) if len(catalog) else None
+                ),
+                "mean_training_frequency": (
+                    float(np.mean(recommendation_frequencies))
+                    if recommendation_frequencies
+                    else None
+                ),
+            },
+            "paired_user_records": records,
+        }
+
+    ### <<< Self_EvolveRec-BLOCK-END
+
+    ### >>> Self_EvolveRec-BLOCK-START: Isolated diagnostics and bounded independently witnessed fault calibration
+    def run_full_diagnosis(self, train_loader):
+        # The supplied adapter defines this helper in this module.
+        return run_isolated_diagnosis(self, self._run_existing_diagnosis, train_loader)
+
+    def _run_existing_diagnosis(self, train_loader):
+        from itertools import islice
+        import time
+
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        diagnostic_started = time.perf_counter()
+        view, network = self.view, self.view.model
+        rng = np.random.default_rng(42)
+        user_rng = np.random.default_rng(42)
+        candidate_rng = np.random.default_rng(42)
+        previous_modes = [(module, module.training) for module in network.modules()]
+        python_state, numpy_state = random.getstate(), np.random.get_state()
+        torch_state = torch.random.get_rng_state()
+        cuda_state = (
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        )
+        metrics = {}
+        definitions = {
+            "training_positions": "Descriptive position-weighted training statistics from at most ten batches, requiring nonzero sequence, positive and negative IDs. No independent-user inference.",
+            "pos_neg_margin_mean": "Mean positive-minus-negative training score; scale dependent.",
+            "pos_neg_margin_p10": "Nearest-rank tenth percentile of training margins.",
+            "pos_neg_neg_beats_pos_rate": "Fraction of valid training margins below zero.",
+            "pos_neg_small_margin_rate": "Fraction of valid training margins below 0.5; this threshold is scale dependent.",
+            "pairwise_accuracy": "P(positive score > negative score) + 0.5 P(tie), conditional on sampled negative difficulty; invariant to strictly increasing score transformations.",
+            "embedding_angular_alignment": "(Mean off-diagonal cosine + 1)/2; approximately 0.5 means zero mean cosine. Not a ranking-quality or semantic-diversity metric.",
+            "representations": "Centered covariance eigenvalues for raw and unit-normalized vectors; total variance, largest eigenvalue share and exp(-sum(p log p)), where p is covariance eigenvalue mass. This is not RankMe. Zero variance has null effective rank.",
+            "structure": "Inspection of actual NextItNet residual blocks, temporal convolutions, positionwise norms, biases, explicit causal padding and masks. Reachability is conditional on this recognized graph and absence of unrecognized operations.",
+            "checks": "Feature comparisons in eval mode: atol=1e-6, rtol=1e-5; report maximum absolute difference. Width checks retain item content but may change absolute positions.",
+            "training_endpoint_interventions": "Fixed positive/negative endpoint pair, largest nonzero index, descriptive loader-row margin changes; rows are not identified independent users.",
+            "user_score_sensitivity": "Identified public training users, fixed 99 training-observed unseen candidates per user. Mean absolute score change and signed mean score change; no relevance labels, HR or target ranks.",
+            "temporal_geometry": "Identified-user strengths 0.25 and 0.5 use k=max(1,floor(fraction*original_nonpadding_length)), before baseline truncation. Interventions are unavailable when retained history cannot support the requested size or preserve the newest k items. Loader-row probes use their observed nonpadding lengths because full histories are unidentified. Deletions compact and left-pad; replacements preserve positions; shuffles preserve identities and multiplicities. Unchanged draws are excluded and counted, so shuffle estimates condition on changed draws.",
+            "user_intervals": "Pointwise 95% percentile intervals from 2000 seed-42 user bootstrap resamples. Each complete paired vector is resampled together within the current category and original-length stratum. Conditional on fitted model, fixed users/candidates; excludes training-seed, candidate-sampling and adaptive-search uncertainty. Exploratory, no p-values.",
+            "missingness": "Unavailable observations are null with reasons, never zero-effect evidence. Cross-category macro estimates require all four categories.",
+        }
+
+        def summary(values):
+            x = np.asarray(values, dtype=np.float64).reshape(-1)
+            if not x.size:
+                return {"n": 0, "mean": None, "reason": "No eligible observations"}
+            if not np.isfinite(x).all():
+                return {
+                    "n": int(x.size),
+                    "mean": None,
+                    "reason": "Nonfinite observations",
+                }
+            return {
+                "n": int(x.size),
+                "mean": float(x.mean()),
+                "p10": float(np.quantile(x, 0.1)),
+                "p50": float(np.quantile(x, 0.5)),
+                "p90": float(np.quantile(x, 0.9)),
+                "min": float(x.min()),
+                "max": float(x.max()),
+            }
+
+        def representation(x):
+            x = x.detach().float().cpu().double()
+            if not torch.isfinite(x).all():
+                return {
+                    "count": int(x.shape[0]),
+                    "value": None,
+                    "reason": "Nonfinite representation values; covariance unavailable",
+                }
+            result = {
+                "count": int(x.shape[0]),
+                "norms": summary(x.norm(dim=-1).numpy()),
+            }
+            for name, z in (("raw", x), ("unit_normalized", F.normalize(x, dim=-1))):
+                if len(z) < 2:
+                    result[name] = {
+                        "total_variance": None,
+                        "effective_rank": None,
+                        "reason": "At least two vectors required",
+                    }
+                    continue
+                z = z - z.mean(0, keepdim=True)
+                eig = torch.linalg.eigvalsh(z.T @ z / (len(z) - 1)).clamp_min(0)
+                total = float(eig.sum())
+                entry = {
+                    "eigenvalues": eig.tolist(),
+                    "total_variance": total,
+                    "leading_share": None,
+                    "effective_rank": None,
+                }
+                if total > 0:
+                    p = eig[eig > 0] / total
+                    entry.update(
+                        leading_share=float(eig[-1] / total),
+                        effective_rank=float(torch.exp(-(p * p.log()).sum())),
+                    )
+                else:
+                    entry["reason"] = "Zero centered variance"
+                result[name] = entry
+            return result
+
+        def encode(seq):
+            return view.log2feats(
+                torch.as_tensor(seq, dtype=torch.long, device=self.device)
+            )
+
+        def endpoint(seq):
+            positions = torch.arange(seq.shape[1], device=seq.device).expand_as(seq)
+            return positions.masked_fill(seq == 0, -1).max(1).values
+
+        def final_features(sequences):
+            seq = torch.as_tensor(
+                (
+                    sequences
+                    if isinstance(sequences, torch.Tensor)
+                    else np.asarray(sequences)
+                ),
+                dtype=torch.long,
+                device=self.device,
+            )
+            if seq.ndim != 2 or seq.shape[1] == 0:
+                raise ValueError("Diagnostic sequences must have nonempty B x L shape")
+            last = endpoint(seq)
+            if (last < 0).any():
+                raise ValueError("All-padding history cannot be scored by diagnostics")
+            feats = encode(seq)
+            return feats[torch.arange(len(seq), device=self.device), last]
+
+        def score_vectors(sequences, candidates):
+            output = []
+            for start in range(0, len(sequences), 32):
+                feats = final_features(sequences[start : start + 32])
+                # One feature vector and one candidate list per call preserves
+                # ModelView implementations accepting arbitrary item-list shapes.
+                output.extend(
+                    view.predict_score(f, candidates).detach().float().cpu().numpy()
+                    for f in feats
+                )
+            return np.asarray(output)
+
+        def compare(a, b):
+            return {
+                "max_absolute_difference": float((a - b).abs().max()),
+                "within_tolerance": bool(torch.allclose(a, b, atol=1e-6, rtol=1e-5)),
+            }
+
+        def inspect_structure():
+            convs = [
+                {
+                    "name": name,
+                    "kernel": list(m.kernel_size),
+                    "dilation": list(m.dilation),
+                    "stride": list(m.stride),
+                    "padding": list(m.padding),
+                    "bias": m.bias is not None,
+                }
+                for name, m in network.named_modules()
+                if isinstance(m, torch.nn.Conv1d)
+            ]
+            norms = [
+                {
+                    "name": name,
+                    "type": type(m).__name__,
+                    "normalized_shape": (
+                        list(m.normalized_shape)
+                        if isinstance(m, torch.nn.LayerNorm)
+                        else None
+                    ),
+                }
+                for name, m in network.named_modules()
+                if isinstance(
+                    m,
+                    (
+                        torch.nn.LayerNorm,
+                        torch.nn.BatchNorm1d,
+                        torch.nn.InstanceNorm1d,
+                        torch.nn.GroupNorm,
+                    ),
+                )
+            ]
+            recognized = type(network).__name__ == "NextItNetModel"
+            recognized &= hasattr(network, "blocks") and hasattr(network, "depth_norms")
+            offsets, all_depths = {0}, set()
+            if recognized:
+                recognized &= len(convs) == 2 * len(network.blocks)
+                for block in network.blocks:
+                    recognized &= type(block).__name__ == "NextItNetBlock"
+                    branch = set(offsets)
+                    for conv in (block.conv1, block.conv2):
+                        recognized &= (
+                            conv.stride == (1,)
+                            and conv.padding == (0,)
+                            and conv.kernel_size == (block.kernel_size,)
+                            and conv.dilation == (block.dilation,)
+                        )
+                        branch = {
+                            o + j * conv.dilation[0]
+                            for o in branch
+                            for j in range(conv.kernel_size[0])
+                        }
+                    offsets |= branch
+                    all_depths |= offsets
+                recognized &= all(
+                    n["type"] == "LayerNorm"
+                    and n["normalized_shape"] == [network.hidden_units]
+                    for n in norms
+                )
+                # The supplied gate includes a cumulative prefix mean. Its
+                # endpoint can depend on every retained earlier input token.
+                if hasattr(network, "prefix_norm") and hasattr(network, "depth_gate"):
+                    all_depths.update(range(int(network.maxlen)))
+            return {
+                "convolutions": convs,
+                "normalizations": norms,
+                "recognized_baseline_graph": bool(recognized),
+                "reachable_endpoint_offsets": (
+                    sorted(all_depths) if recognized else None
+                ),
+                "receptive_field_span": (
+                    max(all_depths) + 1 if recognized and all_depths else None
+                ),
+                "padding_and_masks": (
+                    "Recognized baseline explicitly left-pads each convolution and masks before/after convolutions, normalization and residual paths"
+                    if recognized
+                    else None
+                ),
+                "locality_caveat": "Conditional on supplied baseline forward graph; empirical checks below corroborate but do not prove locality",
+            }
+
+        try:
+            network.eval()
+            with torch.no_grad():
+                metrics["structure"] = inspect_structure()
+                itemnum = int(network.itemnum)
+                weights = view.item_emb.weight.detach()
+                real_count = min(itemnum, len(weights) - 1)
+                indices = rng.choice(
+                    np.arange(1, real_count + 1), min(2048, real_count), replace=False
+                )
+                sample = weights[
+                    torch.as_tensor(indices, dtype=torch.long, device=weights.device)
+                ]
+                metrics["item_representations"] = representation(sample)
+                if len(sample) > 1:
+                    unit = F.normalize(sample.float(), dim=-1)
+                    cosine = (unit.sum(0).square().sum() - unit.square().sum()) / (
+                        len(unit) * (len(unit) - 1)
+                    )
+                    metrics["embedding_angular_alignment"] = float(
+                        (cosine.clamp(-1, 1) + 1) / 2
+                    )
+                else:
+                    metrics["embedding_angular_alignment"] = None
+                margins, positives, negatives, final_states = [], [], [], []
+                endpoint_effects = []
+                batch_count, valid_count = 0, 0
+                for batch in islice(iter(train_loader), 10):
+                    _, sequence, positive, negative = batch
+                    seq, pos, neg = [
+                        torch.as_tensor(x, dtype=torch.long, device=self.device)
+                        for x in (sequence, positive, negative)
+                    ]
+                    feats = encode(seq)
+                    # Score the two B x L tensors separately: the actual NextItNet
+                    # scorer multiplies B x L x D features and item embeddings.
+                    ps, ns = view.predict_score(feats, pos), view.predict_score(
+                        feats, neg
+                    )
+                    valid = (seq != 0) & (pos != 0) & (neg != 0)
+                    margins.extend((ps - ns)[valid].float().cpu().tolist())
+                    positives.extend(ps[valid].float().cpu().tolist())
+                    negatives.extend(ns[valid].float().cpu().tolist())
+                    valid_count += int(valid.sum())
+                    batch_count += 1
+                    last = endpoint(seq)
+                    rows = torch.where(last >= 0)[0]
+                    final_states.append(feats[rows, last[rows]].detach().cpu())
+                    if batch_count == 1 and len(rows):
+                        checks = {
+                            "identity": compare(feats, encode(seq)),
+                            "batch_reordering": compare(
+                                feats, encode(seq.flip(0)).flip(0)
+                            ),
+                            "input_width": int(seq.shape[1]),
+                        }
+                        row = int(rows[0])
+                        nonzero = torch.where(seq[row] != 0)[0]
+                        checks["retained_history"] = int(len(nonzero))
+                        if len(nonzero) >= 2 and real_count >= 2:
+                            pivot = int(nonzero[len(nonzero) // 2 - 1])
+                            altered = seq[row : row + 1].clone()
+                            future = (
+                                torch.arange(seq.shape[1], device=self.device) > pivot
+                            )
+                            future &= altered[0] != 0
+                            altered[0, future] = altered[0, future] % real_count + 1
+                            checks["future_token_causality"] = dict(
+                                compare(
+                                    feats[row, : pivot + 1],
+                                    encode(altered)[0, : pivot + 1],
+                                ),
+                                pivot=pivot,
+                                changed_tokens=int(future.sum()),
+                            )
+                        offsets = metrics["structure"]["reachable_endpoint_offsets"]
+                        if offsets is not None and real_count >= 2:
+                            end = int(last[row])
+                            outside = [
+                                int(i) for i in nonzero if end - int(i) not in offsets
+                            ]
+                            if outside:
+                                altered = seq[row : row + 1].clone()
+                                altered[0, outside] = (
+                                    altered[0, outside] % real_count + 1
+                                )
+                                checks["outside_reachable_offsets"] = dict(
+                                    compare(feats[row, end], encode(altered)[0, end]),
+                                    changed_lags=[end - i for i in outside],
+                                )
+                            else:
+                                checks["outside_reachable_offsets"] = {
+                                    "value": None,
+                                    "reason": "No retained tokens outside reachable offsets",
+                                }
+                        width_checks = []
+                        first = int(nonzero[0])
+                        for remove in sorted({1, first // 2, first}):
+                            if not 0 < remove <= first:
+                                continue
+                            shortened = seq[row : row + 1, remove:]
+                            try:
+                                width_checks.append(
+                                    dict(
+                                        compare(
+                                            feats[row, last[row]],
+                                            final_features(shortened.cpu().numpy())[0],
+                                        ),
+                                        input_width=int(shortened.shape[1]),
+                                        removed_leading_padding=remove,
+                                        absolute_positions_shifted=hasattr(
+                                            network, "pos_emb"
+                                        ),
+                                    )
+                                )
+                            except (RuntimeError, ValueError, IndexError) as exc:
+                                width_checks.append(
+                                    {
+                                        "value": None,
+                                        "input_width": int(shortened.shape[1]),
+                                        "reason": str(exc),
+                                    }
+                                )
+                        checks["leading_padding_widths"] = width_checks or {
+                            "value": None,
+                            "reason": "No removable leading padding",
+                        }
+                        metrics["checks"] = checks
+                        for r in rows[:8].tolist():
+                            e = int(last[r])
+                            if not bool(valid[r, e]):
+                                continue
+                            history = seq[r][seq[r] != 0].cpu().numpy()
+                            if len(history) < 2:
+                                continue
+                            pair = torch.stack((pos[r, e], neg[r, e]))
+                            baseline = float(ps[r, e] - ns[r, e])
+                            for fraction in (0.25, 0.5):
+                                k = max(1, int(fraction * len(history)))
+                                for region, kept in (
+                                    ("old", history[k:]),
+                                    ("recent", history[:-k]),
+                                ):
+                                    altered = np.zeros(seq.shape[1], dtype=np.int64)
+                                    altered[-len(kept) :] = kept
+                                    scores = score_vectors([altered], pair)[0]
+                                    endpoint_effects.append(
+                                        {
+                                            "fraction": fraction,
+                                            "region": region,
+                                            "retained_length": len(history),
+                                            "deleted": k,
+                                            "margin_change": float(
+                                                scores[0] - scores[1] - baseline
+                                            ),
+                                        }
+                                    )
+                m = np.asarray(margins)
+                metrics["training_positions"] = {
+                    "batches": batch_count,
+                    "valid_positions": valid_count,
+                    "margins": summary(m),
+                    "positive_scores": summary(positives),
+                    "negative_scores": summary(negatives),
+                }
+                metrics["pos_neg_margin_mean"] = float(m.mean()) if len(m) else None
+                metrics["pos_neg_margin_p10"] = (
+                    float(np.sort(m)[max(0, int(np.ceil(0.1 * len(m))) - 1)])
+                    if len(m)
+                    else None
+                )
+                metrics["pos_neg_neg_beats_pos_rate"] = (
+                    float((m < 0).mean()) if len(m) else None
+                )
+                metrics["pos_neg_small_margin_rate"] = (
+                    float((m < 0.5).mean()) if len(m) else None
+                )
+                metrics["pairwise_accuracy"] = (
+                    float(((m > 0) + 0.5 * (m == 0)).mean()) if len(m) else None
+                )
+                metrics["training_endpoint_interventions"] = endpoint_effects
+                metrics["loader_endpoint_representations"] = (
+                    representation(torch.cat(final_states))
+                    if final_states
+                    else {"count": 0, "reason": "No nonpadding rows"}
+                )
+
+                histories = self.user_train.get("History", self.user_train)
+                if not isinstance(histories, dict):
+                    raise TypeError(
+                        "ModelView user_train must expose mapped item histories"
+                    )
+                # Histories must already use the baseline's integer item mapping.
+                ordered = sorted(histories, key=lambda x: (type(x).__name__, str(x)))
+                chosen = sorted(
+                    user_rng.choice(
+                        len(ordered), min(200, len(ordered)), replace=False
+                    ).tolist()
+                )
+                frequencies = Counter(
+                    int(i)
+                    for h in histories.values()
+                    for i in h
+                    if 1 <= int(i) <= real_count
+                )
+                observed = np.asarray(sorted(frequencies), dtype=np.int64)
+                ordered_frequency = sorted(
+                    observed.tolist(), key=lambda i: (frequencies[i], i)
+                )
+                decile = {
+                    item: min(9, 10 * rank // max(1, len(ordered_frequency)))
+                    for rank, item in enumerate(ordered_frequency)
+                }
+                pools = {
+                    d: np.asarray(
+                        [i for i in observed if decile[int(i)] == d], dtype=np.int64
+                    )
+                    for d in range(10)
+                }
+                maxlen = int(network.maxlen)
+                user_rows, skips, intact_user_states = [], Counter(), []
+
+                def padded(history):
+                    history = np.asarray(history, dtype=np.int64)
+                    if history.ndim != 1 or not 0 < len(history) <= maxlen:
+                        raise ValueError(
+                            "History must be nonempty and fit the diagnostic input width"
+                        )
+                    array = np.zeros(maxlen, dtype=np.int64)
+                    array[-len(history) :] = history
+                    return array
+
+                for index in chosen:
+                    uid = ordered[index]
+                    original = np.asarray(histories[uid], dtype=np.int64)
+                    if not len(original) or np.any(
+                        (original < 1) | (original > real_count)
+                    ):
+                        skips["empty_or_unmapped_history"] += 1
+                        continue
+                    h = original[-maxlen:]
+                    unseen = observed[~np.isin(observed, original)]
+                    if len(unseen) < 99:
+                        skips["fewer_than_99_training_observed_unseen_candidates"] += 1
+                        continue
+                    candidates = candidate_rng.choice(unseen, 99, replace=False)
+                    cand_t = torch.as_tensor(
+                        candidates, dtype=torch.long, device=self.device
+                    )
+                    intact = padded(h)
+                    intact_features = final_features([intact])[0]
+                    intact_user_states.append(intact_features.detach().cpu())
+                    baseline = (
+                        view.predict_score(intact_features, cand_t)
+                        .detach()
+                        .float()
+                        .cpu()
+                        .numpy()
+                    )
+                    if baseline.shape != (99,) or not np.isfinite(baseline).all():
+                        raise RuntimeError(
+                            "Diagnostic scorer must return 99 finite candidate scores"
+                        )
+                    variants, labels, geometry = (
+                        [intact.copy()],
+                        ["identity"],
+                        [{"changed": 0}],
+                    )
+                    unavailable = Counter()
+
+                    def add(label, history, metadata):
+                        array = padded(history)
+                        if np.array_equal(array, intact):
+                            unavailable[label + ":unchanged"] += 1
+                            return
+                        variants.append(array)
+                        labels.append(label)
+                        geometry.append(metadata)
+
+                    for fraction in (0.25, 0.5):
+                        n = len(h)
+                        k = max(1, int(fraction * len(original)))
+                        prefix = str(fraction) + ":"
+                        if n <= k:
+                            unavailable[prefix + "insufficient_remaining_history"] += 1
+                            continue
+                        regions = {"recent": np.arange(n - k, n)}
+                        if n - k >= k:
+                            regions["old"] = np.arange(k)
+                        else:
+                            unavailable[prefix + "old:cannot_preserve_newest_k"] += 1
+                        if n - k >= k:
+                            regions["random"] = np.sort(
+                                rng.choice(n - k, k, replace=False)
+                            )
+                        else:
+                            unavailable[prefix + "random:cannot_preserve_newest_k"] += 1
+                        if n - k - 1 >= k:
+                            regions["interior"] = np.sort(
+                                rng.choice(np.arange(1, n - k), k, replace=False)
+                            )
+                        else:
+                            unavailable[
+                                prefix + "interior:cannot_preserve_newest_k"
+                            ] += 1
+                        for name, positions in regions.items():
+                            metadata = {
+                                "k": k,
+                                "original_length": len(original),
+                                "retained_length": n,
+                                "input_width": maxlen,
+                                "lags": (n - 1 - positions).tolist(),
+                                "newest_k_preserved": bool(np.all(positions < n - k)),
+                            }
+                            add(
+                                prefix + name + "_delete",
+                                np.delete(h, positions),
+                                metadata,
+                            )
+                            zeros = h.copy()
+                            zeros[positions] = 0
+                            add(prefix + name + "_zero", zeros, metadata)
+                            replacements = h.copy()
+                            unmatched = 0
+                            for p in positions:
+                                forbidden = np.concatenate((h, candidates))
+                                options = pools[decile[int(h[p])]]
+                                options = options[~np.isin(options, forbidden)]
+                                if not len(options):
+                                    unmatched += 1
+                                    options = observed[~np.isin(observed, forbidden)]
+                                if not len(options):
+                                    break
+                                replacements[p] = rng.choice(options)
+                            else:
+                                add(
+                                    prefix + name + "_replace",
+                                    replacements,
+                                    dict(
+                                        metadata, unmatched_frequency_decile=unmatched
+                                    ),
+                                )
+                                continue
+                            unavailable[prefix + name + "_replace:no_alternative"] += 1
+                        for name, positions in (
+                            ("recent", np.arange(n - k, n)),
+                            ("old", np.arange(n - k)),
+                        ):
+                            if len(positions) < 2 or len(np.unique(h[positions])) < 2:
+                                unavailable[
+                                    prefix
+                                    + name
+                                    + "_shuffle:insufficient_distinct_items"
+                                ] += 1
+                                continue
+                            for draw in range(20):
+                                altered = h.copy()
+                                altered[positions] = rng.permutation(h[positions])
+                                add(
+                                    prefix + name + "_shuffle",
+                                    altered,
+                                    {
+                                        "k": k,
+                                        "region_size": len(positions),
+                                        "draw": draw,
+                                        "lags": (n - 1 - positions).tolist(),
+                                        "retained_length": n,
+                                        "input_width": maxlen,
+                                    },
+                                )
+                    scores = score_vectors(variants, cand_t)
+                    if (
+                        scores.shape != (len(variants), 99)
+                        or not np.isfinite(scores).all()
+                    ):
+                        raise RuntimeError(
+                            "Diagnostic intervention scores have invalid shape or nonfinite values"
+                        )
+                    effects = {}
+                    for label in dict.fromkeys(labels):
+                        indices = [
+                            i for i, label_i in enumerate(labels) if label_i == label
+                        ]
+                        delta = scores[indices] - baseline
+                        effects[label] = {
+                            "mean_absolute_score_change": float(np.abs(delta).mean()),
+                            "signed_mean_score_change": float(delta.mean()),
+                            "changed_draws": len(indices),
+                            "geometry": [geometry[i] for i in indices],
+                        }
+                    user_rows.append(
+                        {
+                            "user_id": str(uid),
+                            "original_length": len(original),
+                            "retained_length": len(h),
+                            "effects": effects,
+                            "ineligible": dict(unavailable),
+                        }
+                    )
+
+                metrics["intact_user_endpoint_representations"] = (
+                    representation(torch.stack(intact_user_states))
+                    if intact_user_states
+                    else {
+                        "count": 0,
+                        "value": None,
+                        "reason": "No eligible identified training users",
+                    }
+                )
+                definitions["intact_user_endpoint_representations"] = (
+                    "Raw and unit-normalized covariance statistics and norm quantiles for "
+                    "one intact final-nonpadding feature per identified training user "
+                    "eligible for the fixed-candidate sensitivity probe. Loader endpoint "
+                    "statistics remain separate and may contain repeated users."
+                )
+                definitions["paired_contrasts"] = (
+                    "Within-user difference between each named method and the first method "
+                    "in its declared comparison family, computed on common eligible users. "
+                    "Bootstrap intervals resample each complete paired vector together. "
+                    "These are score-sensitivity contrasts, not ranking improvements."
+                )
+
+                sensitivity_bootstrap_weights = {}
+
+                def aggregate(rows, names):
+                    if not rows:
+                        return {
+                            "eligible_users": 0,
+                            "estimates": None,
+                            "reason": "No common eligible users",
+                        }
+                    columns = [
+                        (name, field)
+                        for name in names
+                        for field in (
+                            "mean_absolute_score_change",
+                            "signed_mean_score_change",
+                        )
+                    ]
+                    values = np.asarray(
+                        [
+                            [r["effects"][name][field] for name, field in columns]
+                            for r in rows
+                        ]
+                    )
+                    # Reuse deterministic user multiplicities by cohort size.
+                    # Every column still shares the same paired resample.
+                    n = len(rows)
+                    if n not in sensitivity_bootstrap_weights:
+                        draws = np.random.default_rng(42).integers(n, size=(2000, n))
+                        counts = np.zeros((2000, n), dtype=np.float64)
+                        np.add.at(counts, (np.arange(2000)[:, None], draws), 1.0)
+                        sensitivity_bootstrap_weights[n] = counts / n
+                    means = sensitivity_bootstrap_weights[n] @ values
+                    bounds = np.quantile(means, [0.025, 0.975], axis=0)
+                    contrasts = {}
+                    for j, (name, field) in enumerate(columns):
+                        if name == names[0]:
+                            continue
+                        reference = columns.index((names[0], field))
+                        paired_difference = values[:, j] - values[:, reference]
+                        bootstrap_difference = means[:, j] - means[:, reference]
+                        contrasts[name + "_minus_" + names[0] + ":" + field] = {
+                            "mean": float(paired_difference.mean()),
+                            "ci95": np.quantile(
+                                bootstrap_difference, [0.025, 0.975]
+                            ).tolist(),
+                        }
+                    return {
+                        "eligible_users": len(rows),
+                        "paired_contrasts": contrasts,
+                        "estimates": {
+                            name
+                            + ":"
+                            + field: {
+                                "mean": float(values[:, j].mean()),
+                                "ci95": bounds[:, j].tolist(),
+                            }
+                            for j, (name, field) in enumerate(columns)
+                        },
+                    }
+
+                groups = {
+                    "all": lambda r: True,
+                    "1-10": lambda r: r["original_length"] <= 10,
+                    "11-25": lambda r: 11 <= r["original_length"] <= 25,
+                    "26+": lambda r: r["original_length"] >= 26,
+                }
+                methods = ["identity"] + [
+                    str(fraction) + ":" + suffix
+                    for fraction in (0.25, 0.5)
+                    for suffix in (
+                        "old_delete",
+                        "recent_delete",
+                        "random_delete",
+                        "interior_delete",
+                        "old_zero",
+                        "recent_zero",
+                        "random_zero",
+                        "interior_zero",
+                        "old_replace",
+                        "recent_replace",
+                        "random_replace",
+                        "interior_replace",
+                        "old_shuffle",
+                        "recent_shuffle",
+                    )
+                ]
+                aggregates, common = {}, {}
+                for group, predicate in groups.items():
+                    rows = [r for r in user_rows if predicate(r)]
+                    aggregates[group] = {
+                        name: aggregate(
+                            [r for r in rows if name in r["effects"]], [name]
+                        )
+                        for name in methods
+                    }
+                    common[group] = {}
+                    for fraction in (0.25, 0.5):
+                        prefix = str(fraction) + ":"
+                        families = {
+                            "deletions": [
+                                "old_delete",
+                                "recent_delete",
+                                "random_delete",
+                                "interior_delete",
+                            ],
+                            "old_geometry_controls": [
+                                "old_delete",
+                                "old_zero",
+                                "old_replace",
+                            ],
+                            "recent_geometry_controls": [
+                                "recent_delete",
+                                "recent_zero",
+                                "recent_replace",
+                            ],
+                            "random_geometry_controls": [
+                                "random_delete",
+                                "random_zero",
+                                "random_replace",
+                            ],
+                            "interior_geometry_controls": [
+                                "interior_delete",
+                                "interior_zero",
+                                "interior_replace",
+                            ],
+                            "shuffles": ["old_shuffle", "recent_shuffle"],
+                        }
+                        for family, suffixes in families.items():
+                            names = [prefix + suffix for suffix in suffixes]
+                            paired = [
+                                r
+                                for r in rows
+                                if all(name in r["effects"] for name in names)
+                            ]
+                            common[group][prefix + family] = aggregate(paired, names)
+                metrics["user_score_sensitivity"] = {
+                    "category": str(
+                        getattr(
+                            view,
+                            "dataset_name",
+                            getattr(network, "dataset_name", "current_category"),
+                        )
+                    ),
+                    "selected_users": len(chosen),
+                    "eligible_users": len(user_rows),
+                    "skipped_users": dict(skips),
+                    "maxlen": maxlen,
+                    "candidate_source": "99 fixed training-observed unseen IDs per identified user",
+                    "by_original_length": aggregates,
+                    "common_eligible_comparisons": common,
+                    "paired_user_records": user_rows,
+                }
+                metrics["candidate_depth_audit"] = self._candidate_depth_audit()
+                definitions["candidate_depth_audit"] = (
+                    "In-sample exploratory training-prefix audit; no validation labels. "
+                    "Up to 200 uniformly sampled eligible users without replacement, sorted "
+                    "before selection; seed 42 plus declared category index and stable hashed "
+                    "user ID for ten independent candidate repetitions. Unknown category uses "
+                    "index 4 and must not be treated as a named category macro report. Each "
+                    "target is the final permitted training interaction; its cutoff is a zero-based "
+                    "training index, and it may have been optimized during fitting. Prefixes are "
+                    "left-padded/truncated to model.maxlen and read at the largest nonzero index. "
+                    "The catalog contains only mapped training-observed items. Negative pools "
+                    "exclude every full training-history item, including target; this is retrospective "
+                    "hindsight rather than a prospective exclusion policy. Repeated targets are "
+                    "recorded before exclusion. Ten uniform ordered samples without replacement "
+                    "share nested prefixes of 99/499/999 negatives. Missing depths are unavailable, "
+                    "with counts in user-repetition-depth units. Ties favor ascending item ID. "
+                    "Rank includes the positive; hit means rank<=10. Margin subtracts the tenth "
+                    "largest negative score and is scale dependent. Nested ranks cannot improve "
+                    "with depth; declining hit rates alone imply nothing about generalization. "
+                    "Users receive equal weight; depth-specific populations may differ. Paired "
+                    "comparisons use common eligible users and 2000 seed-42 user-cluster bootstrap "
+                    "resamples conditional on candidate repetition zero. Intervals exclude training "
+                    "seed, adaptive search and candidate-resampling uncertainty. Repetition SD is "
+                    "computed across ten category-level summaries; SD/sqrt(10) is solely Monte "
+                    "Carlo error of their average, with model and users fixed. Repetitions are never "
+                    "independent users. Frequency bands use all valid permitted training interactions, "
+                    "descending frequency then ascending item ID: first ceil(20%) head, next through "
+                    "ceil(50%) middle, remainder tail. Length bins use prefixes before truncation. "
+                    "At most 50 randomly selected audit users have exact full-eligible-pool ranks; "
+                    "scores stream in chunks<=4096 and retain only the top ten negative items. "
+                    "N is eligible negative count and M counts negatives preceding the target. "
+                    "Conditional expected hit is hypergeom.cdf(9,N,M,m); expected rank is "
+                    "1+m*M/N, applicable only to declared uniform sampling and tie order. "
+                    "Expected/observed residuals measure sampling variability, not generalization. "
+                    "Recommendation popularity and catalog coverage describe top-ten scores on "
+                    "these same restricted negative pools, excluding known training items and the "
+                    "target; they are not unrestricted-catalog recommendation quality. Existing "
+                    "controlled shuffle/truncation probes remain descriptive controls. Only one "
+                    "category is measured here; four-category macro summaries require all four "
+                    "reports and equal category weights. No auxiliary scorer or model is fitted."
+                )
+                metrics["four_category_macro"] = {
+                    "value": None,
+                    "reason": "This ModelView contains one category; aggregate four category reports externally only when all four have eligible observations",
+                }
+                metrics["validation_interventions"] = {
+                    "value": None,
+                    "reason": "No authorized pinned validation user/target/candidate interface supplied",
+                }
+                metrics["pos_neg_margin_category_breakdown"] = {
+                    "value": None,
+                    "reason": "Item categories are unavailable in this benchmark",
+                }
+                metrics["unobserved_traits"] = [
+                    "ratings",
+                    "review text",
+                    "prices",
+                    "stores",
+                    "item categories",
+                    "simulator diversity",
+                    "simulator conformity",
+                ]
+                metrics["diagnostic_scope"] = (
+                    "Exploratory diagnostics only; no model, checkpoint, sampling, training, predictor or evaluator changes"
+                )
+        finally:
+            for module, mode in previous_modes:
+                module.training = mode
+            random.setstate(python_state)
+            np.random.set_state(numpy_state)
+            torch.random.set_rng_state(torch_state)
+            if cuda_state is not None:
+                torch.cuda.set_rng_state_all(cuda_state)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        metrics["diagnostic_elapsed_seconds"] = time.perf_counter() - diagnostic_started
+        definitions["diagnostic_elapsed_seconds"] = (
+            "Wall-clock seconds for all probes, including exact eligible-pool scoring "
+            "and final CUDA synchronization; prior queued CUDA work is excluded by "
+            "synchronizing before timing. Diagnostic execution consumes the shared "
+            "experiment budget."
+        )
+        return {"metrics": metrics, "metric_definitions": definitions}
+
+    ### <<< Self_EvolveRec-BLOCK-END

@@ -1,0 +1,134 @@
+--- g2-r0010-recent10/model.py
++++ g2-r0011-equal_occupied/model.py
+@@ -1,14 +1,15 @@
+-"""Prospective temporal resolution allocation under fixed 100-event visibility.
+-
+-Recent, early and equal partitions use ten blocks and three count-weighted
+-slots per block. Recent and early have reversed block-width schedules; both
+-preserve every valid event. Full history scores each event once, then splits
+-its weighted value by the same feedback masks. No learned router is added.
+-
+-All variants inherit the incumbent scorer, heads, initialization order, and
+-context-open/item-and-scorer-blocked auxiliary gradient paths. The full-history
+-control changes Dice population and training cost as well as compression.
+-Padding values are sanitized before scoring. Numerical checks and training
+-remain host-only. This is a controlled adaptation, with no novelty claim.
++"""Prospective temporal partition x scorer-population factorial.
++
++Only occupied summaries enter the scorer's existing Dice/BatchNorm in the
++occupied cells. Dense cells replay the inherited operator. Means, exact mass,
++all 100 visible events, scorer/tower parameters, initialization order and
++auxiliary gradient ownership remain inherited. Empty-slot target copies can
++otherwise affect the normalization of occupied slots, even though their own
++pooled contributions have zero mass. This study tests that confound; it does
++not assume that the observed recent-partition advantage is an information
++retention effect. No novelty or new empirical result is claimed.
++
++All numerical checks and training are host-only. Boolean compaction can incur
++GPU synchronization and must be charged in measured wall time and latency.
+ """
+ import torch
+@@ -28,15 +29,54 @@
+     'block_aux_context_grad': False,
+     'block_aux_item_grad': True,
+-    'history_partition': 'recent',
++    'history_partition': 'equal',
++    'scorer_population': 'occupied',
+ }
+ 
+ 
++class PopulationScorer(nn.Sequential):
++    """Same layers and state keys as the ancestor; optional row compaction.
++
++    Native BatchNorm computes statistics over the compacted rows, preserving
++    its biased training variance and unbiased running-variance convention.
++    Masked rows never enter any layer or statistic. A degenerate zero/one-row
++    call does not update running state; one row uses stored statistics.
++    """
++
++    def forward(self, interactions, active=None):
++        if active is None:
++            return super().forward(interactions)
++        indices = torch.nonzero(active.reshape(-1), as_tuple=False).reshape(-1)
++        selected = interactions.index_select(0, indices)
++        if selected.shape[0] == 0:
++            # Keep a zero derivative to supplied inputs; scorer state is idle.
++            return interactions[:, :1] * 0.0
++        if self.training and selected.shape[0] == 1:
++            # Avoid changing module modes or shared running buffers. This is
++            # only a degenerate-call rule, not a change to the host recipe.
++            for layer in self:
++                if isinstance(layer, Dice):
++                    normalized = torch.nn.functional.batch_norm(
++                        selected, layer.bn.running_mean, layer.bn.running_var,
++                        layer.bn.weight, layer.bn.bias, training=False,
++                        momentum=0.0, eps=layer.bn.eps)
++                    probability = torch.sigmoid(normalized)
++                    selected = (probability * selected
++                                + layer.alpha * (1 - probability) * selected)
++                else:
++                    selected = layer(selected)
++            scores = selected
++        else:
++            scores = super().forward(selected)
++        output = scores.new_zeros((interactions.shape[0], 1))
++        return output.index_copy(0, indices, scores)
++
++
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='TemporalResolutionCompression', gpu=-1,
++    def __init__(self, feature_map, model_id='OccupiedSummaryCompression', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+                  compression_routes='uf', block_aux_scorer_grad=True,
+                  block_aux_context_grad=False, block_aux_item_grad=True,
+-                 history_partition='recent', num_tasks=None,
++                 history_partition='equal', scorer_population='occupied', num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -63,4 +103,7 @@
+             raise ValueError('Unknown temporal partition')
+         self.history_partition = history_partition
++        if scorer_population not in ('dense', 'occupied'):
++            raise ValueError('Unknown scorer population')
++        self.scorer_population = scorer_population
+         widths = (20, 20, 20, 20, 10, 5, 2, 1, 1, 1)
+         if history_partition == 'early':
+@@ -100,5 +143,5 @@
+             width = hidden
+         layers.append(nn.Linear(width, 1))
+-        self.local_activation = nn.Sequential(*layers)
++        self.local_activation = PopulationScorer(*layers)
+         input_width = len(self.user_fields) * embedding_dim + self.key_width + self.value_width
+         self.towers = nn.ModuleList()
+@@ -177,5 +220,5 @@
+         return torch.cat([query, keys, query - keys, query * keys, action], dim=-1).reshape(batch * slots, -1)
+ 
+-    def _auxiliary_activation(self, interactions):
++    def _auxiliary_activation(self, interactions, active=None):
+         # Functional evaluation uses the SAME learned scorer with parameter
+         # stop-gradient fixed on. Do not use no_grad: gradients into each
+@@ -191,5 +234,5 @@
+                    for name, buffer in self.local_activation.named_buffers()}
+         return torch.func.functional_call(
+-            self.local_activation, (parameters, buffers), (interactions,), strict=True)
++            self.local_activation, (parameters, buffers), (interactions, active), strict=True)
+ 
+     def _pool(self, weights, values, counts):
+@@ -209,5 +252,8 @@
+         # positions. These Dice populations differ, so full versus compressed
+         # is an architectural replacement control, not pure information loss.
+-        primary_weights = self.local_activation(self._interactions(target, values))
++        active = None
++        if self.scorer_population == 'occupied':
++            active = (counts[:, :, 0] if self.history_partition == 'full' else counts) > 0
++        primary_weights = self.local_activation(self._interactions(target, values), active)
+         primary_strata = self._pool(primary_weights, values, counts)
+         uniform = primary_strata[:, 0, :]
+@@ -220,5 +266,5 @@
+             aux_target = target.detach() if self.block_aux_item_grad else target
+             aux_values = values.detach() if self.block_aux_item_grad else values
+-            aux_weights = self._auxiliary_activation(self._interactions(aux_target, aux_values))
++            aux_weights = self._auxiliary_activation(self._interactions(aux_target, aux_values), active)
+             aux_strata = self._pool(aux_weights, aux_values, counts)
+         else:

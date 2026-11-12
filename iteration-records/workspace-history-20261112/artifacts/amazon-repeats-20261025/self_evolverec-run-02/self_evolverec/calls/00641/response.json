@@ -1,0 +1,76 @@
+{
+  "markdown_report": "**Insights from the starting point.** (1) A zero-initialized residual preserves baseline logits at initialization for finite branch outputs. This provides a controlled architectural comparison. (2) Recent pooling can reinforce current interests. It may also amplify an incidental purchase, so window length requires validation. (3) Electronics/CDs show 21.8%/22.4% sampled training ranking errors. These motivate improving positive–negative separation, without establishing a validation deficit.\n\n**Insights from related work.** (1) FSASA combines global and local representations; MiaSRec questions last-item dominance. Together they motivate pooling several recent interactions rather than relying exclusively on the last item. (2) gSASRec identifies sampled-BCE overconfidence. Objective changes therefore deserve an independent comparison before adding gates. (3) UFNRec addresses false negatives. Unobserved candidates should not receive increasingly aggressive penalties merely because they score highly.\n\n**Framework.** Three directions separate explanatory mechanisms: representation horizon, negative-supervision calibration, and adaptive intent fusion. The corresponding minimal experiments are a fixed-window residual, calibrated multi-negative gBCE, and a gated residual. Cross these mechanisms only after isolated comparisons; otherwise improvements cannot be attributed.\n\n**Candidates and assessments.** Scores are 0–10; higher difficulty means harder implementation. O=originality, P=potential, U=user alignment, M=model alignment, D=difficulty. Each entry gives a positive (+) and limitation (−).\n\n| Idea | O | P | U | M | D |\n|---|---|---|---|---|---|\n| A: zero-start recent residual | 3: +controlled fusion; −established mechanism | 7: +cheap foundation; −fixed horizon | 7: +current purpose/style; −no compatibility labels | 6: +direct ranking gradient; −error reduction unproven | 2: +small branch; −predictor synchronization |\n| B: calibrated multi-negative gBCE | 2: +strong precedent; −existing method | 7: +objective baseline; −compute cost | 4: +better discrimination possible; −no intent mechanism | 8: +targets separation; −false negatives | 4: +vectorizable; −calibration details |\n| C: learned recency gate | 4: +conditional fusion; −close prior work | 7: +adaptive context; −sparse supervision | 8: +handles intent shifts; −intent remains latent | 6: +selective correction; −extra capacity confound | 5: +compact gate; −additional tuning |\n\n**Selected: A**, appropriate at 10% progress. Add a padding-aware mean of the latest three observed item embeddings at every position: \\(z_t=h_t+\\alpha r_t\\), with category-specific scalar \\(\\alpha=0\\). Keep the baseline next-item loss. The hypothesis explicitly addresses unsupported broad relatedness and media style/mood drift by strengthening recent evidence. It also targets the observed Electronics/CDs training-pair inversions through gradients on the same positive–negative scores. These are proposed mechanisms, not demonstrated improvements; redundancy and physical compatibility remain unresolved.\n\nImplement causal pooling without future targets, exclude padding, and mask padded outputs. Preserve all four models, routing, seeds, splits, and diagnostic interfaces; serialize the branch configuration and parameters into the predictor writer. Select solely by pinned macro validation HR@10. Missing panels prohibit claims about measured history sensitivity. Compare baseline and A first; test B and C separately only within the remaining GPU budget.",
+  "idea": {
+    "description": "Add a zero-initialized, strictly causal recent-window residual to each category-specific SASRec: z_t = h_t + alpha * r_t, where r_t is the padding-aware mean of the latest three observed item embeddings and alpha is a learned scalar initialized to zero. Keep the existing training objective for the first controlled experiment.",
+    "motivation": "Recent evidence may help distinguish a supported current purpose from broad relatedness and preserve specific media preferences rather than drifting across style or mood boundaries. The branch also receives direct next-item ranking supervision, targeting the elevated sampled training-pair inversions in Electronics and CDs_and_Vinyl. Neither recency dependence nor improved validation accuracy has been established by the supplied diagnostics.",
+    "implementation_notes": "Use existing raw item embeddings, excluding positional embeddings, for the residual. Compute baseline features first and initialize the branch without consuming additional random draws, preserving baseline initialization and RNG behavior. Initialize alpha exactly to zero; do not zero both alpha and an additional learned projection, which could block branch learning. The first update can train alpha while branch-specific gradients are initially zero. Retain baseline loss, optimizer, preprocessing seed 0, training seed 42, and SASREC_EPOCHS environment handling with default 200. DATA_DIR remains os.environ['GAGC_DATA_DIR']; artifacts stay beneath the trial directory. Preserve Movies_and_TV, Industrial_and_Scientific, Electronics, and CDs_and_Vinyl routing. Update the predictor writer to instantiate this same branch and load alpha and window configuration. Keep DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and its metrics/metric_definitions return contract; view.model must expose the actual model and log2feats must return augmented features. Do not fabricate missing panels or metadata. Compare training inversion rates under the same diagnostic distribution, but select only using host-pinned macro validation HR@10. Initial equality applies when loading identical baseline weights and evaluating with identical stochastic state; it is not a guarantee that subsequent training follows the baseline trajectory.",
+    "pseudocode": "import torch\nfrom torch import nn\n\nclass RecentResidual(nn.Module):\n    def __init__(self, window=3):\n        super().__init__()\n        self.window = int(window)\n        if self.window < 1:\n            raise ValueError('window must be positive')\n        self.alpha = nn.Parameter(torch.zeros(()))\n\n    def forward(self, baseline_features, sequence, item_emb):\n        # sequence: B x L; zero denotes padding.\n        valid = sequence.ne(0)\n        values = item_emb(sequence)\n        values = values.masked_fill(~valid.unsqueeze(-1), 0)\n        sums = torch.cat([values.new_zeros(values.size(0), 1, values.size(2)),\n                          values.cumsum(dim=1)], dim=1)\n        counts = torch.cat([values.new_zeros(values.size(0), 1),\n                            valid.to(values.dtype).cumsum(dim=1)], dim=1)\n        end = torch.arange(1, sequence.size(1) + 1, device=sequence.device)\n        start = (end - self.window).clamp_min(0)\n        recent_sum = sums[:, end] - sums[:, start]\n        recent_count = counts[:, end] - counts[:, start]\n        recent = recent_sum / recent_count.clamp_min(1).unsqueeze(-1)\n        result = baseline_features + self.alpha * recent\n        return result.masked_fill(~valid.unsqueeze(-1), 0)\n\n# In each category model, construct RecentResidual after baseline initialization.\n# In log2feats, compute the original SASRec features, then apply this module.\n# Use the same augmented features for training, prediction, and diagnostics.\n# Save window and alpha; generate a predictor containing the identical definition.\n# Host comparison: unchanged baseline versus window=3 residual, using pinned HR@10.",
+    "originality": {
+      "score": 3,
+      "positive": "Zero-start local fusion provides a clean, inexpensive controlled extension of the supplied baseline.",
+      "negative": "Combining local and global sequential representations is established; the proposal is an engineering hypothesis rather than a new intent-identification method."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "A useful residual would establish a simple foundation for separately testing adaptive windows and gates.",
+      "negative": "Fixed-window pooling can reinforce irrelevant recent events and provides no explicit supervision for compatibility, redundancy, or media style."
+    },
+    "code_difficulty": {
+      "score": 2,
+      "positive": "Prefix-sum pooling adds linear sequence work, one scalar parameter, and no external data dependencies.",
+      "negative": "Checkpoint configuration, predictor generation, padding behavior, and diagnostic feature access must remain synchronized."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Provides the causal self-attention sequential recommendation baseline."
+      ],
+      "limitations": [
+        "Its general sequence representation does not explicitly identify current purpose or product compatibility."
+      ]
+    },
+    {
+      "title": "FSASA",
+      "link": "https://www.comsis.org/archive.php?show=ppr906-2305",
+      "contributions": [
+        "Combines global SASRec representations with local session-aware representations using GRU weighting."
+      ],
+      "limitations": [
+        "Does not establish the best local horizon or gains on these four pinned categories."
+      ]
+    },
+    {
+      "title": "MiaSRec",
+      "link": "https://arxiv.org/abs/2405.00986",
+      "contributions": [
+        "Uses item-centered intent representations and dynamic selection, motivating alternatives to last-item dominance."
+      ],
+      "limitations": [
+        "Its intent machinery is more complex than the proposed initial residual ablation."
+      ]
+    },
+    {
+      "title": "gSASRec",
+      "link": "https://www.ijcai.org/proceedings/2024/939",
+      "contributions": [
+        "Attributes SASRec weaknesses to sampled-BCE overconfidence and motivates calibrated multi-negative objectives."
+      ],
+      "limitations": [
+        "Calibration and negative-count settings require controlled evaluation under the available compute budget."
+      ]
+    },
+    {
+      "title": "UFNRec",
+      "link": "https://arxiv.org/abs/2208.04116",
+      "contributions": [
+        "Uses teacher soft labels and consistency regularization to address suspected false negatives."
+      ],
+      "limitations": [
+        "Teacher training adds cost, and unobserved items remain uncertain negatives in this task."
+      ]
+    }
+  ]
+}

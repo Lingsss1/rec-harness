@@ -1,0 +1,164 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting-point insights.** (1) Preserve causal SASRec to separate objective and representation gains. Its existing attention already models recent behavior. (2) A bounded residual exposes additional history signals without dominating sequence scores. Recurrence may revive stale demand, so compare simple recency pooling first. (3) Uniform multi-negative cross-entropy creates candidate competition. Training margins alone cannot establish validation improvement.\n\n**Related-work insights.** (1) Dross Into Gold establishes sampled candidate-set CE; gSASRec instead uses generalized BCE. Negative count, objective and calibration are separate factors [1–2,6]. (2) DIN establishes candidate-conditioned history attention; VISTA caches summaries for scalability. Neither establishes advantages over recency pooling on these Amazon datasets [3,7]. (3) TALE distinguishes calendar intervals from interaction positions; collapse research requires subspace diagnostics beyond cosine alignment. Neither reveals satisfaction or recommendation diversity [4–5].\n\n### Framework and candidates\n\n| Direction | Existing mechanism | Proposed experiment |\n|---|---|---|\n| Candidate discrimination | BCE; sampled CE | Uniform multi-negative CE |\n| Current, specific intent | SASRec; DIN/VISTA | Recency pooling before candidate attention |\n| Persistent interests | Recurrence weighting | Recency versus recurrence ablation |\n| Representation diagnosis | Mean cosine | Centered effective rank and margins |\n\nScores use originality/potential/user alignment/model alignment/difficulty, each 0–10; higher difficulty means harder. Each assessment gives a strength (+) and limitation (−).\n\n| Idea | Scores | Assessment in score order |\n|---|---|---|\n| A: Uniform multi-negative CE [1–2,6] | 2/7/4/9/3 | +Controlled −Established; +Reusable −Incremental; +Competition −No temporal mechanism; +Targets margins −Training proxy; +Small change −Exclusion cost |\n| **B: CE plus bounded candidate-conditioned recency residual [3–4,7–8]** | **3/7/8/8/6** | +Focused combination −Established components; +Extensible −Amazon uncertain; +Specific/current intent −No satisfaction labels; +Candidate separation −Overfitting; +Small branch −Prefix/catalog costs |\n| C: Recurrence-weighted residual [4] | 3/6/6/6/4 | +Controlled test −Known weighting; +Persistent interests −Sparse evidence; +Recurring tastes −Stale demand; +History signal −Indirect margin effect; +Pooling −Temporal tuning |\n| D: CE plus bounded recency pooling [4,8] | 2/7/6/7/3 | +Clean control −Established; +Efficient −Limited expressivity; +Current intent −Candidate-independent; +Additional signal −May duplicate SASRec; +Cacheable −Decay choice |\n\n### Selected idea: B\n\nAt 10% progress, retain B as a **staged hypothesis**, with D as its mandatory cheaper control. Candidate conditioning targets broad associations outranking specific matches; positional decay targets stale interests displacing current priorities. Neither establishes compatibility, satisfied needs or reduced substitute redundancy. CE targets Electronics’ 12.55% and Industrial’s 10.33% training negative-win rates.\n\nPseudocode: `H=SASRec(prefix); r=normalize(Attention(candidate,H,recency_bias)); score=h·e[c]+tanh(a)*r·normalize(e[c]); loss=CE(scores/τ)`.\n\nPrespecify baseline, CE, CE+D, CE+B; use N=32 unique uniform negatives per user, shared across positions, excluding all training positives and padding; τ=1. Set a=0 and decay=log(2)/10. Freeze baseline optimizer, dimensions, seeds and epoch budget; select final-epoch models using pinned macro validation HR@10. Preserve routing, predictor serialization and diagnostic interfaces; chunk catalog scoring. Report paired category-stratified bootstrap differences, compute and throughput. Four-way selection can overfit 800 validation users; intervals do not correct selection bias, and sampled gains need not transfer to full-catalog ranking [9–11].",
+  "idea": {
+    "description": "Retain the proposed bounded candidate-conditioned recency residual as a staged experiment: first test uniform multi-negative candidate-set cross-entropy, then candidate-independent recency pooling, and finally candidate-conditioned pooling. Require evidence that candidate conditioning earns its additional cost.",
+    "motivation": "The chosen mechanism explicitly targets two diagnosed user-facing failures: broad associations displacing specific matches, and stale interests displacing current priorities. Candidate-conditioned history extraction and positional decay are predictive hypotheses for these failures, not measurements of compatibility or satisfied needs. Candidate competition addresses weak sampled training discrimination in Electronics and Industrial_and_Scientific, where negatives beat positives at 12.55% and 10.33% of measured positions. These observations do not establish generalization or explain the causal source of errors.",
+    "implementation_notes": "Prespecify four configurations: the unchanged RecHarness baseline, SASRec with candidate-set CE, CE with candidate-independent recency pooling, and CE with candidate-conditioned recency pooling. Keep all four datasets, preprocessing seed 0, training seed 42, the baseline optimizer and its hyperparameters, hidden dimension, sequence length, batch size, dropout and training-example construction unchanged. Respect SASREC_EPOCHS, whose host default is 200, and use the final epoch for each configuration rather than introducing additional checkpoint selection. Select among these four configurations solely by pinned four-category macro validation HR@10; resolve exact ties by lower measured training GPU time. No experiments or implementation were executed here.\n\nFor the three CE configurations, use N=32 distinct uniform negatives per user sequence example, sampled without replacement from nonpadding catalog items excluding that user's complete training history. Share the sampled set across positions, resample on each presentation, and seed a dedicated sampler with 42. When fewer than 32 eligible items exist, use all eligible items and mask unused slots. Exclude no validation or test interactions. The current next-positive label is already a training-history item, so it cannot collide with these negatives. Apply CE only at valid next-item positions, with the positive always included once, temperature tau=1, and a mean over valid positions. This defines a sampled candidate-set objective; make no claim of unbiased catalog-softmax estimation and apply no logQ correction. Unique sampling avoids implicit duplicate weighting. Baseline versus CE changes both the objective and negative count, so describe that comparison as a combined intervention; an objective-specific causal claim would require a separately budgeted equal-N BCE control. gSASRec uses generalized BCE, and its calibration t is distinct from softmax temperature.\n\nUse causal SASRec states H as both keys and values, with no additional projections. For candidate c and position t, attention logits are dot(normalize(H[k]), normalize(e[c])) minus delta*(t-k), for nonpadding k<=t. Set delta=log(2)/10, fixed across pooling variants. Candidate-independent pooling removes only the candidate-history dot product. Normalize the weighted summary and candidate embeddings using epsilon=1e-8. Add tanh(a)*dot(summary, normalize(e[c])) to the baseline score, with one learned scalar a per category initialized to zero and bound c=1. Thus the absolute score residual is at most one, although its relative influence depends on backbone logit scale and must be reported. This is a bounded adaptation of zero-initialized residual gating, not a published ReZero formula. At initialization, branch-specific parameters would receive no gradient through the zero gate; this parameter-free branch avoids that complication.\n\nCompute summaries from each position's prefix, never from a full sequence summary reused at earlier positions. Block training positions and candidate dimensions to bound memory; a naive all-position implementation can require O(B*N*L^2) attention storage. At inference, use the final available prefix and chunk candidates, initially 512 per chunk, reducing the chunk size on memory pressure without changing scores. Compare full-catalog throughput as well as training GPU time. Candidate attention costs approximately O(C*L*d) per prefix, whereas candidate-independent pooling costs O(L*d+C*d), excluding the shared encoder. Measure actual total runtime and remain within the shared 43,200 GPU-second budget, including diagnostics and failures.\n\nUse ID embeddings initially. Keep a from-scratch title/description encoder, recurrence replacement, generalized BCE and alternative gates as later independent experiments rather than expanding this initial four-configuration search. If later testing calendar decay, compute elapsed time relative to the latest observed prefix interaction, never the target timestamp, and distinguish it from positional age. Ordinary recency-weighted pooling is not an explicit recurrence-interval model. Exact-item repeat mechanisms require adaptation because simulator recommendations exclude seen items.\n\nPreserve DATA_DIR=os.environ['GAGC_DATA_DIR'], category routing and all artifact paths beneath the trial directory. Update the predictor writer with architecture configuration, gate, fixed decay, normalization epsilon, weights and chunked scoring; ensure training and working/predict.py use identical feature and score equations. Retain DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. Keep view.model as the actual trained module, view.item_emb, log2feats, predict_score, user_train, meta_data and review_data compatibility attributes. Carry causal states and masks through the feature representation so predict_score can evaluate each positive or negative candidate separately. Do not let diagnostic scoring collapse the candidate-dependent branch into a single candidate-independent feature vector. Preserve bounded diagnostic sampling and clearly label margins as training-only. Supplement cosine alignment with centered embedding effective rank and embedding norms if budget permits; alignment alone establishes neither collapse nor recommendation diversity.\n\nTreat titles/descriptions and histories as the only relevant observed content; review ratings/text, item ratings/categories/prices/stores, satisfaction and simulator traits are unavailable. Do not infer those labels. Retain twenty real training users, five per category, for full-catalog unseen-item simulator recommendations. Reuse the same users for comparisons and track the supplied qualitative failure reasons without inventing aggregate improvements. The existing probes do not directly measure compatibility, current usefulness or substitute redundancy, and HR@10 cannot establish those outcomes.\n\nFor uncertainty, if official per-user hit indicators are available, bootstrap paired model differences independently within each category using 10,000 resamples and seed 42; average the four category differences and report percentile 95% intervals. If only aggregate host metrics are exposed, report those without fabricating per-user results. One changed hit changes category HR by 0.005 and macro HR by 0.00125. Intervals are conditional on the fixed candidates and trained models; they do not capture training-seed uncertainty or correct winner-selection bias. Keep the grid fixed, report every completed configuration and category result, and distinguish official sampled HR@10 from full-catalog simulator behavior. Watch for popularity shortcuts, title overlap shortcuts in any later text branch, attention dominated by the latest item, and gates that remain inactive or saturate; these are checks, not assumed findings.",
+    "pseudocode": "Prespecify configurations: BASELINE, CE, CE_RECENCY, CE_CANDIDATE.\nFor each configuration and each of the four categories:\n  Use preprocessing seed 0 and training seed 42.\n  Instantiate the baseline backbone and unchanged baseline training settings.\n  For residual configurations, initialize scalar a=0; fix delta=log(2)/10.\n  Train for SASREC_EPOCHS, with host default 200:\n    For each user sequence example:\n      H = causal_SASRec(sequence)\n      If BASELINE: use the unchanged baseline objective.\n      Otherwise:\n        Draw up to 32 unique uniform eligible negatives, shared across positions.\n        Eligible = nonpadding catalog minus this user's training-history items.\n        For every valid next-item position t, processed in memory-bounded blocks:\n          C = [training_positive_at_t] + sampled_negatives\n          For each candidate c:\n            score[c] = dot(H[t], item_embedding[c])\n            If residual enabled:\n              For each nonpadding k <= t:\n                attention_logit[k] = -delta*(t-k)\n                If CE_CANDIDATE:\n                  attention_logit[k] += dot(normalize(H[k]), normalize(e[c]))\n              r = normalize(sum_k softmax(attention_logit)[k] * H[k])\n              score[c] += tanh(a) * dot(r, normalize(e[c]))\n          Accumulate cross_entropy(score / 1.0, target=0).\n        Optimize mean loss over valid positions.\n  Save final-epoch checkpoint and matching predictor configuration.\n  Obtain validation HR@10 through the unchanged pinned host evaluation.\nSelect the configuration by macro HR@10; break exact ties by training GPU time.\nReport all four category scores, macro score, measured compute and catalog throughput.\nIf per-user hits are available, compute paired category-stratified bootstrap intervals.\nRun compatible bounded diagnostics and the prescribed twenty-user simulator protocol.\nDo not claim improvement, calibration, compatibility understanding or catalog-ranking gains without corresponding evidence.",
+    "originality": {
+      "score": 3,
+      "positive": "The bounded, controlled combination is tailored to the observed current-intent and discrimination failures, with an explicit architecture-versus-objective comparison.",
+      "negative": "Candidate-conditioned attention, recency weighting, sampled candidate-set CE and zero-initialized residual gates all have established precedents; novelty is primarily experimental integration."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "A controlled comparison can establish whether candidate specificity adds value beyond a cheap history summary and guide later temporal or locally trained text extensions.",
+      "negative": "Short histories, a small validation sample and full-catalog scoring costs may limit practical benefits; no measured improvement currently supports the mechanism."
+    },
+    "code_difficulty": {
+      "score": 6,
+      "positive": "The SASRec backbone is retained, and the initial attention branch needs no additional projection networks or pretrained assets.",
+      "negative": "Correct all-position causal candidate attention, unique negative sampling, memory blocking, diagnostic adaptation and predictor parity require substantial care."
+    }
+  },
+  "related_work": [
+    {
+      "title": "gSASRec and author implementation",
+      "link": "https://github.com/asash/gsasrec",
+      "contributions": [
+        "Uses generalized BCE to address calibration under negative sampling.",
+        "Separates the number of sampled negatives from a calibration parameter; it is not candidate-set softmax."
+      ],
+      "limitations": [
+        "Does not establish that the proposed CE objective or residual improves this benchmark.",
+        "Its calibration parameter t must not be confused with softmax temperature."
+      ]
+    },
+    {
+      "title": "Scalable Cross-Entropy (RecSys 2024)",
+      "link": "https://dspace.mit.edu/entities/publication/5392aca9-0bae-4176-9b3a-a8165957ba26",
+      "contributions": [
+        "Approximates catalog cross-entropy using informative high-scoring items."
+      ],
+      "limitations": [
+        "Its approximation differs from uniform sampled candidate-set CE and does not justify calling that objective unbiased catalog softmax."
+      ]
+    },
+    {
+      "title": "VISTA (2025)",
+      "link": "https://arxiv.org/abs/2510.22049",
+      "contributions": [
+        "Separates cached history summarization from candidate attention to summary tokens."
+      ],
+      "limitations": [
+        "Industrial long-history results do not establish gains on short Amazon histories or exact compatibility reasoning.",
+        "Direct attention over every SASRec prefix state does not inherit the same caching advantages."
+      ]
+    },
+    {
+      "title": "TALE",
+      "link": "https://arxiv.org/abs/2412.07382",
+      "contributions": [
+        "Models elapsed-time-dependent item correlations through augmentation, interval weighting and trend-aware normalization."
+      ],
+      "limitations": [
+        "Positional decay is a distinct proposed control, not a reproduction of TALE.",
+        "Temporal interaction patterns do not reveal whether a purchase satisfied a need."
+      ]
+    },
+    {
+      "title": "On the Embedding Collapse when Scaling up Recommendation Models",
+      "link": "https://proceedings.mlr.press/v235/guo24e.html",
+      "contributions": [
+        "Characterizes collapse through occupation of a low-dimensional embedding subspace."
+      ],
+      "limitations": [
+        "Mean cosine alignment alone cannot establish collapse, recommendation diversity or the cause of weak ranking."
+      ]
+    },
+    {
+      "title": "Turning Dross Into Gold Loss",
+      "link": "https://github.com/antklen/sasrec-bert4rec-recsys23",
+      "contributions": [
+        "Provides precedent for one-positive, multi-negative sampled candidate-set cross-entropy with negatives shared across sequence positions."
+      ],
+      "limitations": [
+        "Results depend on negative count, exclusions, sharing, duplicate policy and training temperature.",
+        "Provides objective precedent rather than evidence for the proposed attention branch."
+      ]
+    },
+    {
+      "title": "Deep Interest Network for Click-Through Rate Prediction",
+      "link": "https://arxiv.org/abs/1706.06978",
+      "contributions": [
+        "Weights historical behaviors according to the candidate to activate candidate-specific interests."
+      ],
+      "limitations": [
+        "CTR results do not establish superiority over tuned recency pooling on the four-category sequential HR@10 benchmark."
+      ]
+    },
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Provides the causal self-attention backbone.",
+        "Observed attention to recent interactions motivates checking whether an added recency branch supplies information beyond the backbone."
+      ],
+      "limitations": [
+        "Its history attention is not conditioned on each scored candidate.",
+        "Attention observations from another Amazon category do not establish the proposed residual's value."
+      ]
+    },
+    {
+      "title": "Computing Confidence Intervals for Common IR Measures",
+      "link": "https://www.nist.gov/publications/computing-confidence-intervals-common-ir-measures",
+      "contributions": [
+        "Supports bootstrap-based uncertainty analysis for retrieval evaluation."
+      ],
+      "limitations": [
+        "The proposed paired category-stratified procedure remains conditional on the fixed benchmark candidates and trained models."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how optimizing a finite model-selection criterion can produce selection bias."
+      ],
+      "limitations": [
+        "Restricting the search and reporting bootstrap intervals do not eliminate winner-selection bias."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled recommendation evaluation can change model rankings relative to catalog-wide evaluation."
+      ],
+      "limitations": [
+        "Does not authorize changing the pinned evaluator; official selection must retain the prescribed sampled HR@10."
+      ]
+    },
+    {
+      "title": "ReZero is All You Need: Fast Convergence at Large Depth",
+      "link": "https://arxiv.org/abs/2003.04887",
+      "contributions": [
+        "Establishes residual gating with a learned scalar initialized to zero."
+      ],
+      "limitations": [
+        "Does not establish a bounded tanh gate or its effectiveness for this recommendation task."
+      ]
+    },
+    {
+      "title": "TSRec",
+      "link": "https://arxiv.org/abs/2506.08531",
+      "contributions": [
+        "Models repeat consumption using user/item intervals and similarity to previous repeat sequences."
+      ],
+      "limitations": [
+        "Exact-item repeat modeling does not transfer directly to unseen-item recommendations.",
+        "Semantic recurrence would be a proposed adaptation, not an observed satisfaction signal."
+      ]
+    }
+  ]
+}

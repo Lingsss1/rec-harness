@@ -1,0 +1,23 @@
+{
+  "category_edits": [
+    {
+      "category": "feature_construction",
+      "rationale": "For each category, compute normalized log item frequencies solely from training interactions and scale historical item embeddings by 1-0.3*f_i. This tests whether suppressing common historical items improves the current pointwise objective. Preserve learned embeddings, causal convolutions, readout, loss, optimizer and candidate embeddings. Store the fixed scales in a checkpoint buffer; the existing predictor writer imports the updated model class and loads that buffer automatically.",
+      "edits": [
+        {
+          "find": "        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)\n        self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)",
+          "replace": "        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)\n        self.register_buffer(\"history_item_scale\", torch.ones(itemnum + 1))\n        self.history_item_scale[0] = 0.0\n        self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)"
+        },
+        {
+          "find": "        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)",
+          "replace": "        history_scale = self.history_item_scale[seq].unsqueeze(-1)\n        x = self.item_emb(seq) * history_scale * (self.hidden_units ** 0.5) + self.pos_emb(pos)"
+        },
+        {
+          "find": "    ).to(device)\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)",
+          "replace": "    ).to(device)\n    with torch.no_grad():\n        training_items = torch.tensor(\n            [item for history in user_train.values() for item in history],\n            dtype=torch.long, device=device,\n        )\n        counts = torch.bincount(training_items, minlength=itemnum + 1).float()\n        counts[0] = 0.0\n        log_counts = torch.log1p(counts)\n        frequency = log_counts / log_counts.max().clamp(min=1e-12)\n        model.history_item_scale.copy_(1.0 - 0.3 * frequency)\n        model.history_item_scale[0] = 0.0\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Add training-only frequency scaling of historical embeddings across all four category models, with checkpoint-backed inference consistency and unchanged candidate scoring."
+}

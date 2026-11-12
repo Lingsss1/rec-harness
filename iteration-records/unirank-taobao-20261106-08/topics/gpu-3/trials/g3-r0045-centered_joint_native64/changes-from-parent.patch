@@ -1,0 +1,246 @@
+--- g3-r0044-centered_native64/model.py
++++ g3-r0045-centered_joint_native64/model.py
+@@ -1,11 +1,14 @@
+-"""FP64 centered-direction factorial with collected auxiliary context VJPs.
+-
+-Cross native versus reversed occupied-row-centered transfer with mean absent
+-versus retained: C, -C, G, M-C, where G=(cart+fav)+buy and C=G-M.
+-All forward values, private task learning and the direct click path are
+-inherited. Only the product-context input cotangent changes in training.
+-These are surrogate backward attribution controls, not derivatives of the
+-identity forward or new scalar objectives. Norm statements apply only in
+-occupied row space before casting and repeated-ID embedding accumulation.
++"""FP64 click-relative reflection factorial for centered auxiliary transfer.
++
++Collect the click context cotangent and three auxiliary product-context
++cotangents together. Split centered auxiliary C into P parallel to the
++occupied-row-centered click cotangent and O orthogonal to it, globally over
++the batch/context matrix. Return click plus one of C, C-2P, 2P-C, -C.
++These are training-only surrogate VJPs, not derivatives of the identity
++forward or a new scalar objective. Private task learning stays ordinary.
++Equal-norm statements concern auxiliary occupied row space before the one
++boundary cast and repeated-ID embedding accumulation, not optimizer steps.
++The collection topology differs from the direct-click ancestor: native and
++whole-reversal bridge controls must be assessed before interpretation.
+ Numerical verification and all training belong to the authorized host.
+ """
+@@ -17,5 +20,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'aligned', 'centering_scope': 'aggregate', 'click_context_collection': 'direct', 'auxiliary_reduction_precision': 'float64'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'aligned', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64'}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -50,86 +53,92 @@
+ 
+ 
+-def _reduce_auxiliary_context(gradients, occupied, centering_scope, precision,
+-                              component='centered', assignment='aligned', orientation='aligned'):
+-    """Reverse only C, optionally retaining M, before the single cast.
+-
+-    C versus -C has equal Frobenius norm and zero occupied-row mean.
+-    G versus M-C retains M and has equal norm in real row-space arithmetic
+-    since M and C are orthogonal. This does not preserve each row norm or
+-    embedding-parameter norms. Native G is returned directly, avoiding a
+-    C+M round trip. FP64 does not promote upstream or sparse operations.
++def _click_relative_components(click_gradient, gradients, occupied):
++    """Global FP64 orthogonal split before sparse embedding accumulation.
++
++    K is the occupied-row-centered *click-only* context cotangent. P is
++    proj_K(C), O=C-P. Centering K keeps both components in C's zero-mean
++    occupied subspace. Scale K by its maximum absolute entry before the
++    projection to handle small nonzero reference magnitudes. If K=0,
++    define P=0 and O=C. This is not a per-row or parameter-space split.
+     """
+-    if centering_scope != 'aggregate' or precision != 'float64':
+-        raise ValueError('Component factorial freezes aggregate FP64 reduction')
+-    if component not in ('full', 'centered', 'mean', 'blocked'):
+-        raise ValueError('Unknown auxiliary context component')
+-    if assignment not in ('aligned', 'half_swap'):
+-        raise ValueError('Unknown collected auxiliary assignment')
+-    if orientation not in ('aligned', 'reversed'):
+-        raise ValueError('Unknown centered-component orientation')
+-    if component not in ('full', 'centered') or assignment != 'aligned':
+-        raise ValueError('Direction factorial freezes aligned full/centered transfer')
+     components = _auxiliary_context_components(gradients, occupied)
+-    native = components[component]
+-    reversed_centered = -components['centered']
+-    mean_retained_reflection = components['mean'] - components['centered']
+-    reflected = (mean_retained_reflection if component == 'full'
+-                 else reversed_centered)
+-    # Every cell computes both signs; only the prescribed VJP is selected.
+-    selected = reflected if orientation == 'reversed' else native
+-    # A self-inverse permutation only between two occupied half-batch rows.
+-    # Empty rows and occupied rows paired with an empty row remain fixed.
+-    # Apply to G directly in full mode: avoids reconstructing G via C+M.
+-    eligible = occupied & torch.roll(occupied, shifts=occupied.shape[0] // 2, dims=0)
+-    swapped = torch.where(
+-        eligible, torch.roll(selected, shifts=selected.shape[0] // 2, dims=0), selected)
+-    # Compute identical arithmetic in both assignment arms; select before
+-    # the inherited single boundary cast. No RNG, state or scalar loss change.
+-    returned = swapped if assignment == 'half_swap' else selected
+-    return returned.to(dtype=gradients[0].dtype)
+-
+-
+-class _CollectedAuxiliaryTransfer(torch.autograd.Function):
+-    """Three identity edges; one ordered, prescribed auxiliary backward.
+-
+-    Click uses the original context outside this function. Auxiliary tower
+-    and residual context edges remain blocked; private modules never detach.
+-    Collection topology is inherited from g3-r0043. All four cells share
+-    the orientation argument; native cells are execution bridges,
+-    not independent repetitions of their historical endpoints.
++    centered = components['centered']
++    if click_gradient.shape != centered.shape:
++        raise ValueError('Click and auxiliary context cotangents must align')
++    with torch.autocast(device_type=click_gradient.device.type, enabled=False):
++        click = torch.where(occupied, click_gradient.to(dtype=torch.float64), 0.0)
++        count = occupied.to(dtype=torch.float64).sum().clamp_min(1.0)
++        reference = torch.where(occupied, click - click.sum(dim=0, keepdim=True) / count, 0.0)
++        tiny = torch.finfo(torch.float64).tiny
++        scale = reference.abs().amax().clamp_min(tiny)
++        reference = reference / scale
++        reference_norm2 = reference.square().sum()
++        coefficient = (centered * reference).sum() / reference_norm2.clamp_min(tiny)
++        parallel = coefficient * reference
++        orthogonal = centered - parallel
++    return centered, parallel, orthogonal
++
++
++def _reduce_context_transfer(click_gradient, gradients, occupied,
++                             parallel_orientation, orthogonal_orientation):
++    """Prescribed auxiliary reflection; the click cotangent is added unchanged.
++
++    All arms compute the same split and reflections. C and -C are selected
++    directly at the endpoints to avoid a P+O reconstruction round trip.
++    Only the auxiliary transfer is cast once, then added to click in the
++    original context dtype. FP64 does not promote upstream or sparse ops.
++    """
++    if parallel_orientation not in ('aligned', 'reversed'):
++        raise ValueError('Unknown parallel orientation')
++    if orthogonal_orientation not in ('aligned', 'reversed'):
++        raise ValueError('Unknown orthogonal orientation')
++    centered, parallel, orthogonal = _click_relative_components(
++        click_gradient, gradients, occupied)
++    with torch.autocast(device_type=click_gradient.device.type, enabled=False):
++        reverse_parallel = centered - 2.0 * parallel
++        reverse_orthogonal = 2.0 * parallel - centered
++        reverse_both = -centered
++        if parallel_orientation == 'aligned' and orthogonal_orientation == 'aligned':
++            transfer = centered
++        elif parallel_orientation == 'reversed' and orthogonal_orientation == 'aligned':
++            transfer = reverse_parallel
++        elif parallel_orientation == 'aligned' and orthogonal_orientation == 'reversed':
++            transfer = reverse_orthogonal
++        else:
++            transfer = reverse_both
++        return click_gradient + transfer.to(dtype=click_gradient.dtype)
++
++
++class _CollectedContextTransfer(torch.autograd.Function):
++    """Four identity edges; jointly observe click and auxiliary cotangents.
++
++    Only the first output supplies click's context uses; the other outputs
++    supply cart/fav/buy product contexts. Other auxiliary context edges stay
++    blocked. Private parameters receive the ordinary true-label BCE graph.
++    No persistent state, extra pass, labels in forward, or RNG is introduced.
+     Unused cotangents are materialized as zeros by the autograd default.
+     """
+     @staticmethod
+-    def forward(ctx, context, occupied, centering_scope, precision, component, assignment, orientation):
++    def forward(ctx, context, occupied, parallel_orientation, orthogonal_orientation):
+         if context.ndim != 2 or context.shape[0] < 2 or context.shape[0] % 2:
+             raise ValueError('Frozen training requires even context batches [B,D]')
+         if occupied.shape != (context.shape[0], 1) or occupied.dtype != torch.bool:
+             raise ValueError('Expected history occupancy bool[B,1]')
+-        if centering_scope != 'aggregate' or precision != 'float64':
+-            raise ValueError('Component factorial freezes aggregate FP64 reduction')
+-        if component not in ('full', 'centered', 'mean', 'blocked'):
+-            raise ValueError('Unknown auxiliary context component')
+-        if assignment not in ('aligned', 'half_swap'):
+-            raise ValueError('Unknown collected auxiliary assignment')
+-        if orientation not in ('aligned', 'reversed'):
+-            raise ValueError('Unknown centered-component orientation')
+-        if component not in ('full', 'centered') or assignment != 'aligned':
+-            raise ValueError('Direction factorial freezes aligned full/centered transfer')
+-        ctx.orientation = orientation
+-        ctx.assignment = assignment
+-        ctx.component = component
+-        ctx.centering_scope = centering_scope
+-        ctx.precision = precision
++        if parallel_orientation not in ('aligned', 'reversed'):
++            raise ValueError('Unknown parallel orientation')
++        if orthogonal_orientation not in ('aligned', 'reversed'):
++            raise ValueError('Unknown orthogonal orientation')
++        ctx.parallel_orientation = parallel_orientation
++        ctx.orthogonal_orientation = orthogonal_orientation
+         ctx.save_for_backward(occupied)
+-        return context.view_as(context), context.view_as(context), context.view_as(context)
++        return tuple(context.view_as(context) for _ in range(4))
+ 
+     @staticmethod
+-    def backward(ctx, cart_gradient, fav_gradient, buy_gradient):
++    def backward(ctx, click_gradient, cart_gradient, fav_gradient, buy_gradient):
+         (occupied,) = ctx.saved_tensors
+-        transfer = _reduce_auxiliary_context(
+-            (cart_gradient, fav_gradient, buy_gradient), occupied,
+-            ctx.centering_scope, ctx.precision, ctx.component, ctx.assignment,
+-            ctx.orientation)
+-        return transfer, None, None, None, None, None, None
++        total = _reduce_context_transfer(
++            click_gradient, (cart_gradient, fav_gradient, buy_gradient), occupied,
++            ctx.parallel_orientation, ctx.orthogonal_orientation)
++        return total, None, None, None
+ 
+ 
+@@ -160,5 +169,5 @@
+                  orthogonal_orientation='aligned',
+                  centering_scope='aggregate',
+-                 click_context_collection='direct',
++                 click_context_collection='joint',
+                  auxiliary_reduction_precision='float64',
+                  task='binary_classification', **kwargs):
+@@ -204,10 +213,10 @@
+         if orthogonal_orientation not in ('aligned', 'reversed'):
+             raise ValueError('Unknown orthogonal orientation')
+-        if parallel_orientation != 'aligned' or orthogonal_orientation != 'aligned':
+-            raise ValueError('Click-relative orientations stay inactive in this study')
++        if product_context_orientation != 'aligned':
++            raise ValueError('Use the two click-relative orientation switches')
+         if centering_scope != 'aggregate':
+             raise ValueError('Component factorial freezes aggregate reduction')
+-        if click_context_collection != 'direct':
+-            raise ValueError('Collected auxiliary study freezes direct click context')
++        if click_context_collection != 'joint':
++            raise ValueError('Click-relative study requires joint cotangent collection')
+         if auxiliary_reduction_precision != 'float64':
+             raise ValueError('Component factorial freezes FP64 reduction')
+@@ -218,6 +227,6 @@
+         self.orthogonal_orientation = orthogonal_orientation
+         self.product_context_orientation = product_context_orientation
+-        if product_context_component not in ('full', 'centered'):
+-            raise ValueError('Assignment factorial uses full or centered transfer')
++        if product_context_component != 'centered':
++            raise ValueError('Click-relative study freezes centered transfer')
+         if block_aux_residual_context_grad is not True:
+             raise ValueError('Component study isolates product-only context transfer')
+@@ -866,12 +875,12 @@
+         if self.training:
+             occupied = mask.bool().any(dim=1, keepdim=True)
+-            collected_contexts = _CollectedAuxiliaryTransfer.apply(
+-                context, occupied, self.centering_scope,
+-                self.auxiliary_reduction_precision, self.product_context_component,
+-                self.product_context_assignment, self.product_context_orientation)
+-            product_context_by_label = dict(zip(('cart', 'fav', 'buy'), collected_contexts))
+-            # Other auxiliary context uses are blocked below. The original
+-            # context stays on click's unchanged graph.
++            collected_contexts = _CollectedContextTransfer.apply(
++                context, occupied, self.parallel_orientation,
++                self.orthogonal_orientation)
++            product_context_by_label = dict(zip(('cart', 'fav', 'buy'), collected_contexts[1:]))
++            # Other auxiliary context uses are blocked below. Preserve their
++            # forward values, while click uses only the first collection edge.
+             transfer_context = context
++            context = collected_contexts[0]
+         if (self.training and self.training_support == 'full') or self.inference_support == 'full':
+             # This training path is exactly the incumbent's operator sequence:

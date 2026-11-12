@@ -1,0 +1,136 @@
+{
+  "markdown_report": "The strongest first experiment remains a bounded, scale-matched recency residual added to each dataset’s SASRec encoder. Its value is untested; controlled comparisons must establish whether gains come from pooling, exponential weighting, or learned fusion.\n\n**Insights from the starting point.** (1) Electronics’ sampled wrong-rank rate is 14.95%, versus Movies_and_TV’s 3.03%, supporting dataset-specific investigation without establishing validation quality. (2) Feedback identifies older, broad associations outranking recent specific interests; recency is a testable hypothesis, not observed intent. (3) Alignment scores near 0.54–0.56 provide little evidence for severe embedding collapse.\n\n**Insights from related work.** (1) Recency-bias research measures last-item recommendation, not exponential residual effectiveness [2]. (2) Candidate sampling can change model comparisons, requiring benchmark-specific conclusions [1,4]. (3) Attribution research supports controlled interventions, not causal intent claims [3].\n\nThree research directions follow: lightweight representation correction, controlled reliance measurement, and evaluation robustness.\n\n| Direction | Existing mechanism | Proposed extension | Remaining gap |\n|---|---|---|---|\n| Representation | SASRec attention | Bounded recent-prefix residual | Recent activity may mislead |\n| Reliance | History deletions | Position-preserving branch ablations | Perturbations can shift distributions |\n| Evaluation | Sampled ranking | Paired per-category comparisons | Validation uncertainty and adaptive selection |\n\n**Candidate ideas.** Scores are originality/potential/difficulty, each 0–10; higher difficulty means harder implementation.\n\n- **Bounded residual: 4/7/3.** Originality: useful combination, familiar components. Potential: transferable hypothesis, limited intent expressiveness. Difficulty: small change, careful pooling and serialization. Motivated by diagnostic gaps, not established by [2].\n- **History-length-conditioned gate: 5/7/4.** Originality: adaptive combination, established gating. Potential: addresses sparse histories, adds overfitting risk. Difficulty: small network, additional calibration. Motivated by [2,3].\n- **Multi-negative ranking loss: 3/7/4.** Originality: direct ranking alignment, standard technique. Potential: addresses separation, risks false negatives. Difficulty: straightforward scoring, greater memory and sampling cost [1].\n\n**Selected algorithm.** At 10% progress, retain the minimal residual. Compute a padding-aware exponential sum of raw item embeddings at every causal prefix; normalize its direction and match its norm to the SASRec feature. Positive normalization makes division by accumulated weight redundant. Use event-distance decay 0.8 and one signed, bounded coefficient per dataset, initialized at zero.\n\n```python\ns = causal_exponential_sum(item_embeddings, valid_mask, decay=0.8)\nr = normalize(s.float(), eps=1e-6) * norm(h.float()).detach()\nfeatures = mask_padding(h + 0.5 * tanh(recent_gate) * r)\nscores = features @ target_embeddings.T\n```\n\nThe signed gate permits attraction or repulsion; tied embeddings yield weighted similarity scores. Detaching scale does not detach shared embeddings. Predeclare plain SASRec and identical residuals using latest-item, uniform, and exponential pooling; compare learned fusion with fixed fusion. Retain shared settings and equal compute allowances [5]. Zero initialization preserves initial outputs, not the later baseline training trajectory.\n\nSerialize identical training/predictor logic and preserve diagnostic interfaces. Track effective coefficients, rank sensitivity, history length, and popularity; seen-item filtering makes HRLI unsuitable. Select using unchanged macro validation HR@10. Report paired-bootstrap uncertainty as exploratory after selection; cap and log comparisons against adaptive overfitting [6]. No gains are currently measured.\n\nReferences: [1](https://arxiv.org/abs/2107.13045), [2](https://arxiv.org/abs/2409.09722), [3](https://arxiv.org/abs/2609.27201), [4](https://arxiv.org/abs/1912.02263), [5](https://ijcai.org/proceedings/2020/650), [6](https://arxiv.org/abs/1506.02629).",
+  "idea": {
+    "description": "Add a zero-initialized, signed, bounded recency residual to each category’s SASRec features. Normalize a padding-aware exponentially weighted sum of each causal prefix’s raw item embeddings, match its norm to the SASRec feature, and score through the existing target embedding table. Evaluate against matched latest-item and uniform-history residuals to isolate the contribution of exponential weighting.",
+    "motivation": "The supplied feedback suggests that older broad associations sometimes outrank recent specific interests. Electronics also has weaker fitted positive–negative separation, but neither observation proves that recency improves validation ranking. This small intervention tests the hypothesis while allowing different contributions across datasets. The cited recency and attribution studies motivate diagnostics; neither establishes this architecture’s effectiveness.",
+    "implementation_notes": "Preserve all four dataset routes, preprocessing seed 0, training seed 42, DATA_DIR = os.environ['GAGC_DATA_DIR'], trial-local artifacts, single-GPU execution, and effective SASREC_EPOCHS default 200. Keep baseline splits, loss, optimizer, sampling, history truncation, and checkpoint-selection rule unchanged for the first architecture comparison; record their inherited values in the trial configuration. Use decay=0.8, bound=0.5, epsilon=1e-6, and scalar recent_gate=0 separately for each dataset. Define alpha=0.5*tanh(recent_gate): it permits negative coefficients and generally allows a nonzero initial gate gradient, although particular batches can have zero gradient. Do not substitute zero-initialized ReLU or squared gates. Exclude the gate from weight decay so its regularization is explicit. Compute item pooling from raw item embeddings before positional additions or dropout. At every observed event, update S=decay*S+embedding in float32; padding contributes nothing and does not advance the accumulator. Normalize S directly: normalization of S/Z is mathematically equivalent for nonzero prefixes, so the positive denominator Z is unnecessary. Normalize with F.normalize(S.float(), dim=-1, eps=1e-6), multiply by h.float().norm(dim=-1, keepdim=True).detach(), add alpha times this residual, and mask padded outputs. Zero prefixes remain zero; epsilon limits division but can permit large gradients near zero. Check finite gradients and use the baseline clipping policy consistently across variants. Use torch.stack for differentiable prefix outputs; avoid inverse-power cumulative-sum formulations, which can overflow. A loop costs O(BLD) but may add launch overhead; profile within the budget before replacing it with a verified stable scan. Event-distance decay is not elapsed-time decay; timestamps are not used in this experiment. Normalization removes pooling magnitude, retaining its direction. Shared input/output embeddings mean the branch adds weighted similarity scores, which can be negative. Detaching the SASRec norm blocks only that scale gradient; item embeddings retain gradients through other paths. A zero gate preserves initial forward outputs, but its presence and computation do not guarantee an identical baseline optimization trajectory. Apply fusion inside log2feats so training, diagnostics, and prediction share the representation. Save decay, bound, epsilon, aggregation, fusion mode, and gate state; update the predictor writer and checkpoint loader together. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). Report alpha explicitly, with null when unsupported, rather than reporting sigmoid(recent_gate) as the effective coefficient. Restore model modes and RNG state after diagnostics. Generate full-catalog unseen recommendations for five real training users per category. Use only public histories, timestamps, titles, and descriptions; review data, ratings, categories, prices, stores, and simulator traits are unavailable. Preserve missing measurements as null. Predeclare five learned-architecture comparisons: plain SASRec and three residual variants using latest-item, uniform-history, or exponential-history aggregation, plus exponential pooling with fixed alpha=0.1. These are five configurations total. Train independently with the same seed and inherited settings; the three residual aggregation controls share the encoder, embedding/scorer design, norm matching, loss, sampling, and truncation. Latest-item pooling uses the latest observed item at each prefix, uniform pooling uses the prefix sum before normalization, and exponential pooling uses decay 0.8. If resources permit standalone latest-item/uniform/exponential models, label them secondary capacity comparisons because removing SASRec changes more than aggregation. Cap the initial comparison at five configurations and one declared checkpoint-selection rule; reserve any decay grid {0.5, 0.8, 0.95} for a separately budgeted follow-up rather than silently expanding search. Allocate equal single-GPU time caps to comparisons from the remaining shared budget and log actual GPU-seconds, steps, parameters, diagnostics, and failures; an exact numerical time allocation requires the remaining-budget ledger, which is not supplied. Select solely through the unchanged host validation protocol: 200 users per category, 99 fixed unique negatives, evaluation seed 42, and equal-weight macro HR@10. Report all four category values. If authorized per-user validation hits are exposed, bootstrap paired model differences with 10,000 replicates and a declared bootstrap RNG seed of 42: independently resample 200 user indices within each category, use the same indices for both models, and average the four category differences. Report the 2.5th and 97.5th percentiles. Otherwise mark the interval unavailable. This interval is conditional on trained models and candidates; it excludes seed variability and does not correct adaptive selection. Keep host test labels untouched. Position-preserving interventions require architecture-aware embedding hooks that retain occupied positions, positional inputs, and attention masks. Cross branch enabled/disabled with recent, older, random, and training-popularity-matched embedding replacements; separately perturb positional inputs while fixing identities. Report target-rank changes, margins, and top-ten overlap by category, history length, and training popularity. Recompute the residual and detached norm consistently under each intervention. These fitted-training probes measure sensitivity, not held-out quality or causal intent. Explicitly inspect last-item dominance and sparse-history behavior; do not infer duplication, compatibility, mood, or season from item IDs.",
+    "pseudocode": "For each dataset and predeclared configuration:\n    initialize baseline-compatible SASRec with training seed 42\n    initialize scalar recent_gate = 0 for learned residual variants\n    for each batch (None, sequence, positive, negative):\n        h = original_SASRec_features(sequence)\n        x = raw_item_emb(sequence).float()\n        state = zeros(B, D, float32)\n        prefixes = []\n        for t in causal sequence order:\n            valid = sequence[:, t] != 0\n            if aggregation == exponential:\n                candidate = 0.8 * state + x[:, t]\n            elif aggregation == uniform:\n                candidate = state + x[:, t]\n            elif aggregation == latest:\n                candidate = x[:, t]\n            state = where(valid[:, None], candidate, state)\n            prefixes.append(where(valid[:, None], state, 0))\n        s = stack(prefixes, dim=1)\n        r = normalize(s, dim=-1, eps=1e-6)\n        r = r * detach(norm(h.float(), dim=-1, keepdim=True))\n        alpha = 0.5*tanh(recent_gate) if learned_fusion else 0.1\n        features = h if plain_SASRec else mask_padding(h.float() + alpha*r)\n        compute inherited loss using shared target embeddings\n        update with inherited optimizer settings; gate has no weight decay\n    save selected checkpoint and full architecture configuration locally\n    write predictor using identical feature and scoring computation\nReport category HR@10 and their equally weighted mean from the pinned host evaluator.\nIf paired validation hit indicators are available, compute the declared stratified paired bootstrap.\nRun architecture-aware branch and history interventions as separate fitted-model diagnostics.\nLog every attempt and its compute; make no claim of improvement before measurement.",
+    "originality": {
+      "score": 4,
+      "positive": "Combines dataset-specific bounded fusion, baseline-output-preserving initialization, explicit scale matching, and controlled aggregation comparisons in a compact hypothesis.",
+      "negative": "Exponential pooling, residual fusion, and scalar gating are established components; no verified reference supplied here demonstrates novelty of the exact combination."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "A cheap controlled experiment can establish whether explicit recency contributes beyond attention and uniform history pooling, providing a basis for later adaptive gates.",
+      "negative": "Transferability and validation gains remain unmeasured; the branch may amplify last-item or popularity shortcuts and cannot infer practical compatibility or current intent."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Adds one scalar per dataset and a deterministic pooling operation while retaining the existing scoring and training interfaces.",
+      "negative": "Stable differentiable prefixes, mixed precision, matched controls, architecture-aware interventions, compute accounting, and predictor serialization require more care than a minimal encoder edit."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Dallmann et al.: sampled evaluation in sequential recommendation",
+      "link": "https://arxiv.org/abs/2107.13045",
+      "contributions": [
+        "The supplied research summary reports that negative sampling and candidate-set size can change model comparisons.",
+        "Motivates preserving the pinned candidate protocol and separating sampled validation from full-catalog diagnostics."
+      ],
+      "limitations": [
+        "Does not establish which architecture improves this four-dataset task.",
+        "Sampling sensitivity does not authorize changing the host evaluator."
+      ]
+    },
+    {
+      "title": "Measuring Recency Bias In Sequential Recommendation Systems",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "Introduces HRLI@K, measuring how often the last observed item appears among recommendations.",
+        "The supplied summary reports improvements from suppressing last-item recommendations at scoring time."
+      ],
+      "limitations": [
+        "Does not evaluate exponential-history pooling or learned residual fusion.",
+        "Scoring-time last-item suppression is not an architectural last-item-pooling ablation.",
+        "Seen-item filtering makes HRLI uninformative for the required unseen-item recommendation lists."
+      ]
+    },
+    {
+      "title": "A Systematic Benchmark of Explainable Methods for Temporal Attribution in Sequential Recommendation Systems",
+      "link": "https://arxiv.org/abs/2609.27201",
+      "contributions": [
+        "The supplied summary describes a separately trained masking-robust probe and comparisons of temporal attribution faithfulness.",
+        "Reports stronger faithfulness for GradientSHAP and Integrated Gradients than raw attention."
+      ],
+      "limitations": [
+        "Explanation faithfulness does not establish effectiveness of the proposed residual.",
+        "Position-preserving branch interventions are an experimental proposal here, not an established protocol attributed to this paper.",
+        "Sensitivity does not establish causal user intent or held-out generalization."
+      ]
+    },
+    {
+      "title": "Krichene and Rendle: On Sampled Metrics for Item Recommendation",
+      "link": "https://arxiv.org/abs/1912.02263",
+      "contributions": [
+        "Analyzes limitations of sampled recommendation metrics relative to full-catalog metrics.",
+        "Supports interpreting results specifically under the fixed benchmark candidate distribution."
+      ],
+      "limitations": [
+        "Does not provide evidence that this residual improves ranking.",
+        "Full-catalog evaluation also retains missing-feedback and exposure limitations."
+      ]
+    },
+    {
+      "title": "Dacrema et al.: methodological analysis of recommendation comparisons",
+      "link": "https://ijcai.org/proceedings/2020/650",
+      "contributions": [
+        "The supplied summary identifies weak baselines and unequal tuning as threats to recommendation comparisons.",
+        "Motivates matched controls, declared tuning allowances, and reporting actual compute."
+      ],
+      "limitations": [
+        "Does not prescribe the exact aggregation controls or time allocation proposed here.",
+        "Equal epochs alone do not establish equal compute or tuning effort."
+      ]
+    },
+    {
+      "title": "Dwork et al.: The Reusable Holdout",
+      "link": "https://arxiv.org/abs/1506.02629",
+      "contributions": [
+        "Explains how adaptive reuse of held-out data can compromise generalization assessment.",
+        "Motivates capped comparisons, complete attempt logs, and untouched final evaluation."
+      ],
+      "limitations": [
+        "Logging and comparison caps do not themselves provide a formal correction for adaptive selection.",
+        "Ordinary post-selection bootstrap intervals remain exploratory."
+      ]
+    },
+    {
+      "title": "SciPy bootstrap documentation",
+      "link": "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.bootstrap.html",
+      "contributions": [
+        "Documents bootstrap confidence intervals and paired resampling.",
+        "Provides implementation guidance for preserving baseline–trial pairing."
+      ],
+      "limitations": [
+        "The proposed category-stratified macro bootstrap requires explicit category handling.",
+        "Fixed-candidate user resampling excludes training-seed uncertainty and selection bias."
+      ]
+    },
+    {
+      "title": "PyTorch functional normalization documentation",
+      "link": "https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.normalize.html",
+      "contributions": [
+        "Defines normalization using a norm denominator bounded below by epsilon.",
+        "Supports explicit dimension, precision, and zero-prefix handling."
+      ],
+      "limitations": [
+        "An epsilon floor does not eliminate large gradients near zero.",
+        "Numerical stability does not establish recommendation quality."
+      ]
+    },
+    {
+      "title": "PyTorch Tensor.detach documentation",
+      "link": "https://docs.pytorch.org/docs/stable/generated/torch.Tensor.detach.html",
+      "contributions": [
+        "Defines removal of a tensor from the autograd graph.",
+        "Clarifies that detaching the feature norm blocks only that gradient path."
+      ],
+      "limitations": [
+        "Shared embeddings still receive gradients through other paths.",
+        "Detaching scale does not isolate the residual as an independent model."
+      ]
+    }
+  ]
+}

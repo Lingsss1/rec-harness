@@ -1,0 +1,402 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "proposal": {
+        "category_edits": [
+          {
+            "category": "embedding_representation",
+            "rationale": "Apply learned affine LayerNorm exclusively to GRU input embeddings, masking padding back to zero. Preserve embedding dimensions, tying and unnormalized candidate embeddings across all four dataset models.",
+            "edits": [
+              {
+                "find": "        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)",
+                "replace": "        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)\n        self.input_norm = nn.LayerNorm(hidden_units, elementwise_affine=True)"
+              },
+              {
+                "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))",
+                "replace": "    def input_embeddings(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.input_norm(self.item_emb(seq))\n        return emb.masked_fill((seq == 0).unsqueeze(-1), 0.0)\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.input_embeddings(seq))"
+              },
+              {
+                "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))",
+                "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.input_embeddings(seq))"
+              }
+            ]
+          },
+          {
+            "category": "architecture_interaction",
+            "rationale": "Retain GRU recurrence and score through a jointly trained residual feed-forward query and diagonal bilinear compatibility initialized with unit channel weights. Apply identical scoring during training and inference. The predictor imports the modified model class and strictly restores its checkpoint. Preserve BPR, sampling, readout and training settings.",
+            "edits": [
+              {
+                "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+                "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+              },
+              {
+                "find": "        self.dropout = nn.Dropout(dropout_rate)\n        with torch.no_grad():",
+                "replace": "        self.dropout = nn.Dropout(dropout_rate)\n        self.query_ff = nn.Sequential(\n            nn.Linear(hidden_units, 2 * hidden_units),\n            nn.GELU(),\n            nn.Linear(2 * hidden_units, hidden_units),\n        )\n        self.score_diagonal = nn.Parameter(torch.ones(hidden_units))\n        with torch.no_grad():"
+              },
+              {
+                "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:",
+                "replace": "    def scoring_query(self, states: torch.Tensor) -> torch.Tensor:\n        query = states + self.query_ff(states)\n        return query * self.score_diagonal\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:"
+              },
+              {
+                "find": "        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)",
+                "replace": "        query = self.scoring_query(out)\n        pos_scores = (query * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (query * self.item_emb(neg)).sum(dim=-1)"
+              },
+              {
+                "find": "        user_emb = self.encode(seq)[0]",
+                "replace": "        user_emb = self.scoring_query(self.encode(seq))[0]"
+              },
+              {
+                "find": "            dropout_rate=0.0,\n        ).to(_device)\n        model.load_state_dict(torch.load(ckpt_path, map_location=_device, weights_only=True))",
+                "replace": "            dropout_rate=float(meta[\"dropout_rate\"]),\n        ).to(_device)\n        model.load_state_dict(\n            torch.load(ckpt_path, map_location=_device, weights_only=True),\n            strict=True,\n        )"
+              }
+            ]
+          }
+        ],
+        "change_summary": "Across all four category models, combine padding-masked input LayerNorm with residual feed-forward diagonal bilinear scoring. Keep one GRU checkpoint per category, tied embeddings, observed histories, BPR and existing training settings; synchronize predictor construction and strict checkpoint loading.",
+        "edits": [
+          {
+            "find": "        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)",
+            "replace": "        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)\n        self.input_norm = nn.LayerNorm(hidden_units, elementwise_affine=True)"
+          },
+          {
+            "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))",
+            "replace": "    def input_embeddings(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.input_norm(self.item_emb(seq))\n        return emb.masked_fill((seq == 0).unsqueeze(-1), 0.0)\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.input_embeddings(seq))"
+          },
+          {
+            "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))",
+            "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.input_embeddings(seq))"
+          },
+          {
+            "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+            "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+          },
+          {
+            "find": "        self.dropout = nn.Dropout(dropout_rate)\n        with torch.no_grad():",
+            "replace": "        self.dropout = nn.Dropout(dropout_rate)\n        self.query_ff = nn.Sequential(\n            nn.Linear(hidden_units, 2 * hidden_units),\n            nn.GELU(),\n            nn.Linear(2 * hidden_units, hidden_units),\n        )\n        self.score_diagonal = nn.Parameter(torch.ones(hidden_units))\n        with torch.no_grad():"
+          },
+          {
+            "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:",
+            "replace": "    def scoring_query(self, states: torch.Tensor) -> torch.Tensor:\n        query = states + self.query_ff(states)\n        return query * self.score_diagonal\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:"
+          },
+          {
+            "find": "        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)",
+            "replace": "        query = self.scoring_query(out)\n        pos_scores = (query * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (query * self.item_emb(neg)).sum(dim=-1)"
+          },
+          {
+            "find": "        user_emb = self.encode(seq)[0]",
+            "replace": "        user_emb = self.scoring_query(self.encode(seq))[0]"
+          },
+          {
+            "find": "            dropout_rate=0.0,\n        ).to(_device)\n        model.load_state_dict(torch.load(ckpt_path, map_location=_device, weights_only=True))",
+            "replace": "            dropout_rate=float(meta[\"dropout_rate\"]),\n        ).to(_device)\n        model.load_state_dict(\n            torch.load(ckpt_path, map_location=_device, weights_only=True),\n            strict=True,\n        )"
+          }
+        ],
+        "scope_validation": "exact categories and nontrivial AST changes; semantic labels prompt-enforced"
+      }
+    }
+  ],
+  "receipt": {
+    "id": "round-0002-slot-3-attempt-1",
+    "status": "success",
+    "gpu": 7,
+    "allocated_gpu_seconds": 10.744122132658958,
+    "output": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/preflight/gru4rec/recharness/smoke/round-0002-slot-3-attempt-1",
+    "source_sha256": "44c13eda5d592109d8b479b237116fee213ab203d68a5ee3df7f027f01bfbebe",
+    "score": 0.1075,
+    "aggregate": {
+      "HR@5": 0.0488,
+      "HR@10": 0.1075,
+      "HR@20": 0.205,
+      "NDCG@5": 0.0316,
+      "NDCG@10": 0.0502,
+      "NDCG@20": 0.0742,
+      "Movies_and_TV/HR@5": 0.035,
+      "Movies_and_TV/HR@10": 0.09,
+      "Movies_and_TV/HR@20": 0.16,
+      "Movies_and_TV/NDCG@5": 0.0242,
+      "Movies_and_TV/NDCG@10": 0.0418,
+      "Movies_and_TV/NDCG@20": 0.0592,
+      "Industrial_and_Scientific/HR@5": 0.045,
+      "Industrial_and_Scientific/HR@10": 0.105,
+      "Industrial_and_Scientific/HR@20": 0.235,
+      "Industrial_and_Scientific/NDCG@5": 0.0352,
+      "Industrial_and_Scientific/NDCG@10": 0.0544,
+      "Industrial_and_Scientific/NDCG@20": 0.0863,
+      "Electronics/HR@5": 0.055,
+      "Electronics/HR@10": 0.14,
+      "Electronics/HR@20": 0.24,
+      "Electronics/NDCG@5": 0.0335,
+      "Electronics/NDCG@10": 0.06,
+      "Electronics/NDCG@20": 0.0848,
+      "CDs_and_Vinyl/HR@5": 0.06,
+      "CDs_and_Vinyl/HR@10": 0.095,
+      "CDs_and_Vinyl/HR@20": 0.185,
+      "CDs_and_Vinyl/NDCG@5": 0.0334,
+      "CDs_and_Vinyl/NDCG@10": 0.0445,
+      "CDs_and_Vinyl/NDCG@20": 0.0666
+    },
+    "per_dataset": {
+      "Movies_and_TV": {
+        "metrics": {
+          "HR@5": 0.035,
+          "HR@10": 0.09,
+          "HR@20": 0.16,
+          "NDCG@5": 0.0242,
+          "NDCG@10": 0.0418,
+          "NDCG@20": 0.0592
+        },
+        "n_users": 200
+      },
+      "Industrial_and_Scientific": {
+        "metrics": {
+          "HR@5": 0.045,
+          "HR@10": 0.105,
+          "HR@20": 0.235,
+          "NDCG@5": 0.0352,
+          "NDCG@10": 0.0544,
+          "NDCG@20": 0.0863
+        },
+        "n_users": 200
+      },
+      "Electronics": {
+        "metrics": {
+          "HR@5": 0.055,
+          "HR@10": 0.14,
+          "HR@20": 0.24,
+          "NDCG@5": 0.0335,
+          "NDCG@10": 0.06,
+          "NDCG@20": 0.0848
+        },
+        "n_users": 200
+      },
+      "CDs_and_Vinyl": {
+        "metrics": {
+          "HR@5": 0.06,
+          "HR@10": 0.095,
+          "HR@20": 0.185,
+          "NDCG@5": 0.0334,
+          "NDCG@10": 0.0445,
+          "NDCG@20": 0.0666
+        },
+        "n_users": 200
+      }
+    },
+    "evaluation_seconds": 2.171018660068512,
+    "predictor_sha256": "b99dd3077ca2c29ea34d70c8c12745f6184d94e085a3f2a921599b73f94c947a"
+  },
+  "native_result": {
+    "spec": {
+      "dimension": "combination_jump",
+      "delta": 1.0,
+      "estimated_cost_secs": 305.0,
+      "code_diff": "",
+      "code_edits": [],
+      "code_content": "",
+      "arm": "combination_jump",
+      "composite_dims": [
+        "combination_jump"
+      ],
+      "strategy_arm": null,
+      "round_role": "lowlevel_routing",
+      "parallel_group_estimated_wall_secs": 1220.0,
+      "budget_safe_if_global_budget_gte": 1220.0,
+      "budget_accounting": "Parallel group cost is sum(estimated_cost_secs) across the selected candidates.",
+      "code_hint": "COMBINATION JUMP: make a substantive, coordinated change in EACH selected direction. 架构与交互: Coordinate backbone-appropriate blocks (GRU recurrence, NextItNet causal convolution, BERT4Rec masked bidirectional attention, or HSTU gated attention), feed-forward structure, residual paths and jointly trained interaction/scoring formulas such as bilinear compatibility.\n嵌入表征: Item embedding dimensions, parameterization, tying and embedding normalization.\nFor a jump, preservation rules apply to UNSELECTED directions. Shared changes must have one owner; do not claim the same edit for multiple directions. Keep observed-history data, registered model family, seed 42, epoch cap 200 and batches per epoch 200 fixed.\nMaintain shape, checkpoint and predictor consistency for changes in the selected directions; preserve the registered direction boundaries.",
+      "hypothesis": "Memory available in state; agent should write a short arm-specific hypothesis; Agent hypothesis: Across all four datasets, retain embedding dimensions and tying, but apply learned per-channel affine LayerNorm only to input embeddings, keeping padding zero and candidate embeddings unnormalized. Replace direct hidden-state scoring with q=h+W2 GELU(W1 h), followed by a learned diagonal bilinear compatibility q^T diag(a)e_item, initialized with a=1. Input normalization stabilizes GRU dynamics while the residual scorer learns channel-specific ranking geometry without removing candidate norms, unlike the previously regressed full L2 normalization. Preserve all training hyperparameters, history handling, final-real-position readout, sampling and BPR.",
+      "is_jumping": true,
+      "implementation_backend": "claude_code",
+      "implementation_prompt": "COMBINATION JUMP: make a substantive, coordinated change in EACH selected direction. 架构与交互: Coordinate backbone-appropriate blocks (GRU recurrence, NextItNet causal convolution, BERT4Rec masked bidirectional attention, or HSTU gated attention), feed-forward structure, residual paths and jointly trained interaction/scoring formulas such as bilinear compatibility.\n嵌入表征: Item embedding dimensions, parameterization, tying and embedding normalization.\nFor a jump, preservation rules apply to UNSELECTED directions. Shared changes must have one owner; do not claim the same edit for multiple directions. Keep observed-history data, registered model family, seed 42, epoch cap 200 and batches per epoch 200 fixed.\nMaintain shape, checkpoint and predictor consistency for changes in the selected directions; preserve the registered direction boundaries.",
+      "allowed_files": [
+        "train.py",
+        "predict.py"
+      ],
+      "claude_attempts": 3,
+      "arm_design": "semantic_v4",
+      "selected_categories": [
+        "architecture_interaction",
+        "embedding_representation"
+      ],
+      "hypothesis_key": "slot-3",
+      "sampling_draw": {
+        "slot": 3,
+        "arm": "combination_jump",
+        "selected_directions": [
+          "architecture_interaction",
+          "embedding_representation"
+        ],
+        "sampled_values": {
+          "feature_construction": 0.02918720097686488,
+          "embedding_representation": 0.4494224448687488,
+          "architecture_interaction": 0.9960823572376835,
+          "sequence_interest": 0.3355557119305672,
+          "learning_objective": 0.23968573609053745,
+          "hyperparameter_tuning": 0.6701416832099646
+        },
+        "direction_count": 2,
+        "selection": "best unused TS-ranked combination at sizes 2,3,4,2"
+      },
+      "max_trial_gpu_seconds": 305.0,
+      "protected_gpu_seconds": 15119.999999999998,
+      "jump_trigger": "plateau",
+      "jump_budget_plan": {
+        "trial_cap_secs": 305.0,
+        "jump_group_size": 4,
+        "jump_reserved_secs": 1220.0,
+        "retune_group_size": 4,
+        "retune_rounds": 4,
+        "retune_reserved_secs": 4880.0,
+        "total_reserved_secs": 6100.0,
+        "protected_envelope_secs": 15119.999999999998,
+        "cost_source": "p75 measured trial cost * safety + teardown margin"
+      },
+      "predict_code_edits": [],
+      "predict_code_content": "",
+      "agent_hypothesis": "Across all four datasets, retain embedding dimensions and tying, but apply learned per-channel affine LayerNorm only to input embeddings, keeping padding zero and candidate embeddings unnormalized. Replace direct hidden-state scoring with q=h+W2 GELU(W1 h), followed by a learned diagonal bilinear compatibility q^T diag(a)e_item, initialized with a=1. Input normalization stabilizes GRU dynamics while the residual scorer learns channel-specific ranking geometry without removing candidate norms, unlike the previously regressed full L2 normalization. Preserve all training hyperparameters, history handling, final-real-position readout, sampling and BPR.",
+      "gagc_memory_context": {
+        "experiment_skill": "# RecHarness Experiment Skill\n\n## Objective\nUse benchmark val_score as the search and winner criterion.\nDo not use held-out test metrics during search.\nThompson Sampling chooses arms; this skill only guides how to edit code within selected arms.\n\n## Recent Patch Lessons\n- Round 2, sequence_interest: Exclude left padding from recurrent computation and restore aligned training states. Shared model loading keeps generated inference consistent; checkpoint shapes and all training settings remain unchanged.; validation=0.2025, delta_vs_input=-0.0025, outcome=regressed, promoted=False, GPU seconds=11.4. An observation of this exact configuration, not a rule against the whole direction.\n- Round 2, learning_objective: Use masked positive-plus-negative logistic loss for all four category models. Model shapes and predictor behavior remain unchanged.; validation=0.205, delta_vs_input=0.0, outcome=tied, promoted=False, GPU seconds=10.2. An observation of this exact configuration, not a rule against the whole direction.\n- Round 2, embedding_representation: Apply epsilon-protected row-wise L2 normalization to tied item embeddings across training and inference, with padding embeddings fixed at zero. All four dataset models retain the existing architecture, routing and training configuration.; validation=0.1837, delta_vs_input=-0.0213, outcome=regressed, promoted=False, GPU seconds=10.8. An observation of this exact configuration, not a rule against the whole direction.\n\n## Concrete Avoids\nNo concrete patch-level avoids yet.\n",
+        "recent_text_gradients": [
+          "Round 2, sequence_interest: Exclude left padding from recurrent computation and restore aligned training states. Shared model loading keeps generated inference consistent; checkpoint shapes and all training settings remain unchanged.; validation=0.2025, delta_vs_input=-0.0025, outcome=regressed, promoted=False, GPU seconds=11.4. An observation of this exact configuration, not a rule against the whole direction.",
+          "Round 2, learning_objective: Use masked positive-plus-negative logistic loss for all four category models. Model shapes and predictor behavior remain unchanged.; validation=0.205, delta_vs_input=0.0, outcome=tied, promoted=False, GPU seconds=10.2. An observation of this exact configuration, not a rule against the whole direction.",
+          "Round 2, embedding_representation: Apply epsilon-protected row-wise L2 normalization to tied item embeddings across training and inference, with padding embeddings fixed at zero. All four dataset models retain the existing architecture, routing and training configuration.; validation=0.1837, delta_vs_input=-0.0213, outcome=regressed, promoted=False, GPU seconds=10.8. An observation of this exact configuration, not a rule against the whole direction."
+        ],
+        "failure_memory": [],
+        "skill_notes": "Round 2: best_ever=0.2050, recent=0.2050, trend=plateau. Top arms: feature_construction, embedding_representation, sequence_interest."
+      },
+      "trial_group_id": "trialgrp_1793440287271_2861855",
+      "trial_id": 3
+    },
+    "wall_time_secs": 10.744122132658958,
+    "timed_out": false,
+    "oom": false,
+    "val_score": 0.1075,
+    "val_metrics": {
+      "Movies_and_TV": {
+        "HR@5": 0.035,
+        "HR@10": 0.09,
+        "HR@20": 0.16,
+        "NDCG@5": 0.0242,
+        "NDCG@10": 0.0418,
+        "NDCG@20": 0.0592
+      },
+      "Industrial_and_Scientific": {
+        "HR@5": 0.045,
+        "HR@10": 0.105,
+        "HR@20": 0.235,
+        "NDCG@5": 0.0352,
+        "NDCG@10": 0.0544,
+        "NDCG@20": 0.0863
+      },
+      "Electronics": {
+        "HR@5": 0.055,
+        "HR@10": 0.14,
+        "HR@20": 0.24,
+        "NDCG@5": 0.0335,
+        "NDCG@10": 0.06,
+        "NDCG@20": 0.0848
+      },
+      "CDs_and_Vinyl": {
+        "HR@5": 0.06,
+        "HR@10": 0.095,
+        "HR@20": 0.185,
+        "NDCG@5": 0.0334,
+        "NDCG@10": 0.0445,
+        "NDCG@20": 0.0666
+      }
+    },
+    "test_score": null,
+    "test_metrics": null,
+    "convergence_trace": [
+      0.095,
+      0.11,
+      0.12,
+      0.105
+    ],
+    "error_message": null,
+    "stdout_tail": "Per-dataset GRU4Rec training on cuda\n  [Movies_and_TV] users=11947  items=17490\n/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/preflight/gru4rec/recharness/smoke/round-0002-slot-3-attempt-1/train.py:117: UserWarning: Creating a tensor from a list of numpy.ndarrays is extremely slow. Please consider converting the list to a single numpy.ndarray with numpy.array() before converting to a tensor. (Triggered internally at ../torch/csrc/utils/tensor_new.cpp:278.)\n  return torch.tensor([seq_arr], dtype=torch.long, device=device)\n  [Movies_and_TV] epoch   5/5  loss=0.6924  val_score: 0.0950  HR@20=0.1700  NDCG@10=0.0411\n  [Movies_and_TV] Best val HR@10=0.0950  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/preflight/gru4rec/recharness/smoke/round-0002-slot-3-attempt-1/working/Movies_and_TV_model.pt\n  [Industrial_and_Scientific] users=23627  items=25764\n  [Industrial_and_Scientific] epoch   5/5  loss=0.6933  val_score: 0.1100  HR@20=0.2150  NDCG@10=0.0580\n  [Industrial_and_Scientific] Best val HR@10=0.1100  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/preflight/gru4rec/recharness/smoke/round-0002-slot-3-attempt-1/working/Industrial_and_Scientific_model.pt\n  [Electronics] users=27601  items=31533\n  [Electronics] epoch   5/5  loss=0.6934  val_score: 0.1200  HR@20=0.2300  NDCG@10=0.0541\n  [Electronics] Best val HR@10=0.1200  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/preflight/gru4rec/recharness/smoke/round-0002-slot-3-attempt-1/working/Electronics_model.pt\n  [CDs_and_Vinyl] users=18481  items=30951\n  [CDs_and_Vinyl] epoch   5/5  loss=0.6937  val_score: 0.1050  HR@20=0.1850  NDCG@10=0.0494\n  [CDs_and_Vinyl] Best val HR@10=0.1050  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/preflight/gru4rec/recharness/smoke/round-0002-slot-3-attempt-1/working/CDs_and_Vinyl_model.pt\npredict.py written -> /home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/preflight/gru4rec/recharness/smoke/round-0002-slot-3-attempt-1/working/predict.py\n\nAll datasets done. Average val HR@10 = 0.1075\n",
+    "stderr_tail": "",
+    "memory_evidence": {
+      "parameter_changes": [
+        {
+          "name": "DATA_DIR",
+          "before_expression": "os.environ.get('GAGC_DATA_DIR', './input/trainval')",
+          "after_expression": "os.environ['GAGC_DATA_DIR']"
+        }
+      ],
+      "changed_definitions": [
+        "GRU4RecModel",
+        "GRU4RecModel.__init__",
+        "GRU4RecModel.encode",
+        "GRU4RecModel.forward",
+        "GRU4RecModel.input_embeddings",
+        "GRU4RecModel.score_candidates",
+        "GRU4RecModel.scoring_query",
+        "write_predict_script"
+      ],
+      "summary": "Across all four category models, combine padding-masked input LayerNorm with residual feed-forward diagonal bilinear scoring. Keep one GRU checkpoint per category, tied embeddings, observed histories, BPR and existing training settings; synchronize predictor construction and strict checkpoint loading.",
+      "proposal_history": [
+        {
+          "attempt": 1,
+          "summary": "Across all four category models, combine padding-masked input LayerNorm with residual feed-forward diagonal bilinear scoring. Keep one GRU checkpoint per category, tied embeddings, observed histories, BPR and existing training settings; synchronize predictor construction and strict checkpoint loading."
+        }
+      ],
+      "hypothesis": "Across all four datasets, retain embedding dimensions and tying, but apply learned per-channel affine LayerNorm only to input embeddings, keeping padding zero and candidate embeddings unnormalized. Replace direct hidden-state scoring with q=h+W2 GELU(W1 h), followed by a learned diagonal bilinear compatibility q^T diag(a)e_item, initialized with a=1. Input normalization stabilizes GRU dynamics while the residual scorer learns channel-specific ranking geometry without removing candidate norms, unlike the previously regressed full L2 normalization. Preserve all training hyperparameters, history handling, final-real-position readout, sampling and BPR.",
+      "input_source_sha256": "b7361f620a4a8be0c520992ec8ba68f47b7b5f0e6c8cfdd5c16e129ca41eae20",
+      "candidate_source_sha256": "44c13eda5d592109d8b479b237116fee213ab203d68a5ee3df7f027f01bfbebe",
+      "input_normalized_sha256": "5e85648d7615fc7700ebd89e8ed7e4988ebf536f1b86e96355295eeed9cca2ec",
+      "candidate_normalized_sha256": "15a4e7fd60ac7e128f06cc94f7052907fe79132020bed7ee96279f287b8463e5",
+      "patch_sha256": "b3ab7fb3f8471a16a06958d7e66d9c09c6f251319f9e33380a90b8904cca936a",
+      "diff_excerpt": "--- \n+++ \n@@ -30,5 +30,5 @@\n ]\n \n-DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")\n+DATA_DIR = os.environ['GAGC_DATA_DIR']\n \n SEED = int(os.environ.get(\"GAGC_SEED\", \"42\"))\n@@ -181,14 +181,29 @@\n         self.hidden_units = hidden_units\n         self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)\n+        self.input_norm = nn.LayerNorm(hidden_units, elementwise_affine=True)\n         dropout = dropout_rate if num_layers > 1 else 0.0\n         self.gru = nn.GRU(hidden_units, hidden_units, num_layers=num_layers,\n                           batch_first=True, dropout=dropout)\n         self.dropout = nn.Dropout(dropout_rate)\n+        self.query_ff = nn.Sequential(\n+            nn.Linear(hidden_units, 2 * hidden_units),\n+            nn.GELU(),\n+            nn.Linear(2 * hidden_units, hidden_units),\n+        )\n+        self.score_diagonal = nn.Parameter(torch.ones(hidden_units))\n         with torch.no_grad():\n             nn.init.xavier_uniform_(self.item_emb.weight)\n             self.item_emb.weight[0].zero_()\n \n+    def input_embeddings(self, seq: torch.Tensor) -> torch.Tensor:\n+        emb = self.input_norm(self.item_emb(seq))\n+        return emb.masked_fill((seq == 0).unsqueeze(-1), 0.0)\n+\n+    def scoring_query(self, states: torch.Tensor) -> torch.Tensor:\n+        query = states + self.query_ff(states)\n+        return query * self.score_diagonal\n+\n     def encode(self, seq: torch.Tensor) -> torch.Tensor:\n-        emb = self.dropout(self.item_emb(seq))\n+        emb = self.dropout(self.input_embeddings(seq))\n         out, _ = self.gru(emb)\n         # Histories are LEFT padded; count-1 indexes padding on short histories.\n@@ -198,12 +213,13 @@\n \n     def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n-        emb = self.dropout(self.item_emb(seq))\n+        emb = self.dropout(self.input_embeddings(seq))\n         out, _ = self.gru(emb)\n-        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n-        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n+        query = self.scoring_query(out)\n+        pos_scores = (query * self.item_emb(pos)).sum(dim=-1)\n+        neg_scores = (query * self.item_emb(neg)).sum(dim=-1)\n         return pos_scores, neg_scores\n \n     def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:\n-        user_emb = self.encode(seq)[0]\n+        user_emb = self.scoring_query(self.encode(seq))[0]\n         cand_emb = self.item_emb(candidates)\n         return torch.matmul(cand_emb, user_emb)\n@@ -336,7 +352,10 @@\n             hidden_units=meta[\"hidden_units\"],\n             num_layers=meta[\"num_layers\"],\n-            dropout_rate=0.0,\n+            dropout_rate=float(meta[\"dropout_rate\"]),\n         ).to(_device)\n-        model.load_state_dict(torch.load(ckpt_path, map_location=_device, weights_only=True))\n+        model.load_state_dict(\n+            torch.load(ckpt_path, map_location=_device, weights_only=True),\n+            strict=True,\n+        )\n    ",
+      "category_rationales": [
+        {
+          "category": "embedding_representation",
+          "rationale": "Apply learned affine LayerNorm exclusively to GRU input embeddings, masking padding back to zero. Preserve embedding dimensions, tying and unnormalized candidate embeddings across all four dataset models."
+        },
+        {
+          "category": "architecture_interaction",
+          "rationale": "Retain GRU recurrence and score through a jointly trained residual feed-forward query and diagonal bilinear compatibility initialized with unit channel weights. Apply identical scoring during training and inference. The predictor imports the modified model class and strictly restores its checkpoint. Preserve BPR, sampling, readout and training settings."
+        }
+      ],
+      "baseline_validation": 0.205,
+      "basin_id": "default",
+      "execution_status": "success",
+      "attempt_count": 1,
+      "training_attempt_count": 1,
+      "training_attempts": [
+        {
+          "id": "round-0002-slot-3-attempt-1",
+          "status": "success",
+          "source_sha256": "44c13eda5d592109d8b479b237116fee213ab203d68a5ee3df7f027f01bfbebe",
+          "allocated_gpu_seconds": 10.744122132658958,
+          "error": "",
+          "score": 0.1075
+        }
+      ],
+      "checkpoint_fingerprints": {
+        "Movies_and_TV_model.pt": "52dd29fff5d8eda172f257087c23763dfd6a3e71bc5e9b517ee2c2c8999c009a",
+        "Industrial_and_Scientific_model.pt": "c324f866d5ee0d6bced66ac17a7f13796a999c679f4738ba3e6c7548105f8bc4",
+        "Electronics_model.pt": "8d660047c896db8351606bf40c97dc756cad131547da10b4d82b84ab8ba2af14",
+        "CDs_and_Vinyl_model.pt": "134423e662e3f2c27e7feaa494308af3713af9de9b9b3b8296d949f3e2361b88"
+      },
+      "repair_errors": [],
+      "phase": "jump"
+    }
+  },
+  "gpu_seconds_all_attempts": 10.744122132658958,
+  "training_attempts": [
+    {
+      "id": "round-0002-slot-3-attempt-1",
+      "status": "success",
+      "source_sha256": "44c13eda5d592109d8b479b237116fee213ab203d68a5ee3df7f027f01bfbebe",
+      "allocated_gpu_seconds": 10.744122132658958,
+      "error": "",
+      "score": 0.1075
+    }
+  ],
+  "checkpoint_fingerprints": {
+    "Movies_and_TV_model.pt": "52dd29fff5d8eda172f257087c23763dfd6a3e71bc5e9b517ee2c2c8999c009a",
+    "Industrial_and_Scientific_model.pt": "c324f866d5ee0d6bced66ac17a7f13796a999c679f4738ba3e6c7548105f8bc4",
+    "Electronics_model.pt": "8d660047c896db8351606bf40c97dc756cad131547da10b4d82b84ab8ba2af14",
+    "CDs_and_Vinyl_model.pt": "134423e662e3f2c27e7feaa494308af3713af9de9b9b3b8296d949f3e2361b88"
+  }
+}

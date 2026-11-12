@@ -1,0 +1,171 @@
+--- g2-r0018-event_first/model.py
++++ g2-r0019-norm_retained/model.py
+@@ -1,15 +1,21 @@
+-"""Target similarity after history compression: prospective information/cost test.
+-
+-All variants retain the ancestor's thirty recent/behavior slots, scorer,
+-readouts, initialization, auxiliary source gates and training loss. Event mode
+-retains E[cos(q,k)], E[cos(roll(q),k)] and E[cos(q,k)]**2, pruning only unused
+-second moments. Slot mode instead normalizes FP32 mean raw keys per slot;
+-null mode computes that same descriptor then replaces its three channels
+-with zeros. Both stages use FP32 statistics under disabled autocast, so the
+-slot means do not reuse the inherited BF16 compression approximation.
+-
+-This changes normalization order, preserving target-conditioned slot direction
+-but discarding the mean of individual normalized event directions. No quality,
+-latency or originality claim has yet been established. Host execution required.
++"""Prospective direction-weighting x concentration contrast after compression.
++
++Local provenance: g2-r0018-event_first reproduced the reported validation
++metrics of g2-r0017-aligned_centroid; slot_first traded click AUC for cost.
++These single-seed observations do not establish a compression mechanism.
++
++For each field and occupied age/behavior slot, let x_i be masked event keys,
++l_i=max(||x_i||,1e-8), and q the unit target field. Equal-event descriptors
++pool x_i/l_i. Norm-weighted descriptors pool x_i then divide by pooled l_i.
++Retained concentration leaves that bounded resultant unchanged; unit controls
++normalize its direction, removing its length (outside the epsilon regime).
++Aligned and coordinate-rotated dot products, plus squared aligned product,
++replace only the inherited correction's three similarity channel groups.
++
++Equal/retained is algebraically the event-first mean cosine with contraction
++moved after pooling. Norm-weighted/unit has the old slot-first cosine. No
++exact trained-trajectory equality or runtime saving is assumed. Raw values,
++counts, partition, learned state, source gates and Dice ownership are fixed.
++No method-priority claim is made; spherical means are elementary statistics.
+ """
+ import torch
+@@ -40,6 +46,6 @@
+     'moment_query': 'aligned',
+     'moment_hidden_units': 32,
+-    'similarity_stage': 'event',
+-    'similarity_content': 'present',
++    'angular_population': 'norm_weighted',
++    'concentration_readout': 'retained',
+ }
+ 
+@@ -84,5 +90,5 @@
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='CompressedSlotSimilarity', gpu=-1,
++    def __init__(self, feature_map, model_id='ConcentrationCompression', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+@@ -94,6 +100,6 @@
+                  identity_content='union', identity_hidden_units=32,
+                  moment_timing='centroid', moment_query='aligned',
+-                 moment_hidden_units=32, similarity_stage='event',
+-                 similarity_content='present', num_tasks=None,
++                 moment_hidden_units=32, angular_population='norm_weighted',
++                 concentration_readout='retained', num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -147,20 +153,14 @@
+         if history_partition != 'recent':
+             raise ValueError('Freeze the recent partition')
+-        if moment_timing not in ('event', 'centroid'):
+-            raise ValueError('Unknown second-moment replacement')
+-        if moment_query not in ('aligned', 'rotated'):
+-            raise ValueError('Unknown target-coordinate alignment')
++        if moment_timing != 'centroid' or moment_query != 'aligned':
++            raise ValueError('Freeze the squared aligned first-moment channel')
++        if angular_population not in ('equal', 'norm_weighted'):
++            raise ValueError('Unknown angular population')
++        if concentration_readout not in ('retained', 'unit'):
++            raise ValueError('Unknown concentration readout')
++        self.angular_population = angular_population
++        self.concentration_readout = concentration_readout
+         if moment_hidden_units != 32 or embedding_dim < 2:
+             raise ValueError('Require width32 and at least two embedding coordinates')
+-        if moment_timing != 'centroid' or moment_query != 'aligned':
+-            raise ValueError('Freeze the selected squared aligned first moment')
+-        if similarity_stage not in ('event', 'slot'):
+-            raise ValueError('Unknown normalization stage')
+-        if similarity_content not in ('present', 'zero'):
+-            raise ValueError('Unknown similarity content')
+-        if similarity_content == 'zero' and similarity_stage != 'slot':
+-            raise ValueError('Null descriptor is a matched slot-stage control')
+-        self.similarity_stage = similarity_stage
+-        self.similarity_content = similarity_content
+         self.moment_timing = moment_timing
+         self.moment_query = moment_query
+@@ -414,10 +414,13 @@
+ 
+     def _similarity_statistics(self, target, raw_values, mask, auxiliary):
+-        """Three [B,30,F] channels under a single declared normalization stage.
+-
+-        Event mode matches the selected ancestor's actual logit inputs. Slot
+-        mode uses FP32 raw slot means, then cosine; normalization and averaging
+-        do not generally commute. Null retains the slot compute/nominal shape.
+-        No learned encoder, new Dice population, or extra history is added.
++        """Return three [B,30,F] channels from target-independent slot vectors.
++
++        All four cells measure the same per-event norm and pool its scalar
++        mean. Equal weighting additionally divides keys before pooling; norm
++        weighting divides only slot vectors by the pooled norm. Unit cells
++        expose the direction of the corresponding mean before that scalar
++        division, preserving the raw-unit ancestor's epsilon convention.
++        The unused scalar mean in unit/equal cells matches forward norm work;
++        backward paths and normalization kernels necessarily differ.
+         """
+         batch, length, _ = raw_values.shape
+@@ -428,34 +431,36 @@
+         assignment = assignment.reshape(batch, 30, length)
+         fields = len(self.item_fields)
++        # Same local FP32-statistics boundary as both authorized ancestors.
++        # Learned modules still follow the host's frozen BF16 autocast recipe.
+         with torch.autocast(device_type=raw_values.device.type, enabled=False):
+             keys = raw_values[:, :, :self.key_width].float()
+             keys = torch.where(valid[:, :, None], keys, torch.zeros_like(keys))
++            keys = keys.reshape(batch, length, fields, self.moment_embedding_dim)
++            event_norms = torch.linalg.vector_norm(keys, ord=2, dim=-1).clamp_min(1e-8)
++            assignment = assignment.float()
++            n = assignment.sum(dim=-1, keepdim=True).clamp_min(1.0)
++            mean_norm = torch.bmm(assignment, event_norms) / n
++            if self.angular_population == 'equal':
++                event_vectors = keys / event_norms.unsqueeze(-1)
++            else:
++                event_vectors = keys
++            means = (torch.bmm(assignment, event_vectors.reshape(
++                batch, length, self.key_width)) / n).reshape(
++                    batch, 30, fields, self.moment_embedding_dim)
++            if self.concentration_readout == 'unit':
++                descriptors = torch.nn.functional.normalize(means, p=2, dim=-1, eps=1e-8)
++            elif self.angular_population == 'norm_weighted':
++                # mean_norm is a masked mean of pointwise clamped norms,
++                # NOT the norm of the mean. Triangle inequality bounds this
++                # vector by one, including zero vectors and empty slots.
++                descriptors = means / mean_norm.clamp_min(1e-8).unsqueeze(-1)
++            else:
++                descriptors = means
+             query = target.float().reshape(batch, fields, self.moment_embedding_dim)
+             query = torch.nn.functional.normalize(query, p=2, dim=-1, eps=1e-8)
+             rotated_query = torch.roll(query, shifts=1, dims=-1)
+-            assignment = assignment.float()
+-            n = assignment.sum(dim=-1, keepdim=True).clamp_min(1.0)
+-            if self.similarity_stage == 'event':
+-                keys = keys.reshape(batch, length, fields, self.moment_embedding_dim)
+-                directions = torch.nn.functional.normalize(keys, p=2, dim=-1, eps=1e-8)
+-                aligned = (directions * query[:, None, :, :]).sum(dim=-1)
+-                rotated = (directions * rotated_query[:, None, :, :]).sum(dim=-1)
+-                mean_aligned = torch.bmm(assignment, aligned) / n
+-                mean_rotated = torch.bmm(assignment, rotated) / n
+-            else:
+-                # Recompute only the item-field means in FP32. Reusing values
+-                # would confound ordering with inherited BF16 BMM rounding.
+-                means = (torch.bmm(assignment, keys) / n).reshape(
+-                    batch, 30, fields, self.moment_embedding_dim)
+-                directions = torch.nn.functional.normalize(means, p=2, dim=-1, eps=1e-8)
+-                mean_aligned = (directions * query[:, None, :, :]).sum(dim=-1)
+-                mean_rotated = (directions * rotated_query[:, None, :, :]).sum(dim=-1)
++            mean_aligned = (descriptors * query[:, None, :, :]).sum(dim=-1)
++            mean_rotated = (descriptors * rotated_query[:, None, :, :]).sum(dim=-1)
+             squared_mean = mean_aligned.square()
+-            if self.similarity_content == 'zero':
+-                # Compute before replacement for a forward-cost-matched
+-                # negative control. Backward work is inherently different.
+-                mean_aligned = torch.zeros_like(mean_aligned)
+-                mean_rotated = torch.zeros_like(mean_rotated)
+-                squared_mean = torch.zeros_like(squared_mean)
+         return mean_aligned, mean_rotated, squared_mean
+ 

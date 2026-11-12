@@ -1,0 +1,166 @@
+{
+  "markdown_report": "### Insights\n\n**Starting point.** (1) Diagnosis favors specific recurring interests over broad associations. Repeated textual support is a testable proxy, not evidence of current demand. (2) Older purchases may represent completed needs. Recency can attenuate them but cannot identify ownership, satisfaction, compatibility, or seasonality. (3) Existing probes measure embedding alignment and sampled training margins. They cannot establish semantic relevance or validation improvement.\n\n**Related work.** (1) HyperHawkes motivates separating recurring and recent intent; transfer here remains untested. (2) HGN/HAM establish historical gating/pooling, and ReZero establishes zero-initialized residual scaling, limiting originality. (3) DIN motivates preserving evidence strength: weight normalization erases absolute support, while subsequent unit-norm scaling further amplifies weak evidence. (4) Semantically Consistent Contrastive Learning motivates careful perturbation controls; On Sampled Metrics limits conclusions from sampled rankings. (5) Cawley–Talbot motivates documenting validation selection and its optimism.\n\n### Directions and framework\n\nThree directions follow: conservative recurrence modeling, mechanism-focused controls, and evaluation separating predictive gains from behavioral interpretation.\n\n| Component | Evidence available | Proposed role | Unresolved gap |\n|---|---|---|---|\n| SASRec | Ordered interactions | Sequential preference | Specific recurring themes |\n| Text recurrence | Titles/descriptions | Support historical pooling | Similarity does not establish demand |\n| Recency | Interaction order | Attenuate older evidence | Seasonal intent remains uncertain |\n| Confidence | Thresholded support mass/count | Preserve evidence strength | Repeated boilerplate can inflate support |\n| Controls | Matched histories and candidates | Test incremental benefit | Latent motives remain unobserved |\n\n### Candidate ideas\n\nScores are originality / future potential / implementation difficulty; higher difficulty means harder implementation.\n\n1. **Bounded recurrence residual — 4/6/5.** Originality: targeted combination, but established pooling/gating components. Potential: interpretable extension, but normalization discards confidence. Difficulty: small architecture change, but causal sparse computation and predictor parity require care. Inspired by HyperHawkes, HGN/HAM, and ReZero.\n2. **Recency-only residual — 2/5/2.** Originality: useful comparator, but standard pooling. Potential: inexpensive improvement, but cannot distinguish recurring themes. Difficulty: straightforward implementation, but padding and normalization still matter.\n3. **Text-supported redundancy penalty — 5/5/6.** Originality: targets completed-demand hypotheses, but resembles similarity penalties. Potential: may reduce substitutes, but can suppress desirable entertainment continuity. Difficulty: lexical evidence exists, but reliable capability judgments are difficult. Motivated by Learning to Forget.\n4. **Confidence-aware recurrence residual — 5/7/5.** Originality: explicit evidence-preserving combination, but no established novelty beyond related components. Potential: tests whether support strength matters, but boilerplate/popularity remain shortcuts. Difficulty: minimal denominator change, but credible controls and efficient implementation dominate effort. Motivated by DIN.\n\n### Selected idea\n\nAt 10% progress, select the confidence-aware residual. Fit fixed per-category TF–IDF on training-item titles/descriptions. At causal position t, support each historical item by its strongest thresholded similarity to a distinct item at least three positions away within that prefix. Multiply by exponential positional recency. Compute p=Σwᵢeᵢ/(κ+Σwᵢ), κ>0; cap its norm without increasing it, then add 0.25·tanh(g)·p, with g initialized to zero. Zero support yields zero residual; mean fallback would introduce an untested generic-pooling branch. This preserves weak-evidence attenuation, although confidence remains uncalibrated.\n\nCompare against branch-free, mean-pooling, recency-pooling, normalized-semantic, and shuffled-text controls as budget permits; prioritize branch-free and recency controls before interpreting semantics. Use identical validation users/candidates, pinned macro HR@10, and paired category-stratified bootstrap differences. Inference removal measures dependence; retrained controls assess incremental benefit. Preserve all four routes, seeds, splits, predictor serialization, and diagnosis interfaces. Report every validation-informed trial and checkpoint rule; intervals condition on selected models and fixed candidates, excluding training/search variability. Full-catalog lists and twenty simulator users remain separate qualitative diagnostics. No gain or latent-user explanation is established before evaluation.",
+  "idea": {
+    "description": "Add a causal, confidence-aware recurring-interest residual to each SASRec representation. Fixed training-only TF–IDF similarities support historical items through distinct, separated historical witnesses; positional recency attenuates their weights. Pool learned ID embeddings with a positive denominator offset, cap the residual magnitude without scaling weak evidence upward, and retain the branch during prediction.",
+    "motivation": "The qualitative diagnosis suggests that specific repeated interests and recent activity may provide better evidence than broad historical associations. The original normalized pooling and unit-norm rescaling discarded support strength, allowing weak matches to produce large corrections. Confidence-aware shrinkage addresses this methodological gap while retaining a zero-initialized gate. Text similarity remains a proxy for repeated related content, not verified compatibility, current need, completed demand, or simulator traits.",
+    "implementation_notes": "Keep DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, four independent dataset routes, and SASREC_EPOCHS environment default 200. Preserve the baseline preprocessing, input splits, objective, optimizer, batching, checkpoint rule, and host evaluator for the initial comparison; log their resolved configuration. Use only permitted titles/descriptions, interaction histories, and timestamps; disregard the conflicting illustrative review/rating/category/store/price schema. Fit one TfidfVectorizer per category over unique items observed in training histories, concatenating title and description with a space; flatten permitted string lists deterministically, treat missing fields as empty strings, and order documents by saved item mapping. Fix dtype=float32, lowercase=True, analyzer='word', ngram_range=(1,1), max_features=20000, min_df=1, smooth_idf=True, norm='l2', stop_words=None, sublinear_tf=False, and token_pattern='(?u)\\\\b\\\\w\\\\w+\\\\b'. Save vocabulary, IDF, configuration, dependency versions, item mapping and CSR vectors. Items absent from this fitted training-item mapping receive zero text vectors; handle an entirely empty vocabulary explicitly. Initialize positional decay scale rho=10, similarity threshold theta=0.1, denominator offset kappa=1.0, maximum residual coefficient 0.25, and epsilon=1e-8 as declared starting choices, not validated optima. Define weights using item-order distance; do not describe this as elapsed-time decay. At each prefix, require distinct nonpadding item IDs separated by at least three positions. Threshold similarity as max(cosine-theta, 0). The support for an item is its maximum valid witness similarity, not a count of independent interests. Multiple positions can still inflate total evidence; log supported-position count, support mass, and distinct supported-ID count separately. Compute pooled p = sum(weight*embedding)/(kappa+sum(weight)); cap its norm at the detached norm of the corresponding SASRec feature using multiplication by min(1, norm(h)/(norm(p)+epsilon)). Never normalize p upward. Empty or unsupported prefixes return exactly zero; retain mean pooling only as an explicit control. Use a scalar 0.25*tanh(g), g=0, per category; its sign is unrestricted, so learned negative values need explicit reporting rather than a positive-interest interpretation. This bounds the added norm to at most one quarter of the baseline feature norm but does not calibrate confidence. Compute sequence-local sparse text products, not a dense catalog similarity matrix. For local similarity S[b,i,j], mask padding, identical IDs, and gaps below three; cumulative maxima along j followed by transposition give support[b,t,i], with i>t masked out. Similarity/support computation is O(BL²), and embedding pooling is O(BL²d), excluding sparse-dot construction costs. Streaming similarity columns can reduce support-state memory to O(BL); verify numerical agreement before adopting it. Share model, preprocessing, truncation, padding, masks, and pooling implementation between training and the predictor writer. Save all artifacts beneath the trial directory and ensure working/predict.py reconstructs the trained architecture and text state. Preserve the compatibility view: view.model is the actual trained module; view.item_emb exposes learned embeddings; log2feats returns augmented features; predict_score uses the trained scoring head; user_train, meta_data and review_data remain available with unavailable fields empty. Preserve DiagnosisProbe(view, device) and run_full_diagnosis(train_loader), returning metrics and metric_definitions for B x L loader tensors. Retain existing embedding/margin/coverage probes, restore module training flags after diagnostics, and add explicitly defined gate, support-mass, supported-position, distinct-support, and residual-to-feature-norm metrics without treating them as relevance measures. Verify vectorized or streamed pooling against a naive causal reference on left padding, repeated IDs, empty text, short prefixes, zero support, and no-future-information checks. Verify saved-predictor parity and finite scores. Keep the full control menu—branch-free, mean pooling, recency pooling, normalized semantic pooling, confidence-aware pooling, and text shuffled within category/training-frequency/metadata-coverage strata—but schedule only controls affordable within 43,200 shared GPU-seconds. Match gates, clipping, dimensions, training budgets, and tuning opportunities where applicable; the normalized-semantic control replaces kappa+mass with mass and otherwise retains the same clipping. For recurrence isolation, prioritize a last-item-text control if generic text alignment remains plausible. Optional frequency-only, metadata-presence/length, fixed-random-vector, boilerplate-only/stripped-text, and semantic-order controls address remaining shortcuts; derive all strata and boilerplate solely from training data. Retain missing text during permutation and use predeclared text-length bins where sample counts allow; disclose unmatched distributions rather than claiming exact preservation. Do not infer causal motives from these controls. Select solely using pinned four-category macro validation HR@10, with identical 200 users/category, 99 unique negatives, and evaluation seed 42. Report every validation-informed trial, failure, checkpoint-selection rule, resolved hyperparameter, runtime, and budget; preserve the baseline checkpoint protocol and do not introduce an additional selection objective. Report paired user-bootstrap macro differences using 10000 resamples and bootstrap seed 42, independently resampling 200 users with replacement within each category while retaining model pairing, then averaging category differences equally; use percentile 95% intervals. These intervals condition on fitted selected models, observed categories and fixed candidates, exclude training/search variability, and do not correct validation-selection optimism. Report broad popularity/history-length/coverage strata only with counts; 200 users/category limits granularity. Inference branch removal measures dependence; matched retraining assesses incremental predictive benefit. Full-catalog unseen-item recommendations for exactly five real training users/category and qualitative audits remain separate from selection. Audits may retain source snippets, timestamps, unknown judgments, and disagreements, but must not invent ratings, compatibility, preferences, or traits. Freeze the final choice before host-held-out evaluation. No hidden test access, external data, pretrained weights, evaluator changes, or multi-GPU execution.",
+    "pseudocode": "For each of the four datasets independently:\n  fit and save fixed normalized CSR TF-IDF on unique training-item titles/descriptions\n  map unavailable or non-training-item text to zero vectors\n  initialize baseline SASRec and scalar g = 0\n  set rho=10, theta=0.1, kappa=1.0, epsilon=1e-8\n  for each training batch:\n    h = SASRec(sequence)  # causal B x L x D\n    e = item_embedding(sequence)\n    S[i,j] = max(cosine(text[item_i], text[item_j]) - theta, 0)\n    set S[i,j]=0 for padding, identical item IDs, or abs(i-j)<3\n    C = cummax(S, witness_axis=j)\n    support[t,i] = C[i,t] if i<=t else 0\n    weight[t,i] = support[t,i] * exp(-(t-i)/rho) for i<=t\n    mass[t] = sum_i weight[t,i]\n    p[t] = sum_i(weight[t,i] * e[i]) / (kappa + mass[t])\n    p[t] *= min(1, stop_gradient(norm(h[t])) / (norm(p[t]) + epsilon))\n    feature[t] = h[t] + 0.25*tanh(g)*p[t]\n    optimize the unchanged baseline next-item objective using feature\n  serialize model, fixed text state, mapping, and resolved configuration\n  write predictor using the identical architecture and pooling implementation\nVerify causal-reference agreement, zero-support behavior, and predictor parity.\nRun affordable matched retrained controls with identical validation users/candidates.\nSelect using pinned four-category macro HR@10 and log every selection-informed trial.\nBootstrap paired hit differences within categories; average category differences equally.\nUse inference removal only for model dependence; retain full-catalog qualitative diagnostics separately.",
+    "originality": {
+      "score": 5,
+      "positive": "The proposed combination explicitly tests whether preserving the magnitude of repeated textual evidence improves a conservative SASRec residual; no exact matching method is verified in the supplied references.",
+      "negative": "Historical pooling, semantic matching, gating, zero initialization, and evidence-strength preservation have precedents. Absence of a verified exact match does not establish novelty."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides a tractable experiment on support strength versus pooled direction across four domains, with a path toward better recurrence estimation.",
+      "negative": "Lexical overlap, metadata coverage, repeated commercial wording, popularity, and correlated historical events may explain gains; sampled validation improvement cannot establish user intent or full-catalog benefit."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "Requires no pretrained weights and preserves the baseline vocabulary, scoring objective, and diagnostic contract; confidence shrinkage itself is simple.",
+      "negative": "Efficient causal sparse similarities, evidence-preserving clipping, exact predictor parity, reproducibility artifacts, and meaningful budget-matched controls require moderate implementation and runtime effort."
+    }
+  },
+  "related_work": [
+    {
+      "title": "HyperHawkes (2025)",
+      "link": "https://evazangerle.at/publication/peintner-www-2025/",
+      "contributions": [
+        "The supplied summary describes repeated intent dynamics alongside short-term adaptation, motivating separate recurrence and recency signals."
+      ],
+      "limitations": [
+        "Does not establish that TF–IDF pooling captures recurring interests or improves this four-dataset benchmark."
+      ]
+    },
+    {
+      "title": "Semantically Consistent Contrastive Learning (2025)",
+      "link": "https://www.sciencedirect.com/science/article/abs/pii/S089360802500070X",
+      "contributions": [
+        "Highlights that random history augmentation can produce semantically inconsistent sequences."
+      ],
+      "limitations": [
+        "Does not validate the proposed controls; perturbation effects can reflect distribution shift."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics",
+      "link": "https://www.ijcai.org/proceedings/2021/0651.pdf",
+      "contributions": [
+        "Shows that sampled recommendation metrics can yield comparisons inconsistent with full-ranking evaluation."
+      ],
+      "limitations": [
+        "Does not determine sampling effects for this pinned evaluator; its selection protocol must remain unchanged."
+      ]
+    },
+    {
+      "title": "Learning to Forget (2026 preprint)",
+      "link": "https://arxiv.org/abs/2607.12714",
+      "contributions": [
+        "The supplied summary motivates treating some purchases as possible intent completion."
+      ],
+      "limitations": [
+        "Histories and text cannot verify completion, ownership, or redundancy of similar unseen items; the proposed redundancy penalty remains a separate hypothesis."
+      ]
+    },
+    {
+      "title": "Learning to Counterfactually Explain Recommendations",
+      "link": "https://arxiv.org/abs/2211.09752",
+      "contributions": [
+        "Motivates distinguishing inference-time removal effects from counterfactual questions requiring retraining."
+      ],
+      "limitations": [
+        "Inference ablations cannot establish incremental training benefit or users’ latent motives."
+      ]
+    },
+    {
+      "title": "HGN: Hierarchical Gating Networks for Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1906.09217",
+      "contributions": [
+        "Provides precedents for feature/instance gating and historical item interactions."
+      ],
+      "limitations": [
+        "Does not establish the exact proposed confidence-aware text-supported residual or its novelty."
+      ]
+    },
+    {
+      "title": "HAM: Hybrid Associations Models for Sequential Recommendation",
+      "link": "https://pmc.ncbi.nlm.nih.gov/articles/PMC10034966/",
+      "contributions": [
+        "Models historical associations using pooling; the supplied summary reports mean pooling outperforming max pooling in its experiments."
+      ],
+      "limitations": [
+        "Those experimental findings do not establish the best pooling operator for this task."
+      ]
+    },
+    {
+      "title": "ReZero",
+      "link": "https://arxiv.org/abs/2003.04887",
+      "contributions": [
+        "Establishes zero-initialized residual scaling as a prior technique."
+      ],
+      "limitations": [
+        "Zero initialization does not calibrate evidence confidence or ensure recommendation gains."
+      ]
+    },
+    {
+      "title": "Deep Interest Network",
+      "link": "https://arxiv.org/html/1706.06978v4",
+      "contributions": [
+        "Uses candidate-conditioned historical embedding sums without weight normalization to retain interest intensity, motivating preservation of support strength."
+      ],
+      "limitations": [
+        "The proposed kappa-offset denominator and candidate-independent recurrence support are design inferences, not claimed DIN mechanisms."
+      ]
+    },
+    {
+      "title": "RepeatNet",
+      "link": "https://arxiv.org/abs/1812.02646",
+      "contributions": [
+        "Distinguishes repeat consumption from exploration."
+      ],
+      "limitations": [
+        "This benchmark recommends unseen IDs; repeated semantic support must not be equated with repeated consumption."
+      ]
+    },
+    {
+      "title": "TASTE",
+      "link": "https://arxiv.org/abs/2308.14029",
+      "contributions": [
+        "The supplied summary connects text matching with popularity effects, motivating popularity and metadata controls."
+      ],
+      "limitations": [
+        "Text-based gains do not independently establish semantic recurrence or elimination of popularity shortcuts."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/papers/volume11/cawley10a/cawley10a.pdf",
+      "contributions": [
+        "Explains how repeated model selection can overfit validation and bias reported performance."
+      ],
+      "limitations": [
+        "Conditional paired-bootstrap intervals do not remove this selection bias."
+      ]
+    },
+    {
+      "title": "scikit-learn TfidfVectorizer documentation",
+      "link": "https://scikit-learn.org/stable/modules/generated/sklearn.feature_extraction.text.TfidfVectorizer.html",
+      "contributions": [
+        "Documents the vectorizer configuration needed to reproduce fixed sparse text features."
+      ],
+      "limitations": [
+        "Provides implementation semantics, not evidence that the selected lexical representation improves recommendation."
+      ]
+    },
+    {
+      "title": "PyTorch cummax documentation",
+      "link": "https://docs.pytorch.org/docs/stable/generated/torch.cummax.html",
+      "contributions": [
+        "Documents cumulative maxima used to compute prefix-valid support without a cubic witness scan."
+      ],
+      "limitations": [
+        "Complexity reductions are algorithmic deductions; actual runtime and memory benefits require measurement."
+      ]
+    }
+  ]
+}

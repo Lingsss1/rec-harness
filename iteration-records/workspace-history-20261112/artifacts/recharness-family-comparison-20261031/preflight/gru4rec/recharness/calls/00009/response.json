@@ -1,0 +1,41 @@
+{
+  "category_edits": [
+    {
+      "category": "architecture_interaction",
+      "rationale": "Add a jointly trained residual feed-forward block of width 2H after every GRU state: LayerNorm(h + W2 GELU(W1 h)). Apply it consistently to supervised positions and candidate inference across all four datasets. Preserve tied embeddings, final-real-position readout and BPR. The generated predictor imports the updated architecture and restores its parameters from each category's single checkpoint.",
+      "edits": [
+        {
+          "find": "        self.dropout = nn.Dropout(dropout_rate)\n        with torch.no_grad():",
+          "replace": "        self.dropout = nn.Dropout(dropout_rate)\n        self.state_ffn = nn.Sequential(\n            nn.Linear(hidden_units, 2 * hidden_units),\n            nn.GELU(),\n            nn.Linear(2 * hidden_units, hidden_units),\n        )\n        self.state_norm = nn.LayerNorm(hidden_units)\n        with torch.no_grad():"
+        },
+        {
+          "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        # Histories are LEFT padded; count-1 indexes padding on short histories.",
+          "replace": "    def _sequence_states(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        return self.state_norm(out + self.state_ffn(out))\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        out = self._sequence_states(seq)\n        # Histories are LEFT padded; count-1 indexes padding on short histories."
+        },
+        {
+          "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)",
+          "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        out = self._sequence_states(seq)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)"
+        },
+        {
+          "find": "            num_layers=meta[\"num_layers\"],\n            dropout_rate=0.0,",
+          "replace": "            num_layers=meta[\"num_layers\"],\n            dropout_rate=meta[\"dropout_rate\"],"
+        }
+      ]
+    },
+    {
+      "category": "hyperparameter_tuning",
+      "rationale": "Jointly set dropout to 0.2, Adam learning rate to 0.0005, weight decay to 0.00001 and batch size to 256. Lower learning rate and stronger regularization control the residual block's added capacity, while larger batches stabilize updates. Preserve history length, dimensions, epoch cap and batches per epoch. Enforce the required environment-only data path.",
+      "edits": [
+        {
+          "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+          "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+        },
+        {
+          "find": "DROPOUT_RATE  = float(os.environ.get(\"GRU4REC_DROPOUT\", \"0.1\"))\nLR            = float(os.environ.get(\"GRU4REC_LR\", \"1e-3\"))\nWEIGHT_DECAY  = float(os.environ.get(\"GRU4REC_WD\", \"0.0\"))\nBATCH_SIZE    = int(os.environ.get(\"GRU4REC_BATCH\", \"128\"))",
+          "replace": "DROPOUT_RATE  = float(os.environ.get(\"GRU4REC_DROPOUT\", \"0.2\"))\nLR            = float(os.environ.get(\"GRU4REC_LR\", \"0.0005\"))\nWEIGHT_DECAY  = float(os.environ.get(\"GRU4REC_WD\", \"0.00001\"))\nBATCH_SIZE    = int(os.environ.get(\"GRU4REC_BATCH\", \"256\"))"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Add residual feed-forward refinement to GRU states and jointly tune dropout, learning rate, weight decay and batch size across all four category models. Keep training and generated inference consistent, with one checkpoint per category."
+}

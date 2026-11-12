@@ -1,0 +1,77 @@
+{
+  "request_sha256": "5dd8b71f338624c24b564767e684f95f96a4b5fbac1b3ab8bea5bed43a34fcea",
+  "response": {
+    "markdown_report": "At 10% progress, prioritize **recency-weighted BPR-max in the corrected GRU4Rec**, testing loss and weighting separately. This preserves inference and adds no independently fitted components.\n\n**Insights from the starting point and diagnosis.** (1) Users report stale interests displacing recent preferences. Weighting recent training transitions could improve current-choice relevance, but timestamps and recency do not establish intent. (2) Broad affinity also displaces specific recent matches. Emphasizing recent next-item supervision could sharpen specificity without assuming semantic similarity means complementarity. (3) Electronics has 22.31% small margins and 9.01% negative-over-positive rankings. These sampled training measurements motivate stronger discrimination; they do not predict validation gains.\n\n**Insights from related work.** (1) [GRU4Rec](https://github.com/hidasib/GRU4Rec) supplies BPR-max, which aggregates pairwise probabilities using negative-score softmax weights. Its score penalty is separate from optimizer weight decay. (2) [Hard-negative theory](https://arxiv.org/abs/2302.03472) motivates controllable emphasis on difficult negatives. [UFNRec](https://epubs.siam.org/doi/10.1137/1.9781611977653.ch6) cautions that unobserved items can remain relevant, so difficult negatives should not automatically receive reversed labels. (3) [2Gated-TimeGRU](https://aisel.aisnet.org/hicss-57/da/data_science/10/) motivates temporal conditioning. Its evidence does not establish improvement under this benchmark.\n\nThe framework separates three directions: **supervision timing → positional weighting; ranking discrimination → loss/negative coverage; temporal representation → recurrent decay**. The main gap is whether recent supervision improves immediate-choice relevance beyond improving sampled margins.\n\nScores below are Originality/Future potential/User alignment/Model alignment/Code difficulty; higher difficulty means harder. Each assessment gives a positive and negative reason.\n\n| Idea | Scores | Positive / negative assessments, in score order |\n|---|---|---|\n| A. Recency-weighted BPR-max | 3/7/7/8/3 | Focused combination / established ingredients; reusable control / limited novelty; targets stale and broad matches / recency is imperfect; targets weak margins / scale can confound; loss-only integration / reduction needs care |\n| B. Joint recent-item residual | 3/6/7/6/5 | Targeted bypass / familiar mechanism; tests specificity / shortcut risk; exposes latest preference / may duplicate ownership; richer discrimination / no direct margin guarantee; small module / export changes |\n| C. Monotone recurrent time decay | 4/6/6/5/7 | Constrained temporal adaptation / existing gates; interpretable retention / sparse gaps; suppresses stale state / gaps lack intent labels; changes conditioning / indirect margin effect; compact gate / timestamp plumbing |\n\n**Selected experiment.** A addresses two observed user failures—stale-interest ranking and broad historical affinity outranking specific recent continuity—and weak sampled separation. These are hypotheses, not established improvements. Compare baseline, unweighted BPR-max, then weighted BPR-max with fixed negative pools and scoring. Begin with modest coverage; identify any pool expansion as a separate intervention.\n\nSelect solely by pinned four-category macro validation HR@10. Retain common diagnostic samples and report immediate-choice versus deferred-interest judgments separately. Preserve one checkpoint per category, all host interfaces, seeds, splits, routing, training limits and budget. Ownership, compatibility and satisfied needs remain unresolved.",
+    "idea": {
+      "description": "Train the supplied corrected GRU4Rec with recency-weighted BPR-max, retaining one independently trained network and one selected checkpoint per category. First isolate the ranking-loss change, then add positional weighting with everything else held fixed.",
+      "motivation": "The proposal explicitly targets stale interests outranking recent preferences and broad historical affinity displacing specific recent matches. Giving recent observed transitions more supervision may help both, although this requires validation and qualitative confirmation. BPR-max directly targets weak sampled discrimination, particularly Electronics' measured 22.31% small-margin rate and 9.01% negative-over-positive rate. It does not infer ownership satisfaction, compatibility, complementary benefit or latent user traits.",
+      "implementation_notes": "This is a loss integration component because the supplied baseline source is not included in the prompt; it is not a standalone train.py replacement. Attach it to the actual corrected host GRU4Rec without replacing its encoder, scoring activation, optimizer, sampler or predictor. Preserve the baseline reduction initially: the code returns position losses and weights so a baseline-specific reducer can apply them explicitly. The provided weighted-position mean is appropriate only if the supplied baseline uses a global valid-position mean; otherwise retain its user/window reduction and normalize weights within its original reduction units.\n\nUse gamma=0.9 and floor=0.25 as declared initial hypotheses, with gamma=1 giving the unweighted control. Age counts later valid supervised transitions within each sampled window; this is positional recency, not elapsed time or necessarily global recency in a user's full history. Preserve the host window sampler and document this limitation. Weight normalization keeps the mean valid-position weight at one under the illustrated global reduction. Do not silently alter window selection.\n\nImplement the negative-log softmax-weighted pairwise probability, not a weighted average of negative log probabilities. Do not detach negative weights. Keep score regularization separate from optimizer weight decay. Start with the explicitly declared score_reg=0 arm and preserve the baseline scoring activation and epsilon convention; regularized BPR-max is an optional separately identified comparison if budget permits. Common additive score shifts leave the unregularized loss invariant, while scale changes affect both margins and negative concentration.\n\nUse the exact baseline negative tensors for loss comparisons wherever possible. If an expanded modest pool such as K=32 is needed, identify that as a combined loss/pool intervention before comparing weighting. Preserve the declared sampler distribution, duplicate handling and exclusions; never use validation/test interactions for exclusions. Do not introduce popularity or transition scores. Gather valid positions before expensive negative scoring when integrating. Fixed diagnostic negative samples remain independent of the optimization pool.\n\nKeep preprocessing seed 0, training seed 42, maximum 200 epochs and 200 batches per epoch, single-GPU execution, all four required categories, and the shared 43,200 GPU-second budget including unsuccessful runs and diagnostics. DATA_DIR remains os.environ['GAGC_DATA_DIR']; all artifacts remain beneath the trial directory. Use the existing host checkpoint-selection rule and pinned macro validation HR@10. Do not claim significance or improvement from the supplied inspiration scores, whose combined_score label does not establish a fresh pinned validation result.\n\nInference architecture is unchanged. Preserve the embedded predictor writer, architecture configuration, exact score transformation and corrected final-nonpadding readout; never use count-1 for left padding. Preserve family-specific sample_batch, ModelView, view.model as the actual nn.Module, item_emb, log2feats(sequence), predict_score(features, items), user_train, meta_data and review_data. DiagnosisProbe(view, device), run_full_diagnosis(train_loader) returning metrics and metric_definitions, and diagnosis_interpreter_prompt(raw_diagnosis) remain intact. The diagnostic loader still yields (None, sequence, positive, negative), each B x L. No diagnostic adapter replacement is needed for a loss-only change.\n\nCheck K=1, score_reg=0 against pairwise BPR; gamma=1 against the unweighted reducer; repeated negatives, extreme logits and empty valid batches; and gradients through the negative softmax. Monitor common sampled margins, negative-score concentration and embedding norms to distinguish scale changes from improved ranking. Retain the native twenty-user full-catalog unseen-item recommendations, five/category, and track stale-interest objections and specific immediate-choice endorsements without treating those judgments as the selection metric. Use only available histories, titles, descriptions and timestamps; no unavailable review fields, pretrained weights, other trials or hidden test data.",
+      "pseudocode": "import torch\nimport torch.nn.functional as F\n\n\ndef recency_bpr_max_terms(sequence, positive_ids, negative_ids,\n                          positive_scores, negative_scores,\n                          gamma=0.9, floor=0.25,\n                          score_reg=0.0, epsilon=0.0):\n    \"\"\"Return valid-position losses and recency weights.\n\n    sequence, positive_ids, positive_scores: [B, L]\n    negative_ids, negative_scores: [B, L, K]\n    Scores MUST use the unchanged host scoring transformation.\n    All K negative columns must be eligible under the declared sampler.\n    Baseline-specific reduction remains external.\n    \"\"\"\n    if negative_scores.ndim != 3 or negative_scores.shape[-1] < 1:\n        raise ValueError('Expected at least one negative per position')\n    if not (0.0 < gamma <= 1.0 and 0.0 < floor <= 1.0):\n        raise ValueError('Invalid positional weighting configuration')\n    if score_reg < 0.0 or epsilon < 0.0:\n        raise ValueError('Regularization and epsilon must be nonnegative')\n\n    valid = (sequence.ne(0) & positive_ids.ne(0)\n             & negative_ids.ne(0).all(dim=-1))\n    p = positive_scores[valid]\n    n = negative_scores[valid]\n    if p.dtype in (torch.float16, torch.bfloat16):\n        p, n = p.float(), n.float()\n\n    # No detachment: gradients also pass through the negative weights.\n    log_weights = F.log_softmax(n, dim=-1)\n    log_probability = torch.logsumexp(\n        log_weights + F.logsigmoid(p[:, None] - n), dim=-1)\n    if epsilon:\n        log_probability = torch.logaddexp(\n            log_probability, log_probability.new_tensor(epsilon).log())\n    losses = -log_probability\n    if score_reg:\n        losses = losses + score_reg * (\n            log_weights.exp() * n.square()).sum(dim=-1)\n\n    # Count later VALID supervised transitions, respecting left padding.\n    valid_int = valid.to(torch.int64)\n    later = (valid_int.flip(1).cumsum(1).flip(1) - valid_int)\n    weights = gamma ** later[valid].to(dtype=losses.dtype)\n    weights = weights.clamp_min(floor)\n    return losses, weights\n\n\ndef global_valid_position_mean(losses, weights):\n    \"\"\"Use ONLY when this matches the supplied baseline's reduction.\n\n    Return None for an empty batch; caller skips the optimizer step.\n    For user/window reductions, apply weighting within the original\n    reduction units instead of substituting this global mean.\n    \"\"\"\n    if losses.numel() == 0:\n        return None\n    return (losses * weights).sum() / weights.sum()\n\n\n# Host integration:\n# 1. Preserve corrected GRU4Rec, sampler, scores and baseline reduction.\n# 2. Compare baseline loss with unweighted BPR-max (gamma=1).\n# 3. Compare unweighted vs weighted BPR-max using identical pool/settings.\n# 4. Skip optimization when the reducer returns None.\n# 5. Keep host validation, diagnostics and predictor export unchanged.\n# 6. Select exactly one checkpoint per category; never combine scores.\n",
+      "originality": {
+        "score": 3,
+        "positive": "A minimal diagnosis-driven combination makes positional supervision and negative discrimination separately testable within GRU4Rec.",
+        "negative": "BPR-max and recency weighting are established techniques; their combination is an incremental experiment."
+      },
+      "future_potential": {
+        "score": 7,
+        "positive": "An inexpensive controlled result can establish whether supervision timing merits more elaborate temporal modeling.",
+        "negative": "Positional recency cannot represent compatibility, complementary capability or satisfied needs, and may hurt durable interests."
+      },
+      "code_difficulty": {
+        "score": 3,
+        "positive": "The selected change is confined to training loss and weighting, leaving trained architecture and inference unchanged.",
+        "negative": "Correct integration still requires preserving baseline reduction, negative sampling, numerical conventions and controlled comparisons."
+      }
+    },
+    "related_work": [
+      {
+        "title": "GRU4Rec implementation and BPR-max formulation",
+        "link": "https://github.com/hidasib/GRU4Rec",
+        "contributions": [
+          "Provides recurrent recommendation implementations and BPR-max with softmax-weighted negative pairwise probabilities and score regularization.",
+          "Makes loss, negative coverage and popularity-tempered sampling relevant experimental factors."
+        ],
+        "limitations": [
+          "Official sampling and regularization defaults are not validated settings for the supplied corrected Amazon baseline.",
+          "Changing loss and sampling together prevents attributing gains to either factor alone."
+        ]
+      },
+      {
+        "title": "Hard-negative BPR and partial-AUC analysis",
+        "link": "https://arxiv.org/abs/2302.03472",
+        "contributions": [
+          "Connects hard-negative ranking objectives with partial AUC and motivates controlling negative hardness."
+        ],
+        "limitations": [
+          "Does not establish that harder negatives improve this pinned GRU4Rec benchmark.",
+          "High negative scores do not establish true irrelevance."
+        ]
+      },
+      {
+        "title": "UFNRec",
+        "link": "https://epubs.siam.org/doi/10.1137/1.9781611977653.ch6",
+        "contributions": [
+          "Highlights the possibility that sampled unobserved items reflect genuine interests.",
+          "Motivates caution when interpreting difficult negatives."
+        ],
+        "limitations": [
+          "Label reversal needs stabilization and is not included in the selected proposal.",
+          "Unobserved relevance cannot be identified from model scores alone."
+        ]
+      },
+      {
+        "title": "2Gated-TimeGRU",
+        "link": "https://aisel.aisnet.org/hicss-57/da/data_science/10/",
+        "contributions": [
+          "Introduces interaction-interval conditioning into recurrent recommendation updates.",
+          "Supports temporal state modeling as an alternative research direction."
+        ],
+        "limitations": [
+          "Requires consistent timestamp processing during training and prediction.",
+          "Does not demonstrate gains under this task's fixed evaluator or establish that temporal gaps reveal current intent."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/model-family-comparison-20261029/runs/gru4rec-self_evolverec/self_evolverec/calls/01096"
+}

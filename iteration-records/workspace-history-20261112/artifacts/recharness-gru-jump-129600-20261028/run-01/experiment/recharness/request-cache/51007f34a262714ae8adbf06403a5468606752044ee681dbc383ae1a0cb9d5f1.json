@@ -1,0 +1,35 @@
+{
+  "request_sha256": "51007f34a262714ae8adbf06403a5468606752044ee681dbc383ae1a0cb9d5f1",
+  "response": {
+    "category_edits": [
+      {
+        "category": "feature_construction",
+        "rationale": "Apply a fixed training-frequency input feature in all four categories: multiply input embeddings by clip((f_i / m)^(-0.05), 0.9, 1.1). Counts use only training interactions; m is the median positive count. Store scales as a checkpoint buffer so the generated predictor restores them through its existing model-class import and state loading. Preserve learned embeddings, GRU topology, readout, loss, optimizer, and one checkpoint per category.",
+        "edits": [
+          {
+            "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+            "replace": "DATA_DIR = os.environ[\"GAGC_DATA_DIR\"]"
+          },
+          {
+            "find": "        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)\n        dropout = dropout_rate if num_layers > 1 else 0.0",
+            "replace": "        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)\n        self.register_buffer(\"input_frequency_scale\", torch.ones(itemnum + 1))\n        dropout = dropout_rate if num_layers > 1 else 0.0"
+          },
+          {
+            "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))",
+            "replace": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq) * self.input_frequency_scale[seq].unsqueeze(-1))"
+          },
+          {
+            "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))",
+            "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq) * self.input_frequency_scale[seq].unsqueeze(-1))"
+          },
+          {
+            "find": "        dropout_rate=DROPOUT_RATE,\n    ).to(device)\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)",
+            "replace": "        dropout_rate=DROPOUT_RATE,\n    ).to(device)\n    item_counts = np.zeros(itemnum + 1, dtype=np.int64)\n    for history in user_train.values():\n        np.add.at(item_counts, np.asarray(history, dtype=np.int64), 1)\n    positive_counts = item_counts[1:][item_counts[1:] > 0]\n    median_count = float(np.median(positive_counts)) if positive_counts.size else 1.0\n    input_scales = np.ones(itemnum + 1, dtype=np.float32)\n    input_scales[1:] = np.clip(\n        np.maximum(item_counts[1:].astype(np.float64) / median_count, 1e-12) ** (-0.05),\n        0.9, 1.1,\n    ).astype(np.float32)\n    with torch.no_grad():\n        model.input_frequency_scale.copy_(torch.from_numpy(input_scales).to(device))\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Add mild training-frequency scaling to GRU inputs across all four datasets. Persist scales in each model checkpoint; the existing predictor writer imports the updated class and restores the buffer automatically."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/run-01/experiment/recharness/calls/00289"
+}

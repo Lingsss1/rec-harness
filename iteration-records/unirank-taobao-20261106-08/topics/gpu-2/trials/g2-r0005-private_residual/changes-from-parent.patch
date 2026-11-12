@@ -1,0 +1,167 @@
+--- g2-r0004-context_only/model.py
++++ g2-r0005-private_residual/model.py
+@@ -1,17 +1,11 @@
+-"""Prospective source-path attribution under fixed compressed UF histories.
+-
+-Auxiliary gradients into the shared scorer are always blocked. Independent
+-switches control auxiliary gradients through supplied context embeddings and
+-through target/history item-and-action embeddings. Four cells keep identical
+-modules, initialization order, 30 summaries, forward values and inference.
+-Neither/both endpoints correspond to the earlier both_blocked/scorer_only
+-operators. Same-seed endpoint replays are consistency checks, not repetition.
+-
+-These are computational path gates: tied target/history tables remain tied,
+-and cross-source aliases must be audited by the host before ownership claims.
+-Persistent Dice state updates only in the primary scorer call. Preparation
+-performs no numerical execution or training; torch.func support and the
+-forward/backward/masking gates in proposal.json remain host prerequisites.
+-No architecture novelty or new predictive improvement is claimed.
++"""Prospective private residuals for task-specific compressed histories.
++
++The primary path retains the incumbent uniform summaries. Auxiliary tasks use
++feedback-stratified summaries of base item/action embeddings plus optional
++zero-initialized ID residuals. An independent gate controls auxiliary updates
++to the base item/action tables. Residuals are shared among the three auxiliary
++tasks but never enter click predictions. Context updates remain shared, and
++auxiliary scorer parameter updates remain blocked. No new efficacy or priority
++claim is made. Numerical checks and all training belong to the host.
+ """
+ import torch
+@@ -31,13 +25,15 @@
+     'block_aux_context_grad': False,
+     'block_aux_item_grad': True,
++    'use_aux_item_residual': True,
+ }
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='SourcePathCompression', gpu=-1,
++    def __init__(self, feature_map, model_id='PrivateResidualCompression', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+                  compression_routes='uf', block_aux_scorer_grad=True,
+-                 block_aux_context_grad=False, block_aux_item_grad=True, num_tasks=None,
++                 block_aux_context_grad=False, block_aux_item_grad=True,
++                 use_aux_item_residual=True, num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -59,4 +55,9 @@
+         self.block_aux_context_grad = block_aux_context_grad
+         self.block_aux_item_grad = block_aux_item_grad
++        if block_aux_context_grad:
++            raise ValueError('This study retains shared auxiliary context updates')
++        if not isinstance(use_aux_item_residual, bool):
++            raise ValueError('Residual switch must be boolean')
++        self.use_aux_item_residual = use_aux_item_residual
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -74,6 +75,6 @@
+         self.value_width = self.key_width + embedding_dim
+ 
+-        # Inherit the action-aware scorer and towers from the previous factorial.
+-        # All cells instantiate exactly the same modules in exactly this order.
++        # Inherit scorer and tower construction and RNG order. Both residual
++        # cells add identical banks; no-residual controls retain original capacity.
+         layers = []
+         width = 4 * self.key_width + embedding_dim
+@@ -93,5 +94,35 @@
+             tower.append(nn.Linear(width, 1))
+             self.towers.append(nn.Sequential(*tower))
++        # Initialize the inherited network before allocating residual tables:
++        # base embeddings, scorer and towers retain the incumbent RNG order.
+         self.reset_parameters()
++        # Register under embedding_layer for the host embedding optimizer.
++        # Preserve any item/action table aliases; reject cross-source aliases
++        # because they invalidate the intended parameter ownership contrast.
++        residual_layers = nn.ModuleDict()
++        if self.use_aux_item_residual:
++            selected = self.item_fields + [self.action_field]
++            base_layers = self.embedding_layer.embedding_layers
++            context_ids = {id(base_layers[name]) for name in self.user_fields}
++            aliases = {}
++            for name in selected:
++                base = base_layers[name]
++                if not isinstance(base, nn.Embedding):
++                    raise ValueError('Residual bank requires categorical item/action tables')
++                if base.embedding_dim != embedding_dim:
++                    raise ValueError('Residual bank requires uniform field width')
++                if id(base) in context_ids:
++                    raise ValueError('Cross-source embedding alias invalidates ownership')
++                if id(base) not in aliases:
++                    # Construction normally consumes CPU RNG even though
++                    # weights are immediately zeroed. Restore that stream so
++                    # the added bank cannot change subsequent host shuffling.
++                    with torch.random.fork_rng(devices=[]):
++                        residual = nn.Embedding(base.num_embeddings, base.embedding_dim,
++                                                padding_idx=base.padding_idx)
++                        nn.init.zeros_(residual.weight)
++                    aliases[id(base)] = residual
++                residual_layers[name] = aliases[id(base)]
++        self.embedding_layer.auxiliary_residual_layers = residual_layers
+         self.model_to_device()
+ 
+@@ -126,5 +157,19 @@
+         values = torch.cat([keys, item_emb[self.action_field][:, :-1]], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
+-        return context, target, values, mask, auxiliary
++        residual_target, residual_values = None, None
++        if self.use_aux_item_residual:
++            residual_layers = self.embedding_layer.auxiliary_residual_layers
++            # All IDs come from the same filtered item dictionary as the base
++            # embeddings. Never look up the unknown current action.
++            residual_items = {name: residual_layers[name](item[name].long())
++                              for name in self.item_fields}
++            residual_target = torch.cat([residual_items[name][:, -1]
++                                         for name in self.item_fields], dim=-1)
++            residual_keys = torch.cat([residual_items[name][:, :-1]
++                                       for name in self.item_fields], dim=-1)
++            residual_action = residual_layers[self.action_field](
++                item[self.action_field][:, :-1].long())
++            residual_values = torch.cat([residual_keys, residual_action], dim=-1)
++        return context, target, values, mask, auxiliary, residual_target, residual_values
+ 
+     def _compress_both(self, values, mask, auxiliary):
+@@ -175,25 +220,32 @@
+ 
+     def forward(self, inputs):
+-        context, target, values, mask, auxiliary = self._represent(inputs)
++        context, target, values, mask, auxiliary, residual_target, residual_values = self._represent(inputs)
+         values, counts = self._compress_both(values, mask, auxiliary)
+-        # Both calls include all 30 slots: each BatchNorm sees the identical
+-        # population. Selecting ten versus twenty slots BEFORE scoring would
+-        # change the forward operator and invalidate the gradient-only claim.
++        if self.use_aux_item_residual:
++            # Arithmetic compression commutes with residual addition; masks,
++            # strata and event counts are identical for base and residuals.
++            residual_values, _ = self._compress_both(residual_values, mask, auxiliary)
++        # Both scorer calls include all 30 slots with identical memberships.
++        # Residuals may change auxiliary values and their Dice distribution.
++        # Retain the inherited slot population for the no-residual endpoints.
+         primary_weights = self.local_activation(self._interactions(target, values))
+         primary_strata = self._pool(primary_weights, values, counts)
+         uniform = primary_strata[:, 0, :]
+ 
+-        if self.training:
+-            # Item fields share tables across current target and past events:
+-            # gate both uses together. Historical action joins this group.
+-            # Context includes only supplied non-item/non-action features.
+-            aux_context = context.detach() if self.block_aux_context_grad else context
++        if self.training or self.use_aux_item_residual:
++            # Gate the BASE table path before adding residuals. The residual
++            # bank always receives auxiliary gradients and no click gradients.
++            aux_context = context
+             aux_target = target.detach() if self.block_aux_item_grad else target
+             aux_values = values.detach() if self.block_aux_item_grad else values
++            if self.use_aux_item_residual:
++                aux_target = aux_target + residual_target
++                aux_values = aux_values + residual_values
++            # Inference also needs this call when representations differ.
++            # Functional detached parameters preserve input gradients, and
++            # cloned buffers prevent auxiliary updates to persistent Dice state.
+             aux_weights = self._auxiliary_activation(self._interactions(aux_target, aux_values))
+             aux_strata = self._pool(aux_weights, aux_values, counts)
+         else:
+-            # Identical values/parameters and no state update: inference needs
+-            # just one scorer pass for every factorial cell.
+             aux_context, aux_target = context, target
+             aux_strata = primary_strata

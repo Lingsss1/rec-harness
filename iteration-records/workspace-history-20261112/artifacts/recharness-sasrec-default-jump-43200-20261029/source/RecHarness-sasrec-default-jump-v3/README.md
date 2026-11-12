@@ -1,0 +1,354 @@
+# Default SASRec eight-direction jump experiment
+
+This fork is isolated from the original RecHarness and the earlier jump-v2 copy.
+`DEFAULT_COPY_PROVENANCE.json` records the copy from the prior SASRec jump fork. The active policy is
+`gagc/semantic_arms.py`; the experiment plan is in
+`../recharness-sasrec-default-jump-43200-20261029/plan.json`.
+
+The regular bandit has eight directions under four parent categories:
+feature construction / embedding representation; interaction mechanism /
+network architecture; sequence modeling / interest aggregation; learning
+objective / training strategy. One Thompson draw per direction selects the
+highest four without replacement for four GPU slots. Selection frequency
+allocates compute opportunities over rounds; actual worker durations are charged.
+
+A gated jump selects the highest-draw direction and the highest compatible
+one from another parent category, and implements both inside one trained SASRec
+model. A single `combination_jump` counter records its delayed outcome. There
+are no extra per-pair bandit priors or component-direction credit for the jump.
+Four local retune groups, the protected budget, global-best snapshot and safe
+rollback/finalization follow jump-v2. Regular reward is strict improvement over
+the group-start local incumbent, including single-candidate retune groups.
+
+The launch uses one fresh search with 43,200 GPU seconds, as explicitly
+requested for the default-cold-start SASRec rerun. Historical runs are archived separately and
+do not consume this new budget. The search uses the original RecHarness default SASRec program and
+hyperparameters, with fresh weights and no TPE bindings, pinned data/evaluator, and gpt-6.1-sol / medium. Training-time single-model
+audits are charged within trials. Preflight overhead is recorded separately.
+
+Structured edits must cover exactly the selected directions and change executable
+syntax. Their semantic attribution is prompt-enforced and retained for review;
+syntax checks alone do not prove category compliance.
+
+---
+
+# RecHarness Jump v2 — isolated local fork
+
+This directory copies tracked files from `../RecHarness-6lyc` at commit
+`74a927fefaf7d120c52b6e3a0809958bd33984f0`. The original code and experiments are
+unchanged. `COPY_PROVENANCE.json` records the original file hashes. No virtual
+environment, prior results, trained models or search memory were copied.
+
+The Amazon jump changes are implemented in `gagc/jump_policy.py`, `gagc/tools.py`
+and `gagc/state.py`:
+
+- Keep global best validation history separate from the current basin's incumbent.
+  A jump can drop from 0.595 to 0.50 and then promote 0.53 and 0.56 inside its own
+  basin. The old global best remains available until the new basin exceeds it.
+- Estimate a trial cap from the 75th percentile of the last 32 measured positive
+  trial durations, with 1.25x safety and five seconds of teardown margin.
+- Protect a configurable 35% of the original budget for an executable jump and
+  four retune groups. Choose the largest retune group size from 1–4 that fits.
+  Per-trial caps are enforced by the matched executor, including failed retries.
+  This reservation is part of the existing budget, not additional compute.
+- Open the gate after two stagnant local rounds with an estimated ceiling gap
+  below 0.03. Also support an explicitly labeled `reserved_exploration_phase`:
+  once another full local group would consume the protected budget, select one
+  executable jump. This is planned exploration, not a claim that a plateau was
+  observed. Defaults permit one jump attempt per run.
+- Retune for four executed groups, including failed groups. Do not allow nested
+  jumps. Accept only if the basin exceeds its pre-jump global score; otherwise
+  restore the saved code and predictor. A shortened window at finalization keeps
+  an already improved model or restores the old one, without a delayed posterior
+  reward for an incomplete window. A rollback I/O error blocks final evaluation.
+- Make `change_optimizer_type` executable alongside loss and architecture jump
+  arms. Preserve the existing restriction on model-family changes.
+
+All decisions, caps, trigger reasons, posterior updates and outcomes are logged.
+The Claude backend's retry attempts share a single trial deadline.
+
+## Configuration
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `GAGC_JUMP_ENABLED` | `true` | Jump on/off ablation; off releases the protected budget |
+| `GAGC_JUMP_RESERVE_FRACTION` | `0.35` | Portion of total budget protected for exploration |
+| `GAGC_JUMP_BUDGET_TRIGGER` | `true` | Allow the explicitly labeled exploration phase |
+| `GAGC_JUMP_STAGNANT_ROUNDS` | `2` | Plateau gate threshold |
+| `GAGC_JUMP_THETA` | `0.03` | Estimated ceiling-gap threshold |
+| `GAGC_JUMP_COST_SAFETY` | `1.25` | Measured trial-cost multiplier |
+| `GAGC_JUMP_MAX_ATTEMPTS` | `1` | Maximum attempted jumps, including failed jumps |
+| `GAGC_MIN_TRIAL_SECS` | `300` | Minimum runnable trial allowance |
+
+Set `GAGC_JUMP_BUDGET_TRIGGER=false` to evaluate plateau-only triggering. Exact
+policy definitions are also recorded in `JUMP_POLICY.json`.
+
+## Matched Amazon executor
+
+`matched_runner.py` uses the existing verified data, GPU worker, grader and LLM
+transport. Only this process binds `gagc` to the fork. The original adapter files
+and the running TPE control are untouched. Use identical input configs for on/off
+comparisons. The output must be a new directory and the configured GPUs must be
+idle. Merely checking a config starts no experiment:
+
+```bash
+artifacts/MLEvolve/.venv/bin/python artifacts/RecHarness-jump-v2-20261028/matched_runner.py \
+  --config artifacts/amazon-aligned-20261022/recharness/config.json
+```
+
+To explicitly start a future run, add `--run --output <new-output-directory>`.
+Use `--jump off` for the ablation. This command runs in the foreground; no
+experiment has been launched as part of creating this fork.
+
+Run tests from the shared workspace:
+
+```bash
+PYTHONPATH=artifacts/RecHarness-jump-v2-20261028 \
+  artifacts/MLEvolve/.venv/bin/python -m pytest artifacts/RecHarness-jump-v2-20261028/tests -q
+```
+
+The pre-existing strategy-arm tests retain their upstream `xfail` markers.
+`verification/old_trace_gate_replay.json` replays only gate decisions using old
+cost/score logs; it is not a new experiment and provides no new model score.
+
+---
+
+# Original upstream README
+
+# RecHarness: A Bandit-Routed Agentic Harness for Self-Evolving Recommender Systems
+
+Paper: [https://arxiv.org/abs/2607.29241](https://arxiv.org/abs/2607.29241)
+
+Affiliations: Kuaishou Technology · Georgia Institute of Technology
+
+![RecHarness framework](g1.png)
+
+RecHarness is a bandit-routed agentic harness that splits recommender-model optimization into "bandit picks the direction, LLM generates the hypothesis and code," achieving more stable, budget-efficient gains than pure LLM-reasoning search.
+
+This Repo contains the source code, experiment entrypoints, model templates, benchmark harnesses, tests, and local-data preprocessing utilities used to assess the reproducibility of Our RecHarness.
+
+## Artifact Contents
+
+- `run2.sh`: Amazon Reviews sequential-recommendation experiment entrypoint.
+- `gr.sh`: KuaiRec watch-time/ranking experiment entrypoint.
+- `prepare_gr_data.py`: local KuaiRec preprocessing utility.
+- `gagc/data_preprocess.py`: local Amazon Reviews preprocessing utility.
+- `gagc/agent.py`: Amazon and KuaiRec agent factories.
+- `gagc/tools.py`: proposal, isolated execution, promotion, state update, and final evaluation tools.
+- `gagc/state.py`: posterior, basin, queue, and Experiment Skill state.
+- `gagc/grpo.py`: Thompson routing, composite arms, mutex filtering, and group advantages.
+- `gagc/benchmarks/`: frozen benchmark contracts and metric computation.
+- `gagc/templates/`: cold-start recommendation-model templates.
+- `tests/`: unit tests for routing, benchmarks, arms, and the optional code-edit backend.
+
+Only `run2.sh` and `gr.sh` are retained as experiment shell scripts.
+
+## Environment
+
+- Python 3.11 or newer is recommended.
+- Linux is recommended for GPU execution and CPU-affinity support.
+- CUDA-capable GPUs are required for the paper-scale runs.
+- The default main-run budget is **43,200 seconds of total GPU/compute-time**. Parallel trials are charged by the sum of their measured runtimes, not by parallel wall-clock duration.
+
+Create an isolated environment and install the artifact:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[templates,dev]"
+```
+
+Configure the LLM provider through environment variables. Secrets are never stored in the source tree:
+
+```bash
+cp .env.example .env
+export VOLCENGINE_API_KEY=<your-key>
+```
+
+Tracing is optional and is disabled when its API key is absent.
+
+<!-- ## Data -->
+
+### Amazon Reviews Local Layout
+
+For the four-dataset experiment, provide a local raw-data root with the following files:
+
+```text
+<amazon_raw>/
+├── benchmark/5core/last_out/
+│   ├── Movies_and_TV.train.csv
+│   ├── Movies_and_TV.valid.csv
+│   ├── Movies_and_TV.test.csv
+│   ├── Industrial_and_Scientific.train.csv
+│   ├── Industrial_and_Scientific.valid.csv
+│   ├── Industrial_and_Scientific.test.csv
+│   ├── Electronics.train.csv
+│   ├── Electronics.valid.csv
+│   ├── Electronics.test.csv
+│   ├── CDs_and_Vinyl.train.csv
+│   ├── CDs_and_Vinyl.valid.csv
+│   └── CDs_and_Vinyl.test.csv
+└── raw/meta_categories/
+    ├── meta_Movies_and_TV.jsonl
+    ├── meta_Industrial_and_Scientific.jsonl
+    ├── meta_Electronics.jsonl
+    └── meta_CDs_and_Vinyl.jsonl
+```
+
+Preprocess one category manually:
+
+```bash
+python -m gagc.data_preprocess \
+  --dataset Movies_and_TV \
+  --source 2023 \
+  --local-dir /path/to/amazon_raw \
+  --data_dir ./input/trainval \
+  --test_dir ./input/test
+```
+
+`run2.sh` performs this step for all four categories when `--raw-data-dir` is provided. If the split files already exist under `input/trainval/` and `input/test/`, use `--prepared-data`.
+
+For the local Amazon 2014 preprocessing modes, place `reviews_<dataset>.json.gz` directly in the directory passed through `--local-dir`.
+
+### KuaiRec Local Layout
+
+Provide a local directory containing either preprocessed matrices or raw matrices plus feature files:
+
+```text
+<kuairec_raw>/
+├── big_matrix.csv                         # or big_matrix_processed.csv
+├── small_matrix.csv                       # or small_matrix_processed.csv
+├── user_features.csv                      # user_features_raw.csv is also accepted
+├── item_categories.csv                    # may be built from the file below
+└── video_raw_categories_multi.csv          # optional source for item_categories.csv
+```
+
+Create the arrays consumed by `gr.sh`:
+
+```bash
+python prepare_gr_data.py \
+  --raw-dir /path/to/kuairec_raw \
+  --output-dir ./input/kuairec
+```
+
+The command writes `train_data.npy` and `test_data.npy`.
+
+## Main Experiments
+
+### Amazon Sequential Recommendation
+
+Run the four-dataset experiment with four GPUs:
+
+```bash
+bash run2.sh \
+  --raw-data-dir /path/to/amazon_raw \
+  --data-dir ./input \
+  --gpus 0,1,2,3 \
+  --budget 43200
+```
+
+Use existing prepared splits instead:
+
+```bash
+bash run2.sh \
+  --prepared-data \
+  --data-dir ./input \
+  --gpus 0,1,2,3 \
+  --budget 43200
+```
+
+The default cold start is `sasrec_perdataset`. Other registered Amazon templates can be selected through `--cold-start`.
+
+### KuaiRec Watch-Time/Ranking Prediction
+
+```bash
+bash gr.sh \
+  --train-data ./input/kuairec/train_data.npy \
+  --test-data ./input/kuairec/test_data.npy \
+  --gpus 0,1,2,3 \
+  --budget 43200 \
+  --cold-start gr
+```
+
+The registered KuaiRec cold starts are `gr`, `d2q`, `ks_d2q`, and `tpm`.
+
+Both scripts support `--help`.
+
+## Search Protocol
+
+1. Initialize the cold-start `best.py` and, for Amazon tasks, `predict.py`.
+2. Execute one unmodified baseline trial.
+3. Select eligible arms with Thompson-style routing or the configured ablation policy.
+4. Ask the LLM for one concrete hypothesis per selected arm.
+5. Execute candidates in isolated trial workspaces.
+6. Evaluate candidates using the validation metric.
+7. Promote the highest valid candidate only when it improves the incumbent under the promotion rule.
+8. Update posterior state and Experiment Skill memory.
+9. Continue until the total compute-time budget or another hard stop is reached.
+10. Evaluate the final incumbent once on the held-out test set.
+
+Routing and promotion use `HR@10` for the Amazon experiments. Other ranking metrics are reported for the final evaluation but are not used to select or promote candidates.
+
+## Arms and Jump Policy
+
+Local arms cover optimization, regularization, capacity, pooling, context length, and feature choices. Composite arms represent coupled changes such as learning rate plus batch size plus scheduler.
+
+Jump arms cover high-impact structural changes such as architecture, loss, or decoder-backbone changes. A jump group contains exactly one jump arm. A jump becomes eligible after stagnation and when the estimated recent-round improvement gap is below the configured threshold, including the paper setting of `0.03`. After a valid jump, local arms receive a retuning window before the new basin is accepted or rejected.
+
+## Validation Isolation
+
+- Search feedback: validation only.
+- Routing metric for Amazon: `HR@10`.
+- Promotion metric for Amazon: `HR@10`.
+- Secondary metrics: final reporting only.
+
+- Failed, timed-out, OOM, and protocol-invalid trials cannot be promoted.
+
+## Outputs
+
+Each run writes:
+
+```text
+logs/<run-id>/
+├── agent.log
+├── iteration_<N>.json
+├── promotion/latest.json
+├── proposals/round_<N>.json
+├── trials/latest_results.json
+└── state/iter_<N>_before.json
+
+results/<run-id>/
+├── agent_output.txt
+├── summary.json          # KuaiRec runs
+└── score.json            # Amazon final evaluation
+```
+
+Trial-local workspaces are created under `workspace/<run-id>/`.
+
+## Tests
+
+Run the complete unit-test suite:
+
+```bash
+python -m pytest -q
+```
+
+Check shell syntax:
+
+```bash
+bash -n run2.sh gr.sh
+```
+
+## Important Compatibility Names
+
+The installable distribution is named `recharness`, while the source package remains `gagc` for implementation compatibility:
+
+```python
+from gagc.agent import create_gagc_agent, create_gr_agent
+```
+
+The existing `GAGC_*` environment variables are likewise retained so the archived experiment configuration remains executable.
+
+## License
+
+The artifact is distributed under the MIT License in `LICENSE`.

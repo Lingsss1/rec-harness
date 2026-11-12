@@ -1,0 +1,123 @@
+{
+  "request_sha256": "445be3e560ef6ded5dee210b2e7d97a9d22450052d5c7a6477ac3258792a2e1c",
+  "response": {
+    "markdown_report": "**Insights and directions.** (1) The starting gate conditions residual transformations on recent behavior while preserving NextItNet’s identity shortcuts; it does not explicitly reweight historical positions or guarantee recency. (2) Summaries must exclude padding and future items; initialize multipliers at one to preserve baseline behavior. (3) CDs’ sampled-negative margin of 12.03 alongside diagnostic catalog HR@10 of zero motivates stronger competition, but these training diagnostics cannot establish validation gains.\n\nRelated work suggests three directions. (1) [NextItNet](https://arxiv.org/abs/1808.05163) supports causal residual convolutions, without validating this gate. (2) [Scalable Cross-Entropy](https://dspace.mit.edu/entities/publication/5392aca9-0bae-4176-9b3a-a8165957ba26) motivates informative competitors; [UFNRec](https://arxiv.org/abs/2208.04116) cautions that plausible competitors can be false negatives. (3) [ITS-Rec](https://www.mdpi.com/2079-9292/14/9/1748) motivates text enrichment, although its pretrained encoders and reviews exceed this setting. Small deletion samples and repacking confound temporal conclusions.\n\n**Framework and candidates.** Cross representation conditioning (recent summary), discrimination (candidate competition), and evidence enrichment (permitted text). Every candidate retains one jointly trained NextItNet per category.\n\nScores use O=originality, P=potential, U=user alignment, M=model alignment, D=difficulty; higher D means harder. Alignment expresses hypotheses, not demonstrated improvements.\n\n| Idea | O | P | U | M | D |\n|---|---|---|---|---|---|\n| Recent-summary residual gate | 4: +adaptation; −known gating | 7: +intent conditioning; −recency varies | 8: +current priority; −compatibility unknown | 5: +temporal test; −already order-sensitive | 3: +small layer; −causal masking |\n| Mixed-negative softmax on gated backbone | 4: +targeted combination; −known objective | 7: +ranking focus; −false negatives | 8: +specific competition; −intent implicit | 8: +ranking-gap hypothesis; −metric mismatch | 5: +shared scorer; −mining and controls |\n| Scratch-trained title/description addition | 5: +permitted semantics; −known fusion | 7: +grounding; −sparse text | 8: +style/task clues; −compatibility uncertain | 6: +discrimination; −indirect evidence | 6: +pooling; −text pipeline |\n\n**Selected experiment: mixed-negative softmax on the recent-gated NextItNet.** At 10% progress, begin with uniform multi-negative training before mining. Recent conditioning targets old-purchase carryover; stronger competition targets broad matches outranking specific choices. Neither mechanism proves unmet need, compatibility, or style alignment.\n\n```python\nr = causal_masked_recent_mean(item_embeddings, window=5)\nfor block in nextitnet_blocks:\n    h = mask * (h + 2*sigmoid(block.gate(r)) * block.residual_update(h))\n# Gate weights/bias start at zero; initial multiplier equals one.\npool = unique_uniform_prefix_eligible_items(M=128)\nneg = scheduled_random_and_moderate(pool, K=32)\nloss = cross_entropy(scores(h, [positive, *neg]), target=0)\n```\n\nCompare unchanged baseline, uniform CE alone, gate alone, gate+uniform CE, then mining, within budget. If gating helps, compare constant/channel scaling and lag-decay/truncation controls. Track gate variability and controlled temporal perturbations; gate magnitudes cannot establish temporal influence.\n\nPreserve final-nonpadding readout, diagnostic APIs, matching predictor, four routes, fixed seeds, maximum 200 epochs and 200 batches/epoch. Selection uses pinned **sampled** macro HR@10, distinct from catalog diagnostics ([sampled-metric analysis](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/)). One hit changes macro HR by 0.125 percentage points. When host outputs permit, bootstrap paired users within category on identical candidates. Report trials and category changes; fixed-candidate intervals omit seed/sampling variability and post-selection optimism ([Cawley–Talbot](https://www.jmlr.org/papers/v11/cawley10a.html)). No gains are claimed.",
+    "idea": {
+      "description": "Evaluate a causal recent-summary gate and multi-negative candidate cross-entropy through staged ablations of the corrected NextItNet, introducing moderate-hard mining only after uniform-negative training. Train one independent network per category and load one selected checkpoint per category.",
+      "motivation": "The idea explicitly targets two user-facing failures: older purchases carrying over despite changing priorities, and broadly related alternatives outranking specific current matches. Recent conditioning and stronger candidate competition are plausible mechanisms for these failures, rather than established solutions. The model-facing motivation is strong sampled-negative training separation coexisting with poor eligible-catalog training-prefix HR@10. This gap motivates a discrimination experiment but does not imply that catalog diagnostic gains improve the host's sampled HR@10. Order sensitivity is already observed; embedding cosine near 0.5 does not demonstrate collapse.",
+      "implementation_notes": "Preserve the supplied corrected NextItNet backbone, complete residual updates, and untouched identity shortcuts. For each input position, compute a masked mean of raw, jointly trained item embeddings at that position and up to four preceding positions; never include its shifted target. Reuse this causal summary across blocks, with a separate D-to-D gate per block. Set g=2*sigmoid(Wr+b), initializing W and b to zero so g=1 exactly. A plain zero-initialized sigmoid would halve residual updates. This initialization preserves the block's function, although adding modules can change random-number consumption; preserve baseline initialization order or isolate gate initialization. Gate conditioning does not explicitly weight historical positions because hidden states can already contain older information.\n\nUse the supplied optimizer, architecture dimensions, dropout, batch size, preprocessing, and checkpoint-selection schedule unchanged during initial loss/gate comparisons. First compare unchanged baseline, uniform multi-negative CE alone, gate alone with the supplied loss, and gate+uniform CE; assess mining only if budget permits. If the gate helps, compare a fixed residual scale matched to its training-prefix average, a learned context-independent channel scale initialized at one, and an explicit lag-decay or truncated-context control. Controls train separately from scratch and are never fused or averaged. Limit the preregistered sequence to the shared 43,200 GPU-second budget; training, controls, diagnostics, and failures all count. These settings are proposals, not measured optimal choices.\n\nFor the mining variant, propose a unique uniform pool M=128 and K=32 retained negatives per valid training position. Exclude padding, the current positive target, and every item observed in the available training prefix, including observations preceding the truncated model window. Do not exclude using later interactions or held-out labels. Sample the pool without replacement from eligible items. Score it using detached current features and the same trained scorer; larger scores mean harder candidates. Sort ascending by score with item ID as the tie breaker. Define the moderate band as zero-based sorted indices floor(0.50*M_eff) through ceil(0.75*M_eff)-1, where M_eff is the available pool size. Uniformly sample the hard quota without replacement from this band, then sample the random quota uniformly without replacement from the remaining pool. Thus the 'random' component is conditional on already selected hard items. Use fraction f=0 for epochs 1–10, f=0.25*(epoch-10)/20 for epochs 11–30, and f=0.25 afterward. Set K_eff=min(32,M_eff), hard quota=min(floor(f*K_eff), band size), and random quota=K_eff-hard quota. If no eligible negatives exist, omit that position and report the count. Use temperature 1.0 for the loss and uniform sampling within the band; there is no separate sampling temperature. Average CE over valid positions. The uniform-CE control uses the same pool and K_eff but f=0 throughout. Account for candidate-scoring memory by chunking positions without changing the candidate sets.\n\nDescribe uncorrected CE as a sampling-dependent candidate-ranking surrogate, not an unbiased catalog-softmax estimator. No LogQ correction is proposed: filtering, hard selection, and conditional mixing change sampling probabilities. Moderate hardness, random mixing, and curriculum are false-negative mitigation hypotheses; future positives and other relevant unobserved items remain eligible. Hard mining can favor these false negatives, and lower loss temperatures could amplify their gradients.\n\nRemask after final normalization. Gather the maximum index with sequence!=0, never count-1; return a defined zero feature for an empty history. Preserve log2feats(sequence), item_emb, predict_score(features, items), the actual nn.Module in ModelView, and the host sample_batch contract. Retain DiagnosisProbe(view, device), run_full_diagnosis(train_loader) returning metrics and metric_definitions, and diagnosis_interpreter_prompt(raw_diagnosis). Keep the loader's (None, sequence, positive, negative), B x L interface; construct additional loss candidates internally. Include causal-summary dependencies in architecture probes. Check causality, padding invariance, summary masking, and train/predict score agreement. Report gate variability and controlled older/recent perturbations, with matched deletion controls and repacking caveats; do not interpret gate magnitude as measured temporal importance.\n\nKeep the architecture definition and configuration synchronized in the predictor writer and checkpoints, preferably by emitting the same model source. Each category loads exactly one checkpoint, with no checkpoint averaging, independent auxiliary scores, or separately fitted experts. Retain Movies_and_TV, Industrial_and_Scientific, Electronics, and CDs_and_Vinyl routing; DATA_DIR = os.environ['GAGC_DATA_DIR']; trial-local artifacts; preprocessing seed 0; training seed 42; at most 200 epochs; exactly 200 batches per epoch; single-GPU execution. Do not use pretrained weights, extra data, unavailable ratings/reviews/categories/prices/stores, or inferred simulator traits.\n\nSelect exclusively by the host's fixed sampled macro validation HR@10: 200 users/category, one positive and 99 unique negatives, evaluation seed 42. Full-catalog training-prefix diagnostics are separate in-sample measurements. Where host-provided per-user hits are available, compute paired differences on identical candidates and bootstrap users independently within each category while preserving model pairs, recomputing the four-category macro difference. Category-level exact McNemar tests are optional. Aggregate scores alone cannot recover paired uncertainty. These analyses must not modify the evaluator. One category hit changes category HR by 0.5 percentage points and macro HR by 0.125 percentage points. Report trial count, checkpoint-selection opportunities, and per-category changes. Fixed-candidate confidence intervals condition on these users, candidates, and trained models; they omit training-seed variability, candidate resampling, and adaptive-selection optimism. Keep small winning gains exploratory and reserve generalization claims for the host's untouched final evaluation. Baseline source and its full optimizer/checkpoint configuration were not supplied, so this remains an explicit integration specification rather than a verified runnable replacement.",
+      "pseudocode": "initialize_supplied_corrected_nextitnet_with_training_seed(42)\n# Preserve baseline parameter initialization; then add zero-initialized gates.\nfor block in model.blocks:\n    block.gate = Linear(D, D, weight_init=0, bias_init=0)\n\ndef log2feats(sequence):\n    mask = (sequence != 0)[..., None]\n    r = causal_masked_mean(item_emb(sequence), mask, window=5)\n    h = supplied_baseline_input_features(sequence)\n    for block in model.blocks:\n        update = block.complete_residual_update(h)\n        g = 2 * sigmoid(block.gate(r))\n        h = mask * (h + g * update)\n    return supplied_final_norm(h) * mask\n\nfor epoch in range(1, max_epochs + 1):  # max_epochs <= 200\n    fraction = 0 if epoch <= 10 else 0.25 * min(1, (epoch - 10) / 20)\n    for batch_index in range(200):\n        sequence, positive, original_negative, prefix_history = supplied_family_batch()\n        features = log2feats(sequence)\n        losses = []\n        for position in valid_training_positions(sequence, positive):\n            eligible = catalog_without(0, positive[position], prefix_history[position])\n            pool = uniform_without_replacement(eligible, min(128, len(eligible)))\n            if len(pool) == 0:\n                record_omitted_position()\n                continue\n            k = min(32, len(pool))\n            if mining_enabled:\n                with no_grad():\n                    hardness = predict_score(features[position].detach(), pool)\n                ordered = sort_ids_by_ascending_score_then_item_id(pool, hardness)\n                band = ordered[floor(0.50*len(pool)):ceil(0.75*len(pool))]\n                hard_count = min(floor(fraction*k), len(band))\n                hard = uniform_without_replacement(band, hard_count)\n            else:\n                hard = []\n            random = uniform_without_replacement(pool - set(hard), k - len(hard))\n            candidates = [positive[position]] + hard + random\n            logits = predict_score(features[position], candidates)  # temperature 1\n            losses.append(cross_entropy(logits, target=0))\n        optimize_one_network(mean(losses))\n    apply_supplied_validation_and_checkpoint_schedule()\n\n# Predictor writer emits this same architecture and saved configuration.\n# Load one selected checkpoint for the requested category.\nfeatures = log2feats(left_padded_history)\nindex = maximum_nonpadding_index(left_padded_history)\nfeature = features[index] if index_exists else zeros(D)\nscores = predict_score(feature, requested_items)\n# Host selects by fixed four-category sampled macro validation HR@10.",
+      "originality": {
+        "score": 4,
+        "positive": "Combines recent-conditioned complete residual updates with candidate competition tied to the supplied user and model diagnoses.",
+        "negative": "Gating, multi-negative CE, and hardness curricula are established techniques; the contribution is a constrained combination requiring ablation."
+      },
+      "future_potential": {
+        "score": 7,
+        "positive": "Offers a tractable study of context-dependent transformations and ranking discrimination within causal convolution recommenders.",
+        "negative": "Sampled-metric mismatch, false negatives, variable recency needs, and adaptive validation selection limit evidence until controlled gains are measured."
+      },
+      "code_difficulty": {
+        "score": 5,
+        "positive": "Reuses the backbone, embeddings, and scorer; the gate and uniform candidate loss require modest architectural changes.",
+        "negative": "Reproducible prefix exclusions, per-position mining, compute control, ablations, diagnostic adaptation, and predictor/checkpoint consistency add substantial integration work."
+      }
+    },
+    "related_work": [
+      {
+        "title": "NextItNet: A Simple Convolutional Generative Network for Next Item Recommendation",
+        "link": "https://arxiv.org/abs/1808.05163",
+        "contributions": [
+          "Establishes residual dilated causal convolutions for sequential recommendation."
+        ],
+        "limitations": [
+          "Does not establish the proposed recent-summary gate, its temporal influence, or the mining schedule on this benchmark."
+        ]
+      },
+      {
+        "title": "Scalable Cross-Entropy",
+        "link": "https://dspace.mit.edu/entities/publication/5392aca9-0bae-4176-9b3a-a8165957ba26",
+        "contributions": [
+          "Motivates efficient training with informative item competitors through retrieval-based softmax approximation."
+        ],
+        "limitations": [
+          "Its retrieval and normalization procedure differs from the proposed uncorrected random-pool candidate-ranking surrogate."
+        ]
+      },
+      {
+        "title": "UFNRec",
+        "link": "https://arxiv.org/abs/2208.04116",
+        "contributions": [
+          "Identifies false negatives as a concern in sequential recommendation training."
+        ],
+        "limitations": [
+          "Does not validate the proposed quantile band, curriculum, or mixing proportions; these safeguards cannot identify all relevant unobserved items."
+        ]
+      },
+      {
+        "title": "ITS-Rec",
+        "link": "https://www.mdpi.com/2079-9292/14/9/1748",
+        "contributions": [
+          "Provides motivation for incorporating textual item information into sequential recommendation."
+        ],
+        "limitations": [
+          "Uses BERT, self-attention, and reviews; its results do not directly transfer to permitted scratch-trained title/description features."
+        ]
+      },
+      {
+        "title": "On Sampled Metrics for Item Recommendation",
+        "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+        "contributions": [
+          "Shows that sampled recommendation metrics can disagree with full-catalog metrics, including reversing model rankings."
+        ],
+        "limitations": [
+          "Does not replace the pinned benchmark objective; catalog diagnostics remain supplementary to its sampled HR@10."
+        ]
+      },
+      {
+        "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+        "link": "https://www.jmlr.org/papers/v11/cawley10a.html",
+        "contributions": [
+          "Explains how repeated optimization of a finite model-selection criterion produces overfitting and optimistic performance estimates."
+        ],
+        "limitations": [
+          "Does not quantify selection bias for this search without its trial history and per-user outcomes."
+        ]
+      },
+      {
+        "title": "ReZero Is All You Need: Fast Convergence at Large Depth",
+        "link": "https://arxiv.org/abs/2003.04887",
+        "contributions": [
+          "Studies zero-initialized residual scaling as an optimization strategy."
+        ],
+        "limitations": [
+          "Starts residual blocks at identity h, whereas the proposed multiplier-one initialization preserves h+F(h).",
+          "Provides no evidence that residual scaling establishes recency weighting."
+        ]
+      },
+      {
+        "title": "Candidate Sampling",
+        "link": "https://www.tensorflow.org/extras/candidate_sampling.pdf",
+        "contributions": [
+          "Defines candidate-sampling objectives and probability or expected-count corrections."
+        ],
+        "limitations": [
+          "A uniform initial pool does not supply valid uniform correction probabilities after filtering and deterministic hardness selection.",
+          "The proposed experiment uses uncorrected candidate CE and makes no unbiased catalog-softmax claim."
+        ]
+      },
+      {
+        "title": "Statistical Significance Tests for Machine Translation Evaluation",
+        "link": "https://www.aclweb.org/anthology/W04-3250.pdf",
+        "contributions": [
+          "Provides a methodological reference for paired bootstrap comparisons."
+        ],
+        "limitations": [
+          "Recommendation requires resampling paired users within each dataset and recomputing the macro difference.",
+          "Conditional bootstrap intervals do not capture adaptive model selection, training-seed variation, or new negative-candidate samples."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/model-family-comparison-20261029/runs/nextitnet-self_evolverec/self_evolverec/calls/00473"
+}

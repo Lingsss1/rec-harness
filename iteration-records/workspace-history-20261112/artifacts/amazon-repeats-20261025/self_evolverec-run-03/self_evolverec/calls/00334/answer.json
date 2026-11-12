@@ -1,0 +1,134 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting point.** (1) Feedback favors recent behavior and repeated narrow preferences, motivating a controlled recent-history signal. Feedback supplies hypotheses, not held-out labels. (2) Histories cannot establish ownership, compatibility, satisfaction, or replacement needs; automatic utility penalties lack evidence. (3) Embedding alignment and training margins do not establish ranking quality; margins also depend on score scale.\n\n**Related work.** (1) Shuffling studies [1] motivate order interventions without identifying current intent. (2) Recency diagnostics [2] motivate a zero-weight control because added recency may worsen overemphasis. (3) Sampled-ranking research [3] separates pinned HR@10 from full-catalog claims. (4) Fusion and selection research [4,5] motivate scale calibration and explicit selection-optimism warnings.\n\nThese insights suggest controlled recent-history modeling, ranking-based diagnostics, and evidence-qualified audits.\n\n### Framework\n\n| Component | Observable evidence | Proposed use | Limitation |\n|---|---|---|---|\n| SASRec | Ordered prefixes | Sequence score | Mechanism needs intervention tests |\n| Recent-history residual | Recent embeddings | Candidate affinity | Similarity need not imply utility |\n| Evidence audit | Titles/descriptions | Supported, conflicting, unknown specifications | Cannot infer ownership |\n| Ranking diagnosis | Fixed candidates/scores | Rank dependence and validation comparison | Unobserved items lack labels |\n\n### Candidate ideas\n\nScores are originality / future potential / implementation difficulty; higher difficulty means harder.\n\n1. **Recent-history score residual: 4/6/4.** Interpretable, inexpensive fusion tests the diagnosis; novelty is modest, redundancy remains possible, and calibration/adapter parity increase implementation difficulty [2,4].\n2. **Matched history interventions: 5/7/4.** Controlled deletion/shuffling can distinguish dependencies; distribution shift limits interpretation and probes alone do not improve ranking [1].\n3. **Specification-evidence audit: 6/6/6.** Exact evidence spans address unsupported claims; extraction coverage and ranking benefits remain uncertain.\n\n### Selected idea: recent-history score residual\n\nAt 0% progress, retain this reversible experiment. Freeze each category’s SASRec. Normalize the exponentially weighted mean of its last five nonpadding item embeddings; score candidate cosine affinity. Add a residual calibrated using fixed training-only score standard deviations, avoiding candidate-dependent normalization. Select category coefficients from `[0, 0.1, 0.3, 1.0]`, preferring zero on ties.\n\nCache component scores. Compare baseline, similarity alone, and fusion; prespecify last-item, uniform-five, and exponential-five controls. Keep the exponential half-life fixed at two events initially; additional decay searches require explicit accounting.\n\nPreserve routing, seeds, splits, pinned candidates, and macro HR@10. Save all coefficients, scales, configurations, and search results; reproduce scoring through the predictor writer.\n\nKeep `DiagnosisProbe(view, device)` and its schema. Return causal concatenated sequence/residual features, share deployed scoring, restore model mode, and mark unavailable probes missing. Verify padding, causality, rolling aggregation, and predictor parity.\n\nReport paired hit differences, discordant counts, and dataset-stratified bootstrap intervals. Selected-winner intervals omit selection uncertainty; exploratory gains do not establish significance, compatibility, or full-catalog superiority [3,5]. Audit twenty users descriptively, retaining ranks, supporting histories, evidence spans, and unknowns.",
+  "idea": {
+    "description": "Freeze each category’s SASRec and add a scale-calibrated recent-history cosine residual, preserving baseline behavior at coefficient zero. Retain the original adapter framework and evaluate the proposal as an exploratory validation experiment.",
+    "motivation": "The diagnosis suggests that recent specific interests may be underrepresented, but neither this mechanism nor the utility of additional similarity is established. A frozen residual provides a cheap, reversible test. Fixed training-only calibration addresses the original mismatch between unbounded SASRec logits and bounded cosine affinity; controlled history variants test whether additional history and exponential weighting contribute beyond the last item.",
+    "implementation_notes": "Preserve all four categories, preprocessing seed 0, training seed 42, baseline splits and routing, and DATA_DIR = os.environ['GAGC_DATA_DIR']. Honor SASREC_EPOCHS, with host default 200, and write all artifacts beneath the trial directory. Train on one GPU; account for training, diagnosis, debugging, and failures within the shared 43,200 GPU-second budget. No test labels, extra datasets, pretrained weights, or unavailable metadata may be used.\n\nFor each frozen checkpoint, define age as the number of events before the current prefix endpoint. For the last K=5 nonpadding events, use weights 2^(-age/2), count repeated items once per occurrence, average their raw learned embeddings, and normalize the resulting vector with F.normalize(eps=1e-8). Normalize candidate embeddings separately. This preserves the original cosine-of-weighted-mean proposal; it is generally different from averaging individual item cosine similarities. Use that same formula in every path. An empty prefix yields a zero vector and zero residual.\n\nEstimate fixed scales without validation labels: using a category-local NumPy RNG seeded 42, sample without replacement up to 256 users having nonempty training histories and retain their full training prefixes truncated exactly as inference does; sample without replacement up to 1,024 nonpadding catalog item IDs. Evaluate the Cartesian product of those prefixes and items in batches. Let s_base and s_res be population standard deviations across the resulting base and residual scores, each floored at 1e-6. These catalog items are calibration inputs, not labeled negatives. Save the scales. Score candidate i as base_score(i) + alpha * (s_base / s_res) * residual(i). Calibration is fixed across candidate sets, preserving inference behavior between sampled and full-catalog scoring. Coefficient zero must bypass the residual addition to reproduce baseline scores exactly. Log component standard deviations and validation top-10 boundary margins.\n\nPrespecify exponential-five as the primary variant. Select alpha separately per category from [0, 0.1, 0.3, 1.0], using pinned validation HR@10 and the smallest coefficient on ties; maximizing each equally weighted category independently maximizes the macro score within this factorized grid. Cache baseline and residual validation scores. Report every coefficient’s category and macro results, including zero. Compute diagnostic controls for last-item-only and uniform-five histories, using the same normalization and coefficient grid and separately saved training-only scales. Report similarity-only rankings as well. Do not silently promote a diagnostic variant: any promotion or additional decay-rate search becomes another recorded adaptive selection step. No improvement has yet been measured.\n\nThe compatibility view must expose the actual deployed scoring wrapper as view.model and the learned embedding as view.item_emb. log2feats(sequence) returns a tensor B x L x 2D containing causal SASRec states and normalized prefix-specific recent-history vectors. predict_score splits the tensor and applies exactly the deployed score, supporting aligned B x L x C candidate IDs and final-position candidate batches. Construct uniform rolling sums/counts by prefix differences; exponential windows may use five shifted masked contributions with identical event-age weights. Explicitly exclude padding, zero padded features, and ensure future tokens cannot affect earlier features. Preserve causal and padding-key masks; avoid fully masked attention rows before discarding padded query outputs. Verify Boolean mask conventions for the actual attention implementation.\n\nKeep DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. Save and restore the actual module’s prior training mode. Retain existing embedding/margin probes with scale caveats; add residual-on/off fixed-candidate ranks and negative-outranking fractions. Category breakdown lists remain empty because item categories are unavailable. Represent missing review, rating, specification, or simulator-trait observations explicitly as unavailable, not healthy zeros. Do not infer ownership, dislike, satisfaction, conformity, or diversity traits.\n\nUnder eval() and no_grad(), compare adapter final-position scores with the loaded generated predictor on repeated candidates, repeated history items, short histories, all-padding inputs, and zero embeddings. Assert finiteness and numerical closeness. Compare aggregation with a loop oracle. Modify only tokens after position t while preserving tensor length and positional indices; features and scores through t must remain unchanged. The predictor writer must serialize and reload architecture, coefficients, scales, normalization epsilon, K, half-life, and routing.\n\nRecord every user’s hit indicator for each configuration on the host’s pinned 200 users/category and 99 unique negatives, evaluation seed 42. For 10,000 bootstrap replicates with RNG seed 42, independently resample users within each category and use identical resampled indices for paired methods, then average category differences equally. Report percentile 95% intervals and discordant hit counts. One changed hit moves category HR by 0.5 percentage points and macro HR by 0.125 points. Intervals around selected winners condition on the selected coefficients and omit selection optimism, seed variability, and negative-sampling variability. Same-sample bootstrap reselection does not correct optimism. Keep pinned macro HR@10 as the selection objective and record the entire adaptive search history.\n\nFor the twenty real training users, retain full-catalog unseen-item ranks, supporting history items, exact available title/description spans, relation labels, and abstention reasons. Similarity and prior interaction cannot establish complementarity, compatibility, redundancy, or current need. Any fixed-subset full-catalog validation audit is descriptive and must not replace the pinned selection metric.",
+    "pseudocode": "set_preprocessing_seed(0)\nset_training_seed(42)\nfor category in four_categories:\n    base = train_baseline_sasrec(category, epochs=env_default('SASREC_EPOCHS', 200))\n    freeze(base)\n    calibration_prefixes, calibration_items = training_only_calibration_sample(category, seed=42, max_users=256, max_items=1024)\n    for variant in ['exponential5_primary', 'last_item_control', 'uniform5_control']:\n        residual(prefix, items) = cosine(normalize(weighted_mean_of_raw_recent_embeddings(prefix, variant)), base.item_emb(items))\n        s_base, s_res = population_score_stds(base, residual, calibration_prefixes, calibration_items)\n        scales = max(s_base, 1e-6), max(s_res, 1e-6)\n        cache_scores_on_pinned_validation_candidates(base, residual)\n        for alpha in [0, 0.1, 0.3, 1.0]:\n            scores = base_scores if alpha == 0 else base_scores + alpha * scales.base / scales.res * residual_scores\n            record_per_user_hits_and_hr10(scores)\n        record_similarity_only_hits()\n        winner = highest_hr10_with_smallest_alpha_on_ties()\n        save_configuration_results_and_scales(variant, winner)\n    deployed = wrap(base, primary_variant='exponential5_primary', selected_alpha=primary_winner)\n    save_under_trial(deployed, category)\nwrite_predictor_using_identical_wrapper_and_category_routing()\nverify_padding_causality_aggregation_and_loaded_predictor_parity()\nreport_primary_macro_validation_hr10_and_all_prespecified_comparisons()\nreport_paired_stratified_bootstrap_intervals_with_selection_caveat(seed=42, replicates=10000)\nrun_evidence_qualified_full_catalog_audit_for_twenty_training_users()",
+    "originality": {
+      "score": 4,
+      "positive": "Combines a diagnosis-derived hypothesis with a reproducible adapter, fixed scale calibration, and controlled ranking interventions.",
+      "negative": "Recent-item affinity and additive score fusion are established techniques; this remains an incremental combination rather than a new model class."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "Low-cost ablations can reveal whether recent-history information merits more ambitious modeling in particular categories.",
+      "negative": "Learned embeddings may encode popularity or broad similarity, and extra recency can amplify redundancy. Small sampled-validation gains may reflect selection noise rather than useful intent modeling."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Frozen checkpoints and cached score components avoid additional training for coefficient selection and most ablations.",
+      "negative": "Causal per-position aggregation, attention padding safety, fixed calibration, predictor parity, and selection-aware reporting require more implementation care than a simple scoring addition."
+    }
+  },
+  "related_work": [
+    {
+      "title": "[1] Does It Look Sequential? An Analysis of Datasets for Evaluation of Sequential Recommendations",
+      "link": "https://arxiv.org/abs/2408.12008",
+      "contributions": [
+        "Uses shuffled-history comparisons to investigate sequential structure.",
+        "Motivates controlled tests of dependence on interaction order."
+      ],
+      "limitations": [
+        "Does not establish sequential structure in these four target categories.",
+        "Order dependence does not identify current intent, and intervention effects may include distribution shift."
+      ]
+    },
+    {
+      "title": "[2] Measuring Recency Bias in Sequential Recommendation Systems",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "Investigates recent-item emphasis in sequential recommendation.",
+        "Motivates testing recency weighting against zero-weight and last-item controls."
+      ],
+      "limitations": [
+        "Does not establish that additional recency improves the target categories.",
+        "Recency dependence alone cannot establish practical utility."
+      ]
+    },
+    {
+      "title": "[3] On Sampled Metrics for Item Recommendation",
+      "link": "https://arxiv.org/abs/1912.02263",
+      "contributions": [
+        "Shows that sampled ranking metrics can disagree with full-catalog evaluation.",
+        "Supports separating pinned benchmark selection claims from full-catalog audits."
+      ],
+      "limitations": [
+        "Does not replace the prescribed sampled validation objective.",
+        "Does not provide relevance labels for unobserved items."
+      ]
+    },
+    {
+      "title": "[4] Reciprocal Rank Fusion Outperforms Condorcet and Individual Rank Learning Methods",
+      "link": "https://cormack.uwaterloo.ca/cormacksigir09-rrf.pdf",
+      "contributions": [
+        "Provides a rank-based fusion method that avoids dependence on raw score scales.",
+        "Motivates examining score compatibility before combining recommendation branches."
+      ],
+      "limitations": [
+        "Does not establish benefits for SASRec recent-history residuals.",
+        "The proposed fixed-standard-deviation calibration is a task-specific design, not this paper’s algorithm; rank fusion also depends on the ranked candidate universe."
+      ]
+    },
+    {
+      "title": "[5] On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/beta/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how optimizing a noisy selection criterion introduces optimistic performance estimates.",
+        "Supports recording coefficient searches and distinguishing selected validation scores from independent assessment."
+      ],
+      "limitations": [
+        "Does not supply an independent assessment set for this task.",
+        "A paired bootstrap interval for the selected configuration does not automatically correct adaptive selection bias."
+      ]
+    },
+    {
+      "title": "SASRec reference implementation",
+      "link": "https://github.com/kang205/SASRec/blob/master/model.py",
+      "contributions": [
+        "Illustrates item-embedding scoring against sequence representations and final-position inference.",
+        "Provides context for preserving the diagnostic compatibility contract."
+      ],
+      "limitations": [
+        "The actual RecHarness baseline remains the implementation authority.",
+        "Does not implement the proposed residual or prove parity with a generated predictor."
+      ]
+    },
+    {
+      "title": "PyTorch MultiheadAttention documentation",
+      "link": "https://docs.pytorch.org/docs/stable/generated/torch.nn.MultiheadAttention.html",
+      "contributions": [
+        "Documents attention-mask and key-padding-mask semantics.",
+        "Supports explicit handling of blocked keys and padded positions."
+      ],
+      "limitations": [
+        "Mask conventions must be checked against the actual attention API used.",
+        "Documentation alone does not establish finite outputs for every combined masking pattern."
+      ]
+    },
+    {
+      "title": "PyTorch functional.normalize documentation",
+      "link": "https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.normalize.html",
+      "contributions": [
+        "Defines normalization with an epsilon floor.",
+        "Supports consistent finite handling of zero vectors in residual scoring."
+      ],
+      "limitations": [
+        "Numerical normalization does not calibrate the relative scales of scoring branches.",
+        "It provides no evidence of recommendation-quality improvements."
+      ]
+    },
+    {
+      "title": "SciPy bootstrap documentation",
+      "link": "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.bootstrap.html",
+      "contributions": [
+        "Documents paired resampling principles.",
+        "Supports preserving within-user pairing when comparing hit indicators."
+      ],
+      "limitations": [
+        "The four-category stratified macro procedure requires explicit task-specific implementation.",
+        "Ordinary bootstrap intervals omit adaptive selection and other unresampled sources of uncertainty."
+      ]
+    }
+  ]
+}

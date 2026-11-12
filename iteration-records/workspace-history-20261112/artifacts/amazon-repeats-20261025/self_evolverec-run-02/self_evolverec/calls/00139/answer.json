@@ -1,0 +1,173 @@
+{
+  "markdown_report": "**Insights from the starting point.** (1) Loader margins measure sampled discrimination, not immediate usefulness or HR@10; score scaling complicates interpretation. (2) Feedback motivates testing recent repeated evidence against incidental history; interactions establish neither ownership nor satiation. (3) Compatibility hooks enable frozen-model probes, but model mode, RNG, padding, and candidate exclusions require explicit controls.\n\n**Insights from related work.** (1) [Does It Look Sequential?](https://arxiv.org/abs/2408.12008) motivates shuffling; fixing the final item isolates prefix arrangement conditional on that anchor, not semantic dependence. (2) [Measuring Recency Bias](https://arxiv.org/abs/2409.09722) motivates symmetric recency tests; stronger recency is not necessarily better. (3) [Guo et al.](https://proceedings.mlr.press/v235/guo24e.html) motivate spectral diagnostics, which describe geometry rather than ranking quality. (4) [Krichene and Rendle](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/) show sampled metrics can reverse model comparisons; catalog stability and pinned HR@10 must remain separate outcomes.\n\n**Directions and framework.** Organize diagnostics by history dependence, representation geometry, and evidence sufficiency. Map intervention → observable → limitation: history edits → ranking changes → mixed content/position effects; embedding spectrum → effective rank → geometry without quality; title/description audit → supported/unknown judgments → incomplete compatibility evidence. Validate diagnostic behavior before using it to guide training.\n\n**Candidate ideas.** Scores are originality/potential/difficulty, each out of ten; higher difficulty means harder implementation.\n\n- **Matched history-edit probe: 5/7/5.** Originality: integrates matched controls, but perturbations are established. Potential: distinguishes hypotheses, but sensitivity has no demonstrated predictive validity here. Difficulty: existing hooks help, but RNG isolation and positional controls require care. References: history studies above.\n- **Spectrum-plus-margin monitor: 3/6/2.** Originality: complementary measurements, but established methods. Potential: detects degeneration, but weakly identifies next-choice failures. Difficulty: bounded SVD is inexpensive, but conventions matter. Reference: Guo et al.\n- **Evidence-supported complement audit: 5/7/6.** Originality: combines anchors and compatibility evidence, but adapts prior reasoning. Potential: addresses reported failures, but missing information limits coverage. Difficulty: small audits are feasible, but reliable annotation is costly. Reference: [ECCR](https://www.amazon.science/publications/eccr-explainable-and-coherent-complement-recommendation-based-on-large-language-models).\n\n**Selected idea: matched history-edit probe.** At 0% progress, retain this diagnostic and defer architecture changes. Compare recent removal, matched old/random removal, last-item-only input, unrestricted shuffling, and last-item-fixed shuffling. Repeat seeded draws. Treat TF-IDF groups as lexical proxies; audit coherence before repeated-interest deletions and match control count, lag, age, and last-item policy.\n\nPerturb nonpadding items, retain the latest L, left-pad, and score position L−1. Exclude the entire original training history from identical full-catalog candidate pools. Cache scores; report top-10 overlap, rank displacement, ordering flips, balance, missingness, and category counts. Compaction mixes content and position; slot-preserving controls require explicit model support.\n\nUse identity checks and bounded controlled-fault tests; restore every module’s mode and isolate RNG without consuming the live loader. Bootstrap paired users within categories, averaging categories equally. Twenty simulator users remain exploratory. Retain pinned macro validation HR@10 for selection, log every inspected trial, and limit hypotheses to reduce adaptive overfitting. No improvement is claimed before evaluation.",
+  "idea": {
+    "description": "Implement an observational matched history-edit diagnostic adapter that measures frozen-model dependence on recency, prefix arrangement, and repeated lexical interests. Preserve DiagnosisProbe(view, device) and run_full_diagnosis(train_loader), returning metrics and metric_definitions. Treat sensitivity as diagnostic evidence, never as a surrogate objective whose reduction automatically implies better recommendations.",
+    "motivation": "The supplied feedback suggests that broad associations can displace specific recent interests. Existing positive-negative margins cannot distinguish these explanations. Paired interventions can expose dependence on supplied history, while matched controls and positional checks clarify competing explanations. The revised potential score is lower because predictive validity remains untested; implementation difficulty is higher because observational execution and fair controls require substantial care. Neither interactions nor lexical similarity establish ownership, satisfaction, compatibility, saturation, or personality.",
+    "implementation_notes": "Preserve all four dataset routes, original input splits, preprocessing seed 0, training seed 42, and DATA_DIR = os.environ['GAGC_DATA_DIR']. Write all artifacts beneath the trial directory. Respect SASREC_EPOCHS=200 unless explicitly overridden in an authorized training variant. Keep execution single-GPU and charge all diagnostic inference, debugging, and retraining to the shared 43,200 GPU-second budget. This diagnostic-only proposal needs no predictor change; any later architecture or scoring change must also update the predictor writer so working/predict.py loads the trained architecture.\n\nImplement an architecture adapter around view.model, view.item_emb, log2feats, and predict_score. Determine the active dataset from its route; a per-dataset view need not expose all four categories. Aggregate the four category outputs externally with equal weights. Preserve the actual trained module in view.model. Never consult unavailable review fields, ratings, item categories, prices, stores, or hidden test data; leave unavailable category breakdowns empty.\n\nBuild immutable training-history snapshots instead of iterating the live train_loader. Keep the required method argument for compatibility. Compute legacy margins on a separate deterministic diagnostic loader whose batches have shape B x L and structure (None, sequence, positive, negative). Use independent generators and zero workers. Sample negatives from valid training-catalog IDs excluding padding and the user's complete observed training history; report this distribution because its margins are not directly comparable with previous loader-based margins. If a valid negative does not exist, skip and count the case. Skip empty or insufficient prefixes explicitly.\n\nUse the supplied twenty training users, five per category, for the native full-catalog audit. Do not describe this panel as representative. Freeze user IDs and record history hashes, prediction cutoffs, item mappings, model checkpoint hashes, software versions, and all diagnostic settings. For baseline windows retain the latest L interactions. Apply interventions only to their nonpadding entries, then compact, retain the latest L, and left-pad with zero. Select the final feature at L−1 for every nonempty right-aligned sequence, never count_nonzero−1. Score through predict_score with candidate tensors shaped according to the adapter contract; chunk full-catalog scoring to bound memory.\n\nFor each user, construct candidates once from the trained catalog, excluding zero and every item in the original complete observed training history, including interactions omitted from the model window or removed by edits. Reuse this pool for all paired conditions. Initially sort candidates by ascending item ID, then use stable descending score sorting to break ties. This diagnostic convention does not replace the host evaluator's ranking rules. Assert finite scores and record failures rather than silently changing candidates.\n\nPredeclare deletion budget k = min(3, max(1, floor(0.2*n)), n−1) for n >= 2. Recent removal deletes the final k entries; old removal deletes the first k, with their differing final-item policies reported explicitly. Add a final-item-preserved comparison deleting the k immediately preceding entries against k early entries, reducing k when necessary. Include count-matched random deletion, last-item-only input, unrestricted shuffling, last-item-fixed prefix shuffling, and identity edits. Use five independently seeded draws for stochastic edits; average draws within user before uncertainty estimation. Report no-op shuffles and ineligible short histories separately. These budgets are preregistered implementation choices, not empirically established optima.\n\nFor the optional lexical arm, fit TF-IDF only on available training-catalog titles/descriptions, with missing text explicitly marked. Normalize case and whitespace, remove a versioned boilerplate list and identifier-like tokens, use word unigrams/bigrams, sublinear TF, L2 normalization, min_df=2, max_df=0.95, and at most 30,000 features. Fall back to min_df=1 for catalogs where fitting otherwise yields an empty vocabulary; report the fallback. Define a repeated group around the final item's lexical vector using cosine >= 0.30 and at least two earlier matching interactions; this is an anchor neighborhood, not a validated semantic partition. Delete up to k earlier matches while retaining the final item. Match control sets within user on deletion count, joint interaction-lag and timestamp-age bins relative to the cutoff, and the same final-item policy; additionally match training-frequency and repetition bins when feasible. Freeze bin edges from training histories and publish them. Report balance and unmatched cases; do not silently relax constraints. Missing timestamps make this arm ineligible.\n\nBefore interpreting lexical effects, audit blinded within-neighborhood and outside-neighborhood pairs, reporting annotation procedures and agreement. Examine title-only versus description-only vectors and thresholds 0.20/0.30/0.40 without choosing the best validation result. Report coverage, neighborhood sizes, and membership Jaccard stability. Adjusted Rand agreement applies only if a later implementation produces complete cluster partitions; it is inappropriate for these overlapping anchor neighborhoods. Assess training co-occurrence enrichment with age/popularity controls as exploratory evidence, not independent proof of semantics. Lexical overlap, boilerplate, and product identifiers can otherwise create shortcuts. Missing compatibility evidence remains unknown.\n\nSave every module's individual training flag, invoke model.eval(), run under torch.inference_mode(), and restore individual flags directly in finally to preserve mixed submodule modes. Snapshot and restore global Python/NumPy RNG state; use torch.random.fork_rng for CPU and the active CUDA device. Use separate local Python Random, NumPy Generator, and device-appropriate torch.Generator instances. Derive seeds through SHA-256 of seed 42, dataset, user ID, edit name, and draw index; never use Python hash(). Do not touch a live training iterator or worker state.\n\nCache baseline and edited ranks and bounded score summaries. Define top-10 overlap as intersection size divided by min(10, candidate count), mean absolute rank displacement over the baseline top ten, and ordering-flip rate on a fixed deterministic sample of at most 4,096 distinct candidate pairs. Count ties separately and exclude pairs tied in either condition from the strict-flip denominator. These rank statistics are invariant to positive score rescaling apart from numerical ties. Report raw score changes only with a scale-dependence warning. Record encoder-feature changes separately. If spectral diagnostics are retained, sample up to 2,048 nonpadding embeddings with seed 42, state centering conventions, report singular-value effective rank divided by min(n−1,d), leading singular-value mass, and embedding norms; report undefined zero-spectrum cases. Retain mean cosine only as directional alignment, not proof of collapse.\n\nCompacted deletions change positional assignments as well as content. A slot-preserving arm requires an explicit model-specific mask that excludes deleted keys/values, retains surviving positional IDs, and fixes the final query. Apply it only to edits retaining the final anchor. Zeroing embeddings alone is insufficient, and existing hooks do not guarantee support; return an unsupported status when absent. Removing positional embeddings does not remove all order cues from multilayer causal attention. Distinguish these frozen-model interventions from separately retrained ablations.\n\nCheck identity edits, repeated deterministic inference, score-rescaling invariance, and unchanged module flags/RNG state. On temporary bounded model copies, test graded embedding corruption or low-rank projection; test positional or causal-mask faults only where safely supported. Report probe responses and false alarms rather than assuming every fault must change every probe. A repaired copy should reproduce its baseline outputs. Relating diagnostic changes to accuracy requires separately trained, preregistered variants and the unchanged pinned validation evaluator; frozen-input fault recovery is not evidence of a training improvement.\n\nFor paired HR@10 comparisons, use the same pinned 200 users/category and 99-negative candidate sets supplied by the host, without changing its evaluator. Bootstrap paired users within each category for 2,000 seeded replicates and recompute the equal-weight macro; average repeated edits within user first. Report per-category effects and sample sizes. One changed user hit changes macro HR@10 by 0.00125. Full-catalog stability measures a different outcome. Twenty simulator users support only exploratory diagnostics, and ordinary intervals after adaptive selection are exploratory. Log every inspected trial and its GPU cost, limit hypotheses, and reserve confirmatory claims for the host's untouched final evaluation.",
+    "pseudocode": "class DiagnosisProbe:\n    def __init__(self, view, device):\n        self.view, self.device = view, device\n\n    def run_full_diagnosis(self, train_loader):\n        # Required argument retained; do not consume the live training loader.\n        module_modes = [(m, m.training) for m in self.view.model.modules()]\n        python_state, numpy_state = snapshot_global_rng_states()\n        try:\n            with torch.random.fork_rng(devices=active_cuda_devices(self.device)):\n                self.view.model.eval()\n                with torch.inference_mode():\n                    snapshot = immutable_training_history_snapshot(self.view)\n                    local_rngs = generators_from_stable_sha256_identifiers(seed=42)\n                    diagnostic_loader = independent_loader(snapshot, local_rngs, workers=0)\n                    metrics = bounded_margin_probes(diagnostic_loader)\n                    for user in fixed_five_user_panel_for_current_dataset(snapshot):\n                        original_history = snapshot[user]\n                        baseline = left_pad(latest_L(original_history))\n                        if empty(baseline):\n                            record_skip(user, 'empty_history')\n                            continue\n                        candidates = ascending_item_ids_excluding(\n                            padding=0, observed=original_history, catalog=trained_catalog()\n                        )\n                        if empty(candidates):\n                            record_skip(user, 'empty_candidate_pool')\n                            continue\n                        original = score_chunked(\n                            self.view.predict_score,\n                            self.view.log2feats(baseline)[:, -1, :],\n                            candidates\n                        )\n                        for edit, draw, edited_history in preregistered_edits(baseline, local_rngs):\n                            edited = left_pad(latest_L(nonpadding(edited_history)))\n                            changed = score_chunked(\n                                self.view.predict_score,\n                                self.view.log2feats(edited)[:, -1, :],\n                                candidates\n                            )\n                            cache_paired_statistics_with_stable_ties(\n                                user, edit, draw, candidates, original, changed\n                            )\n                    metrics.update(aggregate_draws_within_user_then_users())\n                    metrics.update(counts_balance_missingness_and_supported_controls())\n                    return {'metrics': metrics, 'metric_definitions': explicit_definitions()}\n        finally:\n            for module, training_flag in module_modes:\n                module.training = training_flag\n            restore_global_rng_states(python_state, numpy_state)\n\n# Outside the per-dataset probe:\n# combine four dataset reports with equal weights;\n# retain host-pinned macro validation HR@10 as the sole selection metric;\n# log every inspected trial and diagnostic GPU cost.",
+    "originality": {
+      "score": 5,
+      "positive": "Combines matched deletion controls, last-item-fixed shuffling, explicit positional limitations, and lexical-interest interventions under an architecture-compatible observational interface.",
+      "negative": "History perturbations, matched controls, and rank-sensitivity measurements have direct precedents; the contribution is primarily rigorous integration rather than a new recommendation algorithm."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides falsifiable evidence for choosing later recency, ordering, or repeated-interest hypotheses and creates a path to validating diagnostic usefulness across model variants.",
+      "negative": "No evidence yet establishes that these measurements predict validation improvements; observational histories and twenty simulator users cannot identify true intent or fulfilled needs."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "The minimal compacted-history arm uses existing feature and scoring hooks without retraining or changing the predictor.",
+      "negative": "Exact RNG isolation, full-catalog scoring, matched control construction, lexical audits, and optional slot-preserving masks are substantially harder than the original outline implied."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Does It Look Sequential? (2024)",
+      "link": "https://arxiv.org/abs/2408.12008",
+      "contributions": [
+        "Uses history shuffling to investigate sequential structure, motivating paired ordering interventions."
+      ],
+      "limitations": [
+        "Shuffling sensitivity does not establish user intent or identify an improved model.",
+        "Last-item-fixed shuffling measures prefix arrangement dependence conditional on the final anchor."
+      ]
+    },
+    {
+      "title": "Measuring Recency Bias (2024)",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "Reports that excessive recent-history emphasis can hurt accuracy, motivating symmetric recency probes."
+      ],
+      "limitations": [
+        "Does not establish an optimal recency policy for these four Amazon categories."
+      ]
+    },
+    {
+      "title": "Guo et al., ICML 2024: recommendation embedding collapse",
+      "link": "https://proceedings.mlr.press/v235/guo24e.html",
+      "contributions": [
+        "Studies embedding collapse and constraints on representation dimensionality, motivating spectral diagnostics."
+      ],
+      "limitations": [
+        "Embedding geometry alone does not establish ranking quality or explain compatibility failures.",
+        "Effective-rank comparisons require fixed sampling, centering, normalization, and singular-value conventions."
+      ]
+    },
+    {
+      "title": "ECCR: Explainable and Coherent Complement Recommendation Based on Large Language Models",
+      "link": "https://www.amazon.science/publications/eccr-explainable-and-coherent-complement-recommendation-based-on-large-language-models",
+      "contributions": [
+        "Treats coherent complements as requiring compatibility and relevance, motivating explicit evidence checks."
+      ],
+      "limitations": [
+        "The task lacks reliable ownership and prerequisite labels; missing evidence must remain unknown."
+      ]
+    },
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Combines item and positional embeddings with causal self-attention.",
+        "The original implementation provides right-aligned sequence and final-timestep scoring conventions."
+      ],
+      "limitations": [
+        "Compaction changes positional assignments as well as content.",
+        "Removing positional embeddings alone does not eliminate structural order cues from causal attention."
+      ]
+    },
+    {
+      "title": "SASRec reference implementation",
+      "link": "https://github.com/kang205/SASRec",
+      "contributions": [
+        "Provides preprocessing and scoring conventions relevant to padding and final-position selection."
+      ],
+      "limitations": [
+        "The actual RecHarness adapter must still be checked against its own model and scoring signatures."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled metrics can reverse comparisons between models, including in expectation."
+      ],
+      "limitations": [
+        "Does not authorize changing the pinned evaluator.",
+        "Full-catalog stability remains a different diagnostic outcome."
+      ]
+    },
+    {
+      "title": "Betello et al.: history-perturbation study",
+      "link": "https://arxiv.org/abs/2307.13165",
+      "contributions": [
+        "Reports position-dependent effects of history deletions on recommendation performance."
+      ],
+      "limitations": [
+        "Training-data perturbations do not directly validate frozen-model input sensitivity as a predictor of improvement."
+      ]
+    },
+    {
+      "title": "CASPER",
+      "link": "https://arxiv.org/abs/2201.12686",
+      "contributions": [
+        "Shows that individual training-interaction edits can propagate to many users' rankings."
+      ],
+      "limitations": [
+        "Its training-data interventions differ from inference-time history edits."
+      ]
+    },
+    {
+      "title": "Cascade-guided adversarial training",
+      "link": "https://arxiv.org/abs/2304.05492",
+      "contributions": [
+        "Reports joint ranking-accuracy and robustness improvements, motivating evaluation of both outcomes."
+      ],
+      "limitations": [
+        "Does not establish that minimizing arbitrary diagnostic sensitivity improves accuracy."
+      ]
+    },
+    {
+      "title": "Adaptive-holdout research",
+      "link": "https://arxiv.org/abs/1506.02629",
+      "contributions": [
+        "Explains how repeated feedback-driven analysis can overfit held-out data."
+      ],
+      "limitations": [
+        "Ordinary bootstrap intervals do not correct adaptive model-selection bias."
+      ]
+    },
+    {
+      "title": "Paired retrieval evaluation research",
+      "link": "https://ciir-publications.cs.umass.edu/getpdf.php?id=744",
+      "contributions": [
+        "Supports assessing uncertainty through paired per-user evaluation differences."
+      ],
+      "limitations": [
+        "User bootstrap intervals remain conditional on observed users, trained models, and candidate sets."
+      ]
+    },
+    {
+      "title": "PyTorch inference mode, randomness, DataLoader, and stable sorting documentation",
+      "link": "https://docs.pytorch.org/docs/stable/index.html",
+      "contributions": [
+        "Documents inference mode, RNG isolation mechanisms, loader behavior, and stable sorting."
+      ],
+      "limitations": [
+        "Inference mode does not disable dropout.",
+        "Restoring RNG states cannot rewind a consumed live iterator or persistent worker state."
+      ]
+    },
+    {
+      "title": "Scikit-learn text document clustering example",
+      "link": "https://scikit-learn.org/stable/auto_examples/text/plot_document_clustering.html",
+      "contributions": [
+        "Provides practical context for TF-IDF representations and evaluating text grouping."
+      ],
+      "limitations": [
+        "Lexical geometry and silhouette scores do not establish semantic validity.",
+        "Partition agreement metrics require actual partitions and are unsuitable for overlapping anchor neighborhoods."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,125 @@
+--- g1-r0025-action_value_task/model.py
++++ g1-r0026-summary_action_shared/model.py
+@@ -1,13 +1,12 @@
+-"""Prospective action-path attribution under frozen history masks.
+-
+-Independently enable historical actions in the DIN scorer and in direct
+-pooled values plus all five residual summaries. Score-only and value-only
+-cells crossed with task/shared residual-bank routing fill four missing
+-cells around the existing full/zero-action factorial. Masks, learned
+-modules, initialization and auxiliary gradient ownership are inherited.
+-Action-derived masks remain, so this is conditional path attribution,
+-not removal of all feedback information. A score-only path can encode
+-actions in its weights, and a value-only path can feed residual readout.
+-No local training or tensor validation has been performed.
++"""Prospective attribution of actions in pooled values versus five summaries.
++
++The DIN scorer receives zero action coordinates. Independently preserve
++observed historical actions in count-weighted pooled values or in the five
++inherited target/ordinal residual summaries, crossed with task/shared bank
++readout. The pooled base also enters the residual bank; this intervention
++does not isolate the direct tower from residual processing of that base.
++Original action-derived masks, partitions and gradient ownership remain.
++This is conditional action-token path attribution on the offline benchmark.
++No training or tensor validation is performed in the coding environment.
+ """
+ import torch
+@@ -18,5 +17,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_values': True}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'shared', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': False, 'action_in_summaries': True}
+ 
+ 
+@@ -27,10 +26,11 @@
+                  compression_routes='uf', block_aux_scorer_grad=True,
+                  block_aux_context_grad=False, block_aux_item_grad=True, num_tasks=None,
+-                 residual_input='match_detail', residual_routing='task', residual_hidden=16,
++                 residual_input='match_detail', residual_routing='shared', residual_hidden=16,
+                  temporal_detail='position', block_detail='ordinal',
+                  curvature_detail='quadratic', joint_detail='duplicate_match',
+                  match_support='available', match_scaling='norm', coarse_extension='duplicate',
+                  primary_partition='uniform', normalization_support='rotated_duplicate',
+-                 support_gradient='attached', action_in_scorer=False, action_in_values=True,
++                 support_gradient='attached', action_in_scorer=False,
++                 action_in_pool=False, action_in_summaries=True,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -72,8 +72,11 @@
+         if not isinstance(residual_hidden, int) or residual_hidden < 1:
+             raise ValueError('Residual width must be a positive integer')
+-        if not isinstance(action_in_scorer, bool) or not isinstance(action_in_values, bool):
+-            raise ValueError('Action path switches must be booleans')
++        if action_in_scorer is not False:
++            raise ValueError('This study freezes scorer action coordinates to zero')
++        if not isinstance(action_in_pool, bool) or not isinstance(action_in_summaries, bool):
++            raise ValueError('Action value-path switches must be booleans')
+         self.action_in_scorer = action_in_scorer
+-        self.action_in_values = action_in_values
++        self.action_in_pool = action_in_pool
++        self.action_in_summaries = action_in_summaries
+         self.residual_input = residual_input
+         self.residual_routing = residual_routing
+@@ -190,9 +193,9 @@
+         # neither observed IDs nor an action-parameter gradient graph is
+         # retained when both paths are disabled. Mixed cells use observations.
+-        if not self.action_in_scorer and not self.action_in_values:
++        if not self.action_in_pool and not self.action_in_summaries:
+             embedding_item = dict(item)
+             embedding_item[self.action_field] = torch.zeros_like(item[self.action_field])
+         item_emb = self.embedding_layer(embedding_item)
+-        if not self.action_in_scorer and not self.action_in_values:
++        if not self.action_in_pool and not self.action_in_summaries:
+             item_emb[self.action_field] = torch.zeros_like(item_emb[self.action_field])
+         target = torch.cat([item_emb[name][:, -1] for name in self.item_fields], dim=-1)
+@@ -201,8 +204,8 @@
+         values = torch.cat([keys, item_emb[self.action_field][:, :-1]], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
+-        # Summaries belong to the direct-value path, never the scorer path.
+-        # Their coefficients and match counts depend only on item IDs/masks.
++        # All five summaries share this intervention. Item coordinates and
++        # coefficients/match counts remain identical to the inherited model.
+         detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._target_match_summary(
+-            item, self._value_channel(values), mask)
++            item, self._action_channel(values, self.action_in_summaries), mask)
+         return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union
+ 
+@@ -511,13 +514,12 @@
+         return weighted.sum(dim=1)
+ 
+-    def _value_channel(self, values):
+-        """Keep item coordinates; exactly erase direct action coordinates.
+-
+-        One projection is used for every direct pooled value and all five
+-        residual summaries. The raw compressed stream is retained only for
+-        the independently controlled scorer input. No detach, module, RNG,
+-        buffer update or extra compression/scorer pass is introduced.
++    def _action_channel(self, values, enabled):
++        """Preserve item coordinates and optionally erase action coordinates.
++
++        The pool and five-summary consumers use independent switches. All
++        learned widths, compression populations and count weights stay fixed.
++        No detach, learned module, RNG or persistent state is introduced.
+         """
+-        if self.action_in_values:
++        if enabled:
+             return values
+         return torch.cat([values[:, :, :self.key_width],
+@@ -585,8 +587,8 @@
+         all_values, all_counts = self._compress_with_match(values, mask, auxiliary, match_union)
+         # Compress the observed stream once. Only _interactions can expose
+-        # its action coordinates to the scorer; only _value_channel can
++        # its action coordinates to the scorer; only the pool projection can
+         # expose them to pooling. Counts/assignments stay unchanged.
+         primary_weights = self._primary_activation(self._interactions(target, all_values))
+-        all_strata = self._pool_seven(primary_weights, self._value_channel(all_values), all_counts)
++        all_strata = self._pool_seven(primary_weights, self._action_channel(all_values, self.action_in_pool), all_counts)
+         uniform = all_strata[:, 0, :]
+         # Auxiliary training retains the original ordered 30-slot population
+@@ -612,5 +614,5 @@
+             aux_joint_detail = joint_detail.detach() if self.block_aux_item_grad else joint_detail
+             aux_weights = self._auxiliary_activation(self._interactions(aux_target, aux_values))
+-            aux_strata = self._pool(aux_weights, self._value_channel(aux_values), counts)
++            aux_strata = self._pool(aux_weights, self._action_channel(aux_values, self.action_in_pool), counts)
+         else:
+             # Identical values/parameters and no state update: inference needs

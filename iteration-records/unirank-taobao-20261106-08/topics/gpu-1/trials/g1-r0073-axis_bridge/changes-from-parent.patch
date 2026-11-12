@@ -1,0 +1,93 @@
+--- g1-r0072-signed_attached/model.py
++++ g1-r0073-axis_bridge/model.py
+@@ -1,12 +1,12 @@
+-"""Prospective primary coarse-summary gradient attribution; unmeasured.
+-
+-Cross signed versus sign-canonical coarse input to the click residual adapter
+-with attached versus blocked gradient from that input into historical values.
+-The interaction and auxiliary adapters retain the sign-canonical input. Only
+-one direct source edge is detached; every adapter parameter remains trainable,
+-and all other history/context/target edges, modules and initialization remain
+-inherited. A third concatenation executes in every cell to match forward work.
+-This is a local mechanism diagnostic, not whole-history order invariance or a
+-novel-architecture claim. Native checks and measurements belong to the host.
++"""Prospective click-adapter sign-invariance replacement study; unmeasured.
++
++At the click residual adapter only, compare f(x,c), f(x,axis(c)), and the
++continuous even readout (f(x,c)+f(x,-c))/2. The same stateless ReLU adapter
++and all three evaluations execute in every cell; unselected evaluations
++remain in the backward graph with zero coefficient. No parameter, buffer,
++input event, task mask, initialization or host recipe is added or changed.
++Other consumers retain the inherited coarse axis. This tests one supplied
++coarse-summary polarity, not invariance to arbitrary event order.
++Native torch/BF16/autograd checks and performance measurements are host-owned.
+ """
+ import torch
+@@ -17,5 +17,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'interaction_coarse_signed': False, 'primary_adapter_coarse_signed': True, 'auxiliary_adapter_coarse_signed': False, 'block_primary_adapter_coarse_grad': False}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'interaction_coarse_signed': False, 'primary_adapter_coarse_signed': True, 'auxiliary_adapter_coarse_signed': False, 'block_primary_adapter_coarse_grad': False, 'primary_adapter_readout': 'axis'}
+ 
+ 
+@@ -40,4 +40,5 @@
+                  interaction_coarse_signed=False,
+                  block_primary_adapter_coarse_grad=False,
++                 primary_adapter_readout='axis',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -64,4 +65,12 @@
+             raise ValueError('Primary coarse source-gradient gate must be boolean')
+         self.block_primary_adapter_coarse_grad = block_primary_adapter_coarse_grad
++        if primary_adapter_readout not in ('even', 'signed', 'axis'):
++            raise ValueError('Unknown primary adapter readout')
++        if (primary_adapter_coarse_signed is not True
++                or auxiliary_adapter_coarse_signed is not False
++                or block_primary_adapter_coarse_grad is not False
++                or residual_execution != 'direct'):
++            raise ValueError('Readout study requires signed attached primary, axis auxiliary and direct routing')
++        self.primary_adapter_readout = primary_adapter_readout
+         if block_aux_scorer_grad is not True:
+             raise ValueError('Auxiliary scorer parameter gradients must stay blocked')
+@@ -785,4 +794,32 @@
+         return adapter_signal, interaction_signal
+ 
++    def _primary_adapter_correction(self, index, features):
++        """Average the two signs BEFORE the downstream tower and its Dice.
++
++        The last five value-width slices are match, local, coarse, quadratic,
++        and joint summaries. Only coarse is reflected. Shared prefix and all
++        sibling summaries are unchanged. The inherited adapter consists only
++        of Linear/ReLU/Linear, so these calls have no running-state effect.
++        FP32 averaging reduces cancellation error under host BF16 autocast.
++        Explicit zero terms retain all evaluations in every backward graph.
++        """
++        width = self.value_width
++        coarse_start = features.shape[1] - 3 * width
++        coarse_end = coarse_start + width
++        coarse = features[:, coarse_start:coarse_end]
++        reflected = torch.cat([features[:, :coarse_start], -coarse,
++                               features[:, coarse_end:]], dim=-1)
++        canonical = torch.cat([features[:, :coarse_start], self._coarse_axis(coarse),
++                               features[:, coarse_end:]], dim=-1)
++        positive = self.residual_bank[index](features)
++        negative = self.residual_bank[index](reflected)
++        axis = self.residual_bank[index](canonical)
++        even = ((positive.float() + negative.float()) * 0.5).to(positive.dtype)
++        if self.primary_adapter_readout == 'even':
++            return even + 0.0 * positive + 0.0 * negative + 0.0 * axis
++        if self.primary_adapter_readout == 'signed':
++            return positive + 0.0 * even + 0.0 * negative + 0.0 * axis
++        return axis + 0.0 * even + 0.0 * positive + 0.0 * negative
++
+     def forward(self, inputs):
+         context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._represent(inputs)
+@@ -941,5 +978,7 @@
+             # in the loss graph. Unselected adapters are stateless and their
+             # outputs have zero loss derivative in the all-bank control.
+-            if self.residual_execution == 'direct':
++            if label == 'is_click':
++                correction = self._primary_adapter_correction(index, residual_features)
++            elif self.residual_execution == 'direct':
+                 correction = self.residual_bank[index](residual_features)
+             else:

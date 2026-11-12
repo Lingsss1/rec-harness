@@ -1,0 +1,91 @@
+"""Eight regular edit directions; jump composes two across parent categories."""
+import os
+import random
+
+REGULAR = {
+    'feature_construction': {'label': '特征构造', 'parent': '特征与表征',
+        'scope': 'Construct input features solely from supplied training interactions, such as frequency or recency indicators. No external metadata, independent scorer or score fusion. Keep learned embedding design, SASRec topology, readout, loss and optimizer fixed.'},
+    'embedding_representation': {'label': '嵌入表征', 'parent': '特征与表征',
+        'scope': 'Item embedding dimensions, parameterization, tying and embedding normalization. Keep feature definitions, interaction/scoring mechanism, SASRec topology, history policy, loss and optimizer fixed.'},
+    'interaction_mechanism': {'label': '交互机制', 'parent': '交互与架构',
+        'scope': 'Jointly trained user-interest/item interaction or scoring mechanisms, such as gated or bilinear compatibility. Preserve the causal Transformer backbone topology, input features, history readout, loss and optimizer. No independently trained score fusion.'},
+    'network_architecture': {'label': '网络架构', 'parent': '交互与架构',
+        'scope': 'SASRec attention block depth, attention heads, feed-forward layers, residual paths and internal network topology. Retain the SASRec causal Transformer backbone. Preserve input features, embedding design, scoring mechanism, history selection/readout, loss and optimizer.'},
+    'sequence_modeling': {'label': '序列建模', 'parent': '序列与兴趣',
+        'scope': 'Causal input context length, truncation and ordering/position representation. Preserve input feature definitions, embedding design, SASRec topology, interest readout, loss and optimizer. Never introduce future interactions or change supplied splits.'},
+    'interest_aggregation': {'label': '兴趣聚合', 'parent': '序列与兴趣',
+        'scope': 'Readout of existing causal encoder states, such as last-state, mean, recency-weighted or attention pooling, inside one jointly trained model. Preserve input history selection, embedding construction, backbone topology, scoring mechanism, loss and optimizer.'},
+    'learning_objective': {'label': '学习目标', 'parent': '目标与训练',
+        'scope': 'Ranking/prediction loss, loss weighting and jointly trained auxiliary objectives. Preserve feature definitions, embeddings, SASRec topology, scoring/readout, optimizer, sampling, scheduler and batch/epoch settings.'},
+    'training_strategy': {'label': '训练策略', 'parent': '目标与训练',
+        'scope': 'Optimizer, learning rate, batch size, scheduler, dropout and weight decay. Preserve model structure, features, scoring/readout and loss definition. Keep seed 42, epoch cap 200, data splits, evaluation and GPU/CPU allocation fixed.'},
+}
+JUMP = 'combination_jump'
+# One delayed-outcome counter belongs to the jump mechanism. Its 24 possible
+# cross-category pairs are not extra bandit arms with unlearned priors.
+PAIRS = {JUMP: [JUMP]}
+ALL = list(REGULAR) + [JUMP]
+
+
+def enabled():
+    value = os.getenv('GAGC_ARM_DESIGN', 'semantic_v3')
+    if value not in {'semantic_v3', 'legacy_v2'}:
+        raise ValueError('Unknown GAGC_ARM_DESIGN: ' + value)
+    return value == 'semantic_v3'
+
+
+def categories(arm, selected=None):
+    if arm in REGULAR:
+        return [arm]
+    if arm != JUMP or selected is None:
+        return []
+    if len(selected) != 2 or len(set(selected)) != 2 or any(v not in REGULAR for v in selected):
+        raise ValueError('Jump requires exactly two distinct registered directions')
+    if REGULAR[selected[0]]['parent'] == REGULAR[selected[1]]['parent']:
+        raise ValueError('Jump directions must belong to different parent categories')
+    return list(selected)
+
+
+def hint(arm, selected=None):
+    directions = categories(arm, selected)
+    if arm == JUMP and selected is None:
+        return 'Combine exactly two registered directions from different parent categories in ONE jointly trained SASRec model; no independent scorer/model fusion.'
+    prefix = ('COMBINATION JUMP: make a substantive, coordinated change in EACH selected direction. '
+              if arm == JUMP else 'REGULAR MUTATION: change only this one direction. ')
+    return prefix + '\n'.join(REGULAR[name]['label'] + ': ' + REGULAR[name]['scope'] for name in directions) + (
+        '\nMaintain shape, checkpoint and predictor consistency for changes in the selected directions; '
+        'preserve the registered direction boundaries.')
+
+
+HINTS = {arm: hint(arm) for arm in ALL}
+
+
+def sample(state, slots, jump=False, with_trace=False):
+    # One independent Beta draw per regular direction per decision. Four GPUs
+    # select FOUR of EIGHT without replacement, leaving budget allocation adaptive.
+    pool = list(REGULAR)
+    draws = {arm: random.betavariate(state.arms[arm].alpha, state.arms[arm].beta)
+             if arm in state.arms else random.betavariate(1., 1.) for arm in pool}
+    ranked = sorted(pool, key=lambda arm: draws[arm], reverse=True)
+    if jump:
+        first = ranked[0]
+        second = next(arm for arm in ranked[1:] if REGULAR[arm]['parent'] != REGULAR[first]['parent'])
+        selected = [JUMP]
+        trace = [{'slot': 0, 'arm': JUMP, 'selected_directions': [first, second],
+                  'sampled_values': draws, 'selection': 'highest draw plus highest compatible cross-category draw'}]
+    else:
+        selected = ranked[:min(slots, len(pool))]
+        trace = [{'slot': i, 'rank': i+1, 'arm': arm, 'sampled_values': dict(draws)}
+                 for i, arm in enumerate(selected)]
+    return (selected, trace) if with_trace else selected
+
+
+def policy():
+    return {'version': 'eight_directions_v3', 'regular_arms': REGULAR,
+        'regular_routing': 'one TS draw for each of eight directions; select the top four without replacement for four GPUs',
+        'gpu_budget_allocation': 'selection frequency allocates slots over rounds; equal per-candidate caps within a group; charge actual worker duration',
+        'regular_reward': 'Bernoulli success iff valid host validation strictly exceeds the group-start local incumbent',
+        'jump_routing': 'budget-safe gate; draw from the eight direction posteriors; combine highest draw with highest cross-parent compatible draw; G=1',
+        'jump_credit': 'one delayed combination_jump outcome counter; no unidentifiable component-direction credit and no separate prior for each pair',
+        'possible_cross_category_pairs': 24, 'within_run_jump_limit': 1,
+        'edit_contract': 'exact selected direction set, per-direction nontrivial AST edits, logged rationale; semantic scope prompt-enforced'}

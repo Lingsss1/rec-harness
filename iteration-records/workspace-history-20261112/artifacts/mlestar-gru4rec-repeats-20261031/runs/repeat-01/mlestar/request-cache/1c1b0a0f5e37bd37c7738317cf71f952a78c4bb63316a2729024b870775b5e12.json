@@ -1,0 +1,43 @@
+{
+  "request_sha256": "1c1b0a0f5e37bd37c7738317cf71f952a78c4bb63316a2729024b870775b5e12",
+  "response": {
+    "directions": [
+      {
+        "description": "Replace single-negative BPR with multi-negative BPR-max. The authors provide this ranking loss in the [official GRU4Rec implementation](https://github.com/hidasib/GRU4Rec/blob/master/gru4rec.py). This is the first proposed experiment; improvement on this benchmark remains unmeasured.",
+        "urls": [
+          "https://hidasi.eu/assets/pdf/gru4rec_v2_cikm18.pdf",
+          "https://github.com/hidasib/GRU4Rec_PyTorch_Official",
+          "https://github.com/hidasib/GRU4Rec/blob/master/gru4rec.py"
+        ],
+        "implementation": "Apply each direction independently to the supplied corrected baseline. Shared requirements: DATA_DIR = os.environ['GAGC_DATA_DIR']; retain all four categories and routing; training seed 42; leave preprocessing seed 0 and supplied splits unchanged; maximum 200 epochs and exactly 200 batches per executed epoch. Save one selected checkpoint/category beneath the trial's working directory. Preserve sample_batch's shifted, causal targets. Add log2feats(sequence) returning [B,T,H], and predict_score(features, items) using the same item_emb scoring as training. encode must gather the final nonpadding position using masked position indices, never count-1. Keep ModelView compatible. Update write_predict_script and metadata for every architecture change; load exactly one checkpoint/category. Use the pinned validation procedure for comparisons and never report unmeasured gains.\n\nFor this direction, retain the GRU architecture and tied item embeddings. Keep sample_batch compatible, but draw K=32 additional training negatives per valid position, excluding the user's training interactions; return fewer or skip that position if no eligible items exist. Mask padding positions before computing the loss. Implement:\n\ndef bpr_max_loss(pos_scores, neg_scores, coefficient=0.1):\n    # Shapes [N], [N,K]; N contains only valid training positions.\n    log_weights = torch.log_softmax(neg_scores.float(), dim=-1)\n    log_win = torch.nn.functional.logsigmoid(pos_scores.float()[:, None] - neg_scores.float())\n    ranking = -torch.logsumexp(log_weights + log_win, dim=-1)\n    regularizer = (log_weights.exp() * neg_scores.float().square()).sum(-1)\n    return (ranking + coefficient * regularizer).mean()\n\nStart with hidden=128, dropout=0.1, Adam lr=0.001 and gradient clipping=5. Keep inference as the single model's raw dot-product scores."
+      },
+      {
+        "description": "Replace pairwise BPR with categorical next-item cross-entropy. Cross-entropy is supported by the [authors' GRU4Rec implementation](https://github.com/hidasib/GRU4Rec_PyTorch_Official); using the full vocabulary here avoids sampling-correction bookkeeping.",
+        "urls": [
+          "https://github.com/hidasib/GRU4Rec_PyTorch_Official",
+          "https://hidasi.eu/assets/pdf/gru4rec_v2_cikm18.pdf"
+        ],
+        "implementation": "Use the shared contracts from direction 1. Preserve the baseline GRU and tied item_emb. Compute full-vocabulary logits at valid shifted-target positions, excluding padding item 0. To bound memory, randomly select at most 512 valid positions per batch using the seed-42 training RNG, then process them in chunks of 64. Compute GRU features once per batch. For each chunk:\n\nlogits = features_chunk.float() @ model.item_emb.weight[1:].float().T\nchunk_loss = torch.nn.functional.cross_entropy(logits, targets_chunk - 1, reduction='sum')\n\nSum chunk losses and divide by the total selected-position count before backward. This remains one optimizer update per batch and 200 batches/epoch. Start with hidden=128, dropout=0.2, Adam lr=0.001, no label smoothing and clip norm=5. The existing single-model dot-product predictor remains valid; expose the shared log2feats and predict_score methods. Full-vocabulary cost depends on category vocabulary size, so record actual GPU time against the shared budget."
+      },
+      {
+        "description": "Use dropout masks shared across time to regularize the recurrent encoder. The [AWD-LSTM authors' implementation](https://github.com/salesforce/awd-lstm-lm/blob/master/locked_dropout.py) supplies the reference operation. Applying it to GRU4Rec is a proposed adaptation, not a reported result for these datasets.",
+        "urls": [
+          "https://github.com/salesforce/awd-lstm-lm",
+          "https://github.com/salesforce/awd-lstm-lm/blob/master/locked_dropout.py",
+          "https://arxiv.org/abs/1708.02182"
+        ],
+        "implementation": "Use the shared contracts from direction 1. Isolate this experiment by retaining baseline BPR, optimizer, hidden width and target sampling. Replace embedding dropout with batch-first locked dropout, initially p=0.2, and apply a separate locked output dropout with p=0.1 before scoring:\n\nclass LockedDropout(nn.Module):\n    def __init__(self, p):\n        super().__init__()\n        self.p = float(p)\n    def forward(self, x):\n        if not self.training or self.p == 0:\n            return x\n        keep = 1.0 - self.p\n        mask = x.new_empty(x.size(0), 1, x.size(2)).bernoulli_(keep).div_(keep)\n        return x * mask\n\nRoute forward and encode through one log2feats implementation: item_emb -> locked input dropout -> GRU -> locked output dropout. Each mask is shared across time within a sequence. Preserve the final-nonpadding gather. Save input_dropout and output_dropout in category metadata, extend the model constructor, and update the predictor writer to instantiate that exact architecture before loading its checkpoint. In eval mode both dropout operations are identity functions."
+      },
+      {
+        "description": "Add R-Drop consistency regularization to next-item cross-entropy. The [R-Drop authors' code](https://github.com/dropreg/R-Drop) uses symmetric KL between two dropout passes. Its application to this GRU recommender is an experimental hypothesis.",
+        "urls": [
+          "https://arxiv.org/abs/2106.14448",
+          "https://github.com/dropreg/R-Drop",
+          "https://github.com/dropreg/R-Drop/blob/main/README.md"
+        ],
+        "implementation": "Use the shared contracts from direction 1 and direction 2's full-vocabulary CE objective. Train one GRU model with two stochastic forward passes of the same batch through the same parameters. Use identical selected positions and targets in both passes. Start with embedding dropout=0.2 and consistency coefficient=0.1. Compute logits in chunks of 64 positions:\n\ndef rdrop_loss(a, b, targets, coefficient=0.1):\n    import torch.nn.functional as F\n    a, b = a.float(), b.float()\n    la, lb = F.log_softmax(a, -1), F.log_softmax(b, -1)\n    pa, pb = la.exp(), lb.exp()\n    symmetric_kl = 0.5 * ((pa * (la - lb)).sum(-1) + (pb * (lb - la)).sum(-1)).mean()\n    supervised = 0.5 * (F.cross_entropy(a, targets) + F.cross_entropy(b, targets))\n    return supervised + coefficient * symmetric_kl\n\nTargets are item IDs minus one because logits exclude item 0. Weight chunk losses by their position counts. Perform one backward and optimizer update per batch. Both distributions receive gradients. Save one selected checkpoint/category; inference uses one deterministic eval-mode pass with dropout disabled. This is shared-parameter regularization, with no independently trained predictors or inference averaging. Account for the extra forward-pass cost within the shared GPU budget."
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/mlestar-gru4rec-repeats-20261031/runs/repeat-01/mlestar/calls/00001"
+}

@@ -1,0 +1,147 @@
+{
+  "request_sha256": "ca7780d3ac5109280db5d219f4f51ea28689343170cb1ef6df3bf20bc15c09d1",
+  "response": {
+    "markdown_report": "At 0% progress, prioritize **terminal-focused BERT4Rec training**, testing endpoint recency and negative count separately. Multiple uniform negatives reduce sampling variance; they do not strengthen the expected pairwise objective.\n\n**Insights from the starting point.** (1) Random reconstruction differs from next-item prediction; terminal masking matches appended-mask inference. (2) Industrial and Electronics show 12.25% and 11.27% wrong-rank rates and negative lower-tail margins, motivating discrimination experiments. (3) Users report stale interests and broadly plausible alternatives displacing specific choices. Recent-prefix supervision addresses these failures indirectly; compatibility and mood remain unobserved. Embedding scores near 0.5 do not indicate directional collapse.\n\n**Insights from related work.** (1) [BERT4Rec](https://arxiv.org/abs/1904.06690) already includes final-item masking, limiting originality. (2) [Recency Sampling](https://arxiv.org/abs/2207.02643) motivates recent endpoints but did not test this BERT4Rec adaptation or establish a ten-interaction half-life. (3) [Correcting LogQ](https://arxiv.org/abs/2507.09331) addresses sampling bias, not false-negative detection; [controlled BERT4Rec experiments](https://arxiv.org/abs/2308.07192) support separating negative count from loss choice.\n\n**Framework.** Three directions distinguish target alignment, competitor objectives, and feature specificity. Terminal masking changes prediction context; endpoint sampling changes target frequency; negative count changes pairwise gradient variance; candidate softmax changes the objective. Scratch-trained title features change representations without supplying ownership or compatibility labels.\n\n**Candidate assessment.** Scores are 0–10; higher difficulty means greater implementation cost. Each cell states a strength and limitation.\n\n| Idea | Originality | Potential | User alignment | Model alignment | Difficulty |\n|---|---|---|---|---|---|\n| A. Recent-prefix terminal ranking; separate negative-count ablation | 3: useful adaptation; established parts | 7: transferable; unverified | 7: present priorities and specific next choices; indirect specificity | 7: aligned supervision; margins may not improve | 4: local changes; careful controls |\n| B. Corrected stochastic hard-negative objective | 5: careful combination; known methods | 7: discrimination; false negatives | 6: specific competitors; recency absent | 8: hard cases; proposal bias risk | 6: tractable; probability accounting |\n| C. Joint ID/title encoder trained from scratch | 5: constrained adaptation; established fusion | 7: finer details; sparse text | 8: identifiers and purpose; mood uncertain | 6: differentiated items; unverified | 7: one network; tokenization overhead |\n\n**Selected algorithm: A.** Its two user-facing targets are stale interests outweighing current priorities and broad matches displacing compelling next choices. Terminal supervision and recent endpoints plausibly address these; neither establishes compatibility or duplication awareness. The model-facing target is weak lower-tail separation.\n\n```\nuser ~ uniform(eligible training users)\nt ~ endpoint_distribution(training_history)\ninput = left_pad(last_L_minus_1(history[:t]) + [MASK])\nloss = mean_examples(mean_targets(mean_negatives(softplus(s_neg-s_pos))))\n```\n\nUse q=0.5 terminal examples; otherwise mask 15% of nonpadding items, ensuring one target and replacing every selected item with MASK. Hide suffixes in terminal examples. Test uniform versus exponential endpoints with half-life 10, sampled before truncation. Predeclare a 2×2 masking/endpoint comparison; hold baseline loss and negative count fixed, then separately test K=32. More negatives preserve the expected pairwise gradient and reduce conditional sampling variance, without guaranteed HR@10 gains. Preserve seeds, routing, one checkpoint/category, limits, predictor consistency and diagnostic interfaces. Log all attempts within 43,200 GPU-seconds. Select by fixed macro validation HR@10; report paired uncertainty when available, recognizing selection bias and sampled-candidate limitations.",
+    "idea": {
+      "description": "Increase terminal-mask supervision within the corrected BERT4Rec, testing endpoint recency separately from training-negative count and loss changes. Train exactly one independent model per category, preserving the bidirectional masked-item backbone and appended-mask inference.",
+      "motivation": "The proposal explicitly targets two reported user failures: historical interests outweighing present priorities, and broadly plausible recommendations displacing stronger specific next choices. Recent endpoints emphasize more current observations, while terminal supervision removes future context and trains the actual next-choice task. These mechanisms provide hypotheses rather than evidence of improved compatibility, ownership awareness, duplication avoidance, or mood inference. Industrial_and_Scientific and Electronics have negative tenth-percentile margins and wrong-rank rates of 12.25% and 11.27%, motivating evaluation of lower-tail discrimination. Near-zero mean item-embedding cosine similarity provides no reason to prioritize an anti-collapse intervention.",
+      "implementation_notes": "Modify the host-supplied corrected baseline rather than reconstructing its unavailable implementation. Keep DATA_DIR=os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, all four dataset routes, maximum 200 epochs, 200 batches per epoch, and single-GPU execution per trial. Write artifacts beneath the trial directory and never read other trials or checkpoints. Preserve the host optimizer, updates and baseline objective for the initial masking/endpoint comparison. Do not silently replace a different baseline loss with pairwise logistic loss; declare that replacement as a separate experimental factor.\n\nDefine a training history H=(x_1,...,x_n), with n>=2. Uniformly sample eligible users, then sample endpoint t in {2,...,n} before truncation. The uniform condition uses P(t)=1/(n-1); the exponential condition uses P(t) proportional to 2^(-(n-t)/10), equivalently alpha=2^(-1/10), approximately 0.9330. The ten-interaction half-life is a proposed setting, not a validated result. Retain the earlier 50% uniform/50% exponential endpoint mixture as an optional, separately declared follow-up rather than conflating it with the primary exponential condition. Sample the terminal branch independently with q=0.5; reconstruction-only uses q=0.\n\nFor terminal examples, input is left_pad(last_{L-1}(x_1,...,x_{t-1})+[MASK], L), label x_t. Exclude the target occurrence and entire suffix; legitimate earlier repetitions may remain. In zero-based code, use H[:t] and target H[t] with t sampled from {1,...,n-1}. For reconstruction examples, use the training-only prefix H[:t+1] under that indexing, retain its last L items, select each nonpadding position independently with probability 0.15, and force one uniformly selected nonpadding target if none is selected. Replace every selected occurrence with the reserved MASK token; do not leave selected targets unchanged. Reconstruction permits bidirectional context within this prefix, as BERT4Rec intends. Do not introduce shifted next-item labels at unmasked positions.\n\nThe initial comparison crosses reconstruction-only versus q=0.5 terminal mixture with uniform versus exponential endpoints. This estimates the terminal-mixture effect, endpoint effect and their interaction under a common sampling protocol. The q=0 uniform cell is a controlled reconstruction reference; if its preprocessing differs from the supplied cold start, report that distinction and retain a cold-start comparison when budget permits. At 0% progress, prefer this small controlled study to immediately adding text encoders or hard-negative mining.\n\nFor the proposed pairwise-loss extension, draw IID uniform negatives with replacement from real item IDs excluding every known training positive for that user; exclude padding and MASK. Sample 32 negatives per supervised target. Replacement permits K=32 even for small eligible pools, with repeated draws counted as draws. Skip a target if its eligible pool is empty and report the count. Excluding known positives reduces a specific source of false negatives but cannot identify all unobserved preferences. The earlier suggestion to reduce K for small pools is an alternative without-replacement protocol, not the primary IID experiment, and requires separate reporting.\n\nCompute mean pairwise softplus across negatives, then targets within each example, then examples. This prevents examples with more reconstruction targets from receiving greater total weight merely because of target count; q controls their expected share of example loss, although not gradient magnitude. Original BERT4Rec instead averages valid targets across the batch; per-target normalization is a separate ablation. For L_K=mean_k softplus(s_neg_k-s_pos), IID sampling gives the same conditional expected gradient at K=1 and K=32, with negative-sampling gradient covariance reduced by 1/K conditional on the example, parameters and forward randomness. It does not reduce all user, masking or dropout variability. Stronger discrimination is therefore a possible optimization outcome, not a stronger population objective. Pairwise logistic loss remains AUC-oriented and does not directly optimize HR@10.\n\nCandidate softmax, log(1+sum_k exp(s_neg_k-s_pos)), is a distinct objective for K>1; it exponentially emphasizes stronger competitors. A subsequent comparison can cross pairwise versus candidate softmax with K in {1,32}. No logQ correction is required for the specified uniform pairwise objective. Importance-corrected sampled softmax is another separate formulation with generally biased finite-sample gradients; deterministic hard selection cannot inherit uniform proposal probabilities.\n\nPredeclare configurations, contrasts, checkpoint-selection and stopping rules, and GPU allocations before observing their scores. Use the host's existing checkpoint-selection procedure; if none is supplied, declare a fixed validation schedule and choose the highest macro-validation checkpoint with earliest-epoch tie breaking. Every complete comparison must retain all four categories. Count training, failures and diagnostics against 43,200 GPU-seconds; four slots reduce elapsed time, not GPU cost. Reserve budget for complete four-category comparisons and stop launching configurations when their estimated completion cost exceeds the remaining allocation. Compare both fixed-update quality and, only when budget permits, an equal-GPU-time follow-up; record actual GPU-seconds. Avoid attributing bundled improvements to individual components.\n\nSelect only using the pinned macro validation HR@10. If the host exposes per-user hits without evaluator changes, report category deltas, discordant paired hits and a paired bootstrap interval: resample 200 paired user records with replacement within each category, recompute the equally weighted macro difference, and use the 2.5th and 97.5th percentiles of 10,000 replicates with bootstrap seed 42. One changed hit changes category HR by 0.5 percentage points and macro HR by 0.125 points. These intervals condition on trained models and candidate sets; they do not quantify training-seed variability, candidate-sampling variability or winner-selection bias. Treat gains as exploratory, freeze the chosen configuration before held-out evaluation, and do not infer full-catalog gains from 99-negative evaluation.\n\nRecency weighting can overfit final training positions or underrepresent persistent interests; q=0.5 retains reconstruction supervision, and the uniform condition measures this risk. Additional negatives can increase runtime without changing the expected pairwise objective. Do not use item popularity, sequence length or recent position as evidence of compatibility. Unidentified simulator items are unassessable feedback, not explicit content rejection; do not construct preference labels from them.\n\nInference loads exactly one selected checkpoint per category, appends MASK after the last L-1 observed items, and reads the final nonpadding position using positions or the final appended-mask index, never count-1 on left-padded histories. Preserve log2feats(sequence), item_emb and predict_score(features, items). Update the embedded predictor writer whenever architecture, configuration or inference behavior changes, preserving checkpoint consistency. Never score padding or MASK as recommendation candidates.\n\nRetain DiagnosisProbe(view, device), run_full_diagnosis(train_loader), diagnosis_interpreter_prompt(raw_diagnosis), and the host ModelView interfaces, with view.model referencing the trained nn.Module. Adapt family-specific sample_batch so positive labels correspond to actually masked positions; do not feed shifted labels through visible bidirectional inputs. The loader remains (None, sequence, positive, negative), all B x L. Measure margins only at valid hidden targets. Hold the diagnostic masking, sampling and aggregation protocol fixed across compared models or explicitly flag incomparable measurements. Return measured metrics and their definitions, with no invented category breakdowns. Use only public histories, titles, descriptions and timestamps; review text, ratings, categories, prices, stores and simulator traits are unavailable.",
+      "pseudocode": "declare configurations, budgets, contrasts, stopping rules and checkpoint policy\nfor configuration in predeclared_four_category_trials:\n    for category in FOUR_CATEGORIES:\n        initialize corrected BERT4Rec with seed 42\n        for epoch in range(max_epochs_at_most_200):\n            for step in range(200):\n                losses = []\n                for H in uniformly_sampled_eligible_training_users:\n                    # Zero-based target index; endpoint sampled before truncation.\n                    t = sample_index(1, len(H)-1, uniform_or_exponential_half_life_10)\n                    if Bernoulli(q):\n                        sequence = left_pad(H[:t][-(L-1):] + [MASK], L)\n                        positions = [final_nonpadding_position(sequence)]\n                        targets = [H[t]]\n                    else:\n                        sequence = left_pad(H[:t+1][-L:], L)\n                        positions = bernoulli_nonpadding_positions(sequence, probability=0.15)\n                        if positions is empty:\n                            positions = [uniform_nonpadding_position(sequence)]\n                        targets = copy(sequence[positions])\n                        sequence[positions] = MASK\n                    features = model.log2feats(sequence)[positions]\n                    if initial_controlled_comparison:\n                        example_loss = declared_baseline_loss(features, targets)\n                    else:\n                        negatives = IID_uniform_real_items_excluding_all_training_positives(H, K)\n                        if eligible_negative_pool_is_empty:\n                            record_skip_and_continue\n                        pos = model.predict_score(features, targets)\n                        neg = model.predict_score(features, negatives)\n                        if loss_kind == 'pairwise':\n                            target_losses = mean_K(softplus(neg - pos[:, None]))\n                        else:\n                            target_losses = logsumexp(concat(zeros_column, neg-pos[:, None]), dim=1)\n                        example_loss = mean_targets(target_losses)\n                    losses.append(example_loss)\n                optimize(mean_examples(losses))\n            apply_predeclared_host_validation_and_checkpoint_policy()\n        save_exactly_one_selected_checkpoint_with_configuration(category)\n    emit_predictor_with_identical_architecture_and_appended_mask_readout()\n    obtain_host_macro_validation_HR10()\n    record_configuration_cost_failures_and_category_results()\nfreeze_one_configuration_using_predeclared_validation_selection_rule()\n# Never average checkpoints, models, ranks or scores.",
+      "originality": {
+        "score": 3,
+        "positive": "The diagnosis-driven combination of controlled terminal supervision, endpoint sampling and explicit loss normalization is a useful constrained adaptation.",
+        "negative": "BERT4Rec already uses final-item masking, and recency sampling and multiple-negative pairwise learning are established; no new objective or backbone is introduced."
+      },
+      "future_potential": {
+        "score": 7,
+        "positive": "A controlled result could guide compute-efficient alignment of masked reconstruction with next-item recommendation and clarify interactions among endpoint sampling, masking and negative objectives.",
+        "negative": "No supplied validation evidence establishes improvement, and the approach cannot directly resolve unobserved compatibility, ownership, duplication or mood."
+      },
+      "code_difficulty": {
+        "score": 4,
+        "positive": "The primary experiment changes sampling and normalization while retaining the backbone, scoring interface and single-checkpoint predictor.",
+        "negative": "Reproducible endpoint distributions, leakage-free masking, diagnostic alignment, paired comparisons and budget accounting require more care than the original score of 3 implied."
+      }
+    },
+    "related_work": [
+      {
+        "title": "BERT4Rec: Sequential Recommendation with Bidirectional Encoder Representations from Transformer",
+        "link": "https://arxiv.org/abs/1904.06690",
+        "contributions": [
+          "Introduces bidirectional masked-item sequential recommendation and final-item masking.",
+          "Its generator implements random and forced-last masking: https://github.com/FeiSun/BERT4Rec/blob/master/gen_data.py",
+          "Its loss averages valid masked targets across the batch: https://github.com/FeiSun/BERT4Rec/blob/master/run.py"
+        ],
+        "limitations": [
+          "Does not establish the best terminal-example proportion or endpoint-recency setting for this benchmark.",
+          "Random reconstruction can expose context unavailable during next-item inference.",
+          "Per-target normalization gives examples with more masked targets greater aggregate weight."
+        ]
+      },
+      {
+        "title": "Recency Sampling for Sequential Recommendation",
+        "link": "https://arxiv.org/abs/2207.02643",
+        "contributions": [
+          "Studies exponential target-position weighting and recency-strength ablations for efficient sequential recommendation."
+        ],
+        "limitations": [
+          "Does not apply its sampling adaptation to BERT4Rec.",
+          "Does not validate the proposed ten-interaction half-life or isolate its interaction with BERT4Rec terminal masking."
+        ]
+      },
+      {
+        "title": "Correcting the LogQ Correction",
+        "link": "https://arxiv.org/abs/2507.09331",
+        "contributions": [
+          "Distinguishes always-included positives from sampled negatives in sampled-softmax correction."
+        ],
+        "limitations": [
+          "Sampling correction does not detect false negatives.",
+          "Its softmax correction is not required by the proposed uniform pairwise logistic objective."
+        ]
+      },
+      {
+        "title": "Sampled Estimators For Softmax Must Be Biased",
+        "link": "https://papers.neurips.cc/paper_files/paper/2025/hash/42b7c2f6d320d1fe1afa899a6319d6d7-Abstract-Conference.html",
+        "contributions": [
+          "Establishes limitations of subset-only softmax estimators."
+        ],
+        "limitations": [
+          "Does not establish recommendation gains for a particular sampling strategy or pairwise objective."
+        ]
+      },
+      {
+        "title": "Petrov and Macdonald: controlled BERT4Rec negative-count and loss experiments, §6.2.4",
+        "link": "https://arxiv.org/abs/2308.07192",
+        "contributions": [
+          "Crosses negative counts of 1, 4, 16, 64 and 256 with BCE, gBCE and uniform sampled softmax for BERT4Rec on MovieLens-1M."
+        ],
+        "limitations": [
+          "Does not test BPR or the exact 1-versus-32 comparison proposed here.",
+          "Results on MovieLens-1M do not establish gains on the four Amazon categories."
+        ]
+      },
+      {
+        "title": "Wu et al.: sampled-softmax ranking analysis",
+        "link": "https://wujcan.github.io/papers/tois-ssm.pdf",
+        "contributions": [
+          "Analyzes sampled-softmax ranking behavior and benefits associated with hard negatives."
+        ],
+        "limitations": [
+          "Uses collaborative-filtering backbones and different similarity or sampling choices, limiting direct transfer to this BERT4Rec experiment."
+        ]
+      },
+      {
+        "title": "Rawat et al.: sampled-softmax analysis",
+        "link": "https://papers.neurips.cc/paper_files/paper/2019/file/e43739bba7cdb577e9e3e4e42447f5a5-Paper.pdf",
+        "contributions": [
+          "Provides analysis relevant to sampling distributions and bias in sampled-softmax gradients."
+        ],
+        "limitations": [
+          "Importance correction does not generally yield unbiased finite-sample gradients relative to full softmax."
+        ]
+      },
+      {
+        "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+        "link": "https://www.jmlr.org/papers/v11/cawley10a.html",
+        "contributions": [
+          "Explains how repeated model selection can overfit finite validation data."
+        ],
+        "limitations": [
+          "Ordinary uncertainty intervals do not remove winner-selection bias."
+        ]
+      },
+      {
+        "title": "Recommendation-evaluation uncertainty research",
+        "link": "https://arxiv.org/abs/2305.02461",
+        "contributions": [
+          "Provides supporting research for bootstrap and randomization approaches to recommendation evaluation."
+        ],
+        "limitations": [
+          "The proposed paired bootstrap conditions on fitted models and fixed candidate sets and cannot measure all experimental uncertainty."
+        ]
+      },
+      {
+        "title": "On Sampled Metrics for Item Recommendation",
+        "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+        "contributions": [
+          "Shows that sampled-candidate evaluation can change relative method rankings."
+        ],
+        "limitations": [
+          "Pinned 99-negative HR@10 comparisons cannot establish corresponding full-catalog improvements."
+        ]
+      },
+      {
+        "title": "NIST: factorial experimental designs",
+        "link": "https://www.itl.nist.gov/div898/handbook/pri/section2/pri212.htm",
+        "contributions": [
+          "Explains experimental designs that estimate factor effects and interactions."
+        ],
+        "limitations": [
+          "Single-factor comparisons identify effects at the reference setting but can miss interactions; factorial studies require additional budget."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/model-family-comparison-20261029/runs/bert4rec-self_evolverec/self_evolverec/calls/00347"
+}

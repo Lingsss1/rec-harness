@@ -1,0 +1,55 @@
+{
+  "category_edits": [
+    {
+      "category": "feature_construction",
+      "rationale": "Scale each input embedding by 1 + 0.25*log1p(c), where c counts earlier occurrences of that item in the available causal prefix before truncation and padding. Apply the same feature during training, validation and prediction across all four categories. Preserve embedding parameters, GRU topology, readout, loss and optimizer.",
+      "edits": [
+        {
+          "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+          "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+        },
+        {
+          "find": "    batch_seq, batch_pos, batch_neg = [], [], []",
+          "replace": "    batch_seq, batch_pos, batch_neg, batch_repeat = [], [], [], []"
+        },
+        {
+          "find": "        batch_neg.append(neg)\n    return np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg)",
+          "replace": "        batch_neg.append(neg)\n        batch_repeat.append(GRU4RecModel.repetition_weights(history[:-1], maxlen))\n    return (np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg),\n            np.asarray(batch_repeat, dtype=np.float32))"
+        },
+        {
+          "find": "            scores = model.score_candidates(seq_t, cand_t).detach().cpu().tolist()",
+          "replace": "            repeat_t = torch.tensor(\n                [model.repetition_weights(history, maxlen)], dtype=torch.float32, device=device\n            )\n            scores = model.score_candidates(seq_t, cand_t, repeat_t).detach().cpu().tolist()"
+        },
+        {
+          "find": "def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:\n    pos_scores, neg_scores = model(seq, pos, neg)",
+          "replace": "def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor,\n                      repeat_weights: torch.Tensor) -> torch.Tensor:\n    pos_scores, neg_scores = model(seq, pos, neg, repeat_weights)"
+        },
+        {
+          "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))",
+          "replace": "    @staticmethod\n    def repetition_weights(history: list[int], maxlen: int) -> list[float]:\n        counts = {}\n        weights = []\n        for item in history:\n            if item == 0:\n                weights.append(1.0)\n                continue\n            earlier = counts.get(item, 0)\n            weights.append(1.0 + 0.25 * math.log1p(earlier))\n            counts[item] = earlier + 1\n        tail = weights[-maxlen:]\n        return [1.0] * (maxlen - len(tail)) + tail\n\n    def encode(self, seq: torch.Tensor, repeat_weights: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq) * repeat_weights.unsqueeze(-1))"
+        },
+        {
+          "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))",
+          "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor,\n                repeat_weights: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq) * repeat_weights.unsqueeze(-1))"
+        },
+        {
+          "find": "    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:\n        user_emb = self.encode(seq)[0]",
+          "replace": "    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor,\n                         repeat_weights: torch.Tensor) -> torch.Tensor:\n        user_emb = self.encode(seq, repeat_weights)[0]"
+        },
+        {
+          "find": "            seq, pos, neg = sample_batch(user_train, itemnum, BATCH_SIZE, MAXLEN)",
+          "replace": "            seq, pos, neg, repeat_weights = sample_batch(user_train, itemnum, BATCH_SIZE, MAXLEN)"
+        },
+        {
+          "find": "            loss = bpr_sequence_loss(model, seq_t, pos_t, neg_t)",
+          "replace": "            repeat_t = torch.tensor(repeat_weights, dtype=torch.float32, device=device)\n            loss = bpr_sequence_loss(model, seq_t, pos_t, neg_t, repeat_t)"
+        },
+        {
+          "find": "    with torch.no_grad():\n        scores = model.score_candidates(seq_t, cand_t).detach().cpu().tolist()",
+          "replace": "    repeat_t = torch.tensor(\n        [model.repetition_weights(history, maxlen)], dtype=torch.float32, device=_device\n    )\n    with torch.no_grad():\n        scores = model.score_candidates(seq_t, cand_t, repeat_t).detach().cpu().tolist()"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Add deterministic causal repetition features consistently to training, validation and the embedded predictor writer. Retain one GRU model per category and the existing 200-epoch default."
+}

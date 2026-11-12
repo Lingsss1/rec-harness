@@ -1,0 +1,37 @@
+--- amazon-next-v9-round-8-control-1.py
++++ model.py
+@@ -222,6 +222,8 @@
+         ])
+         self.dropout = nn.Dropout(dropout_rate)
+         self.norm = nn.LayerNorm(hidden_units)
++        self.skip_proj = nn.Linear(hidden_units, hidden_units, bias=False)
++        nn.init.zeros_(self.skip_proj.weight)
+         with torch.no_grad():
+             nn.init.xavier_uniform_(self.item_emb.weight)
+             self.item_emb.weight[0].zero_()
+@@ -234,9 +236,12 @@
+         pos = pos * (seq != 0).long()
+         x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
++        skip_source = None
+         for block_index, block in enumerate(self.blocks):
+             x = block(x)
+             x = x * (seq != 0).unsqueeze(-1).float()
++            if block_index == 1:
++                skip_source = x
+             if block_index == len(self.blocks) - 1:
+                 insertion_valid = (seq != 0).unsqueeze(-1).to(x.dtype)
+                 insertion_sum = nn.functional.pad(
+@@ -255,7 +260,11 @@
+         compressed = 4.0 * torch.tanh(x / 4.0)
+         compressed_context = 4.0 * torch.tanh(context / 4.0)
+         blended = 0.85 * compressed + 0.15 * compressed_context
+-        return torch.where(preceding_count > 0, blended, compressed) * valid
++        readout = torch.where(preceding_count > 0, blended, compressed)
++        if skip_source is not None:
++            source = nn.functional.normalize(skip_source, p=2, dim=-1) * math.sqrt(self.hidden_units)
++            readout = readout + 0.1 * torch.tanh(self.skip_proj(source))
++        return readout * valid
+ 
+     def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):
+         out = self.encode_sequence(seq)

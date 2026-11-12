@@ -1,0 +1,15 @@
+{
+  "category_edits": [
+    {
+      "category": "interest_aggregation",
+      "rationale": "Blend each current GRU state with a causal, padding-masked mean of preceding GRU states using a 10-interaction half-life: 0.8 * current + 0.2 * pooled. Training and inference share this method through the predictor writer's existing model-class import. Preserve the GRU backbone, embeddings, scoring, loss, optimizer, and dataset routing.",
+      "edits": [
+        {
+          "find": "    def aggregate_states(self, out: torch.Tensor, seq: torch.Tensor) -> torch.Tensor:\n        # Prefix normalization yields weight 2**(-age/5) at every valid step.\n        positions = torch.arange(seq.size(1), device=out.device, dtype=torch.float32)\n        weights = torch.exp2((positions - (seq.size(1) - 1)) / 5.0)\n        weights = weights.unsqueeze(0) * seq.ne(0).float()\n        numerator = torch.cumsum(out.float() * weights.unsqueeze(-1), dim=1)\n        denominator = torch.cumsum(weights, dim=1).unsqueeze(-1)\n        pooled = numerator / denominator.clamp_min(torch.finfo(torch.float32).tiny)\n        return pooled.to(out.dtype)",
+          "replace": "    def aggregate_states(self, out: torch.Tensor, seq: torch.Tensor) -> torch.Tensor:\n        valid = seq.ne(0).float()\n        interaction_index = valid.cumsum(dim=1)\n        # The common scale cancels in every prefix; age counts valid interactions.\n        weights = torch.exp2(\n            (interaction_index - interaction_index[:, -1:]) / 10.0\n        ) * valid\n        numerator = torch.cumsum(out.float() * weights.unsqueeze(-1), dim=1)\n        denominator = torch.cumsum(weights, dim=1).unsqueeze(-1)\n        pooled = numerator / denominator.clamp_min(torch.finfo(torch.float32).tiny)\n        return (0.8 * out.float() + 0.2 * pooled).to(out.dtype)"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Replace pure pooled readout with an 80% current-state / 20% recency-weighted history blend, consistently across training and prediction for all four datasets."
+}

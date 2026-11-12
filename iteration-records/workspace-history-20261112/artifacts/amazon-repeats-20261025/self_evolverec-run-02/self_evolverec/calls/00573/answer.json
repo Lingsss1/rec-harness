@@ -1,0 +1,60 @@
+{
+  "markdown_report": "The best early-stage direction is a **support-gated transition residual with normalized sampled softmax**. It preserves SASRec while testing whether independently supported next-item associations improve current-purpose matching.\n\n**Insights from the starting point.**\n\n1. Directed transitions distinguish next-step evidence from broad similarity. They remain behavioral proxies, not proof of compatibility.\n2. Cross-fitting removes a user's contribution to their training graph. It prevents direct self-support but cannot eliminate unobserved-positive ambiguity.\n3. Recency can prioritize current interests. However, existing recent-removal sensitivity already exceeds distant-removal sensitivity, so stronger recency is not automatically justified.\n\n**Insights from related work.**\n\n1. Sampled-softmax analysis links normalization and temperature to discriminative gradients [1]. Electronics' 7.9% negative-win rate motivates testing this objective without claiming causality.\n2. Directed graph projections provide interaction-only association estimates [2]. Support shrinkage can limit unreliable sparse edges.\n3. FAME separates preference components through gated predictions [3]. This offers an alternative when a single sequence representation mixes interests.\n\n**Framework.** Three directions separate the intervention: objective calibration changes discrimination; directed evidence changes association specificity; intent routing changes history aggregation. Cross-fitting and validation selection apply across them. None establishes functional compatibility from interaction order alone.\n\nScores below are originality/potential/user alignment/model alignment/difficulty, each 0–10; higher difficulty means harder implementation. Each assessment gives a positive and a limitation.\n\n| Atomic idea | Scores | Assessment by dimension |\n|---|---|---|\n| A: Normalized sampled softmax [1] | 3/7/5/9/2 | Originality: useful adaptation / established loss. Potential: reusable / transfer uncertain. User: sharper ranking / no explicit current-purpose evidence. Model: targets separation / training margins may mislead. Difficulty: small change / sampler care required. |\n| B: Support-gated transitions plus A [1,2] | 5/8/8/8/5 | Originality: combines independent evidence and calibration / familiar components. Potential: interpretable residual / sparse coverage. User: recent next-step support / cannot verify compatibility. Model: stronger candidate competition / graph may mask encoder weakness. Difficulty: sparse operations / fold bookkeeping. |\n| C: Two gated intent heads [3] | 4/7/7/6/6 | Originality: compact adaptation / established routing. Potential: separates interests / limited sparse-history evidence. User: reduces interest mixing / no complementarity guarantee. Model: richer representation / no direct margin correction. Difficulty: few heads / routing instability. |\n\n**Selected algorithm: B.** At 10% progress, its modest scope and explicit evidence make it preferable. It addresses broadly plausible but nonspecific recommendations and older-interest carryover by adding bounded evidence from recent directed associations. Sampled softmax addresses weak Electronics separation.\n\nBuild user-disjoint training graphs; shrink transition lift by source and edge support. Aggregate scores over the latest five prefix items with normalized recency weights. Add a bounded, initially near-zero residual to normalized SASRec logits; unsupported candidates retain backbone scores. Preserve the unrestricted history encoder.\n\nCompare baseline, A, and B under matched budgets. Select exclusively by pinned four-category macro validation HR@10. Extend diagnostics to measure complete scores and graph-removal effects; report no anticipated gain as measured.\n\nReferences: [1](https://wujcan.github.io/papers/tois-ssm.pdf), [2](https://arxiv.org/abs/2506.09209), [3](https://arxiv.org/abs/2411.01457).",
+  "idea": {
+    "description": "Add a bounded, support-shrunk directed-transition residual to per-dataset SASRec, combined with normalized multi-negative sampled softmax. Use user-grouped cross-fitting for training graph features and an ensemble of the same fold graphs at inference.",
+    "motivation": "The user diagnosis identifies broadly plausible recommendations without a specific next-step connection and excessive influence from older interests. Recent, independently supported transitions provide a testable behavioral signal for both failures. Electronics also has a training negative-win rate of 0.079 and a 10th-percentile margin of 0.2522, motivating an objective ablation. Existing removal diagnostics already indicate strong recent-history sensitivity; they do not justify simply amplifying recency or establish validation gains.",
+    "implementation_notes": "Retain all four dataset models, routing, preprocessing seed 0, training seed 42, DATA_DIR=os.environ['GAGC_DATA_DIR'], trial-local artifacts, and the SASREC_EPOCHS environment default of 200. Build graphs exclusively from training histories. Assign users deterministically to folds; each training example uses a graph excluding its entire user's fold. Count adjacent directed transitions, source totals, and destination frequencies separately for each graph. Define a bounded nonnegative association using smoothed positive log lift multiplied by edge-count and source-count shrinkage. Unsupported edges contribute zero. Aggregate the latest five nonpadding prefix items using normalized decay weights; keep the full-history SASRec branch. Use a bounded nonnegative residual coefficient initialized near zero. At inference, average residual scores from the stored fold graphs to reduce reliance on a different full-data graph. This does not entirely remove train/inference feature differences, so validate the residual scale carefully. Start with 64 uniform negatives per valid position, excluding padding, the target, and the user's known training items; deduplicate or mask collisions. Do not use held-out labels for negative filtering. Compute cosine logits with a shared temperature initially 0.2, then add the bounded graph residual before cross-entropy. Compare baseline, objective-only, and residual variants under matched GPU budgets, retaining all categories and selecting only by pinned macro validation HR@10. Update the predictor writer to serialize and restore normalization, temperature, residual parameters, fold graphs, and dataset routing. Preserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. Because graph scores depend on sequence context, extend the view with a complete sequence-to-candidate scoring method while retaining item_emb, log2feats, and predict_score compatibility. Compute encoder-only and complete-score margins separately; measure complete-score history perturbations and graph-removal effects. Preserve model evaluation mode during probes and restore prior mode afterward. No unavailable metadata or simulator traits are used. User diagnosis alignment: 8/10, positive: directly tests specific recent next-step evidence; negative: cannot establish compatibility, satisfied needs, or true complementarity. Model diagnosis alignment: 8/10, positive: directly tests stronger positive–negative discrimination; negative: improved training margins or cosine geometry need not improve validation ranking.",
+    "pseudocode": "For each category independently:\n  deterministically partition training users into K folds\n  for fold f:\n    G[f] = directed adjacent-transition statistics from users outside f\n    A[f] = bounded positive log-lift, shrunk by edge and source support\n  initialize SASRec and near-zero bounded residual coefficient\n  for training batch (user, sequence, positive, negative):\n    h = SASRec(sequence)\n    candidates = positive plus 64 filtered uniform negatives per valid position\n    base = cosine(h, item_embeddings[candidates]) / temperature\n    graph = recency_weighted_lookup(A[fold(user)], prefix_last_five, candidates)\n    logits = base + bounded_coefficient * graph\n    minimize masked candidate cross_entropy(logits, target_index=0)\n  save model, scoring configuration, routing, and fold graphs\nAt inference:\n  score = normalized_SASRec_score + bounded_coefficient * mean_fold_graph_score\nSelect checkpoints and variants using only pinned macro validation HR@10.",
+    "originality": {
+      "score": 5,
+      "positive": "Combines user-disjoint transition evidence, support shrinkage, and calibrated candidate competition in a compact adaptation.",
+      "negative": "Directed graphs, shrinkage, cross-fitting, and sampled softmax are established techniques; novelty lies mainly in their integration."
+    },
+    "future_potential": {
+      "score": 8,
+      "positive": "Creates an interpretable evidence branch that can later support candidate-conditioned routing and reliability analysis.",
+      "negative": "Sparse transitions may provide limited coverage, and behavioral association cannot resolve functional compatibility."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "Keeps the encoder intact and requires only sparse graph lookup, a scoring residual, and a replacement objective.",
+      "negative": "User-fold tracking, efficient per-prefix candidate lookup, inference serialization, and complete-score diagnostics require careful integration."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Sampled-softmax analysis (2024; supplied search result)",
+      "link": "https://wujcan.github.io/papers/tois-ssm.pdf",
+      "contributions": [
+        "Analyzes normalized representations and temperature in sampled-softmax training.",
+        "Motivates an objective-only ablation before expanding sequence architecture."
+      ],
+      "limitations": [
+        "Does not establish improvements on the pinned four-category evaluation.",
+        "Reported temperature settings require validation under this task."
+      ]
+    },
+    {
+      "title": "Revisiting Graph Projections (2025)",
+      "link": "https://arxiv.org/abs/2506.09209",
+      "contributions": [
+        "Provides an interaction-only precedent for directed weighted item graphs."
+      ],
+      "limitations": [
+        "Directed association does not establish practical compatibility or functional complementarity.",
+        "The proposed cross-fitting and support gate require independent evaluation."
+      ]
+    },
+    {
+      "title": "FAME (WSDM 2025)",
+      "link": "https://arxiv.org/abs/2411.01457",
+      "contributions": [
+        "Uses attention-head preference components and gated predictions to separate interests."
+      ],
+      "limitations": [
+        "Transfer to these sparse Amazon histories is uncertain.",
+        "Multiple preference components alone do not identify complementary purchases."
+      ]
+    }
+  ]
+}

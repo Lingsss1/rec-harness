@@ -1,0 +1,142 @@
+{
+  "markdown_report": "At 0% progress, prioritize a small, testable extension: **recent-intent residual SASRec with multi-negative training**. Improvements remain hypotheses; no validation results are available.\n\n**Insights from the starting point.** (1) SASRec already learns selective history dependence; a recent branch needs controls demonstrating benefits beyond added capacity. Repeated recent interests motivate testing it, not assuming its superiority. (2) Electronics has 14.95% sampled wrong ranks and a −0.4812 lower-decile margin. These motivate discrimination experiments but do not establish validation HR@10. (3) Similar embedding alignment across categories provides little justification for prioritizing collapse penalties. Empty category breakdowns cannot identify category-specific causes.\n\n**Insights from related work.** (1) [gSASRec](https://arxiv.org/abs/2308.07192) motivates calibrated multi-negative training, but its theorem depends on the sampling distribution. Excluding every known positive changes that distribution. (2) [R²NS](https://renzhaochun.github.io/assets/pdf/WWW_2026_Camera_Ready.pdf) supports uniform warm-up before harder sampling; false negatives discourage immediate hardest-negative mining. (3) [LSIDN](https://arxiv.org/abs/2407.14743) motivates separating persistent and current interests without establishing purchase satisfaction. (4) [ReZero](https://arxiv.org/abs/2003.04887) motivates a zero-initialized residual: adding output LayerNorm would change baseline scores even with a zero residual.\n\n**Framework and candidate directions.** Separate temporal evidence, discrimination, and relation evidence. Full-prefix/recent-prefix encoders address temporal relevance; multi-negative objectives address discrimination; title/transition channels offer uncertain relation evidence. Independently encoded five-item windows differ from multilayer sliding attention, whose receptive field expands with depth.\n\nScores are originality / future potential / user alignment / model alignment / implementation difficulty; 10 means highest, including difficulty. Each dimension has a benefit (+) and limitation (−).\n\n| Candidate | Scores | Assessment by dimension |\n|---|---|---|\n| A: Multi-negative gBCE, unchanged SASRec | 2/7/4/9/3 | Originality: +targeted adaptation, −established; potential: +reusable control, −limited mechanism; user: +fewer weak competitors, −no temporal correction; model: +targets separation, −surrogate only; difficulty: +small loss change, −calibration and sampling require care. |\n| B: Recent residual plus multi-negative gBCE | 3/7/8/8/6 | Originality: +diagnosis-driven combination, −known components; potential: +adaptive temporal evidence, −domain dependence; user: +specificity and recency, −no compatibility guarantees; model: +stronger discrimination, −false negatives; difficulty: +shared weights, −repeated encoding and gradient management. |\n| C: Separate title-similarity and directed-transition channels | 6/7/8/6/7 | Originality: +relation-aware fusion, −prior precedents; potential: +purpose clues, −weak relation labels; user: +specific matching and complements, −ownership ambiguity; model: +extra evidence, −uncertain margin gains; difficulty: +available inputs, −feature pipeline. |\n\n**Selected: B.** Add a zero-initialized, gated recent-prefix residual to the unchanged SASRec scoring path. It explicitly targets stale historical influence and broadly plausible recommendations crowding out repeated recent interests. Multi-negative gBCE targets weak sampled separation, especially in Electronics. Neither mechanism establishes compatibility, complements, or satisfied ownership; a recent branch may amplify incidental purchases.\n\nUse 32 uniform negatives with replacement, excluding padding and the current target, with calibration t=0.75. Known training positives remain eligible to preserve the stated theorem’s sampling support; this entails false-negative risk. History exclusion requires a separately labeled heuristic, not a claimed calibrated equivalent. Use the stable direct softplus objective described below.\n\nPredeclare four primary configurations: baseline, loss-only, recent-only, and combined. Require a gated full-history residual control before attributing gains specifically to recency; match normalization, projection, pooling, and loss. With no new output normalization, a normalization-only control is unnecessary. Profile first, then assign equal GPU-time ceilings, fixed validation cadence, and a fixed checkpoint-selection rule within 43,200 aggregate GPU-seconds, including diagnosis and failures. Concurrent slots reduce elapsed time only.\n\nSelect solely by pinned four-category macro validation HR@10; record every configuration and category result. Where the evaluator exposes per-user hits, report paired stratified bootstrap intervals and discordant wins/losses. These quantify conditional user variability, not training-seed uncertainty or selection bias. Repeated validation can overfit 800 users; keep the search small and leave held-out evaluation to the host.",
+  "idea": {
+    "description": "Add a baseline-preserving gated recent-prefix residual to SASRec and train with 32 uniform negatives using generalized BCE at t=0.75. Share encoder parameters between full and independently encoded five-item prefixes, retaining independent models and dataset routing for all four categories.",
+    "motivation": "The user diagnosis identifies stale interests and broadly related recommendations crowding out specific current preferences. A recent-prefix branch supplies explicit local evidence while preserving full-history preferences, addressing those two user-facing failures. Electronics’ 14.95% sampled wrong-rank rate motivates stronger discrimination. These are hypotheses requiring pinned validation; training margins cannot establish HR@10 gains, compatibility, or purchase satisfaction.",
+    "implementation_notes": "Preserve DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, unchanged splits, four-category routing, and SASREC_EPOCHS default 200. Write all artifacts beneath the trial directory. Use only available histories, titles, descriptions, and timestamps; this proposal requires histories alone. Do not consume the unavailable ratings, review text, categories, prices, stores, or simulator traits.\n\nFor every valid next-item training position, construct a recent window from its causal prefix, never including its target or subsequent interactions. Left-pad item IDs by four and unfold with width five and stride one to obtain B x L x 5 windows. Select valid positions and encode windows independently with the shared SASRec encoder. Use fixed right-aligned positional slots 0 through 4 at both training and inference; padding remains masked. Retain each window’s final state. This is not interchangeable with sliding-window attention across layers. Materialize embeddings only after chunking windows. Handle padded query rows safely: permit their self-attention entry and zero their outputs, while blocking padded keys for valid queries. Respect the opposite boolean-mask conventions of TransformerEncoder and SDPA.\n\nLet h be the original full-prefix feature and r the recent feature. Define g = sigmoid(Linear(concat(h, r, log1p(prefix_length)))) and h_new = h + a*g*r, with a a learned scalar initialized exactly to zero, gate weights zero, and gate bias -2. Add no output LayerNorm or projection. Use unchanged item dot products for scores. Check initial score equivalence in eval mode against the same baseline checkpoint. The recent branch receives gradients after a departs zero. Its lack of guaranteed norm control is a limitation; track feature norms rather than introducing an untested normalization change.\n\nLet N count nonpadding items. Draw k=32 negatives independently with replacement from all N items except the current target; duplicates count as separate draws. Set alpha=k/(N-1), beta=1-t+t*alpha, t=0.75, and compute each valid position’s loss as (beta*softplus(-positive_logit) + sum(softplus(negative_logits)))/(k+1). Average over valid positions. Compute softplus in float32 or higher. Do not average positive and negative terms separately. The positive-logit transformation is unnecessary with this equivalent direct objective; inference always uses original dot-product scores. Report that k=32 is a budget-conscious proposal, while the cited authors recommend k=256. Do not claim full-catalog calibration after excluding all known positives; such exclusion changes sampling support. Target-only exclusion preserves the theorem’s support but leaves observed and unobserved false negatives possible.\n\nIndependent recent encoding repeats projection and feedforward computation. Profile complete optimizer steps, validation, and diagnosis before committing to the ablation schedule. To bound window activations while preserving full-branch gradients, encode the full sequence once, create a detached feature proxy requiring gradients, backpropagate globally normalized chunk losses into that proxy and shared parameters, then backpropagate the accumulated proxy gradient through the original full encoder graph. Step the optimizer once after all chunks. Compare its gradients against an unchunked tiny batch with dropout disabled. This validation is necessary because simply retaining every chunk loss until one backward defeats the intended memory bound.\n\nPredeclare four primary ablations: unchanged single-negative BCE baseline; unchanged architecture with multi-negative gBCE; recent residual with baseline loss; combined model. Add a gated full-history residual control, replacing r with h while matching gate, normalization placement, and training settings, before claiming a specifically temporal mechanism. All retain the baseline optimizer and other hyperparameters initially. Allocate equal aggregate GPU-time ceilings after profiling; count training, validation, diagnosis, debugging, and failures toward 43,200 GPU-seconds across all four categories and configurations. Fix checkpoint cadence and choose the highest macro validation HR@10, breaking exact ties in favor of the earlier checkpoint and then the simpler configuration. Log every evaluated setting and consumed GPU time. Keep seeds fixed; bootstrap uncertainty does not replace training-seed replication.\n\nIf the unchanged evaluator exposes paired per-user hit indicators, bootstrap 10,000 paired resamples with a separate analysis RNG seeded 42, independently sampling 200 users with replacement within each category and averaging category differences equally. Report percentile 95% intervals, category results, and discordant wins/losses. Do not change the evaluator to obtain unavailable outputs. These intervals condition on fixed candidates and training seed; they neither remove winner-selection bias nor establish full-catalog performance.\n\nUpdate the predictor writer and working/predict.py with the exact fused architecture, learned scalar, gate state, right-aligned positions, window size, and category checkpoints. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). view.model must remain the actual trained nn.Module; item_emb, log2feats, and predict_score must expose the fused scoring path. Preserve user_train, meta_data, and review_data compatibility attributes without inventing unavailable fields. Return measured metrics and definitions; mark unavailable probes explicitly and do not infer categories from empty breakdowns. Compute diagnostic item alignment excluding padding, using identical sampling across compared models. Record margin diagnostics, residual magnitude, gate distribution, and feature norms as explanatory measures, never replacement selection metrics. Twenty real training users, five per category, must still receive full-catalog unseen-item recommendations for the native simulator.",
+    "pseudocode": "predeclare_configurations_budget_checkpoint_cadence_and_tie_breaks()\nfor configuration in declared_configurations:\n    for category in FOUR_DATASETS:\n        initialize_baseline_SASRec_and_optional_residual(seed=42)\n        # Keep preprocessing seed 0 and original optimizer/settings.\n        for batch in unchanged_training_loader:\n            optimizer.zero_grad()\n            full = model.original_log2feats(batch.sequence)\n            if residual_enabled:\n                proxy = full.detach().requires_grad_(True)\n                windows = left_pad(batch.sequence, 4).unfold(1, 5, 1)\n            else:\n                proxy = full\n            valid_count = count(batch.positive != 0)\n            for chunk in valid_position_chunks:\n                h = select(proxy, chunk)\n                if residual_enabled:\n                    r = shared_encoder(windows[chunk], positions=right_aligned_slots_0_to_4).last_state\n                    g = sigmoid(gate(concat(h, r, log1p(prefix_lengths[chunk]))))\n                    h = h + zero_initialized_learned_scalar * g * r\n                negatives = draw_with_replacement_excluding_target_and_padding(k=32)\n                positive_logits = dot(h, item_emb(batch.positive[chunk]))\n                negative_logits = dot(h, item_emb(negatives))\n                beta = 1 - 0.75 + 0.75 * 32 / (nonpadding_catalog_size - 1)\n                position_loss = (beta * softplus(-positive_logits) + sum(softplus(negative_logits), dim=-1)) / 33\n                backward(sum(position_loss) / valid_count)\n                # Baseline-loss ablations instead use the unchanged single-negative BCE.\n            if residual_enabled:\n                full.backward(proxy.grad)\n            optimizer.step()\n            enforce_shared_aggregate_GPU_budget()\n        save_checkpoints_and_matching_predictor_under_trial_directory()\nselect_using_only_pinned_four_category_macro_validation_HR_at_10()\nreport_category_results_cost_and_available_paired_uncertainty()\nrun_compatible_measured_diagnostics_and_native_training_user_recommendations()",
+    "originality": {
+      "score": 3,
+      "positive": "The combination is explicitly tied to the supplied temporal and discrimination failures and includes controls testing its proposed mechanism.",
+      "negative": "Recent-history encoders, gates, residual initialization, and multi-negative objectives are established techniques; their combination is incremental."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides a controlled foundation for studying when local evidence should supplement persistent preferences across different domains.",
+      "negative": "Recency can amplify incidental interactions, and neither purpose alignment nor gains across all four categories are established."
+    },
+    "code_difficulty": {
+      "score": 6,
+      "positive": "Reuses SASRec weights, item embeddings, scoring, and available histories without external data.",
+      "negative": "Independent causal windows, masking, chunked gradient accumulation, sampling calibration, fair controls, and predictor parity require substantial care."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Provides the causal self-attention baseline and shared item-embedding scoring.",
+        "Already permits selective history dependence, motivating controls for any explicit recent-history branch."
+      ],
+      "limitations": [
+        "Does not guarantee that specific recent intent outranks older associations.",
+        "Its flexibility alone does not demonstrate that a recent residual will improve the pinned benchmark."
+      ]
+    },
+    {
+      "title": "gSASRec: Reducing Overconfidence in Sequential Recommendation Trained with Negative Sampling",
+      "link": "https://arxiv.org/abs/2308.07192",
+      "contributions": [
+        "Derives generalized BCE calibration for multiple sampled negatives.",
+        "Supports the direct stable loss using beta-weighted positive softplus and summed negative softplus.",
+        "Official implementation: https://github.com/asash/gSASRec-pytorch."
+      ],
+      "limitations": [
+        "The theorem assumes uniform draws with replacement excluding the current target; excluding all known positives changes its support.",
+        "The supplied official sampler permits target collisions, creating a discrepancy from the theorem.",
+        "The proposed k=32 differs from the authors’ recommended k=256, and gains on this pinned evaluation remain untested."
+      ]
+    },
+    {
+      "title": "R²NS",
+      "link": "https://renzhaochun.github.io/assets/pdf/WWW_2026_Camera_Ready.pdf",
+      "contributions": [
+        "Supports uniform warm-up and progressively harder stochastic negative sampling.",
+        "Motivates avoiding immediate hardest-negative mining."
+      ],
+      "limitations": [
+        "Hard negatives can be unobserved positives.",
+        "The initial proposal uses uniform sampling and makes no claim to implement R²NS."
+      ]
+    },
+    {
+      "title": "LSIDN",
+      "link": "https://arxiv.org/abs/2407.14743",
+      "contributions": [
+        "Motivates distinguishing persistent preferences from short-term interests."
+      ],
+      "limitations": [
+        "Does not establish that interactions reveal satisfied needs or product compatibility.",
+        "Does not validate the proposed shared-encoder residual."
+      ]
+    },
+    {
+      "title": "ReZero is All You Need: Fast Convergence at Large Depth",
+      "link": "https://arxiv.org/abs/2003.04887",
+      "contributions": [
+        "Motivates initializing a residual scaling parameter at zero to preserve the original feature path."
+      ],
+      "limitations": [
+        "Does not establish a SASRec-specific benefit.",
+        "Score equivalence additionally requires preserving the baseline normalization and inference path."
+      ]
+    },
+    {
+      "title": "Mistral 7B",
+      "link": "https://arxiv.org/abs/2310.06825",
+      "contributions": [
+        "Explains receptive-field expansion through stacked sliding-window attention."
+      ],
+      "limitations": [
+        "Provides an architectural distinction rather than recommendation evidence.",
+        "Sliding attention is not equivalent to independently encoding reset-position five-item windows."
+      ]
+    },
+    {
+      "title": "PyTorch Tensor.unfold documentation",
+      "link": "https://docs.pytorch.org/docs/2.14/generated/torch.Tensor.unfold.html",
+      "contributions": [
+        "Documents view-based extraction of overlapping windows for exact recent-prefix construction."
+      ],
+      "limitations": [
+        "Embedding extracted windows still materializes tensors and incurs repeated encoder computation.",
+        "Mask conventions depend on the attention API and require explicit checks."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/beta/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how repeated model selection can bias performance estimates.",
+        "Motivates a small predeclared search and complete configuration logging."
+      ],
+      "limitations": [
+        "Does not eliminate selection bias under the fixed benchmark splits.",
+        "Bootstrap intervals for a selected winner do not correct adaptive selection."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled recommendation evaluation can disagree with full-catalog rankings."
+      ],
+      "limitations": [
+        "Does not authorize changing the pinned 99-negative evaluator.",
+        "Full-catalog simulator judgments and pinned validation HR@10 remain distinct evidence."
+      ]
+    },
+    {
+      "title": "Paired resampling in retrieval evaluation",
+      "link": "https://ciir-publications.cs.umass.edu/getpdf.php?id=744",
+      "contributions": [
+        "Motivates paired uncertainty analysis using identical resampled users for compared models."
+      ],
+      "limitations": [
+        "The proposed category-stratified bootstrap is an adaptation.",
+        "Intervals condition on available per-user results, fixed candidates, and the training seed."
+      ]
+    }
+  ]
+}

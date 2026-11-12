@@ -1,0 +1,60 @@
+{
+  "markdown_report": "At 10% progress, prioritize **diverse-timescale initialization of the existing GRU update gate**, with execution consistency as a prerequisite. This preserves GRU4Rec and avoids an additional recurrent gate.\n\nThree insights follow from the starting point. First, embedding-conditioned retention could suppress isolated historical interests. Its benefit remains hypothetical because temporal diagnostics are unavailable. Second, an extra gate attenuates a state already controlled by GRU gates. Initializing existing gates offers a simpler experiment. Third, every category fails final-feature consistency, with discrepancies of 0.000163–0.000633. Zero aligned-feature and candidate-score discrepancies narrow the investigation but do not identify its cause.\n\nThree literature insights motivate the alternatives. Chrono initialization [1] connects recurrent gate biases to different temporal scales. This supports allocating coordinates to short and persistent preferences without assuming excessive forgetting is desirable. minGRU [2] demonstrates input-dependent coordinate-wise retention. Its changed recurrence is contextual evidence, not a permitted backbone replacement here. ICSRec [3] motivates shared-network subsequence supervision. However, overlapping histories need not express identical intent, so consistency can erase meaningful changes.\n\nThe conceptual framework separates **execution**, **memory allocation**, and **supervision**: shared readout establishes interpretable measurements; gate initialization controls initial retention; auxiliary objectives shape learned invariances. Execution is mandatory for every direction.\n\nThree atomic proposals follow. Scores are originality/potential/user alignment/model alignment/difficulty; higher difficulty means harder implementation. Each pair gives a positive and negative assessment.\n\n| Proposal | Scores | Positive / negative assessment by dimension |\n|---|---|---|\n| Existing-gate timescales [1], selected | 3/7/7/8/2 | O: focused adaptation / established method; P: cheap foundation / gains uncertain; U: recent and persistent memory / no compatibility labels; M: shared readout addresses execution / initialization alone cannot fix it; D: few edits / gate indexing needs care |\n| Additional retention gate [2] | 4/6/7/8/5 | O: explicit conditioning / recurrent-gating precedent; P: adaptive forgetting / redundant attenuation; U: targets stale influence and weak recent fit / may erase lasting preferences; M: same execution repair / temporal evidence absent; D: small module / custom-cell parity and throughput costs |\n| Same-endpoint subsequence consistency [3] | 4/6/6/7/4 | O: cautious augmentation / established supervision; P: robustness / intent mixing; U: repeated recent evidence / may preserve broad associations; M: execution prerequisite / margins already strong; D: shared weights / extra forward passes |\n\nThe selected experiment directly targets **isolated older interests persisting** and **recent, repeated behavior receiving insufficient priority**. Short-retention coordinates can adapt while longer-retention coordinates preserve coherent preferences; neither behavior is guaranteed. Its execution component directly addresses the measured final-feature failure. First isolate the discrepancy using the same captured feature tensor, then compare production, ModelView, and serialized predictor readouts without relaxing tolerances. Keep temporal results unavailable until checks pass.\n\nCompare the corrected baseline with initialization-only training under the fixed protocol, selecting exclusively by official four-category macro validation HR@10. No improvement is claimed.\n\nReferences: [1] https://arxiv.org/abs/1804.11188; [2] https://arxiv.org/abs/2410.01201; [3] https://doi.org/10.1145/3616855.3635773",
+  "idea": {
+    "description": "Initialize the corrected GRU4Rec's existing update-gate coordinates across short and longer retention timescales, without adding gates or changing its backbone. Establish consistent final-feature extraction across training, ModelView, and the embedded predictor before interpreting temporal diagnostics.",
+    "motivation": "The user diagnosis identifies stale isolated interests and insufficient priority for recent repeated behavior. Diverse initial retention horizons offer a minimal hypothesis for balancing these needs. All four categories also have measured final-feature execution failures, which must be resolved independently; the available measurements do not establish their cause or demonstrate excessive historical dependence.",
+    "implementation_notes": "Extend the supplied corrected baseline rather than reconstructing unavailable training code. Preserve its loss, optimizer, sampling, dimensions, dropout, initialization of other parameters, and validation cadence for an initialization-only comparison. For PyTorch GRU algebra h=z*h_previous+(1-z)*candidate, initialize coordinate retention z=1-1/T using T log-spaced from 2 to max(2, history_window). Set the total update-gate bias to log(T-1): assign bias_ih[H:2H] accordingly and bias_hh[H:2H] to zero, for each existing recurrent layer. This is an experimental adaptation of chrono initialization, not a claim to reproduce its complete prescription. Use a local seed-42 generator if permuting horizons; do not disturb the baseline training RNG stream. The direct-path horizon is approximate and does not describe the complete nonlinear memory.\n\nBefore training the architectural comparison, investigate execution failures on the unchanged baseline. Capture features once and compare the production readout against maximum-nonzero-position gathering from that same tensor. Separately check raw versus transformed features, individual versus batched execution, added leading padding, actual model versus ModelView, and serialized predictor agreement. Preserve diagnostic tolerances and report unresolved failures. Freeze recurrent states at padding and zero padded output features; do not advance a GRU through leading zeros. Preserve empty-history behavior, including learned scoring biases. Do not attribute the observed discrepancies to indexing, floating point, or dropout without measurements.\n\nRetain item_emb, log2feats(sequence), predict_score(features, items), sample_batch and ModelView contracts, including BxLxK scoring. Keep DiagnosisProbe(view, device), run_full_diagnosis(train_loader), measured metrics and metric_definitions, and diagnosis_interpreter_prompt(raw_diagnosis). Run temporal probes only after execution checks pass. Frequency-stratified training margins remain descriptive, not validation estimates; mapped embedding cosine near 0.5 does not establish recommendation diversity or collapse.\n\nKeep DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, maximum 200 epochs and 200 batches per epoch. Retain Movies_and_TV, Industrial_and_Scientific, Electronics and CDs_and_Vinyl, fixed splits and routing, single-GPU execution, and artifacts beneath the trial directory. Account for all controls, diagnostics and failures within 43,200 GPU-seconds. Each category trains and deploys exactly one independent model/checkpoint; alternative trials are never fused. Save architecture configuration with state_dict and update the predictor writer whenever runtime architecture or readout changes. Initialize biases only before training, never over loaded checkpoint values. Select using official macro validation HR@10; no test data, other-trial checkpoints, extra datasets, pretrained weights, unavailable metadata or independently fitted scorers are used.",
+    "pseudocode": "import torch\n\n@torch.no_grad()\ndef initialize_retention_horizons(gru, history_window):\n    # Call once after normal baseline initialization, before optimization.\n    # PyTorch GRU gate order is reset, update, new.\n    H = gru.hidden_size\n    for name, bias in gru.named_parameters():\n        if name.startswith('bias_ih_l'):\n            T = torch.logspace(\n                torch.log10(torch.tensor(2.0)).item(),\n                torch.log10(torch.tensor(float(max(2, history_window)))).item(),\n                steps=H, device=bias.device, dtype=bias.dtype)\n            bias[H:2 * H].copy_(torch.log(T - 1))\n        elif name.startswith('bias_hh_l'):\n            bias[H:2 * H].zero_()\n\n\ndef final_nonpadding_features(sequence, features):\n    B, L = sequence.shape\n    if L == 0:\n        return features.new_zeros((B, features.shape[-1]))\n    positions = torch.arange(L, device=sequence.device)\n    last = torch.where(sequence.ne(0), positions[None, :], -1).amax(dim=1)\n    gathered = features.gather(\n        1, last.clamp_min(0)[:, None, None].expand(-1, 1, features.shape[-1])\n    ).squeeze(1)\n    return torch.where(last[:, None].ge(0), gathered, torch.zeros_like(gathered))\n\n# Integration outline, retaining the supplied baseline's actual interfaces:\n# 1. Isolate unchanged-baseline final-feature inconsistencies; retain tolerances.\n# 2. Share verified readout/scoring semantics with ModelView and predictor writer.\n# 3. For each of the four categories, initialize one corrected GRU4Rec model.\n# 4. Apply initialize_retention_horizons to its existing GRU once.\n# 5. Train with seed 42, <=200 epochs, 200 batches/epoch, unchanged objective.\n# 6. Save one selected checkpoint/category and matching embedded predictor.\n# 7. Check reload agreement; run retained diagnostics on the actual trained module.\n# 8. Accept only host-measured macro validation HR@10 evidence.\n# No additional retention module, independent scorer, or checkpoint averaging.",
+    "originality": {
+      "score": 3,
+      "positive": "A focused adaptation of existing GRU gate timescales to diagnosis-driven sequential recommendation.",
+      "negative": "Chrono initialization is established; neither a new recurrence nor benchmark gains are demonstrated."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "A cheap controlled experiment can establish whether initial memory allocation merits further study.",
+      "negative": "Training may overwrite the initialization, and ID-only retention cannot establish compatibility, mood, or ownership needs."
+    },
+    "code_difficulty": {
+      "score": 2,
+      "positive": "Changes only existing gate biases and needs no additional inference parameters or datasets.",
+      "negative": "Execution diagnosis and faithful integration with the supplied baseline and predictor remain necessary."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Can recurrent neural networks warp time? — chrono initialization",
+      "link": "https://arxiv.org/abs/1804.11188",
+      "contributions": [
+        "Connects recurrent gating with temporal scales and motivates gate-bias initialization.",
+        "Provides the foundation for the proposed existing-update-gate initialization."
+      ],
+      "limitations": [
+        "Does not establish gains under the supplied four-category RecHarness protocol.",
+        "Direct retention-path timescales do not characterize the full nonlinear model."
+      ]
+    },
+    {
+      "title": "Were RNNs All We Needed?",
+      "link": "https://arxiv.org/abs/2410.01201",
+      "contributions": [
+        "Introduces simplified recurrent units with input-dependent coordinate-wise gates and parallelizable training."
+      ],
+      "limitations": [
+        "Replacing GRU4Rec with minGRU would change the required backbone.",
+        "The supplied evidence does not demonstrate results on this benchmark."
+      ]
+    },
+    {
+      "title": "ICSRec: Intent Contrastive Learning for Sequential Recommendation",
+      "link": "https://doi.org/10.1145/3616855.3635773",
+      "contributions": [
+        "Motivates cross-subsequence intent supervision and attention to false negatives."
+      ],
+      "limitations": [
+        "Subsequence agreement can impose incorrect invariances when user intent changes.",
+        "A shared-GRU auxiliary loss would require a separately budgeted controlled experiment."
+      ]
+    }
+  ]
+}

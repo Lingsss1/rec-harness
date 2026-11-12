@@ -1,0 +1,66 @@
+{
+  "markdown_report": "### Insights\n\n**Starting point.** (1) Feedback favors repeated recent interests over broad associations. This motivates testing whether recent item transitions improve ranking, without treating feedback as observed intent. (2) Existing margin probes depend on score scale and sampled negatives. Rank-based intervention measurements offer a complementary diagnostic. (3) Specifications and user needs are often unknown. Missing evidence must remain unavailable rather than become incompatibility or rejection labels.\n\n**Related work.** (1) Spotify’s supplied benchmark report motivates strong pairwise-transition controls. Its findings do not establish gains on these four datasets. (2) CoDeR motivates separating current demand from noisy history. History interventions can test model dependence, but cannot identify causal user preferences. (3) Sampling-reliability research cautions that candidate sampling can change conclusions. The pinned sampled HR@10 must nevertheless remain the selection objective.\n\n### Framework and directions\n\n| Direction | Existing approach | Gap and proposed response |\n|---|---|---|\n| Recent evidence | SASRec sequence encoding; pairwise controls | Test an explicit recent-transition residual |\n| Ranking supervision | Sampled BCE; gSASRec | Compare a better-calibrated loss without changing evaluation |\n| Diagnostic validity | Training margins; history interventions | Measure paired target-rank changes and evidence coverage |\n\n### Candidate ideas\n\nScores are originality/potential/code difficulty, each 0–10; higher difficulty means harder implementation.\n\n1. **Recent-transition residual: 4/7/3.** Add normalized training-transition scores to SASRec scores. Originality: explicit residual integration is useful, but combines established components. Potential: cheap, interpretable controls support further work, but sparse transitions limit coverage. Difficulty: sparse counts and one blending parameter are simple, but predictor parity requires care.\n2. **Generalized-BCE loss replacement: 3/6/3.** Apply gSASRec’s published correction with the actual sampling configuration. Originality: a principled objective change, but an existing method. Potential: addresses overconfidence, but calibration need not improve HR@10. Difficulty: localized training changes, but incorrect correction parameters invalidate the comparison.\n3. **Intervention-guided recency regularization: 6/6/6.** Encourage agreement between full-history and recent-suffix predictions only when training-prefix targets support both. Originality: connects diagnosis to training, but resembles consistency learning. Potential: may reduce stale-history dependence, but can erase useful long-term interests. Difficulty: reuses the encoder, but requires extra passes and careful masking.\n\n### Selected idea: recent-transition residual\n\nAt 0% progress, begin with the cheapest interpretable hypothesis. Build sparse directed transition counts from training histories only. For candidate j, aggregate smoothed transition probabilities from the last three observed items with fixed exponential recency weights. Blend this evidence with SASRec scores after label-free, per-query candidate-score standardization; use identical normalization at inference.\n\nCompare the baseline against three prespecified residual strengths using unchanged macro validation HR@10. Retain zero residual if no improvement occurs. Record category scores and transition coverage; neither simulator comments nor diagnostic margins determine selection.\n\nPreserve all routing, seeds, paths, and the 200-epoch environment default. Serialize transition statistics and the selected blend, update the predictor writer, and preserve both diagnostic entry points. Report missing measurements as undefined with sample counts. No improvement is claimed before evaluation.",
+  "idea": {
+    "description": "Add a sparse, recency-weighted item-transition residual to the existing per-dataset SASRec predictor. Select its strength using the pinned macro validation HR@10, including the unchanged baseline as an explicit option.",
+    "motivation": "The qualitative feedback suggests that broadly plausible associations can overwhelm specific recent interests. A transition residual tests a narrow, observable hypothesis using interaction histories alone. It does not infer compatibility, ownership satisfaction, user traits, or immediate intent.",
+    "implementation_notes": "Use DATA_DIR = os.environ['GAGC_DATA_DIR'] and retain the baseline preprocessing seed 0, training seed 42, dataset routing, input splits, artifact locations beneath the trial directory, and SASREC_EPOCHS environment default 200. Construct directed adjacent-transition counts exclusively from user_train['History'], excluding padding. Define P(j|i) = (count(i,j) + alpha*p_train(j))/(out_count(i)+alpha), using training item frequencies and a prespecified alpha; unseen source rows back off to p_train. Aggregate the last three nonpadding items with weights proportional to exp(-position_age). Standardize each score channel across the supplied candidates using population standard deviation clamped by epsilon; constant channels become zero. This makes rankings candidate-set dependent, so the same routine must serve validation and generated working/predict.py, including full-catalog requests. Prespecify lambda in {0, 0.1, 0.3, 1.0}; evaluate all settings with the host's pinned validation procedure and choose the greatest macro HR@10, breaking ties toward smaller lambda. Do not recreate or alter host candidates. Store sparse counts, smoothing constants, training frequencies, recent-window settings, lambda, and architecture configuration beneath the trial directory. Update the predictor writer to load these artifacts alongside the actual trained model. DiagnosisProbe(view, device).run_full_diagnosis(train_loader) must return metrics and metric_definitions, preserve and restore view.model.training, and use inference_mode. Keep existing model margin probes explicitly labeled as training-logit diagnostics; separately expose residual coverage and final-ranking diagnostics through the deployed scoring routine. Count only positions with nonzero targets and real preceding history. Empty samples return undefined values with reasons and counts. Leave unavailable category lists empty with an explicit unavailable status. diagnosis_interpreter_prompt(raw_diagnosis) must embed measured metrics and their definitions and prohibit causal or unobserved-trait conclusions. Bound diagnostic batches and candidate chunks to respect the shared GPU budget.",
+    "pseudocode": "for dataset in FOUR_DATASETS:\n    model = train_baseline_sasrec(dataset, preprocessing_seed=0, training_seed=42)\n    counts, frequency = count_adjacent_training_transitions(dataset.user_train)\n    save_model_and_transition_artifacts_under_trial(dataset, model, counts, frequency)\n\nfunction score(sequence, candidates, dataset, lambda):\n    base = dataset.model.predict(sequence, candidates)\n    recent = last_nonpadding_items(sequence, limit=3)\n    transition = recency_weighted_smoothed_transition_scores(recent, candidates)\n    return standardize(base) + lambda * standardize(transition)\n\nfor lambda in [0, 0.1, 0.3, 1.0]:\n    result[lambda] = pinned_host_macro_validation_HR10(score_with(lambda))\nchosen = argmax_with_smallest_lambda_tiebreak(result)\nwrite_predictor_loading_all_four_models_and_transition_artifacts(chosen)\n\nclass DiagnosisProbe:\n    run_full_diagnosis(train_loader):\n        preserve actual model training mode\n        measure bounded, masked training margins and transition coverage\n        restore model training mode\n        return {metrics: measured_values_and_counts,\n                metric_definitions: definitions_and_limitations}\n\nfunction diagnosis_interpreter_prompt(raw_diagnosis):\n    return prompt_containing(raw_diagnosis.metrics,\n                             raw_diagnosis.metric_definitions,\n                             'Distinguish measurements from hypotheses; preserve unavailable evidence.')",
+    "originality": {
+      "score": 4,
+      "positive": "An explicit recent-transition residual connects a testable diagnostic hypothesis to a cheap, inspectable ranking change.",
+      "negative": "Pairwise transitions, recency weighting, smoothing, and score blending are established techniques."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "The residual provides a strong control and exposes transition coverage, supporting later work on when sequence modeling adds value.",
+      "negative": "Sparse transitions and candidate-dependent normalization may limit transfer and full-catalog behavior."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Sparse counting and a small blending sweep require no additional encoder training.",
+      "negative": "Artifact serialization, candidate normalization, and predictor-writer parity require careful implementation."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Do sequential recommendation benchmarks require higher-order sequence modelling? — Spotify Research (supplied search result)",
+      "link": "https://research.atspotify.com/2026/10/do-sequential-recommendation-benchmarks-require-higher-order-sequence-modelling",
+      "contributions": [
+        "The supplied summary reports strong pairwise-transition baselines against SASRec variants, motivating a transition control."
+      ],
+      "limitations": [
+        "The supplied results do not establish improvement on the four matched Amazon datasets or this pinned evaluator."
+      ]
+    },
+    {
+      "title": "CoDeR — AAAI 2025",
+      "link": "https://ojs.aaai.org/index.php/AAAI/article/view/33379",
+      "contributions": [
+        "The supplied summary describes demand extraction and counterfactual adjustment for demand shifts obscured by noise and bias."
+      ],
+      "limitations": [
+        "History sensitivity does not establish causal preference change or validate inferred user intent."
+      ]
+    },
+    {
+      "title": "gSASRec — IJCAI 2024",
+      "link": "https://ijcai.org/proceedings/2024/939",
+      "contributions": [
+        "Connects sampled binary-cross-entropy training to overconfidence and motivates a corrected-loss comparison."
+      ],
+      "limitations": [
+        "Better calibration does not guarantee improved pinned HR@10; the correction must match the sampling configuration."
+      ]
+    },
+    {
+      "title": "On the Reliability of Sampling Strategies — RecSys 2025",
+      "link": "https://doi.org/10.1145/3705328.3748086",
+      "contributions": [
+        "Examines how sampled evaluation affects resolution, robustness, and agreement with full evaluation."
+      ],
+      "limitations": [
+        "Does not justify changing the task's pinned candidate sampling or substituting another selection metric."
+      ]
+    }
+  ]
+}

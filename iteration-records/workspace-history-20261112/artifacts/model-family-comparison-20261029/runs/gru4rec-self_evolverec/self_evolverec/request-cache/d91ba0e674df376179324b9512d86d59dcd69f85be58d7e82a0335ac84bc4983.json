@@ -1,0 +1,124 @@
+{
+  "request_sha256": "d91ba0e674df376179324b9512d86d59dcd69f85be58d7e82a0335ac84bc4983",
+  "response": {
+    "markdown_report": "The next step should test whether earlier ordering improves target ranking after controlling for the final item. At 10% research progress, retain this feasible GRU4Rec diagnostic; strengthen its controls before attempting hidden-state interventions.\n\n### Insights and directions\n\n**Starting-point insights.** (1) Execution checks establish whether temporal interventions are interpretable. Padding invariance and final-nonpadding readout remain prerequisites. (2) Fixed candidates support paired comparisons. Training-prefix results remain conditional, in-sample evidence and may reflect memorization. (3) Feedback suggests recent, repeated behavior may be underused. Histories and simulator feedback cannot establish ownership or current intent.\n\n**Related-work insights.** (1) *Does It Look Sequential?* motivates shuffle controls; fixing the final item is an additional methodological proposal, not an established control from that paper. Evaluation shuffling also introduces distribution shift. (2) *Repeated Padding* motivates execution checks before memory interpretation. (3) Rank-estimation research cautions against generalizing sampled-ranking results. (4) Hierarchical-resampling research supports treating users, rather than permutations, as independent sampling units [Saravanan; Kulkarni].\n\nThese insights define three directions: execution fidelity, controlled temporal attribution, and evidence-bounded interpretation.\n\n### Framework and candidate ideas\n\n| Direction | Atomic idea | Originality | Potential | Difficulty |\n|---|---|---|---|---|\n| Temporal attribution | Shuffle earlier items while fixing the final item | 4: focused control combination; established perturbations | 7: reusable evidence; limited mechanistic resolution | 3: existing hooks; pairing, ties and uncertainty require care |\n| Memory localization | Reset hidden state before an identical suffix | 6: sharper intervention; related to standard ablation | 7: localizes prefix dependence; atypical reset states | 6: practical replay; exact GRU access required |\n| Attribution triangulation | Compare integrated gradients with deletions | 4: established combination; limited novelty | 6: checks agreement; correlated inputs complicate interpretation | 5: autodifferentiation helps; baseline selection remains difficult |\n\n### Selected idea: final-item-controlled temporal utility\n\nFor each existing eligible training-prefix example, compare original history, five full shuffles, five earlier-item shuffles fixing the final item, and the existing last-item-only control. Preserve duplicates, targets, candidates and padding; use seed 42 and actual scores including biases. A later fixed-suffix-length control can localize sensitivity further.\n\nAverage paired rank damage and HR@10 damage within users, then weight users equally. Report 2,000 user-cluster bootstrap intervals, category counts and length slices; require 30 complete users for intervals. Report permutation Monte Carlo error separately. Repetitions do not increase the independent sample size.\n\nRecord unchanged permutations, changed-history effects, boundary ties and score changes. Use the host’s ranking rule without modifying evaluation. Full-shuffle damage disappearing under final-item control supports latest-item sensitivity; residual damage supports earlier-arrangement sensitivity, without distinguishing recency weighting from transitions. Last-item-only similarity and nonsignificance do not establish shortcuts or equivalence.\n\nRetain interfaces, execution checks, RNG restoration and metric definitions. No retraining or predictor change is required; retain one checkpoint/category. Aggregate categories equally only when all four diagnostic outputs exist. Only pinned macro validation HR@10 selects models; adaptive validation reuse can itself overfit.",
+    "idea": {
+      "description": "Strengthen the paired temporal-utility probe with full-history and final-item-fixed shuffles, explicit unchanged-permutation and tie accounting, user-cluster uncertainty, and separate finite-permutation Monte Carlo error.",
+      "motivation": "Fixing the final item tests whether earlier arrangement contributes target-ranking information beyond immediate recency. Comparing this intervention with full-history shuffling helps distinguish latest-item sensitivity from earlier-arrangement sensitivity. These comparisons address the feedback hypothesis while remaining conditional diagnostics of the trained GRU4Rec model, rather than measurements of causal user intent.",
+      "implementation_notes": "Retain DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). Reuse the existing deterministic selection of at most 200 eligible training users/category, with one training target/user preceded by at least five retained interactions. Save selected user/target identifiers, sequences, candidate IDs, perturbation indices and configuration under the trial directory so the run is reproducible. Never access hidden evaluation files. Freeze each target plus 99 unique negatives excluding the full training history and target. These diagnostic cases remain distinct from the host's validation users and candidates. Require passing execution checks before temporal interpretation. Shuffle only nonpadding items, preserving duplicate multiplicities and padding placement; final-item-fixed shuffles permute positions preceding the final nonpadding position. Draw five permutations per intervention/user using separate local NumPy generators initialized through SeedSequence([42, stable_user_index, intervention_id]); use a saved deterministic user ordering, never Python's process-dependent hash. Keep identity and duplicate-induced unchanged draws in the primary estimand; do not redraw until changed. Report the changed-draw fraction, users with any changed draw, and a separately labeled changed-draw conditional summary. Obtain features through view.log2feats and scores through view.predict_score, including learned biases. Read the maximum nonzero position, never count minus one; skip empty histories. Use the exact ranking/tie helper used by the pinned evaluator where available; otherwise return rank/HR unavailable with a reason until that rule is established. Record candidate order, exact target-score ties, ties spanning the tenth-place boundary, score differences and rank differences. Any tolerance-based near-tie measurement is supplementary and must not alter ranks. For each intervention, define rank damage as perturbed rank minus original rank and HR damage as original hit minus perturbed hit. Average five paired differences within each user, then average users equally. Use 2,000 percentile bootstrap replicates, resampling complete user blocks with replacement using seed 42; require at least 30 complete users for intervals, otherwise return null and a reason. Compare interventions on the same complete users and preserve their pairing during resampling. Do not bootstrap repetitions again inside resampled users. Separately report conditional Monte Carlo standard error sqrt(sum_i(s_i^2 / R_i) / U^2), using within-user sample variances and independent permutation streams; this estimates finite-draw uncertainty, not uncertainty across users. Category macro summaries require all four category outputs, equal category weights, and independent within-category user resampling; a single-category view must return macro fields null. Preserve model mode and Python, NumPy and Torch RNG states, including CUDA states. Report category, history-length and repeat-target slices with counts; small slices remain descriptive. No hypothesis-test p-values or equivalence claims are required. Evaluation shuffling creates distribution shift, and training-prefix measurements can reflect memorization. If later training changes follow these diagnostics, select them solely with official macro validation HR@10 and record adaptive search exposure; do not tune the probe to favorable outcomes. Preserve training seed 42, preprocessing seed 0, maximum 200 epochs, 200 batches/epoch, all four category routes, DATA_DIR = os.environ['GAGC_DATA_DIR'], single-GPU execution and trial-local artifacts. This diagnostic changes neither architecture nor predictor; each category retains exactly one independently trained GRU4Rec checkpoint.",
+      "pseudocode": "def temporal_utility_probe(view, saved_examples, device, rank_helper):\n    # Run inside the existing eval/inference-mode context that restores all RNG states.\n    # saved_examples retains deterministic user order and frozen candidate identities.\n    if not execution_checks_pass(view):\n        return unavailable_with_definitions('execution checks failed')\n    outcomes = []\n    for user_index, example in enumerate(saved_examples):\n        sequence, target, candidates = example\n        positions = nonzero_positions(sequence)\n        if len(positions) < 5:\n            continue\n        def evaluate(seq):\n            features = view.log2feats(seq[None].to(device))\n            last = maximum_nonzero_position(seq)\n            scores = view.predict_score(features[:, last, :], candidates.to(device))\n            rank, hit = rank_helper(scores, target, candidates, k=10)\n            return scores, rank, hit, boundary_tie_statistics(scores, target, k=10)\n        original = evaluate(sequence)\n        record = {'original': original, 'interventions': {}}\n        for intervention_id, mode in enumerate(['full_shuffle', 'final_item_fixed']):\n            rng = numpy.random.default_rng(numpy.random.SeedSequence([42, user_index, intervention_id]))\n            movable = positions if mode == 'full_shuffle' else positions[:-1]\n            draws = []\n            for repetition in range(5):\n                permutation = rng.permutation(len(movable))\n                altered = sequence.clone()\n                altered[movable] = sequence[movable[permutation]]\n                changed = not tensor_equal(altered, sequence)\n                perturbed = evaluate(altered)\n                draws.append({\n                    'rank_damage': perturbed.rank - original.rank,\n                    'hr_damage': original.hit - perturbed.hit,\n                    'changed': changed,\n                    'score_changes': perturbed.scores - original.scores,\n                    'ties': perturbed.ties,\n                    'permutation': permutation\n                })\n            record['interventions'][mode] = draws\n        last_only = zeros_like(sequence)\n        last_only[positions[-1]] = sequence[positions[-1]]\n        record['last_item_only'] = evaluate(last_only)\n        outcomes.append(record)\n    # Primary estimates include unchanged draws; conditional changed-draw results are separate.\n    user_means = average_paired_differences_within_each_user(outcomes)\n    summary = equal_user_means_and_cluster_bootstrap(user_means, replicates=2000, seed=42, minimum_users=30)\n    summary['permutation_mc_se'] = conditional_mc_standard_errors(outcomes)\n    summary['change_and_tie_accounting'] = summarize_changes_ties_and_scores(outcomes)\n    summary['slices'] = descriptive_length_and_repeat_target_slices(outcomes)\n    summary['macro'] = None  # Aggregate externally only when all four categories are present.\n    return metrics_and_explicit_definitions(summary)\n# The interpreter reports measured sensitivity, uncertainty, distribution shift and in-sample limits.\n# It must not infer causal intent, ownership, generalization, equivalence or a proven shortcut.",
+      "originality": {
+        "score": 4,
+        "positive": "Combines final-item control, a full-shuffle comparator, execution checks and careful repeated-measure accounting in a focused GRU4Rec diagnostic.",
+        "negative": "The perturbations and statistical methods are established; the contribution is an incremental methodological synthesis."
+      },
+      "future_potential": {
+        "score": 7,
+        "positive": "Provides inexpensive, reproducible evidence for deciding whether subsequent experiments should address earlier-arrangement learning or latest-item reliance.",
+        "negative": "In-sample sampled-candidate effects and perturbation distribution shift limit conclusions about generalization and internal mechanisms."
+      },
+      "code_difficulty": {
+        "score": 3,
+        "positive": "Uses existing feature and scoring hooks without changing GRU internals, retraining models or updating predictors.",
+        "negative": "Exact tie-rule parity, saved perturbations, paired aggregation, RNG restoration and separate uncertainty components require more care than the original rating of 2 suggested."
+      }
+    },
+    "related_work": [
+      {
+        "title": "Does It Look Sequential? (RecSys 2024)",
+        "link": "https://arxiv.org/html/2408.12008v1",
+        "contributions": [
+          "Motivates original-versus-shuffled history comparisons, ranking measurements and bootstrap uncertainty.",
+          "Its full-history shuffle changes the final input item; the proposed final-item-fixed control addresses an additional attribution question."
+        ],
+        "limitations": [
+          "Perturbation sensitivity does not establish useful higher-order temporal reasoning or causal user intent.",
+          "Evaluation-only shuffling introduces distribution shift."
+        ]
+      },
+      {
+        "title": "Repeated Padding (2024)",
+        "link": "https://arxiv.org/abs/2403.06372",
+        "contributions": [
+          "Shows that padding strategy can materially affect GRU4Rec behavior, motivating explicit execution checks."
+        ],
+        "limitations": [
+          "Does not establish that a particular perturbation effect represents forgetting or useful memory."
+        ]
+      },
+      {
+        "title": "Improved Estimation of Ranks for Learning Item Recommenders with Negative Sampling (2024)",
+        "link": "https://research.google/pubs/improved-estimation-of-ranks-for-learning-item-recommenders-with-negative-sampling/",
+        "contributions": [
+          "Documents challenges in rank estimation under negative sampling."
+        ],
+        "limitations": [
+          "Fixed diagnostic candidates support paired comparability but do not remove sampled-ranking bias or establish full-catalog accuracy."
+        ]
+      },
+      {
+        "title": "Axiomatic Attribution for Deep Networks",
+        "link": "https://arxiv.org/abs/1703.01365",
+        "contributions": [
+          "Introduces integrated gradients, supporting the attribution-triangulation alternative."
+        ],
+        "limitations": [
+          "Attributions depend on the baseline and do not establish causal relevance or ranking utility."
+        ]
+      },
+      {
+        "title": "Application of the Hierarchical Bootstrap to Multi-Level Data in Neuroscience",
+        "link": "https://pmc.ncbi.nlm.nih.gov/articles/PMC7906290/",
+        "contributions": [
+          "Explains why repeated measurements within a sampling unit should not be treated as independent observations.",
+          "Supports preserving user-level repeated-measure blocks when estimating uncertainty."
+        ],
+        "limitations": [
+          "Its application domain differs from recommendation; the resampling unit must follow the actual diagnostic design.",
+          "Does not justify naively adding repetition-level resampling to bootstrap samples of already noisy user means."
+        ]
+      },
+      {
+        "title": "Hierarchical Resampling Methods (Kulkarni et al., 2022)",
+        "link": "https://pmc.ncbi.nlm.nih.gov/articles/PMC9098003/",
+        "contributions": [
+          "Motivates respecting sampling hierarchies and restricting exchanges according to the experimental design."
+        ],
+        "limitations": [
+          "User-level sign flips or label swaps require justified null assumptions; randomly shuffling histories does not establish those assumptions."
+        ]
+      },
+      {
+        "title": "Monte Carlo Error Assessment",
+        "link": "https://pmc.ncbi.nlm.nih.gov/articles/PMC3337209/",
+        "contributions": [
+          "Motivates reporting finite-simulation uncertainty separately from sampling uncertainty."
+        ],
+        "limitations": [
+          "More perturbation draws reduce conditional Monte Carlo error without increasing the number of independent users."
+        ]
+      },
+      {
+        "title": "NumPy Generator.permutation Documentation",
+        "link": "https://numpy.org/doc/stable/reference/random/generated/numpy.random.Generator.permutation.html",
+        "contributions": [
+          "Defines the permutation operation used for reproducible history interventions."
+        ],
+        "limitations": [
+          "Identity permutations and exchanges among duplicate items can leave the observed history unchanged; changed-history coverage must be measured explicitly."
+        ]
+      },
+      {
+        "title": "PyTorch argsort Documentation",
+        "link": "https://docs.pytorch.org/docs/stable/generated/torch.argsort.html",
+        "contributions": [
+          "Documents stable sorting behavior, clarifying how candidate order can affect tied-score ranks."
+        ],
+        "limitations": [
+          "Does not establish the host evaluator's tie rule; implementation parity must be verified separately."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/model-family-comparison-20261029/runs/gru4rec-self_evolverec/self_evolverec/calls/00692"
+}

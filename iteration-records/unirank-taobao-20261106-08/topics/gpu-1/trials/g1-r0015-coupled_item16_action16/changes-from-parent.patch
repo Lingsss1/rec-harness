@@ -1,0 +1,227 @@
+--- g2-r0004-context_only/model.py
++++ g1-r0015-coupled_item16_action16/model.py
+@@ -1,18 +1,20 @@
+-"""Prospective source-path attribution under fixed compressed UF histories.
+-
+-Auxiliary gradients into the shared scorer are always blocked. Independent
+-switches control auxiliary gradients through supplied context embeddings and
+-through target/history item-and-action embeddings. Four cells keep identical
+-modules, initialization order, 30 summaries, forward values and inference.
+-Neither/both endpoints correspond to the earlier both_blocked/scorer_only
+-operators. Same-seed endpoint replays are consistency checks, not repetition.
+-
+-These are computational path gates: tied target/history tables remain tied,
+-and cross-source aliases must be audited by the host before ownership claims.
+-Persistent Dice state updates only in the primary scorer call. Preparation
+-performs no numerical execution or training; torch.func support and the
+-forward/backward/masking gates in proposal.json remain host prerequisites.
+-No architecture novelty or new predictive improvement is claimed.
++"""Prospective item/action capacity factorial with source-coupled initialization.
++
++The native operator is inherited without forward changes. Each model starts
++from an untrained full16 CPU reference drawn using the host RNG state; all
++retained field coordinates, dense input columns, hidden parameters and buffers
++are copied exactly. The temporary reference is never registered or trained.
++Reduced construction is inside a CPU RNG fork, so the final CPU RNG state is
++that of one full16 source construction in every cell. No seed is changed.
++
++This is an initialization-confound diagnostic, not a new architecture claim.
++It removes shape-driven reassignment of shared random draws, but not capacity,
++fan-in variance, optimization or functional differences from omitted columns.
++Static preparation only; numerical and measured cost gates remain host-owned.
+ """
++
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'item_embedding_dim': 16, 'action_embedding_dim': 16}
++
++import copy
+ import torch
+ from torch import nn
+@@ -22,19 +24,51 @@
+ 
+ 
+-CONFIG = {
+-    'embedding_dim': 16,
+-    'attention_hidden_units': [64, 32],
+-    'tower_hidden_units': [128, 64],
+-    'attention_normalization': 'none',
+-    'compression_routes': 'uf',
+-    'block_aux_scorer_grad': True,
+-    'block_aux_context_grad': False,
+-    'block_aux_item_grad': True,
+-}
+-
+-
+-class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='SourcePathCompression', gpu=-1,
+-                 embedding_dim=16, attention_hidden_units=(64, 32),
++
++
++def _capacity_layout(feature_map, item_width, action_width):
++    """Derive candidate-local widths without mutating host metadata.
++
++    Mirror FeatureEmbeddingDict's ordered alias ownership. Context aliases
++    protect their table at sixteen. Cross-group aliases keep the larger width;
++    the constructor rejects a layout that cannot implement the requested cell.
++    Actual alias identities and parameter savings still need host audit.
++    """
++    if item_width not in (8, 16) or action_width not in (8, 16):
++        raise ValueError('Factor widths must be 8 or 16')
++    if ('item_id' not in feature_map.features
++            or feature_map.features['item_id'].get('source') != 'item'
++            or feature_map.features['item_id']['type'] == 'meta'):
++        raise ValueError('The released advertisement item_id field is required')
++    local_map = copy.copy(feature_map)
++    local_map.features = copy.deepcopy(feature_map.features)
++    owner_for = {}
++    owner_widths = {}
++    for name, spec in feature_map.features.items():
++        if spec['type'] == 'meta':
++            continue
++        if spec['type'] not in ('categorical', 'sequence'):
++            raise ValueError('This contrast requires supplied categorical tables')
++        if spec.get('feature_encoder') or 'pretrained_emb' in spec:
++            raise ValueError('Encoded or pretrained fields need a separate audit')
++        shared = spec.get('share_embedding')
++        owner = owner_for[shared] if shared in owner_for else name
++        owner_for[name] = owner
++        if spec.get('source') == 'item':
++            requested = item_width
++        elif spec.get('source') == 'action':
++            requested = action_width
++        else:
++            requested = 16
++        owner_widths[owner] = max(owner_widths.get(owner, 0), requested)
++    widths = {name: owner_widths[owner] for name, owner in owner_for.items()}
++    for name, width in widths.items():
++        local_map.features[name]['embedding_dim'] = width
++    return local_map, widths
++
++
++class _NativeModel(MultiTaskModel):
++    def __init__(self, feature_map, model_id='ItemActionCapacity', gpu=-1,
++                 embedding_dim=16, item_embedding_dim=16, action_embedding_dim=16,
++                 attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+                  compression_routes='uf', block_aux_scorer_grad=True,
+@@ -59,5 +93,12 @@
+         self.block_aux_context_grad = block_aux_context_grad
+         self.block_aux_item_grad = block_aux_item_grad
+-        self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
++        if embedding_dim != 16:
++            raise ValueError('Keep fallback embedding_dim=16; use item/action capacity factors')
++        local_map, self.table_widths = _capacity_layout(
++            feature_map, item_embedding_dim, action_embedding_dim)
++        self.embedding_layer = FeatureEmbeddingDict(local_map, embedding_dim)
++        for name, width in self.table_widths.items():
++            if self.embedding_layer.embedding_layers[name].embedding_dim != width:
++                raise ValueError('Shared embedding width does not match local layout')
+         self.item_fields = [name for name, spec in feature_map.features.items()
+                             if spec.get('source') == 'item' and spec['type'] != 'meta']
+@@ -69,13 +110,22 @@
+         if self.action_field is None:
+             raise ValueError('Historical action field is required')
++        if any(self.table_widths[name] != item_embedding_dim for name in self.item_fields):
++            raise ValueError('Embedding aliases prevent the requested uniform item width')
++        if self.table_widths[self.action_field] != action_embedding_dim:
++            raise ValueError('Embedding aliases prevent the requested action width')
++        if any(self.table_widths[name] != 16 for name in self.user_fields):
++            raise ValueError('Context width must remain sixteen')
+         self.auxiliary_indices = [list(feature_map.labels).index(label)
+                                   for label in ('cart', 'fav', 'buy')]
+-        self.key_width = len(self.item_fields) * embedding_dim
+-        self.value_width = self.key_width + embedding_dim
+-
+-        # Inherit the action-aware scorer and towers from the previous factorial.
+-        # All cells instantiate exactly the same modules in exactly this order.
++        self.key_width = sum(self.table_widths[name] for name in self.item_fields)
++        self.action_width = self.table_widths[self.action_field]
++        self.value_width = self.key_width + self.action_width
++        self.context_width = sum(self.table_widths[name] for name in self.user_fields)
++
++        # Field-specific native widths feed scorer and towers. Hidden widths, Dice,
++        # module order, compression and gradient gates remain inherited.
++        # No expansion maps, repeated coordinates or unused map parameters.
+         layers = []
+-        width = 4 * self.key_width + embedding_dim
++        width = 4 * self.key_width + self.action_width
+         for hidden in attention_hidden_units:
+             layers.extend([nn.Linear(width, hidden), Dice(hidden)])
+@@ -83,5 +133,5 @@
+         layers.append(nn.Linear(width, 1))
+         self.local_activation = nn.Sequential(*layers)
+-        input_width = len(self.user_fields) * embedding_dim + self.key_width + self.value_width
++        input_width = self.context_width + self.key_width + self.value_width
+         self.towers = nn.ModuleList()
+         for _ in feature_map.labels:
+@@ -207,2 +257,71 @@
+             predictions[label + '_pred'] = torch.sigmoid(tower(features))
+         return predictions
++
++
++def _source_columns(item_field_count, context_field_count, item_width, action_width):
++    """Map native input coordinates to semantic full16 field/block positions."""
++    if item_width not in (8, 16) or action_width not in (8, 16):
++        raise ValueError('Factor widths must be eight or sixteen')
++    if item_field_count <= 0 or context_field_count < 0:
++        raise ValueError('Invalid supplied field counts')
++    full_key = 16 * item_field_count
++    full_context = 16 * context_field_count
++    key_columns = [16 * field + coordinate
++                   for field in range(item_field_count)
++                   for coordinate in range(item_width)]
++    scorer_columns = [block * full_key + column
++                      for block in range(4) for column in key_columns]
++    scorer_columns += [4 * full_key + coordinate for coordinate in range(action_width)]
++    tower_columns = list(range(full_context))
++    tower_columns += [full_context + column for column in key_columns]
++    tower_columns += [full_context + full_key + column for column in key_columns]
++    tower_columns += [full_context + 2 * full_key + coordinate
++                      for coordinate in range(action_width)]
++    return scorer_columns, tower_columns
++
++
++class Model(_NativeModel):
++    def __init__(self, feature_map, model_id='SourceCoupledCapacity', gpu=-1,
++                 item_embedding_dim=16, action_embedding_dim=16, **kwargs):
++        # This scratch reference receives no data or checkpoint. It is drawn
++        # at the incoming host RNG state with the original full-width recipe.
++        # Native construction uses only CPU random initialization; moving a
++        # model to its assigned device does not initialize new parameters.
++        reference = _NativeModel(
++            feature_map, model_id=model_id, gpu=-1,
++            item_embedding_dim=16, action_embedding_dim=16, **kwargs)
++        # Preserve the reference's ending CPU RNG state, including for any
++        # later host sampler. Do not reseed or touch the GPU RNG stream.
++        with torch.random.fork_rng(devices=[]):
++            super().__init__(
++                feature_map, model_id=model_id, gpu=gpu,
++                item_embedding_dim=item_embedding_dim,
++                action_embedding_dim=action_embedding_dim, **kwargs)
++        self._copy_source_initialization(reference)
++        # No scratch tensors become model state or optimizer parameters.
++        del reference
++
++    def _copy_source_initialization(self, reference):
++        scorer_columns, tower_columns = _source_columns(
++            len(self.item_fields), len(self.user_fields),
++            self.table_widths[self.item_fields[0]], self.action_width)
++        source_state = reference.state_dict()
++        target_state = self.state_dict()
++        if set(source_state) != set(target_state):
++            raise ValueError('Source and candidate state names differ')
++        tower_inputs = {'towers.' + str(index) + '.0.weight'
++                        for index in range(self.num_tasks)}
++        with torch.no_grad():
++            for name, target in target_state.items():
++                value = source_state[name]
++                if name.startswith('embedding_layer.embedding_layers.') and name.endswith('.weight'):
++                    if value.ndim != 2 or target.ndim != 2:
++                        raise ValueError('Expected categorical embedding matrices')
++                    value = value[:, :target.shape[1]]
++                elif name == 'local_activation.0.weight':
++                    value = value[:, scorer_columns]
++                elif name in tower_inputs:
++                    value = value[:, tower_columns]
++                if value.shape != target.shape:
++                    raise ValueError('Unmapped source tensor shape: ' + name)
++                target.copy_(value)

@@ -1,0 +1,123 @@
+{
+  "markdown_report": "At 20% progress, prioritize **recency-balanced cutoff sampling**, a controlled BERT4Rec experiment.\n\n**Insights.** From the starting point: (1) separately normalized losses preserve coefficient balance despite unequal target counts; (2) truncated prefixes prevent bidirectional target leakage; (3) fixing endpoint probability isolates nonterminal sampling changes, but not their induced context-length or item-frequency changes. Related work: (1) [BERT4Rec](https://arxiv.org/abs/1904.06690) motivates terminal supervision; (2) [RSS](https://arxiv.org/abs/2207.02643) motivates event-position recency, but predicts deduplicated target sets without prefix truncation and was not adapted to BERT4Rec; (3) [PCGrad](https://arxiv.org/abs/2001.06782) motivates measuring conflict before intervention.\n\nThe selected idea addresses two user failures: broad associations displacing present preferences, and historical purchases implying persistent demand. Recent terminal supervision might reduce both; it cannot establish unresolved needs, specifications, quantities, or compatibility. Industrial/Electronics lower-tail margins are −0.1487/−0.2356, motivating discrimination checks. Lower user RankMe does not establish collapse; diagnostic terminal coverage does not establish training branch balance.\n\n| Direction | Existing mechanism | Gap / proposed experiment |\n|---|---|---|\n| Objective alignment | Masked reconstruction | Separately normalized terminal supervision |\n| Temporal relevance | Uniform cutoffs | Recent/uniform mixture; inspect context/frequency shifts |\n| Optimization | Shared loss sum | Measure conflict before projection |\n\nScores are originality/potential/user alignment/model alignment/difficulty, 0–10; higher difficulty means harder. Each includes benefit (+) and limitation (−).\n\n| Idea | Assessments |\n|---|---|\n| **A: Recent/uniform cutoffs** [RSS] | O 3: +controlled combination, −incremental; P 6: +cheap foundation, −recency may mislead; U 7: +targets stale demand/present-preference mismatch, −needs latent; M 7: +terminal discrimination, −unverified; D 3: +sampler change, −reproducibility bookkeeping |\n| B: Terminal-only objective [BERT4Rec] | O 3: +clean alignment, −established; P 6: +simple control, −loses reconstruction; U 6: +next-choice emphasis, −no explicit compatibility; M 7: +direct separation, −less supervision; D 2: +one branch, −budget matching |\n| C: Conflict-conditioned projection [PCGrad] | O 4: +specific application, −existing algorithm; P 5: +protects gradients, −conflict unmeasured; U 4: +indirect relevance, −weak intent link; M 5: +tests interference, −not concentration; D 6: +standard method, −extra backward cost |\n\n**Selected experiment: A.** Establish the uniform control first. Select final target with probability 0.1; otherwise sample nonterminal targets uniformly. Treatment changes only that conditional distribution to equal uniform/recent-ten components. Require preceding context; log singleton exceptions.\n\nTerminal input is `history[:t]+[MASK]`; retain its latest capacity-fitting positions. A separate corrupted-history pass shares the same network. Optimize `0.5·mean(CE_terminal)+0.5·mean(CE_reconstruction)`. Match underlying randomness using identifier-derived, purpose-separated seed-42 streams in both arms; preserve dropout call shapes/order where feasible. Log cutoff/context distributions, target frequencies, branch counts and coefficient masses. This tests the complete sampling policy; matched-length analysis is needed for mechanism attribution.\n\nPreserve seeds, splits, routing, diagnostic interfaces, predictor consistency, and one checkpoint/category. Use host macro validation HR@10 within budget. If host per-user hits are exposed, report paired category-stratified bootstrap intervals and gained/lost hits. One hit changes macro HR by 0.00125. Intervals exclude seed/candidate variability and adaptive-selection bias; document all searches. Sampled ranking does not establish full-catalog utility. Track user rejection reasons separately; reserve confirmation for untouched host evaluation.",
+  "idea": {
+    "description": "Test an endpoint-preserving mixture of uniform and recent nonterminal cutoff sampling in the supplied BERT4Rec. Train exactly one jointly optimized model per category in each experimental arm; never combine independently fitted models or their scores.",
+    "motivation": "The user diagnosis identifies broad associations displacing specific present preferences and historical purchases being mistaken for continuing demand. Emphasizing recent terminal targets could address both by learning next-choice discrimination from recent contexts, although recent purchases can also reflect completed needs. Industrial_and_Scientific and Electronics have negative lower-tail sampled training margins and negative-beats-positive rates of 11.49% and 12.42%, respectively. These observations motivate evaluation; they establish neither causality nor expected validation gains. No alternative currently has stronger evidence: terminal-only training remains a useful later control, while PCGrad requires measured gradient conflict first.",
+    "implementation_notes": "Establish the uniform-cutoff control before the treatment. Both use independently target-normalized terminal and reconstruction CE with coefficients 0.5 each. Retain the supplied architecture, optimizer, reconstruction policy and user-sampling distribution; change only nonterminal target probabilities between these two arms. Reconstruction must retain the corrected baseline's masked-target policy and must not expose shifted next-item labels through bidirectional inputs. Each terminal input excludes its target occurrence and every subsequent event; earlier repeated occurrences are legitimate history. Use at most maxlen-1 preceding events plus the reserved MASK. Read features at the maximum nonpadding index, never count-1.\n\nUse preprocessing seed 0 and training seed 42, maximum 200 epochs and exactly 200 batches per epoch. Preserve DATA_DIR=os.environ['GAGC_DATA_DIR'], all four category routes, fixed splits and evaluator, and trial-local artifacts. Each category's predictor loads exactly one independently trained checkpoint. Experimental arms are separate trials, never a deployed ensemble. Use the same predetermined training/checkpoint-selection protocol and budget accounting for both arms; all controls, failures and diagnostics count toward 43,200 GPU-seconds. Do not claim equal wall-clock cost without measuring it.\n\nFor reproducibility, introduce the same stream scheme in both arms and document that this changes the original baseline's random draws. Derive NumPy generators from SeedSequence([42, fixed_category_id, epoch, batch, purpose_id]); use a documented category order and integer purpose IDs rather than Python hash(). Separate user selection, cutoff uniforms, reconstruction masking and negative sampling. Keep model initialization/dropout RNG separate from data RNG; give DataLoader its own torch.Generator and seed worker libraries explicitly when workers are used. Reuse the same cutoff uniform through each arm's inverse CDF. Matching randomness does not guarantee matching realized masks. Maintain tensor shapes and forward-call order where feasible; record software/hardware and determinism settings rather than promising cross-platform identity.\n\nSkip histories without an eligible target using the same rule in both arms. If only one eligible target exists, select it with probability one and log the exception; endpoint probability 0.1 is conditional on having a nonterminal alternative. For longer histories, preserve exactly 0.1 endpoint probability and use the last min(10, number_of_nonterminal_targets) eligible event positions for the recent component. This is event-position recency, not elapsed-time decay. Record the expected probabilities and realized frequencies separately.\n\nPersist measured branch counters alongside the checkpoint: valid targets, coefficient masses, endpoint selections, singleton/skipped counts and cutoff/context-length histograms. Branch CE is target-weighted for reporting; coefficient mass is neither loss-value share nor gradient share. Keep DiagnosisProbe(view, device), run_full_diagnosis(train_loader), diagnosis_interpreter_prompt(raw_diagnosis), the actual view.model, item_emb, log2feats and predict_score interfaces. Keep unavailable categories, review attributes and stochastic corruption branches unavailable. Diagnostic-loader terminal coverage cannot reconstruct training allocation. A sampler-only change needs no inference architecture change; preserve the embedded predictor writer and checkpoint compatibility.\n\nCompare the two policies using only pinned host macro validation HR@10. If the host exposes per-user validation hits, pair records by category/user under identical candidates, bootstrap 200 users with replacement within each category for 10,000 replicates, and average category differences with equal weights. Report observed difference, percentile 95% interval, and gained/lost hit counts per category. If hits are unavailable, omit the interval rather than reconstructing or changing evaluation. One hit changes category HR@10 by 0.005 and macro HR@10 by 0.00125. Intervals are descriptive conditional on fitted models/candidates and exclude training-seed variability and adaptive-selection optimism. Document every evaluated configuration and checkpoint-selection rule.\n\nInspect target item-frequency and retained context-length shifts using training data. The primary comparison estimates the total policy effect; it cannot isolate recency from increased context or changed target frequencies. A later budgeted control could give both policies exactly the same number of immediately preceding events, acknowledging the restriction to histories with sufficient context. Do not introduce that additional change into the primary two-arm comparison. Recency can amplify popular items, repeated-purchase patterns or transient interests; use measured frequency strata and user rejection reasons to investigate these risks without adding popularity scores or inventing user traits. Any qualitative follow-up uses the same twenty real training users, five per category, and unseen full-catalog recommendations. Treat unknown item suitability as uncertain. Only public histories, titles, descriptions and timestamps are available; the selected experiment requires histories alone.",
+    "pseudocode": "CATEGORIES = ('Movies_and_TV', 'Industrial_and_Scientific', 'Electronics', 'CDs_and_Vinyl')\n# Fixed documented integer purpose IDs; preprocessing retains seed 0.\ndef data_rng(category_id, epoch, batch, purpose_id):\n    return np.random.default_rng(\n        np.random.SeedSequence([42, category_id, epoch, batch, purpose_id]))\n\ndef choose_target(history, u, treatment):\n    # Zero-based event indices; eligible targets have preceding context.\n    n = len(history)\n    if n < 2:\n        return None, 'no_eligible_target'\n    if n == 2:\n        return 1, 'singleton_endpoint_exception'\n    if u < 0.1:\n        return n - 1, 'endpoint'\n    # Exactly one common uniform per example in both arms.\n    v = (u - 0.1) / 0.9\n    targets = np.arange(1, n - 1)  # endpoint excluded\n    m = len(targets)\n    probabilities = np.full(m, 1.0 / m)\n    if treatment:\n        k = min(10, m)\n        probabilities *= 0.5\n        probabilities[-k:] += 0.5 / k\n    cdf = np.cumsum(probabilities)\n    cdf[-1] = 1.0\n    j = min(int(np.searchsorted(cdf, v, side='right')), m - 1)\n    return int(targets[j]), 'nonterminal'\n\n# In both arms, derive separate batch streams for users, cutoffs,\n# reconstruction masks and negatives. Match user batches and base uniforms.\n# Keep model initialization/dropout on their separate seeded Torch stream.\nfor epoch in range(max_epochs):  # max_epochs <= 200\n    for batch_id in range(200):\n        users = unchanged_user_sampling(user_rng)\n        cutoff_uniforms = cutoff_rng.random(len(users))\n        terminal_examples = []\n        for history, u in zip(training_histories(users), cutoff_uniforms):\n            t, status = choose_target(history, u, treatment)\n            log_cutoff_status(status)\n            if t is None:\n                continue\n            context = history[max(0, t - (maxlen - 1)):t]\n            sequence = left_pad(context + [MASK], maxlen)\n            terminal_examples.append((sequence, history[t]))\n            log_cutoff_context_target(t, len(history), len(context), history[t])\n        reconstruction_batch = unchanged_reconstruction_sampler(users, mask_rng, negative_rng)\n        # Both passes use the same BERT4Rec parameters; no score fusion.\n        terminal_ce = mean_over_valid_terminal_targets(model, terminal_examples)\n        reconstruction_ce = mean_over_valid_reconstruction_targets(model, reconstruction_batch)\n        # Construct batches with both branches nonempty using a shared eligibility rule.\n        loss = 0.5 * terminal_ce + 0.5 * reconstruction_ce\n        optimizer.zero_grad()\n        loss.backward()\n        optimizer.step()\n        record_measured_branch_counts_and_coefficient_masses()\n# Persist one checkpoint/category and measured counters; retain predictor writer.\n# Evaluate only through the unchanged host protocol.\n# Optional host-hit bootstrap: reuse each category's resampled user indices\n# for both arms; macro_delta = mean_category(mean(hit_treatment - hit_control)).",
+    "originality": {
+      "score": 3,
+      "positive": "The fixed endpoint probability and separately normalized shared-network objective produce a clearly specified BERT4Rec sampling ablation.",
+      "negative": "Recency weighting and prefix-terminal prediction are established ingredients. Distinguishing this policy from RSS clarifies attribution but does not make it a fundamentally new algorithm."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "A low-cost controlled result can guide later temporal modeling and clarify whether recent terminal exposure helps the two weaker categories.",
+      "negative": "The experiment mixes target recency, context length and item exposure. It cannot directly infer unresolved needs or compatibility, and apparent gains may reflect validation selection noise."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "The primary intervention changes the sampler without changing the BERT4Rec architecture, checkpoint format or inference computation.",
+      "negative": "Reliable comparisons require matched random streams, explicit short-history exceptions, persistent training counters and careful budget and selection bookkeeping."
+    }
+  },
+  "related_work": [
+    {
+      "title": "BERT4Rec: Sequential Recommendation with Bidirectional Encoder Representations from Transformer",
+      "link": "https://arxiv.org/abs/1904.06690",
+      "contributions": [
+        "Introduces bidirectional masked-item sequential recommendation.",
+        "Supplies the retained backbone and reserved-mask prediction formulation."
+      ],
+      "limitations": [
+        "Interior reconstruction can use context unavailable for appended-mask next-item prediction.",
+        "Does not validate this cutoff mixture or establish that reconstruction harms this benchmark."
+      ]
+    },
+    {
+      "title": "Recency Sampling for Next-Item Recommendation",
+      "link": "https://arxiv.org/abs/2207.02643",
+      "contributions": [
+        "Samples event positions with recency-weighted probabilities, deduplicates sampled positions into positive targets, and retains remaining events in order.",
+        "Provides evidence motivating investigation of event-position recency."
+      ],
+      "limitations": [
+        "RSS does not require prefix truncation; retained inputs can follow selected targets.",
+        "RSS was tested on GRU4Rec, Caser and SASRec; BERT4Rec was a baseline rather than an RSS adaptation.",
+        "Its full-catalog evaluation and target-set objective differ from this pinned sampled-HR@10 experiment.",
+        "It does not isolate the proposed policy's context-length or item-frequency effects."
+      ]
+    },
+    {
+      "title": "Gradient Surgery for Multi-Task Learning",
+      "link": "https://arxiv.org/abs/2001.06782",
+      "contributions": [
+        "Defines gradient conflict through negative dot products and projects conflicting gradient components.",
+        "Motivates measuring gradient cosine, negative-cosine frequency and norm ratios between reconstruction and terminal objectives."
+      ],
+      "limitations": [
+        "No supplied measurements establish conflict between these BERT4Rec objectives.",
+        "Additional gradient computations consume the shared budget; projection is deferred."
+      ]
+    },
+    {
+      "title": "PyTorch Reproducibility",
+      "link": "https://github.com/pytorch/pytorch/blob/main/docs/source/notes/randomness.md",
+      "contributions": [
+        "Documents RNG control, DataLoader worker seeding and deterministic execution considerations.",
+        "Supports separating data generators from model randomness."
+      ],
+      "limitations": [
+        "A fixed seed alone does not align random draws after control-flow changes.",
+        "Reproducibility is not guaranteed across releases, platforms or hardware."
+      ]
+    },
+    {
+      "title": "NumPy Parallel Random Number Generation",
+      "link": "https://numpy.org/doc/stable/reference/random/parallel.html",
+      "contributions": [
+        "Documents SeedSequence and reproducible streams derived from stable integer identifiers.",
+        "Supports per-category, epoch, batch and purpose streams that prevent variable draw counts from affecting later batches."
+      ],
+      "limitations": [
+        "Introducing stream separation changes original baseline draws and must be applied to both ablation arms.",
+        "Shared underlying uniforms do not imply identical outcomes under different sampling distributions."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Explains limitations of sampled recommendation metrics, including possible disagreement with full-catalog model ordering."
+      ],
+      "limitations": [
+        "Does not authorize changing the pinned RecHarness evaluator.",
+        "Does not quantify the discrepancy for these particular fitted models and candidates."
+      ]
+    },
+    {
+      "title": "SciPy Bootstrap Documentation",
+      "link": "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.bootstrap.html",
+      "contributions": [
+        "Documents paired bootstrap resampling and confidence-interval methods.",
+        "Supports uncertainty summaries based on paired per-user outcomes when those outcomes are exposed by the host."
+      ],
+      "limitations": [
+        "The proposed category-stratified macro bootstrap requires explicit stratification and equal category weighting.",
+        "User resampling conditional on fitted models and candidates excludes training-seed variability and adaptive-selection bias."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how repeated model selection can overfit finite validation estimates.",
+        "Motivates documenting search extent and reserving confirmatory claims for untouched evaluation."
+      ],
+      "limitations": [
+        "An ordinary post-selection bootstrap interval does not correct adaptive selection optimism.",
+        "Provides no direct estimate of selection bias for this search."
+      ]
+    }
+  ]
+}

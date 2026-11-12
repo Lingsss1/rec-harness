@@ -36,12 +36,36 @@ ARMS = {
     "C": {"planning": True, "flush": True, "diagnostics": False},
     "D": {"planning": True, "flush": True, "diagnostics": True},
 }
+MOVIES_PROFILE = "movies-nextitnet-v1"
+MOVIES_TASKS = {
+    "movies_nextitnet": {
+        "fml_name": "RecHarness_Movies_NextItNet", "regime": "dense",
+        "metric": "HR@10", "direction": "higher",
+        "description": "Optimize causal NextItNet on Movies_and_TV; training seed=2024, evaluation seed=42. "
+            "Frozen BPR/Adam, 200 epochs, 200 batches per epoch, evaluation every 5 epochs, patience 20, "
+            "200 validation users, 99 unique negatives. Histories are right aligned; the raw baseline's "
+            "count_nonzero-1 readout may index padding. Treat correctness fixes separately from architecture gains. "
+            "Shared, separate, projected or normalized target embeddings are allowed. "
+            "Training scores must be finite, have the target shape, and be invariant to positive/negative "
+            "argument role and batch composition; each position must use only its history prefix and own target. "
+            "Public scores must be finite and independent of candidate "
+            "order and candidate-set composition. The encoder must remain causal and batch-independent. "
+            "Edit only the two nn.Module classes and eight numeric hyperparameters; imports, training and evaluation are fixed.",
+        "editable": ["model.py"],
+    },
+}
 IMAGE = re.compile(r"^[^\s]+@sha256:[0-9a-f]{64}$")
 
 
-def template(backend="docker"):
+def task_cards(config):
+    return MOVIES_TASKS if config.get("study_profile") == MOVIES_PROFILE else TASKS
+
+
+def template(backend="docker", profile=None):
+    if profile not in (None, MOVIES_PROFILE):
+        raise ProtocolError("Unknown study profile")
     tasks = {}
-    for key, card in TASKS.items():
+    for key, card in (MOVIES_TASKS if profile == MOVIES_PROFILE else TASKS).items():
         tasks[key] = dict(card, public_source="", validation_data="", test_data="", baseline_checkpoint="",
             validation_image="", test_image="", timeout_seconds=2400,
             validation_argv=["python", "/evaluator/validate.py"],
@@ -64,6 +88,9 @@ def template(backend="docker"):
                      "gpu_device": "0", "score_scale": "fraction, not percentage"},
         "tasks": tasks,
     }
+    if profile == MOVIES_PROFILE:
+        config["study_profile"] = profile
+        config["sources"]["rec_harness_commit"] = ""
     if backend == "local":
         config["execution"] = {"backend": "local", "isolation": "process",
             "environment_id": "", "gpu_device": "0", "pinned_files": [], "readonly_roots": [],
@@ -83,10 +110,10 @@ def template(backend="docker"):
     return config
 
 
-def initialize(root, backend="docker"):
+def initialize(root, backend="docker", profile=None):
     root = Path(root).resolve()
     root.mkdir(parents=True, exist_ok=True)
-    write(root / "study.draft.json", template(backend), exclusive=True)
+    write(root / "study.draft.json", template(backend, profile), exclusive=True)
     return root / "study.draft.json"
 
 
@@ -96,13 +123,21 @@ def check_config(config, root, check_images=False):
         if not condition:
             errors.append(message)
     require(config.get("schema_version") == 1, "Unsupported schema version")
-    require(config.get("protocol") == template()["protocol"], "Protocol must match the registered 4-arm, 100-trial, 5-repeat design")
-    require(bool(re.fullmatch(r"[0-9a-f]{40}", config.get("sources", {}).get("fml_commit", ""))), "Pin the FML checkout commit")
+    require(config.get("study_profile") in (None, MOVIES_PROFILE), "Unknown study profile")
+    expected_protocol = template()["protocol"]
+    if config.get("study_profile") == MOVIES_PROFILE and config.get("protocol", {}).get("trial_budget") == 44:
+        expected_protocol.update(trial_budget=44, replicates=1)
+    require(config.get("protocol") == expected_protocol, "Protocol must match the full design or Movies 44-trial, one-repeat comparison")
+    revision_key = "rec_harness_commit" if config.get("study_profile") == MOVIES_PROFILE else "fml_commit"
+    require(bool(re.fullmatch(r"[0-9a-f]{40}", config.get("sources", {}).get(revision_key, ""))), "Pin the task checkout commit: " + revision_key)
     agent = config.get("agent", {})
     execution = config.get("execution", {"backend": "docker"})
     backend = execution.get("backend")
     require(backend in ("docker", "local"), "Unknown execution backend")
     local = backend == "local"
+    provider = agent.get("provider", "claude")
+    require(provider in ("claude", "codex"), "Unknown native agent provider")
+    require(provider != "codex" or local, "Codex provider currently requires the local process backend")
     if not local:
         require(bool(IMAGE.fullmatch(agent.get("image", ""))), "agent.image must use an immutable sha256 digest")
     require(bool(agent.get("version")), "Record the native CLI version")
@@ -110,17 +145,20 @@ def check_config(config, root, check_images=False):
     if not local:
         require(agent.get("binary") == "claude", "This adapter supports the Claude Code CLI")
     else:
-        require(bool(agent.get("binary")) and Path(agent["binary"]).is_absolute(), "local agent.binary must be an absolute Claude Code executable")
+        require(bool(agent.get("binary")) and Path(agent["binary"]).is_absolute(), "local agent.binary must be an absolute native CLI executable")
     require(agent.get("effort") in ("low", "medium", "high", "xhigh", "max"), "Invalid effort")
-    for key in ("timeout_seconds", "max_budget_usd_per_call"):
+    for key in (("timeout_seconds",) if provider == "codex" else ("timeout_seconds", "max_budget_usd_per_call")):
         value = agent.get(key)
         require(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0, "Invalid agent " + key)
-    require(set(config.get("tasks", {})) == set(TASKS), "All three predeclared tasks must be present")
+    if provider == "codex":
+        require(agent.get("max_budget_usd_per_call") is None, "Codex has no enforced per-call USD cap; set max_budget_usd_per_call=null")
+    cards = task_cards(config)
+    require(set(config.get("tasks", {})) == set(cards), "All predeclared tasks for this profile must be present")
     for name, task in config.get("tasks", {}).items():
         label = name + ": "
-        if name not in TASKS:
+        if name not in cards:
             continue
-        for key, value in TASKS[name].items():
+        for key, value in cards[name].items():
             require(task.get(key) == value, label + "changed fixed task card " + key)
         for key in ("metric_best", "metric_worst"):
             require(task.get(key) == (1.0 if key == "metric_best" else 0.0), label + "invalid normalization")
@@ -208,6 +246,12 @@ def check_local_config(config, root, check_environment):
     require(execution.get("isolation") in ("process", "bubblewrap"), "local isolation must be process or bubblewrap")
     require(bool(execution.get("environment_id")), "Record a fixed local environment_id")
     require(bool(re.fullmatch(r"[0-9]+|GPU-[A-Za-z0-9-]+", str(execution.get("gpu_device", "0")))), "Select one local GPU ordinal or GPU UUID")
+    devices = execution.get("gpu_devices", [execution.get("gpu_device", "0")])
+    require(isinstance(devices, list) and bool(devices) and len(set(map(str, devices))) == len(devices)
+        and all(bool(re.fullmatch(r"[0-9]+|GPU-[A-Za-z0-9-]+", str(d))) for d in devices), "Invalid GPU pool")
+    require(str(execution.get("gpu_device", "0")) in list(map(str, devices)), "Primary GPU must belong to the registered pool")
+    if config["agent"].get("provider") == "codex":
+        require(execution.get("isolation") == "process", "Codex adapter currently supports trusted process mode only")
     files = execution.get("pinned_files", [])
     roots = execution.get("readonly_roots", [])
     if not isinstance(files, list) or not all(isinstance(p, str) and Path(p).is_absolute() and Path(p).is_file() for p in files):
@@ -316,5 +360,5 @@ def matrix(config):
         for task in sorted(config["tasks"]):
             arms = list(config["protocol"]["arms"])
             rng.shuffle(arms)
-            result.extend({"task": task, "arm": arm, "replicate": rep, "trial_budget": 100} for arm in arms)
+            result.extend({"task": task, "arm": arm, "replicate": rep, "trial_budget": config["protocol"]["trial_budget"]} for arm in arms)
     return result

@@ -1,0 +1,137 @@
+{
+  "markdown_report": "At 0% progress, prioritize a small, testable change: add recency-weighted historical evidence to SASRec and measure pinned macro validation HR@10. Feedback motivates this hypothesis; it does not establish measured defects.\n\n**Insights from the starting point.** (1) Feedback favors recent, repeated interests; existing margin probes do not measure dependence on them. Repetition need not indicate continuing demand. (2) Embedding similarity does not establish ranking quality; empty observations must indicate unavailable evidence. (3) Compatibility and unmet need appear in feedback, but histories establish neither ownership nor requirements. Missing descriptions limit assessability.\n\n**Insights from related work.** (1) [Krichene–Rendle](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/) establishes sampled-ranking bias; preserve pinned selection. Fixed candidates enable paired comparisons without establishing full-catalog superiority. (2) [Robust Training](https://iris.uniroma1.it/bitstream/11573/1740238/1/Siciliano_Robust-Training_2024.pdf) motivates controlled removals; sensitivity indicates dependence, not causal preferences. Diagnostic targets must be excluded from diagnostic-model training. (3) [FISM](https://chbrown.github.io/kdd-2013-usb/kdd/p659.pdf), [FPMC](https://www.ra.ethz.ch/cdstore/www2010/www/p811.pdf), and [FOSSIL](https://arxiv.org/abs/1609.09152) establish historical-similarity and transition combinations. [Spotify’s study](https://research.atspotify.com/2026/10/do-sequential-recommendation-benchmarks-require-higher-order-sequence-modelling) motivates simple controls, without establishing Amazon transfer.\n\nThree directions remain: historical evidence aggregation, controlled behavioral diagnostics, and text-grounded assessability. The framework is **evidence → intervention → measurement**: histories → residual → pinned HR@10; removals → matched perturbations → target-rank changes; descriptions → supported attributes → coverage/conflicts. The gap is linking diagnostic signals to predictive gains.\n\nThree atomic ideas follow; scores are originality/potential/difficulty:\n\n- **Recency residual: 2/6/4.** Originality: feedback-targeted combination, but substantial FOSSIL precedent. Potential: cheap cross-category test, but recency-specific value is unproven. Difficulty: small branch, but causal alignment and predictor parity require care.\n- **Matched removal probe: 5/7/4.** Originality: feedback-specific controls, but established perturbations. Potential: measures dependence, but cannot identify preferences. Difficulty: reusable hooks, but leakage-free diagnostic training costs budget. Reference: Robust Training.\n- **Attribute-conflict probe: 5/6/7.** Originality: connects assessability and failures, but extraction is established. Potential: distinguishes unknown/conflict, but text may be sparse. Difficulty: rules are feasible, but normalization needs auditing. Reference: [WDC-PAVE](https://arxiv.org/abs/2403.02130).\n\nSelect the **recency residual**, framed as an empirical adaptation. With λ=2^(−1/4), scan each retained window using FP32: `S=λ*S+E(x); Z=λ*Z+1; p=S/Z; f=h+sigmoid(a)*p`. Include the current item before predicting its successor; padding leaves state unchanged and emits zero. Reset at window boundaries. Shared dot-product scoring preserves the compatibility interface; no semantic compatibility is inferred.\n\nFit gates on a frozen baseline first; compare zero, uniform, recency, last-item, and log-frequency controls. Retrain the predeclared recency variant under matched conditions. Check explicit-weight equivalence, padding, truncation, and inference logits; update predictor generation and retain diagnostic APIs.\n\nPredeclare search/checkpoint limits and log every validation query within 43,200 GPU-seconds. Select solely by four-category macro HR@10; report category deltas and paired user-bootstrap intervals, conditional on fixed models/candidates. These intervals exclude adaptive-selection optimism ([Cawley–Talbot](https://www.jmlr.org/papers/v11/cawley10a.html)).",
+  "idea": {
+    "description": "Add a learned recency-weighted item-embedding residual inside each dataset’s SASRec sequence-feature function. Preserve all four independently routed models, shared dot-product scoring, and selection by pinned macro validation HR@10. Treat this as an empirical adaptation of established historical-similarity methods rather than a new model class.",
+    "motivation": "Qualitative feedback suggests that broad historical affinity sometimes outranks specific recent or repeated interests. A small historical-evidence branch tests this hypothesis without unavailable ratings, reviews, ownership labels, simulator traits, or pretrained weights. FISM, FPMC, and FOSSIL substantially limit originality claims. Uniform-history, last-item, and popularity controls are needed before attributing improvements specifically to recency.",
+    "implementation_notes": "Keep DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, unchanged benchmark splits, all four categories and routing, single-GPU execution, and artifacts beneath the trial directory. Respect SASREC_EPOCHS=200 unless explicitly configured otherwise within the authorized search. Charge training, gate fitting, diagnostics, debugging, and failed trials to the shared 43,200 GPU-second budget. No improvement has been measured.\n\nUse a fixed four-interaction half-life as a declared hypothesis, not an established optimum. Set lambda=2**(-0.25). For each retained chronological sequence window, initialize FP32 S=0 and Z=0. At each nonpadding item x_t, update S=lambda*S+E(x_t), Z=lambda*Z+1, and emit p_t=S/max(Z,epsilon). Padding leaves S and Z unchanged and emits zero. Empty prefixes return zero. Reset at every retained window boundary in training and inference; do not carry discarded history. The pool includes sequence[t], which precedes positive[t], and never includes positive[t] or subsequent interactions. Repeated occurrences contribute separately. This pooling measures interaction recency, not elapsed timestamp recency.\n\nDefine shared features f_t=h_t+sigmoid(a)*p_t and logits f_t dot E(candidate). Learn one scalar a per routed dataset, initialized to logit(0.1). Use no projection initially, preserving the atomic intervention. Keep pooling differentiable during joint training, mask padded targets, and retain the baseline loss and other settings. The bounded gate does not bound the residual’s contribution relative to SASRec because embedding and feature norms differ; report gate values, residual/base-logit magnitudes, and item-norm versus training-frequency associations. A cosine-residual diagnostic can test norm dependence, but is not part of the primary architecture.\n\nImplement the residual in the actual nn.Module’s shared log2feats path so view.log2feats returns augmented features and view.predict_score uses the existing dot product. Never add the residual twice. In inference select the last valid position, returning a zero representation for an empty sequence consistently with the documented baseline fallback. Save gate, half-life, architecture version, and all parameters. Update the predictor writer so working/predict.py reconstructs the identical architecture and routing. Verify recurrence against explicit normalized decay weights, current-item/next-target alignment, padding invariance, empty inputs, truncated windows, and training/inference logits with dropout disabled.\n\nBefore execution, record the number of gate-fitting runs, joint-training runs, checkpoint evaluations, checkpoint schedule, and GPU-second allocations; apply the same checkpoint rules to baseline and joint-training residual. A minimal screen uses one frozen SASRec checkpoint per dataset and fits only scalar gates for normalized uniform, recency, last-item, and log-training-frequency branches, alongside the unchanged zero-residual baseline. Fit gates with training batches, never validation labels. Define the popularity branch as sigmoid(a_pop)*log1p(c_i), where c_i counts only training interactions. Keep windows, candidate embeddings, loss, and initialization fixed for the three embedding-pool controls. Retrain the predeclared recency model and compare it with the baseline under matched conditions; do not expand the search in response to small validation gains without recording the additional queries. Frozen comparisons isolate score-combination effects but cannot establish behavior after joint retraining. Attribute a benefit specifically to recency only if evidence also supports superiority over the simpler controls.\n\nSelect solely through host-provided pinned macro validation HR@10 with 200 users/category, 99 unique negatives, and evaluation seed 42. Never replace the evaluator or change its candidate sets. Log every evaluated checkpoint. Report four category deltas and their equal-weight macro delta. Where paired per-user hits are available from authorized evaluation outputs, bootstrap paired hit differences by resampling 200 users within each category, using a fixed bootstrap seed and 10,000 replicates, and take percentile 95% intervals. If those outputs are unavailable, mark intervals unavailable. One additional hit changes category HR by 0.005 and macro HR by 0.00125. Intervals condition on fitted models and fixed candidates and exclude training randomness, negative-sampling variability, and adaptive winner selection. Hidden evaluation is reserved for the frozen final choice.\n\nRetain DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis), returning metrics and metric_definitions grounded in measured values. Keep view.model as the actual nn.Module. Preserve valid existing embedding and margin probes, add observation counts, restore the prior training/evaluation mode, and represent unavailable measurements explicitly rather than as healthy zeros. Categories and reviews from the generic example schema are unavailable under this task contract; replace unavailable metadata-category breakdowns with routing-dataset and training-frequency summaries, defining bucket boundaries from training interactions and reporting denominators.\n\nFor optional mechanism checks, create chronological diagnostic holdouts only inside public training histories and train separate diagnostic models excluding reserved targets and later interactions. Respect global temporal cutoffs where feasible and disclose remaining cross-user temporal leakage. Compare recent-versus-equal-count-random removals with identical padding/window handling; also shuffle only residual-history assignments while preserving SASRec inputs. Record the perturbation seed and exact removal/shuffle rule. These checks consume budget, concern a different training regime, and are not independent confirmation after tuning. Treat full-catalog recommendations for twenty real training users, five per category, as exploratory examples. Do not infer ownership, satisfaction, compatibility, unmet needs, or latent diversity/conformity traits. Text-supported attribute probes require audited spans and explicit unknown states.",
+    "pseudocode": "Predeclare run counts, checkpoint schedule, validation-query limits, and GPU-second allocations.\nFor each of the four routed datasets:\n  train the unchanged SASRec baseline with preprocessing seed 0 and training seed 42\n  retain checkpoints using the declared host-validation rule\n  define pooled_features(sequence, base_features, a):\n    S = FP32 zeros(batch, embedding_dim); Z = FP32 zeros(batch, 1)\n    outputs = []\n    for t in chronological retained-window order:\n      valid = sequence[:, t] != 0\n      proposed_S = lambda * S + FP32(item_emb(sequence[:, t]))\n      proposed_Z = lambda * Z + 1\n      S = where(valid, proposed_S, S)\n      Z = where(valid, proposed_Z, Z)\n      p = where(valid, S / clamp_min(Z, epsilon), 0)\n      outputs.append(where(valid, base_features[:, t] + sigmoid(a) * p, 0))\n    return stack(outputs)\n  freeze the same baseline checkpoint\n  fit only training-loss gates for uniform, recency, last-item, and log-frequency controls\n  evaluate each once using the declared pinned validation protocol\n  initialize the joint recency model from the same declared initialization policy as its baseline comparator\n  train with original masked loss on shared augmented-feature dot products\n  evaluate only declared checkpoints; record every query and runtime\n  save model, gate, half-life, routing, and architecture configuration beneath trial directory\nGenerate working/predict.py with identical shared-feature computation and last-valid-position selection.\nCompare category and equal-weight macro HR@10; calculate paired intervals only if authorized per-user hits are available.\nOptionally run separately budgeted, leakage-controlled mechanism probes; report counts, definitions, and limitations.\nFreeze the final choice before hidden evaluation.",
+    "originality": {
+      "score": 2,
+      "positive": "Applies a minimal historical-evidence branch to a specific diagnostic hypothesis with explicit controls and a stable SASRec compatibility interface.",
+      "negative": "Historical pooling, transition components, recency weighting, and score mixtures have substantial precedent in FISM, FPMC, and FOSSIL."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "Provides an inexpensive foundation for identifying when explicit recent-history evidence adds predictive value beyond a sequence model.",
+      "negative": "Recency-specific gains remain unproven and may reflect last-item similarity, popularity, embedding norms, or the sampled evaluation protocol."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "The primary architecture adds one linear-time recurrence and one scalar parameter per dataset without changing candidate scoring.",
+      "negative": "Reliable causal alignment, FP32 accumulation, diagnostic adaptation, controlled comparisons, checkpoint loading, and predictor parity require more work than the scoring formula suggests."
+    }
+  },
+  "related_work": [
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Establishes that sampled evaluation can change model orderings, supporting strict preservation of the pinned selection protocol."
+      ],
+      "limitations": [
+        "Does not identify the best architecture for this benchmark or equate sampled HR@10 with full-catalog quality."
+      ]
+    },
+    {
+      "title": "Robust Training of Sequential Recommender Systems with Missing Input Data",
+      "link": "https://iris.uniroma1.it/bitstream/11573/1740238/1/Siciliano_Robust-Training_2024.pdf",
+      "contributions": [
+        "Studies ranking sensitivity to missing historical interactions and motivates controlled removal diagnostics."
+      ],
+      "limitations": [
+        "Perturbation sensitivity does not identify causal preferences or establish transfer to the four requested datasets."
+      ]
+    },
+    {
+      "title": "Do Sequential Recommendation Benchmarks Require Higher-Order Sequence Modelling?",
+      "link": "https://research.atspotify.com/2026/10/do-sequential-recommendation-benchmarks-require-higher-order-sequence-modelling",
+      "contributions": [
+        "The supplied search summary reports strong history-aware pairwise baselines, motivating simple historical-evidence controls."
+      ],
+      "limitations": [
+        "Results concern other benchmarks and do not validate this residual architecture on the requested Amazon categories."
+      ]
+    },
+    {
+      "title": "WDC-PAVE",
+      "link": "https://arxiv.org/abs/2403.02130",
+      "contributions": [
+        "Provides precedent for extracting and normalizing product attributes using verified annotations."
+      ],
+      "limitations": [
+        "Extraction requires auditing on available text; missing attributes establish neither compatibility nor conflict."
+      ]
+    },
+    {
+      "title": "FISM: Factored Item Similarity Models for Top-N Recommender Systems",
+      "link": "https://chbrown.github.io/kdd-2013-usb/kdd/p659.pdf",
+      "contributions": [
+        "Scores candidates using length-normalized historical-item factors and separate target factors, providing direct precedent for historical-similarity scoring."
+      ],
+      "limitations": [
+        "Its history aggregation is order independent and does not establish the benefit of exponential recency or a SASRec residual."
+      ]
+    },
+    {
+      "title": "Factorizing Personalized Markov Chains for Next-Basket Recommendation",
+      "link": "https://www.ra.ethz.ch/cdstore/www2010/www/p811.pdf",
+      "contributions": [
+        "Combines user–candidate preference with factorized transitions from previous items or baskets."
+      ],
+      "limitations": [
+        "Uses a different preference representation and does not validate the proposed shared-embedding sequence-feature augmentation."
+      ]
+    },
+    {
+      "title": "Fusing Similarity Models with Markov Chains for Sparse Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1609.09152",
+      "contributions": [
+        "Combines FISM-style historical similarity with recent-item transitions and global plus user-specific lag weights."
+      ],
+      "limitations": [
+        "Strongly limits novelty claims for historical and sequential mixtures; its lag weights need not follow monotonic exponential decay."
+      ]
+    },
+    {
+      "title": "SASRec Reference Sampler and Model",
+      "link": "https://github.com/kang205/SASRec",
+      "contributions": [
+        "The sampler defines sequence-position inputs paired with next-interaction targets.",
+        "The model provides the reference shared item-embedding dot-product scoring structure."
+      ],
+      "limitations": [
+        "The actual RecHarness implementation remains authoritative for padding, truncation, interfaces, and checkpoint behavior."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains selection optimism from optimizing model choices against finite validation estimates."
+      ],
+      "limitations": [
+        "Predeclared search limits and paired bootstrap intervals do not eliminate adaptive-selection bias."
+      ]
+    },
+    {
+      "title": "The Reusable Holdout: Preserving Validity in Adaptive Data Analysis",
+      "link": "https://arxiv.org/abs/1506.02629",
+      "contributions": [
+        "Establishes that formally reusable holdouts require controlled access rather than ordinary repeated evaluation."
+      ],
+      "limitations": [
+        "Its guarantees do not apply automatically to repeated queries of the pinned benchmark."
+      ]
+    },
+    {
+      "title": "A Critical Study on Data Leakage in Recommender System Offline Evaluation",
+      "link": "https://arxiv.org/abs/2010.11060",
+      "contributions": [
+        "Motivates attention to global temporal leakage when constructing chronological diagnostic evaluations."
+      ],
+      "limitations": [
+        "Diagnostic temporal controls must remain separate from the unchanged host benchmark splits and cannot make diagnostic results independent after adaptive tuning."
+      ]
+    }
+  ]
+}

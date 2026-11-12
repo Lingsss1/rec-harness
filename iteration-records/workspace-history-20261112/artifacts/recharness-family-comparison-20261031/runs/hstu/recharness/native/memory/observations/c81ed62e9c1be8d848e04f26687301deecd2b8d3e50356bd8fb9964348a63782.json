@@ -1,0 +1,92 @@
+{
+  "schema_version": 2,
+  "protocol_id": "549366dec30f3763567e6e817d66b07222b60932b7246814929f9402f6a197af",
+  "record": {
+    "round_idx": 7,
+    "trial_group_id": "trialgrp_1793476285960_3001973",
+    "trial_id": 0,
+    "arm": "combination_jump",
+    "selected_categories": [
+      "sequence_interest",
+      "learning_objective"
+    ],
+    "patch_summary": "Replace fixed recency pooling with causal cosine-similarity pooling and train with recent-position, equal-user BPR weighting across all four independent HSTU category models. Predictor architecture stays consistent through its existing import of HSTURec.",
+    "benchmark_score": 0.535,
+    "val_score": 0.535,
+    "is_winner": false,
+    "is_group_winner": false,
+    "valid": true,
+    "failure_type": null,
+    "delta_vs_prev_best": -0.0325,
+    "delta_vs_input": -0.0325,
+    "outcome": "regressed",
+    "val_support": "regressed",
+    "gpu_seconds": 1577.1536101996899,
+    "trial_cap_seconds": 1686.0,
+    "per_dataset_hr10": {
+      "Movies_and_TV": 0.595,
+      "Industrial_and_Scientific": 0.565,
+      "Electronics": 0.435,
+      "CDs_and_Vinyl": 0.545
+    },
+    "error": "",
+    "parameter_changes": [],
+    "changed_definitions": [
+      "HSTURec",
+      "HSTURec.forward",
+      "train_one_dataset"
+    ],
+    "summary": "Replace fixed recency pooling with causal cosine-similarity pooling and train with recent-position, equal-user BPR weighting across all four independent HSTU category models. Predictor architecture stays consistent through its existing import of HSTURec.",
+    "proposal_history": [
+      {
+        "attempt": 1,
+        "summary": "Replace fixed recency pooling with causal cosine-similarity pooling and train with recent-position, equal-user BPR weighting across all four independent HSTU category models. Predictor architecture stays consistent through its existing import of HSTURec."
+      }
+    ],
+    "hypothesis": "Across all four datasets, retain newest-128 truncation and cumulative observed positions; replace fixed pooling with causal weights proportional to exp(cos(h_t,h_j)-(t-j)/4), mixing 0.75*h_t+0.25*pool_t. For the learning objective, replace uniform BPR averaging with equal-user averaging of per-position BPR weighted by exp(-(last_valid-t)/8). Content-sensitive pooling and recent-target emphasis may jointly improve next-item ranking. Preserve frequency features, HSTU blocks and optimizer settings; use one checkpoint per category and identical readout in the predictor writer.",
+    "input_source_sha256": "bc5d5385b93f29472ac04a5710633a4b153f8012b7c61f981470c14686e69ecc",
+    "candidate_source_sha256": "c13ddf0557a9ccfca1726a02591e07eda395b1b5739a595cad3a776efcf929d9",
+    "input_normalized_sha256": "e34d182f28eb2705b02d533b65db7a7f492f5127963e67966c570cc1b8f2f8d4",
+    "candidate_normalized_sha256": "fbb35189f9c8e3eb56ecf769f9f5ea74308118c9dc2c70919af3cf81377b251a",
+    "patch_sha256": "ef87dd6db8936d8d756d601ca22fd71b583c18794d1bc8278fda56d1aced3275",
+    "diff_excerpt": "--- \n+++ \n@@ -214,8 +214,11 @@\n         positions = torch.arange(maxlen, device=seq.device)\n         distance = positions[:, None] - positions[None, :]\n-        weights = torch.exp(-distance.clamp_min(0).to(states.dtype) / 4.0)\n-        weights = weights.masked_fill(distance < 0, 0.0)\n+        normalized_states = F.normalize(states, p=2, dim=-1, eps=1e-8)\n+        similarity = torch.matmul(normalized_states, normalized_states.transpose(1, 2))\n+        logits = similarity - distance.clamp_min(0).to(states.dtype).unsqueeze(0) / 4.0\n+        allowed = (distance >= 0).unsqueeze(0) & valid.unsqueeze(1)\n+        weights = torch.exp(logits).masked_fill(~allowed, 0.0)\n         pooled_sum = torch.matmul(weights, states)\n-        pooled_mass = torch.matmul(weights, valid.to(states.dtype).unsqueeze(-1))\n+        pooled_mass = weights.sum(dim=-1, keepdim=True)\n         pooled = pooled_sum / pooled_mass.clamp_min(1e-8)\n         readout = 0.75 * states + 0.25 * pooled\n@@ -323,6 +326,12 @@\n             pos_scores = (out * model.item_emb(pos_t)).sum(dim=-1)\n             neg_scores = (out * model.item_emb(neg_t)).sum(dim=-1)\n-            loss = F.softplus(-(pos_scores - neg_scores))\n-            loss = (loss * mask).sum() / mask.sum().clamp(min=1.0)\n+            position_loss = F.softplus(-(pos_scores - neg_scores))\n+            target_positions = torch.arange(pos_t.size(1), device=device).unsqueeze(0)\n+            last_valid = target_positions.expand_as(pos_t).masked_fill(pos_t == 0, -1).amax(dim=1, keepdim=True)\n+            target_age = (last_valid - target_positions).clamp_min(0).to(position_loss.dtype)\n+            target_weights = torch.exp(-target_age / 8.0) * mask\n+            user_loss = (position_loss * target_weights).sum(dim=1) / target_weights.sum(dim=1).clamp_min(1e-8)\n+            active_users = mask.any(dim=1).to(user_loss.dtype)\n+            loss = (user_loss * active_users).sum() / active_users.sum().clamp_min(1.0)\n             optimizer.zero_grad()\n             loss.backward()\n",
+    "category_rationales": [
+      {
+        "category": "sequence_interest",
+        "rationale": "Across all four category models, retain newest-128 truncation and cumulative observed positions while making causal pooling content-sensitive: exp(cos(h_t,h_j)-(t-j)/4), with readout 0.75*h_t+0.25*pool_t. The generated predictor imports this same HSTURec class, so inference automatically uses the identical readout without checkpoint shape changes."
+      },
+      {
+        "category": "learning_objective",
+        "rationale": "Coordinate content-sensitive readout with recent-target emphasis: weight valid BPR positions by exp(-(last_valid-t)/8), normalize within each sampled user's history, then average users equally. Preserve negative sampling, optimizer and the training budget settings."
+      }
+    ],
+    "baseline_validation": 0.5675,
+    "basin_id": "default",
+    "execution_status": "success",
+    "attempt_count": 1,
+    "training_attempt_count": 1,
+    "training_attempts": [
+      {
+        "id": "round-0006-slot-0-attempt-1",
+        "status": "success",
+        "source_sha256": "c13ddf0557a9ccfca1726a02591e07eda395b1b5739a595cad3a776efcf929d9",
+        "allocated_gpu_seconds": 1577.1536101996899,
+        "error": "",
+        "score": 0.535
+      }
+    ],
+    "checkpoint_fingerprints": {
+      "Movies_and_TV_model.pt": "1688b16da57589101c2b9068b65f89020ffa34b24e9b2d6db1e9ccaffedfc0dc",
+      "Industrial_and_Scientific_model.pt": "07244f3a595e90652f25107dfd2c3de0d28c7539d486804ce0ac4508aa784457",
+      "Electronics_model.pt": "de4f67de4dd4ae83a3941acb3e183d1ee61a11241c0b9206b2b4dab55f72f77e",
+      "CDs_and_Vinyl_model.pt": "14b9fe1385c45edd8018f7aad5ed33f4d710f1a047274b5f6e5438a41d787f53"
+    },
+    "repair_errors": [],
+    "phase": "jump",
+    "promoted": false,
+    "provisional": false,
+    "protocol_id": "549366dec30f3763567e6e817d66b07222b60932b7246814929f9402f6a197af",
+    "evidence_id": "c81ed62e9c1be8d848e04f26687301deecd2b8d3e50356bd8fb9964348a63782"
+  },
+  "record_sha256": "30bb9f55ecb8b60af0a095fca6fc80093e808beeba046d2ae7715cde2bbb6496"
+}

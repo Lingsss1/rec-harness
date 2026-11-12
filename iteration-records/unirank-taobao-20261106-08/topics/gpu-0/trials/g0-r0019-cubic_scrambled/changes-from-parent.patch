@@ -1,0 +1,125 @@
+--- g0-r0017-available_norm/model.py
++++ g0-r0019-cubic_scrambled/model.py
+@@ -1,8 +1,9 @@
+-"""Prospective support by scale factorial for a duplicate match channel.
+-
+-Keep the four incumbent summaries and the fifth match direction. Cross the
+-inherited joint-support gate with basic availability, and norm-matched with
+-raw coefficients. Every cell builds all alternatives before selection.
+-Ordinals are array positions, not elapsed time. No new moment is claimed.
++"""Fifth-summary replacement by a coarse cubic ordinal contrast.
++
++All cells construct the same coefficients and learned modules. New cubic
++and scrambled contrasts are projected off valid constants, coarse linear
++ranks and the inherited quadratic. Eligibility and coefficient norm match
++between the three replacement cells. The bridge returns the exact incumbent
++fifth expression. Positions are array ordinals, never elapsed time.
+ """
+ import torch
+@@ -13,5 +14,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'scrambled'}
+ 
+ 
+@@ -25,5 +26,5 @@
+                  temporal_detail='position', block_detail='ordinal',
+                  curvature_detail='quadratic', joint_detail='duplicate_match',
+-                 match_support='available', match_scaling='norm',
++                 match_support='available', match_scaling='norm', coarse_extension='scrambled',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -75,4 +76,9 @@
+         self.match_support = match_support
+         self.match_scaling = match_scaling
++        if match_support != 'available' or match_scaling != 'norm':
++            raise ValueError('This study freezes the incumbent fifth support and scale')
++        if coarse_extension not in ('cubic', 'scrambled', 'duplicate', 'bridge'):
++            raise ValueError('Unknown coarse ordinal replacement')
++        self.coarse_extension = coarse_extension
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -172,5 +178,5 @@
+ 
+     def _target_match_summary(self, item, values, mask):
+-        """Five masked value summaries; only fifth support/scale varies.
++        """Five masked value summaries; only the fifth direction/gate varies.
+ 
+         Quadratic/scrambled coefficients are orthogonal to valid constants
+@@ -249,7 +255,10 @@
+         else:
+             fourth = duplicate
+-        fifth = self._joint_coefficients(
++        incumbent_fifth = self._joint_coefficients(
+             centered, centered_position, fourth, valid, counts,
+             block_rank, scrambled_rank)
++        fifth = self._coarse_extension_coefficients(
++            incumbent_fifth, centered_position, fourth, linear,
++            block_rank, scrambled_rank, valid, counts, total)
+         coefficients = torch.stack(
+             (centered, centered_position, block_coefficients, fourth, fifth), dim=-2)
+@@ -261,4 +270,63 @@
+         return (summaries[:, 0, :], summaries[:, 1, :], summaries[:, 2, :],
+                 summaries[:, 3, :], summaries[:, 4, :], match_counts)
++
++    def _coarse_extension_coefficients(self, incumbent, position, quadratic,
++                                       linear, rank, scrambled_rank,
++                                       valid, counts, total):
++        """Replace the redundant fifth direction at fixed learned capacity.
++
++        Event-weighted projection uses the actual validity mask, including
++        partial/noncontiguous blocks. Every candidate coefficient is block
++        constant on valid events, hence orthogonal to the first target-match
++        and second local-position coefficients as well. A common gate and
++        norm make information content the main replacement contrast. The
++        gate can itself carry information; the duplicate isolates that.
++        """
++        cubic = self._coarse_residual(
++            rank * rank * rank, linear, quadratic, valid, total)
++        scrambled = self._coarse_residual(
++            scrambled_rank * scrambled_rank * scrambled_rank,
++            linear, quadratic, valid, total)
++        cubic_norm2 = cubic.square().sum(dim=(1, 2), keepdim=True)
++        scrambled_norm2 = scrambled.square().sum(dim=(1, 2), keepdim=True)
++        incumbent_norm2 = incumbent.square().sum(dim=(1, 2), keepdim=True)
++        target_norm2 = position.square().sum(dim=(1, 2), keepdim=True)
++        occupied = (counts > 0).sum(dim=1, keepdim=True)
++        support = ((occupied >= 4) & (cubic_norm2 > 1e-10)
++                   & (scrambled_norm2 > 1e-10)
++                   & (incumbent_norm2 > 1e-10)
++                   & (target_norm2 > 1e-10)).to(valid.dtype)
++        cubic = (cubic * (target_norm2 / cubic_norm2.clamp_min(1e-10)).sqrt()
++                 * support)
++        scrambled = (scrambled
++                     * (target_norm2 / scrambled_norm2.clamp_min(1e-10)).sqrt()
++                     * support)
++        duplicate = incumbent * support
++        # All alternatives above execute in all cells; no modules or RNG added.
++        if self.coarse_extension == 'cubic':
++            return cubic
++        if self.coarse_extension == 'scrambled':
++            return scrambled
++        if self.coarse_extension == 'duplicate':
++            return duplicate
++        return incumbent
++
++    @staticmethod
++    def _coarse_residual(raw, linear, quadratic, valid, total):
++        """Two projection sweeps in FP32; zero bases are harmless."""
++        residual = valid * raw
++        linear_norm2 = linear.square().sum(dim=(1, 2), keepdim=True)
++        quadratic_norm2 = quadratic.square().sum(dim=(1, 2), keepdim=True)
++        for _ in range(2):
++            mean = residual.sum(dim=(1, 2), keepdim=True) / total.unsqueeze(-1)
++            residual = valid * (residual - mean)
++            slope = ((residual * linear).sum(dim=(1, 2), keepdim=True)
++                     / linear_norm2.clamp_min(1e-12))
++            residual = valid * (residual - slope * linear)
++            slope = ((residual * quadratic).sum(dim=(1, 2), keepdim=True)
++                     / quadratic_norm2.clamp_min(1e-12))
++            residual = valid * (residual - slope * quadratic)
++        mean = residual.sum(dim=(1, 2), keepdim=True) / total.unsqueeze(-1)
++        return valid * (residual - mean)
+ 
+     def _joint_coefficients(self, affinity, position, fourth, valid, counts,

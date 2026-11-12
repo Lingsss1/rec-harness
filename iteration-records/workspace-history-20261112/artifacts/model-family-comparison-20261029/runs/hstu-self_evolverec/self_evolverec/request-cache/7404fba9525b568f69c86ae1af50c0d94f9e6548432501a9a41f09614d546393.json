@@ -1,0 +1,140 @@
+{
+  "request_sha256": "7404fba9525b568f69c86ae1af50c0d94f9e6548432501a9a41f09614d546393",
+  "response": {
+    "markdown_report": "At 0% progress, prioritize a controlled diagnostic adapter before changing HSTU training. No supplied measurement establishes which suspected failure actually reduces validation HR@10; training-prefix sensitivity alone cannot establish generalizable sequence use.\n\n**Insights from the starting point.** (1) Existing margins depend on score scale and negative sampling. Fixed-candidate ranks improve comparability but retain sampling bias. (2) User feedback distinguishes recent purpose from broad familiarity. Controlled interventions measure model dependence, without establishing preferences, ownership, fulfilled needs, or compatibility. (3) Missing metadata currently produces empty breakdowns, and missing samples produce zeros. Explicit availability states prevent these from appearing to be measured success.\n\n**Insights from related work.** (1) [Missing-input robustness](https://iris.uniroma1.it/bitstream/11573/1740238/1/Siciliano_Robust-Training_2024.pdf) and [recency-bias research](https://arxiv.org/abs/2409.09722) motivate measuring recent-history dependence; neither supports maximizing it universally. (2) [Sequence-pattern research](https://doi.org/10.1145/3705328.3748042) identifies availability confounding. Separate older-order effects, last-item dependence, and deletion effects. (3) [HSTU](https://arxiv.org/abs/2402.17152) motivates controlling evidence quantity and attention geometry; inspect the supplied implementation before attributing effects to temporal bias. (4) [WDC-PAVE](https://arxiv.org/abs/2403.02130) motivates extracting explicit attributes with abstention. [Sampled-metric research](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/) limits conclusions to the candidate set.\n\n**Framework and directions.** Organize diagnostics along three axes: temporal dependence, candidate discrimination, and evidence availability. Cross each with a controlled measurement and an inference boundary:\n\n| Direction | Measurement | Interpretation boundary |\n|---|---|---|\n| Temporal dependence | Paired target-rank changes under matched deletions and slot-preserving shuffles | Training dependence can reflect memorization; validation dependence can reflect availability |\n| Candidate discrimination | Fixed-candidate rank and tie-aware win rate | Conditional on sampled candidates; raw margins remain scale-dependent |\n| Evidence availability | Attribute coverage and explicit contradictions | Missing evidence does not establish incompatibility |\n\n**Candidate ideas.** Scores are originality/potential/difficulty, each out of 10; higher difficulty means harder implementation.\n\n- **Controlled temporal probe: 5/7/5.** Originality: useful HSTU integration, but established interventions. Potential: guides targeted changes, but cannot identify causal preferences or guarantee HR gains. Difficulty: existing hooks help, but temporal controls, reproducible ranking, and authorized validation access require care. References: HSTU, robustness, and sequence-pattern work above.\n- **Train-only hard-negative audit: 4/7/4.** Originality: useful paired comparison, but familiar sampling analysis. Potential: exposes weak discrimination, but unobserved positives confound interpretation. Difficulty: simple scoring, but exclusions and mining add cost. Reference: [Hard-BPR](https://arxiv.org/abs/2403.19276).\n- **Abstaining attribute audit: 6/7/6.** Originality: connects uncertainty to recommendation diagnosis, but extraction is established. Potential: exposes assessable mismatches, but sparse descriptions limit coverage. Difficulty: deterministic extraction is feasible, but contextual compatibility is difficult. Reference: WDC-PAVE.\n\n**Selected idea: controlled temporal probe.** Freeze one HSTU checkpoint per category. Construct reproducible next-item examples from public training prefixes; label these in-sample diagnostics. Freeze targets and 99 unique eligible negatives. Truncate once to the baseline window without backfilling. Compare identity/no-op, recent-k, oldest-k and repeated random-k deletions on identical eligible examples; separately shuffle item identities across fixed slots with/without the final item preserved. Deletions compact positions and therefore measure combined content, length and positional effects. Preserve surviving timestamps and fixed query time only if supported by the actual backbone; timestamp-aware interventions require an existing compatible scoring path.\n\nRepack with left padding and gather the maximum nonpadding index. Report paired rank and diagnostic HR@10 changes, candidate-set top-10 overlap, counts, exclusions, and category/history-length strata. Use five recorded perturbation seeds, averaging diagnostic effects per user without averaging prediction scores. Bootstrap users within category 10,000 times with seed 42, then macro-average categories; report conditional 95% percentile intervals. Where an existing authorized interface exposes validation examples and pinned candidates, repeat without changing splits or evaluator, and stratify by training-observed transition frequency and suffix overlap. Otherwise mark validation effects unavailable. For the fixed 20 training users, optionally audit full-catalog unseen-item overlap and entering/leaving items; these describe stability, not relevance. Retain both adapter entry points and the interpretation function. Preserve HSTU, routing, checkpoint consistency, seeds and training limits; only unchanged host macro validation HR@10 selects models.",
+    "idea": {
+      "description": "Implement a controlled temporal-sensitivity diagnostic around the supplied HSTU ModelView, retaining exactly one independently trained checkpoint per category. Separate in-sample training-prefix measurements from any authorized validation measurements, and distinguish candidate-set ranking stability from descriptive full-catalog stability.",
+      "motivation": "Qualitative feedback suggests broad familiarity may overwhelm specific recent intent, but existing embedding and margin probes cannot separate older-order sensitivity, last-item dependence, and information loss. The revised probe provides controlled evidence for subsequent changes while recognizing memorization, item availability, sampled-candidate bias, and HSTU attention geometry as alternative explanations. It remains the preferred early-stage idea because it requires no architectural change; the hard-negative and attribute audits remain useful follow-up directions.",
+      "implementation_notes": "Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis), returning metrics and metric_definitions. Preserve view.model as the actual trained nn.Module and the item_emb, log2feats(sequence), predict_score(features, items), user_train, meta_data, and review_data interfaces. The loader remains (None, sequence, positive, negative), each tensor B x L. Never treat category names, ratings, review text, prices, stores, ownership, simulator traits, or fulfilled needs as observed. Only histories, timestamps, titles, and descriptions are available.\n\nInspect the supplied HSTU implementation before making claims about relative position or temporal bias. The paper's architecture does not establish which mechanisms the supplied baseline implements. If timestamps are absent from the scoring interface, explicitly report that timestamp effects were not tested; do not invent timestamp inputs or alter the ModelView signature. Where timestamps are supported through an existing path, preserve actual units, surviving event timestamps, and prediction/query time. Shuffle item identities across fixed chronological timestamp/position slots; moving item–timestamp pairs is a different intervention and is excluded from the primary protocol.\n\nUse a deterministic diagnostic configuration: at most 100 training users per category sampled with seed 42 from users with at least five usable events; take each selected user's final training event as the diagnostic target and all preceding events as its prefix. These examples were available during fitting and must be labeled in-sample. Apply the baseline maximum history length once, then perturb that fixed window without backfilling. Set k=max(1,floor(0.2*n)) for a window of n valid events. Recent-k, oldest-k, and random-k deletions share exactly the same eligible users and k, leave at least one event, and compact surviving positions. Record this as a combined content/length/position intervention; equal deletion counts do not fully isolate semantic recency. Report final-item removal separately. Shuffle older item identities while preserving the final item, and shuffle all item identities, retaining sequence length and padding slots. Use perturbation seeds [42,43,44,45,46]; these are diagnostic RNG seeds, not additional training seeds. Identity and no-op outputs must agree within a recorded numerical tolerance before interpreting effects.\n\nFor training-prefix probes, freeze the target plus 99 unique negatives excluding padding, reserved tokens, the target, and every known item in that user's public training history. Skip users with fewer than 99 eligible negatives and record why. Training-derived candidates are separate from the host benchmark. Use the exact pinned candidates, filtering, and tie behavior for validation only if an existing authorized interface supplies them. run_full_diagnosis(train_loader) alone does not expose validation targets or candidates; it must not infer them or access hidden files. Otherwise return validation effects as null with a reason. Never modify or replace the host evaluator.\n\nUse view.log2feats and view.predict_score with the existing compatible tensor shapes. Compute the greatest nonzero sequence index, never count-1; exclude empty histories. Score fixed candidates in the same precision and checkpoint state. For auxiliary diagnostic ranks, break ties by descending score then ascending canonical item ID, including the top-k cutoff; define target rank as one plus the number of candidates ahead under that ordering. Define pairwise win rate as mean(I[positive>negative]+0.5*I[equal]). Report exact tie frequency. Preserve host tie handling for official evaluation. Existing raw margin metrics may remain for continuity, explicitly marked scale- and sampler-dependent.\n\nSave per-user baseline and perturbed outcomes, candidate IDs, perturbation seeds, history length, k, and configuration under the trial directory. Average repeated perturbation outcomes within user before aggregation; never average prediction scores or deploy perturbation predictions. Report delta as perturbed minus baseline for HR@10 and target rank, and overlap@10=|baseline_top10 intersect perturbed_top10|/10 within the fixed candidate set. Use history-length bins 1–9, 10–19, and >=20; return null for empty strata. Bootstrap users within each category with replacement using seed 42 and 10,000 CPU replicates, applying identical sampled indices to paired outcomes. Average category differences equally and report observed differences and 2.5th/97.5th percentiles. Intervals condition on fixed candidates, checkpoints, and the recorded perturbation realizations; they exclude training-seed, candidate-sampling, and model-selection uncertainty. Report variation across perturbation seeds separately. Only report a four-category macro effect when all four category estimates are available; otherwise label the available category results explicitly.\n\nIf authorized validation examples are available, stratify by training-observed final-transition counts 0, 1–4, and >=5, and whether the terminal three-item history suffix occurs in public training histories. Record counts and handle short suffixes as unavailable. Persistence on novel transitions strengthens evidence of generalizable dependence but does not remove availability artifacts or establish causal behavior. Training-only effects are consistent with memorization or distribution shift and establish neither.\n\nOptionally score all eligible unseen items for the same fixed 20 training users, five per category, with frozen histories, mapping, exclusions, precision, k=10, and canonical tie handling. Compare identity versus each intervention for the same checkpoint, reporting overlap, entering/leaving IDs, shared-item rank changes, and whether the diagnostic target is excluded. For these training users the target may be a known interaction and therefore absent from the unseen catalog. This is descriptive stability, not a relevance estimate; five users/category makes any uncertainty exploratory. A separately fitted baseline is unnecessary for this diagnostic and must never be fused with the selected model.\n\nRestore the original model mode after diagnostics, including on errors. Return counts, formulas, configuration, unavailable/null reasons, and interpretation limits alongside metrics; zero must mean an actual measurement. Keep legacy collapse diagnostics with their original definition rather than implying that mean cosine is an effective-rank measure. diagnosis_interpreter_prompt must embed measured values and definitions and prohibit unsupported conclusions about compatibility, current demand, causal preference, or expected validation gains.\n\nKeep all four routes, DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, at most 200 epochs and 200 batches per epoch, and single-GPU execution. No predictor-writer changes are required because this diagnostic leaves architecture and inference unchanged. Any later architectural change must update both the predictor writer and checkpoint loading. Bound diagnostic batches and catalog scoring, record their GPU cost, and retain the shared 43,200 GPU-second budget. Predeclare probes before inspecting results; avoid repeatedly tuning to frozen validation candidates. Only the unchanged host macro validation HR@10 selects models.",
+      "pseudocode": "save model mode\ntry:\n    model.eval(); disable gradients\n    record checkpoint/configuration and actual positional/temporal mechanisms\n    examples = sample_training_users(seed=42, max_users_per_category=100,\n                                     minimum_events=5)\n    for user in examples:\n        target = final public training event\n        prefix = preceding training events\n        window = truncate_once(prefix, baseline_max_length)\n        candidates = freeze(target + 99 unique eligible negatives)\n        if insufficient_candidates: record exclusion; continue\n        k = max(1, floor(0.2 * valid_length(window)))\n        variants = identity, no_op, recent_k_delete, oldest_k_delete,\n                   final_item_delete, random_k_delete,\n                   shuffle_older_keep_last, shuffle_all\n        for variant in variants:\n            for seed in required_seeds(variant, [42,43,44,45,46]):\n                sequence = apply_to_same_window_without_backfill(variant, seed)\n                preserve_supported_timestamp_slots_or_surviving_timestamps()\n                sequence = left_pad(sequence)\n                if sequence is empty: record exclusion; continue\n                features = view.log2feats(sequence)\n                index = max(position where sequence[position] != 0)\n                scores = view.predict_score(final_features(features,index), candidates)\n                record deterministic rank, hit@10, top10 IDs, ties\n        verify identity/no_op agreement\n        average repeated diagnostic outcomes within user, never scores\n    aggregate paired effects and history-length strata\n    bootstrap users within category 10000 times with seed=42\n    macro-average four category effects only when all are available\n    if authorized validation examples and pinned candidates are supplied:\n        repeat controlled protocol; keep host filtering/tie rules unchanged\n        report training-transition and suffix-overlap strata separately\n    else:\n        validation_metrics = null with reason\n    optionally audit full-catalog unseen-item stability for fixed 20 training users\nfinally:\n    restore original model mode\nreturn {metrics: values_counts_configuration_and_availability,\n        metric_definitions: formulas_controls_and_interpretation_limits}",
+      "originality": {
+        "score": 5,
+        "positive": "Integrates matched deletion controls, slot-preserving shuffles, evidence-availability states, and separate in-sample versus validation interpretation in a HSTU-compatible adapter.",
+        "negative": "The individual interventions, paired comparisons, and uncertainty methods are established; novelty primarily lies in careful integration."
+      },
+      "future_potential": {
+        "score": 7,
+        "positive": "Provides a reproducible basis for choosing whether subsequent single-model HSTU changes should address recency, sequence order, or candidate discrimination.",
+        "negative": "Diagnostic sensitivity may not predict HR@10 improvements, and training-prefix measurements alone cannot demonstrate generalizable sequence use or explain user rejection reasons."
+      },
+      "code_difficulty": {
+        "score": 5,
+        "positive": "Core interventions use existing scoring hooks and require no retraining, architectural change, or checkpoint migration.",
+        "negative": "Correct candidate exclusions, temporal controls, deterministic ranking, paired aggregation, and optional authorized validation integration add substantial implementation care."
+      }
+    },
+    "related_work": [
+      {
+        "title": "Actions Speak Louder than Words",
+        "link": "https://arxiv.org/abs/2402.17152",
+        "contributions": [
+          "Introduces HSTU for recommendation sequences.",
+          "Motivates considering relative positional and temporal bias and evidence quantity when interpreting history interventions."
+        ],
+        "limitations": [
+          "The architecture alone does not establish whether a fitted checkpoint captures current intent.",
+          "The supplied baseline must be inspected before assuming it implements every mechanism in the paper.",
+          "The proposed diagnostic controls are adaptations, not published findings validating this probe."
+        ]
+      },
+      {
+        "title": "Robust Training of Sequential Recommender Systems with Missing Input Data",
+        "link": "https://iris.uniroma1.it/bitstream/11573/1740238/1/Siciliano_Robust-Training_2024.pdf",
+        "contributions": [
+          "Studies sensitivity to missing sequential inputs, motivating controlled deletion probes."
+        ],
+        "limitations": [
+          "Does not validate the proposed adapter as an HSTU failure detector.",
+          "Deletion effects combine information removal with other representation changes."
+        ]
+      },
+      {
+        "title": "Measuring Recency Bias",
+        "link": "https://arxiv.org/abs/2409.09722",
+        "contributions": [
+          "Motivates examining whether recent interactions receive excessive influence."
+        ],
+        "limitations": [
+          "Does not imply that increasing or decreasing recency dependence will improve this benchmark."
+        ]
+      },
+      {
+        "title": "Disentangling User and Item Sequence Patterns",
+        "link": "https://doi.org/10.1145/3705328.3748042",
+        "contributions": [
+          "Highlights confounding between behavioral sequence patterns and item availability.",
+          "Supports cautious interpretation of shuffle-based sensitivity."
+        ],
+        "limitations": [
+          "Shuffle effects do not identify causal preferences.",
+          "Fixed-split validation dependence can still reflect availability artifacts."
+        ]
+      },
+      {
+        "title": "Hard-BPR",
+        "link": "https://arxiv.org/abs/2403.19276",
+        "contributions": [
+          "Addresses challenges associated with hard negatives, including potential false negatives."
+        ],
+        "limitations": [
+          "Hard-negative performance is conditional on sampling and cannot replace the pinned host benchmark."
+        ]
+      },
+      {
+        "title": "WDC-PAVE",
+        "link": "https://arxiv.org/abs/2403.02130",
+        "contributions": [
+          "Studies product attribute extraction and normalization, informing an optional evidence-availability audit."
+        ],
+        "limitations": [
+          "Extracted attributes can be incorrect or incomplete and do not independently establish product compatibility.",
+          "Public interaction histories do not establish ownership or fulfilled needs."
+        ]
+      },
+      {
+        "title": "On Sampled Metrics for Item Recommendation",
+        "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+        "contributions": [
+          "Explains why sampled ranking metrics can distort comparisons with full-catalog evaluation."
+        ],
+        "limitations": [
+          "Fixing candidate sets improves reproducibility but does not remove sampling bias.",
+          "This evidence motivates interpretation limits, not changes to the pinned benchmark."
+        ]
+      },
+      {
+        "title": "Sequential-Recommendation Sampling Study",
+        "link": "https://arxiv.org/abs/2107.13045",
+        "contributions": [
+          "Provides additional evidence that sampled evaluation can produce inconsistent sequential-recommender rankings."
+        ],
+        "limitations": [
+          "Does not determine the direction or size of sampling distortion for the supplied checkpoints."
+        ]
+      },
+      {
+        "title": "PyTorch torch.topk Documentation",
+        "link": "https://docs.pytorch.org/docs/stable/generated/torch.topk.html",
+        "contributions": [
+          "Documents that indices of tied elements are not guaranteed to be stable, motivating explicit diagnostic tie handling."
+        ],
+        "limitations": [
+          "Deterministic tie handling improves reproducibility but does not establish recommendation relevance.",
+          "Auxiliary ranking rules must not replace host evaluator behavior."
+        ]
+      },
+      {
+        "title": "SciPy Paired Bootstrap Documentation",
+        "link": "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.bootstrap.html",
+        "contributions": [
+          "Documents paired resampling, supporting preservation of baseline–intervention correspondence."
+        ],
+        "limitations": [
+          "The proposed category-stratified user bootstrap requires explicit aggregation logic.",
+          "Its intervals exclude candidate-sampling, training-seed, and selection uncertainty; very small audit samples remain exploratory."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/model-family-comparison-20261029/runs/hstu-self_evolverec/self_evolverec/calls/00135"
+}

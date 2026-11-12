@@ -1,0 +1,99 @@
+--- g1-r0028-pool_match_task/model.py
++++ g1-r0029-summary_rotate_shared/model.py
+@@ -1,13 +1,11 @@
+-"""Pool-conditioned localization of historical action-summary utility.
+-
+-Restore pooled action in the existing match/ordinal summary-family by
+-task/shared readout quartet. All item coordinates, summary coefficients,
+-original action-derived masks, learned construction and ownership remain.
+-Scorer action stays zero. Pool-off and all/none summary settings are diagnostic
+-bridges; no extra training variants are submitted. The action lookup remains
+-observed whenever the pool needs it, including the none-summary endpoint.
+-This tests conditional action-token paths in the official offline benchmark.
+-Equal nominal shapes do not imply equal active capacity or information.
+-No local training, tensor validation, or priority claim is made.
++"""Within-block action alignment control for all five residual summaries.
++
++Only the action coordinates of the summary input use a deterministic cyclic
++rotation among valid positions in each original ten-event block. Aligned cells
++execute the same gather with zero shift. Per-block action multisets, original
++pool/scorer streams, item coordinates, coefficient construction, task masks,
++learned modules and auxiliary gradient ownership are retained. This is a
++conditional representation probe; action-derived masks still expose feedback.
++No training or tensor validation has been performed in the coding environment.
+ """
+ import torch
+@@ -18,5 +16,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'match'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'shared', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated'}
+ 
+ 
+@@ -27,5 +25,5 @@
+                  compression_routes='uf', block_aux_scorer_grad=True,
+                  block_aux_context_grad=False, block_aux_item_grad=True, num_tasks=None,
+-                 residual_input='match_detail', residual_routing='task', residual_hidden=16,
++                 residual_input='match_detail', residual_routing='shared', residual_hidden=16,
+                  temporal_detail='position', block_detail='ordinal',
+                  curvature_detail='quadratic', joint_detail='duplicate_match',
+@@ -34,5 +32,6 @@
+                  support_gradient='attached', action_in_scorer=False,
+                  action_in_pool=True, action_in_summaries=True,
+-                 summary_action_group='match', task='binary_classification', **kwargs):
++                 summary_action_group='all', summary_action_alignment='rotated',
++                 task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+@@ -87,4 +86,7 @@
+             raise ValueError('Unknown summary action group')
+         self.summary_action_group = summary_action_group
++        if summary_action_alignment not in ('aligned', 'rotated'):
++            raise ValueError('Unknown within-block summary action alignment')
++        self.summary_action_alignment = summary_action_alignment
+         self.residual_input = residual_input
+         self.residual_routing = residual_routing
+@@ -213,9 +215,40 @@
+         values = torch.cat([keys, item_emb[self.action_field][:, :-1]], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
+-        # All summaries are computed once from the same values. A projection
+-        # after contraction selects only their historical action coordinates.
++        # Only the summary consumer sees reindexed action coordinates.
++        # The observed values returned below still feed the unchanged pool
++        # and scorer. Neither item IDs nor original task masks are reindexed.
++        summary_values = self._summary_values(values, mask)
+         detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._target_match_summary(
+-            item, self._action_channel(values, self.action_in_summaries), mask)
++            item, self._action_channel(summary_values, self.action_in_summaries), mask)
+         return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union
++
++    def _summary_values(self, values, mask):
++        """Gather action embeddings by valid rank within each ten-event block.
++
++        The rotated cell shifts by floor(n_valid/2); aligned uses zero shift.
++        Invalid positions retain their old values and cannot be gather sources
++        for valid destinations. No action token crosses a block or sample.
++        Empty and singleton blocks are identities. The gather is bijective on
++        valid positions, so action multisets and their sums are preserved per
++        block. Original item values, masks and action lookup are never changed.
++        """
++        batch, length, width = values.shape
++        if length != 100 or mask.shape != values.shape[:2]:
++            raise ValueError('Expected one mask per frozen history position')
++        valid = mask.bool().reshape(batch, 10, 10)
++        ranks = (valid.long().cumsum(dim=-1) - 1).clamp_min(0)
++        counts = valid.long().sum(dim=-1, keepdim=True)
++        positions = torch.arange(10, device=values.device, dtype=torch.long).view(1, 1, 10)
++        packed_positions = torch.zeros_like(ranks).scatter_add(
++            -1, ranks, positions * valid.long())
++        shift = (counts // 2) * int(self.summary_action_alignment == 'rotated')
++        source_rank = (ranks + shift).remainder(counts.clamp_min(1))
++        source_position = packed_positions.gather(-1, source_rank)
++        actions = values[:, :, self.key_width:].reshape(batch, 10, 10, width - self.key_width)
++        gathered = actions.gather(
++            2, source_position.unsqueeze(-1).expand(-1, -1, -1, width - self.key_width))
++        actions = torch.where(valid.unsqueeze(-1), gathered, actions)
++        return torch.cat([values[:, :, :self.key_width],
++                          actions.reshape(batch, length, width - self.key_width)], dim=-1)
+ 
+     def _target_match_summary(self, item, values, mask):

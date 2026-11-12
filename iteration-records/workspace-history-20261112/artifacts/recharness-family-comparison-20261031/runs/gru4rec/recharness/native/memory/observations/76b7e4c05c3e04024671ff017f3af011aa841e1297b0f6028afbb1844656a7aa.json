@@ -1,0 +1,89 @@
+{
+  "schema_version": 2,
+  "protocol_id": "63d884e335450b4c7d4c05470c02cfbc484d52d6b839640f603abc93a1b33219",
+  "record": {
+    "round_idx": 17,
+    "trial_group_id": "trialgrp_1793447777127_2865811",
+    "trial_id": 2,
+    "arm": "feature_construction",
+    "selected_categories": [
+      "feature_construction"
+    ],
+    "patch_summary": "Add fixed training-frequency history scaling with checkpointed buffers and matching predictor validation for each category’s single GRU4Rec model.",
+    "benchmark_score": 0.5887,
+    "val_score": 0.5887,
+    "is_winner": false,
+    "is_group_winner": false,
+    "valid": true,
+    "failure_type": null,
+    "delta_vs_prev_best": -0.0163,
+    "delta_vs_input": -0.0163,
+    "outcome": "regressed",
+    "val_support": "regressed",
+    "gpu_seconds": 340.1461700350046,
+    "trial_cap_seconds": 5854.898874223232,
+    "per_dataset_hr10": {
+      "Movies_and_TV": 0.66,
+      "Industrial_and_Scientific": 0.59,
+      "Electronics": 0.43,
+      "CDs_and_Vinyl": 0.675
+    },
+    "error": "",
+    "parameter_changes": [],
+    "changed_definitions": [
+      "GRU4RecModel",
+      "GRU4RecModel.__init__",
+      "GRU4RecModel._interest_states",
+      "train_one_dataset",
+      "write_predict_script"
+    ],
+    "summary": "Add fixed training-frequency history scaling with checkpointed buffers and matching predictor validation for each category’s single GRU4Rec model.",
+    "proposal_history": [
+      {
+        "attempt": 1,
+        "summary": "Add fixed training-frequency history scaling with checkpointed buffers and matching predictor validation for each category’s single GRU4Rec model."
+      }
+    ],
+    "hypothesis": "Across all four datasets, multiply each nonpadding input embedding by s_i=clip((c_i/g)^(-0.1),0.8,1.2), where c_i is the item's supplied-training interaction count clamped to one and g is the geometric mean of these counts over training-observed items. Mild frequency attenuation may reduce common-item dominance in recurrent updates. Keep candidate embeddings unchanged. Store counts/scales for identical inference; preserve embedding parameters, topology, readout, scoring, loss and optimizer.",
+    "input_source_sha256": "a8e47e71c18270bbe947edf6aef97be7f86631980ae0e9ab2e034de39aefea89",
+    "candidate_source_sha256": "d3f35a2ba7de09184b2d9731c9494269c2c06e7ce1e03bb94540654498ae7882",
+    "input_normalized_sha256": "aa418c4406e21a0c1d8e14c49cb5d962d5dab49de0150f37353b862f3e8161d8",
+    "candidate_normalized_sha256": "12558b250e08bffd184a045a0d6d7b74cf085ab9545b229b795a7e5b586e8946",
+    "patch_sha256": "866deaf24b1f0354dfa31f16ab444902b1e7290190ddb9f544bc8d8d56fc9e32",
+    "diff_excerpt": "--- \n+++ \n@@ -193,4 +193,6 @@\n         self.hidden_units = hidden_units\n         self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)\n+        self.register_buffer(\"history_frequency_scale\", torch.ones(itemnum + 1))\n+        self.history_frequency_scale[0] = 0.0\n         dropout = dropout_rate if num_layers > 1 else 0.0\n         self.gru = nn.GRU(hidden_units, hidden_units, num_layers=num_layers,\n@@ -202,5 +204,7 @@\n \n     def _interest_states(self, seq: torch.Tensor) -> torch.Tensor:\n-        emb = self.dropout(self.item_emb(seq))\n+        emb = self.dropout(\n+            self.item_emb(seq) * self.history_frequency_scale[seq].unsqueeze(-1)\n+        )\n         out, _ = self.gru(emb)\n         positions = torch.arange(seq.size(1), device=seq.device)\n@@ -246,4 +250,16 @@\n         dropout_rate=DROPOUT_RATE,\n     ).to(device)\n+    counts = np.zeros(itemnum + 1, dtype=np.int64)\n+    for items in user_train.values():\n+        np.add.at(counts, np.asarray(items, dtype=np.int64), 1)\n+    observed_counts = counts[1:][counts[1:] > 0]\n+    geometric_mean = float(np.exp(np.log(observed_counts.astype(np.float64)).mean()))\n+    scales = np.clip(\n+        (np.maximum(counts, 1).astype(np.float64) / geometric_mean) ** (-0.1),\n+        0.8, 1.2,\n+    ).astype(np.float32)\n+    scales[0] = 0.0\n+    with torch.no_grad():\n+        model.history_frequency_scale.copy_(torch.from_numpy(scales).to(device))\n     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)\n \n@@ -301,4 +317,5 @@\n             \"dropout_rate\": DROPOUT_RATE,\n             \"sequence_readout\": \"gru_0.8_causal_mean_0.2_half_life_4\",\n+            \"history_feature\": \"train_count_geomean_power_minus_0.1_clip_0.8_1.2\",\n         }, f)\n     print(f\"  [{dataset_name}] Best val HR@10={max(best_hr10, 0.0):.4f}  ckpt={ckpt_path}\", flush=True)\n@@ -358,4 +375,6 @@\n         if meta.get(\"sequence_readout\") != \"gru_0.8_causal_mean_0.2_half_life_4\":\n             raise RuntimeError(f\"Incompatible GRU sequence readout for {ds}\")\n+        if meta.get(\"history_feature\") != \"train_count_geomean_power_minus_0.1_clip_0.8_1.2\":\n+            raise RuntimeError(f\"Incompatible GRU history feature for {ds}\")\n         model = ModelClass(\n             itemnum=meta[\"itemnum\"],\n",
+    "category_rationales": [
+      {
+        "category": "feature_construction",
+        "rationale": "Apply mild training-frequency attenuation to history embeddings across all four datasets: clip((count/geometric_mean)^(-0.1), 0.8, 1.2). Persist the fixed scales in each model checkpoint and validate the feature specification during prediction. Preserve candidate embeddings, GRU topology, readout, loss, optimizer and training settings."
+      }
+    ],
+    "baseline_validation": 0.605,
+    "basin_id": "default",
+    "execution_status": "success",
+    "attempt_count": 1,
+    "training_attempt_count": 1,
+    "training_attempts": [
+      {
+        "id": "round-0016-slot-2-attempt-1",
+        "status": "success",
+        "source_sha256": "d3f35a2ba7de09184b2d9731c9494269c2c06e7ce1e03bb94540654498ae7882",
+        "allocated_gpu_seconds": 340.1461700350046,
+        "error": "",
+        "score": 0.5887
+      }
+    ],
+    "checkpoint_fingerprints": {
+      "Movies_and_TV_model.pt": "927e1f830e73870637d231008c9214b6a6b9e7a3c061eb6d47f1c2d2a776138d",
+      "Industrial_and_Scientific_model.pt": "98a1e20af07992537b18d7232b0fad010b8c6d3533ee271cff7b2a5d8979a2a7",
+      "Electronics_model.pt": "5fb857bff5a34f1d38605a898c2d68b7963ecf11bb5190e79361ea120bbb2667",
+      "CDs_and_Vinyl_model.pt": "b480ca657258beb55e9e87c7bab40b443a5bf20b72ea8baaa36ba13dacc5b633"
+    },
+    "repair_errors": [],
+    "phase": "regular",
+    "promoted": false,
+    "provisional": false,
+    "protocol_id": "63d884e335450b4c7d4c05470c02cfbc484d52d6b839640f603abc93a1b33219",
+    "evidence_id": "76b7e4c05c3e04024671ff017f3af011aa841e1297b0f6028afbb1844656a7aa"
+  },
+  "record_sha256": "35b028ed62a9624e936d36052ffa19e415f935f33affbcb3b21cb0df7b13dd57"
+}

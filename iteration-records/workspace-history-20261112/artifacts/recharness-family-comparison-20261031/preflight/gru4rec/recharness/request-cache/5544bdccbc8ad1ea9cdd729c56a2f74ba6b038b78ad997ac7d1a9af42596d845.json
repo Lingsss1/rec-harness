@@ -1,0 +1,19 @@
+{
+  "request_sha256": "5544bdccbc8ad1ea9cdd729c56a2f74ba6b038b78ad997ac7d1a9af42596d845",
+  "response": {
+    "category_edits": [
+      {
+        "category": "embedding_representation",
+        "rationale": "Normalize the shared item embeddings for GRU inputs and all item scoring to reduce norm-driven score inflation. Preserve embedding dimensions, GRU topology, dot-product scoring, loss and optimizer. The generated predictor imports this same model class, so inference uses identical normalization with unchanged checkpoint shapes.",
+        "edits": [
+          {
+            "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        # Histories are LEFT padded; count-1 indexes padding on short histories.\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores\n\n    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:\n        user_emb = self.encode(seq)[0]\n        cand_emb = self.item_emb(candidates)\n        return torch.matmul(cand_emb, user_emb)",
+            "replace": "    def normalized_item_embeddings(self, items: torch.Tensor) -> torch.Tensor:\n        emb = torch.nn.functional.normalize(\n            self.item_emb(items), p=2, dim=-1, eps=1e-8\n        )\n        return emb.masked_fill((items == 0).unsqueeze(-1), 0.0)\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.normalized_item_embeddings(seq))\n        out, _ = self.gru(emb)\n        # Histories are LEFT padded; count-1 indexes padding on short histories.\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.normalized_item_embeddings(seq))\n        out, _ = self.gru(emb)\n        pos_scores = (out * self.normalized_item_embeddings(pos)).sum(dim=-1)\n        neg_scores = (out * self.normalized_item_embeddings(neg)).sum(dim=-1)\n        return pos_scores, neg_scores\n\n    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:\n        user_emb = self.encode(seq)[0]\n        cand_emb = self.normalized_item_embeddings(candidates)\n        return torch.matmul(cand_emb, user_emb)"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Apply epsilon-protected row-wise L2 normalization to tied item embeddings across training and inference, with padding embeddings fixed at zero. All four dataset models retain the existing architecture, routing and training configuration."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/preflight/gru4rec/recharness/calls/00002"
+}

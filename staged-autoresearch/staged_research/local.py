@@ -235,15 +235,22 @@ def make_runtime(config, root):
     if execution["backend"] == "docker":
         return DockerRuntime(config["agent"], config["protocol"]["gpu_device"])
     if execution["backend"] == "local":
+        if config["agent"].get("provider") == "codex":
+            from .codex import CodexRuntime
+            return CodexRuntime(config["agent"], execution, root, execution.get("gpu_device", config["protocol"]["gpu_device"]))
         return LocalRuntime(config["agent"], execution, root, execution.get("gpu_device", config["protocol"]["gpu_device"]))
     raise ProtocolError("Unknown execution backend")
 
 
 @contextlib.contextmanager
-def gpu_lease(config):
+def gpu_lease(config, device=None):
     from .storage import digest, locked
     lock_root = Path(tempfile.gettempdir()) / ("staged-research-gpu-" + str(os.getuid()))
     lock_root.mkdir(mode=0o700, exist_ok=True)
-    gpu = config.get("execution", {}).get("gpu_device", config["protocol"]["gpu_device"])
+    execution = config.get("execution", {})
+    gpu = device if device is not None else execution.get("gpu_device", config["protocol"]["gpu_device"])
+    allowed = execution.get("gpu_devices", [execution.get("gpu_device", config["protocol"]["gpu_device"])])
+    if str(gpu) not in list(map(str, allowed)):
+        raise ProtocolError("GPU outside the registered execution pool")
     with locked(lock_root / (digest(gpu)[:16] + ".lock")):
         yield

@@ -1,0 +1,96 @@
+{
+  "schema_version": 2,
+  "protocol_id": "549366dec30f3763567e6e817d66b07222b60932b7246814929f9402f6a197af",
+  "record": {
+    "round_idx": 11,
+    "trial_group_id": "trialgrp_1793481975759_3001973",
+    "trial_id": 0,
+    "arm": "embedding_representation",
+    "selected_categories": [
+      "embedding_representation"
+    ],
+    "patch_summary": "Separate history and candidate embeddings across all four category models. Both tables remain jointly trained and checkpointed within one HSTU model per category; validation and the generated predictor consistently use the candidate table.",
+    "benchmark_score": 0.465,
+    "val_score": 0.465,
+    "is_winner": true,
+    "is_group_winner": true,
+    "valid": true,
+    "failure_type": null,
+    "delta_vs_prev_best": -0.1062,
+    "delta_vs_input": -0.1062,
+    "outcome": "regressed",
+    "val_support": "regressed",
+    "gpu_seconds": 1306.7475455999374,
+    "trial_cap_seconds": 1686.0,
+    "per_dataset_hr10": {
+      "Movies_and_TV": 0.56,
+      "Industrial_and_Scientific": 0.54,
+      "Electronics": 0.335,
+      "CDs_and_Vinyl": 0.425
+    },
+    "error": "",
+    "parameter_changes": [
+      {
+        "name": "DATA_DIR",
+        "before_expression": "os.environ.get('GAGC_DATA_DIR', './input/trainval')",
+        "after_expression": "os.environ['GAGC_DATA_DIR']"
+      }
+    ],
+    "changed_definitions": [
+      "HSTURec",
+      "HSTURec.__init__",
+      "evaluate_val",
+      "train_one_dataset",
+      "write_predict_script"
+    ],
+    "summary": "Separate history and candidate embeddings across all four category models. Both tables remain jointly trained and checkpointed within one HSTU model per category; validation and the generated predictor consistently use the candidate table.",
+    "proposal_history": [
+      {
+        "attempt": 1,
+        "summary": "Separate history and candidate embeddings across all four category models. Both tables remain jointly trained and checkpointed within one HSTU model per category; validation and the generated predictor consistently use the candidate table."
+      }
+    ],
+    "hypothesis": "Across Movies_and_TV, Industrial_and_Scientific, Electronics and CDs_and_Vinyl, untie history and candidate item embeddings at width 64. Initialize the candidate table as a clone of the history table, then train both jointly within each category's single HSTU model. Separating context and target roles may reduce conflicting embedding gradients while preserving initial scores. Keep padding rows zero, frequency features, gated attention, readout, dot-product scoring, loss, optimizer and training settings fixed. Use the candidate table consistently in training, validation and the generated predictor, and checkpoint both tables.",
+    "input_source_sha256": "9f427e11a390c915351a692333db184fb551aa2eaf6f7c4b952c06d5e5cb07da",
+    "candidate_source_sha256": "36327d8f5aea9e0341546184e935f495bc79aed600d1368949afa064544a4097",
+    "input_normalized_sha256": "c320bb8236e91c7befe976c7336940b6dd54e6206564fb9438b5de854bd06e45",
+    "candidate_normalized_sha256": "acaeb40cf9fa848b52fa0fd156fdec14fa80e0e6a3ea6301bcf422b2fd8ca5c3",
+    "patch_sha256": "2dde19fb60d845289cf90eb7c58828f2bb6a34105b126c2387c87c021157fbfb",
+    "diff_excerpt": "--- \n+++ \n@@ -36,5 +36,5 @@\n EVAL_USERS = int(os.environ.get(\"HSTU_EVAL_USERS\", \"200\"))\n \n-DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")\n+DATA_DIR = os.environ['GAGC_DATA_DIR']\n \n DEFAULT_DATASETS = [\n@@ -199,4 +199,7 @@\n             nn.init.xavier_uniform_(self.pos_emb.weight)\n             self.pos_emb.weight[0].zero_()\n+        self.candidate_emb = nn.Embedding.from_pretrained(\n+            self.item_emb.weight.detach().clone(), freeze=False, padding_idx=0\n+        )\n \n     def forward(self, seq: torch.Tensor) -> torch.Tensor:\n@@ -257,5 +260,5 @@\n             out = model(seq_t)\n             user_emb = out[0, -1]\n-            scores = torch.matmul(model.item_emb(cand_t), user_emb)\n+            scores = torch.matmul(model.candidate_emb(cand_t), user_emb)\n             rank = int(torch.argsort(scores, descending=True).tolist().index(0))\n             if rank < 10:\n@@ -335,6 +338,6 @@\n             out = model(seq_t)\n             mask = (pos_t != 0).float()\n-            pos_scores = (out * model.item_emb(pos_t)).sum(dim=-1)\n-            neg_scores = (out * model.item_emb(neg_t)).sum(dim=-1)\n+            pos_scores = (out * model.candidate_emb(pos_t)).sum(dim=-1)\n+            neg_scores = (out * model.candidate_emb(neg_t)).sum(dim=-1)\n             pairwise_loss = F.softplus(-(pos_scores - neg_scores))\n             pointwise_loss = 0.5 * (F.softplus(-pos_scores) + F.softplus(neg_scores))\n@@ -384,5 +387,5 @@\n \n def write_predict_script(working_dir):\n-    script = '\"\"\"Per-dataset HSTU predict — routes by dataset_name kwarg.\"\"\"\\nfrom __future__ import annotations\\n\\nimport importlib.util\\nimport os\\nimport pickle\\n\\nimport torch\\n\\n_HERE = os.path.dirname(os.path.abspath(__file__))\\n\\nDEFAULT_DATASETS = [\\n    \"Movies_and_TV\",\\n    \"Industrial_and_Scientific\",\\n    \"Electronics\",\\n    \"CDs_and_Vinyl\",\\n]\\nDATASETS = [\\n    part.strip()\\n    for part in os.environ.get(\"GAGC_DATASETS\", \",\".join(DEFAULT_DATASETS)).split(\",\")\\n    if part.strip()\\n]\\n\\n_models: dict = {}\\n_metas: dict = {}\\n_device = None\\n\\n\\ndef _load_model_class():\\n    spec = importlib.util.spec_from_file_location(\\n        f\"hstu_perdataset_train_{os.getpid()}\", os.path.join(_HERE, \"..\", \"train.py\")\\n    )\\n    module = importlib.util.module_from_spec(spec)\\n    spec.loader.exec_module(module)\\n    return module.HSTURec\\n\\n\\ndef _ensure_loaded() -> None:\\n    global _device\\n    if _models:\\n        return\\n    _device = torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\\n    model_cls = _load_model_class()\\n    working_dir = _HERE\\n    for dataset_name in DATASETS:\\n        meta_path = os.path.join(working_dir, f\"{dataset_name}_meta.pkl\")\\n        ckpt_path = os.path.join(working_dir, f\"{dataset_name}_model.pt\")\\n        if not os.path.isfile(meta_path) or not os.path.isfile(ckpt_path):\\n            continue\\n        with open(meta_path, \"rb\") as f:\\n            meta = pickle.load(f)\\n        _metas[dataset_name] = meta\\n        model = model_cls(\\n            ",
+    "category_rationales": [
+      {
+        "category": "embedding_representation",
+        "rationale": "Untie history and candidate item embeddings in each category's single HSTU model, retaining width 64. Clone the initialized history table into a jointly trained candidate table to preserve initial scores while allowing context and target representations to specialize. Keep attention, frequency features, readout, dot-product scoring, loss and optimizer fixed."
+      }
+    ],
+    "baseline_validation": 0.5712,
+    "basin_id": "default|combination_jump@7",
+    "execution_status": "success",
+    "attempt_count": 1,
+    "training_attempt_count": 1,
+    "training_attempts": [
+      {
+        "id": "round-0010-slot-0-attempt-1",
+        "status": "success",
+        "source_sha256": "36327d8f5aea9e0341546184e935f495bc79aed600d1368949afa064544a4097",
+        "allocated_gpu_seconds": 1306.7475455999374,
+        "error": "",
+        "score": 0.465
+      }
+    ],
+    "checkpoint_fingerprints": {
+      "Movies_and_TV_model.pt": "36b6ea2cb3d5b0180db9fbb1b82dcfd036dbb41421f07334f2edb93c3492777f",
+      "Industrial_and_Scientific_model.pt": "fd5ac1c9328d0c63fd2c9ce10d5de71b13ebf4a71414d2f86865569ddbf44a9f",
+      "Electronics_model.pt": "8b198c7e33aea378a87a4c59add40794dd4c33ad2aa9d33dba8c696c5a8b6d9f",
+      "CDs_and_Vinyl_model.pt": "2ed7bc33fa8bcbfc2535ad55381545fc06818f07754575203092a5631f7e4b73"
+    },
+    "repair_errors": [],
+    "phase": "retune",
+    "jump_window_id": "default|combination_jump@7",
+    "promoted": false,
+    "provisional": false,
+    "protocol_id": "549366dec30f3763567e6e817d66b07222b60932b7246814929f9402f6a197af",
+    "evidence_id": "a214ac737c832219eb5c0e48d38bcc20d38efcfa0e1fa13d988da4eb2a3fb0dd"
+  },
+  "record_sha256": "6d7968e9f358da82b57106c43302900fc60efa9e3f0bd007c1e9afba82cd6f3f"
+}

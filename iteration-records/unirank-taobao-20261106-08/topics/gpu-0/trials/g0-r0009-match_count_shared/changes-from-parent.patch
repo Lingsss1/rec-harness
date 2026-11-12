@@ -1,0 +1,169 @@
+--- g0-r0008-task_capacity/model.py
++++ g0-r0009-match_count_shared/model.py
+@@ -1,12 +1,13 @@
+-"""Prospective feedback-contrast x task-specific residual factorial.
+-
+-Retain the incumbent UF compression, scorer, Dice population and gradient
+-ownership. A zero-output residual bank modifies the pooled representation.
+-Contrast cells expose the centered feedback stratum; capacity controls expose
+-only the already consumed pool. Task cells select a task's bank member;
+-shared cells average the same four nonlinear members. Every cell executes
+-all members per task, with equal allocated parameters and forward shapes.
+-New modules are allocated after inherited initialization under fork_rng.
+-No numerical validation, predictive gain or originality is asserted here.
++"""Prospective target-match detail x adapter-sharing factorial.
++
++Keep the inherited UF pooling, scorer population and gradient ownership.
++Compress target-match/value covariance inside each original temporal block
++before its means discard that information. All cells expose three match
++counts; detail cells additionally expose the covariance, and replacement
++controls expose the already consumed base pool in the same input positions.
++Task cells select one of four adapters; shared cells average the same bank.
++All four adapters execute per task in every cell. Zero final projections
++preserve source predictions initially. No numerical validation, predictive
++gain, original-paper reproduction or originality is asserted here.
+ """
+ import torch
+@@ -17,14 +18,14 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'base', 'residual_routing': 'task', 'residual_hidden': 16}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'count_only', 'residual_routing': 'shared', 'residual_hidden': 16}
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='SourcePathCompression', gpu=-1,
++    def __init__(self, feature_map, model_id='TargetMatchDetail', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+                  compression_routes='uf', block_aux_scorer_grad=True,
+                  block_aux_context_grad=False, block_aux_item_grad=True, num_tasks=None,
+-                 residual_input='contrast', residual_routing='task', residual_hidden=16,
++                 residual_input='count_only', residual_routing='shared', residual_hidden=16,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -48,5 +49,5 @@
+         if block_aux_context_grad is not False or block_aux_item_grad is not True:
+             raise ValueError('The incumbent source-path ownership is required')
+-        if residual_input not in ('contrast', 'base'):
++        if residual_input not in ('match_detail', 'count_only'):
+             raise ValueError('Unknown residual information control')
+         if residual_routing not in ('task', 'shared'):
+@@ -70,4 +71,17 @@
+         self.key_width = len(self.item_fields) * embedding_dim
+         self.value_width = self.key_width + embedding_dim
++        # Only supplied encoded fields are compared; no external lookups.
++        # Zero and declared special IDs never constitute positive evidence.
++        self.match_fields = ('item_id', 'cate_id', 'brand')
++        self.match_excluded_ids = {}
++        for name in self.match_fields:
++            if name not in self.item_fields:
++                raise ValueError('Required target-match field is absent: ' + name)
++            spec = feature_map.features[name]
++            excluded = {0}
++            for special in ('padding_idx', 'oov_idx'):
++                if spec.get(special) is not None:
++                    excluded.add(int(spec[special]))
++            self.match_excluded_ids[name] = tuple(sorted(excluded))
+ 
+         # Inherit the action-aware scorer and towers from the previous factorial.
+@@ -95,5 +109,6 @@
+         with torch.random.fork_rng(devices=[]):
+             self.residual_bank = nn.ModuleList([
+-                nn.Sequential(nn.Linear(input_width, residual_hidden), nn.ReLU(),
++                nn.Sequential(nn.Linear(input_width + len(self.match_fields) + self.value_width,
++                                        residual_hidden), nn.ReLU(),
+                               nn.Linear(residual_hidden, self.value_width))
+                 for _ in feature_map.labels
+@@ -134,5 +149,43 @@
+         values = torch.cat([keys, item_emb[self.action_field][:, :-1]], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
+-        return context, target, values, mask, auxiliary
++        detail, match_counts = self._target_match_summary(item, values, mask)
++        return context, target, values, mask, auxiliary, detail, match_counts
++
++    def _target_match_summary(self, item, values, mask):
++        """One compressed within-block covariance, plus three match counts.
++
++        r_i averages item/category/brand equality. Centering r separately
++        within each original block removes the component already represented
++        by its mean value. This uses encoded equality, not raw-ID semantics.
++        All cells compute this summary, including count-only replacements.
++        """
++        matches = []
++        for name in self.match_fields:
++            ids = item[name]
++            if ids.ndim != 2 or ids.shape[1] != 101 or ids.shape[0] != mask.shape[0]:
++                raise ValueError('Expected target-match IDs with shape [B,101]')
++            history_ids, target_id = ids[:, :-1], ids[:, -1:]
++            valid = mask.bool() & (history_ids > 0) & (target_id > 0)
++            for special in self.match_excluded_ids[name]:
++                valid = valid & (history_ids != special) & (target_id != special)
++            matches.append(valid & (history_ids == target_id))
++        match_matrix = torch.stack(matches, dim=-1).to(torch.float32)
++        match_counts = torch.log1p(match_matrix.sum(dim=1))
++        batch, length, width = values.shape
++        if length != 100:
++            raise ValueError('Frozen target-match compression requires 100 history positions')
++        valid = mask.bool().reshape(batch, 10, 10).to(torch.float32)
++        counts = valid.sum(dim=-1, keepdim=True)
++        affinity = match_matrix.mean(dim=-1).reshape(batch, 10, 10)
++        centered = affinity - valid * (affinity.sum(dim=-1, keepdim=True)
++                                      / counts.clamp_min(1))
++        # No event-level MLP or extra Dice population. Only this small batched
++        # contraction precedes the same 30-slot inherited scoring operator.
++        detail = torch.bmm(centered.to(values.dtype).reshape(batch * 10, 1, 10),
++                           values.reshape(batch * 10, 10, width))
++        detail = detail.reshape(batch, 10, width).sum(dim=1)
++        total = counts.sum(dim=1).clamp_min(1)
++        detail = detail / total.sqrt().to(detail.dtype)
++        return detail, match_counts
+ 
+     def _compress_both(self, values, mask, auxiliary):
+@@ -183,5 +236,5 @@
+ 
+     def forward(self, inputs):
+-        context, target, values, mask, auxiliary = self._represent(inputs)
++        context, target, values, mask, auxiliary, detail, match_counts = self._represent(inputs)
+         values, counts = self._compress_both(values, mask, auxiliary)
+         # Both calls include all 30 slots: each BatchNorm sees the identical
+@@ -199,4 +252,5 @@
+             aux_target = target.detach() if self.block_aux_item_grad else target
+             aux_values = values.detach() if self.block_aux_item_grad else values
++            aux_detail = detail.detach() if self.block_aux_item_grad else detail
+             aux_weights = self._auxiliary_activation(self._interactions(aux_target, aux_values))
+             aux_strata = self._pool(aux_weights, aux_values, counts)
+@@ -205,16 +259,9 @@
+             # just one scorer pass for every factorial cell.
+             aux_context, aux_target = context, target
++            aux_detail = detail
+             aux_strata = primary_strata
+         feedback = aux_strata[:, 1, :] + aux_strata[:, 2, :]
+-        # Center the feedback pool by its unweighted event prevalence.
+-        # F = A + N; contrast = A - p*F. Homogeneous histories have zero
+-        # contrast. Counts describe only released, mask-valid history.
+         grouped_counts = counts.reshape(counts.shape[0], 10, 3)
+         total_count = grouped_counts[:, :, 0].sum(dim=1, keepdim=True)
+-        feedback_count = grouped_counts[:, :, 2].sum(dim=1, keepdim=True)
+-        fraction = feedback_count / total_count.clamp_min(1)
+-        primary_feedback = primary_strata[:, 1, :] + primary_strata[:, 2, :]
+-        primary_contrast = primary_strata[:, 2, :] - fraction * primary_feedback
+-        auxiliary_contrast = aux_strata[:, 2, :] - fraction * feedback
+         has_history = (total_count > 0).to(uniform.dtype)
+         predictions = {}
+@@ -222,10 +269,11 @@
+             if label == 'is_click':
+                 task_context, task_target, base = context, target, uniform
+-                contrast = primary_contrast
++                task_detail = detail
+             else:
+                 task_context, task_target, base = aux_context, aux_target, feedback
+-                contrast = auxiliary_contrast
+-            signal = contrast if self.residual_input == 'contrast' else base
+-            residual_features = torch.cat([task_context, task_target, signal], dim=-1)
++                task_detail = aux_detail
++            signal = task_detail if self.residual_input == 'match_detail' else base
++            residual_features = torch.cat([task_context, task_target, base,
++                                           match_counts.to(base.dtype), signal], dim=-1)
+             # Equal bank execution in all cells; no task-specific scorer rows
+             # or extra stateful normalization is introduced.

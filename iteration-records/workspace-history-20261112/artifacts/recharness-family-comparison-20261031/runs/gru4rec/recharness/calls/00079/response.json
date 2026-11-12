@@ -1,0 +1,31 @@
+{
+  "category_edits": [
+    {
+      "category": "feature_construction",
+      "rationale": "Apply mild training-frequency attenuation to history embeddings across all four datasets: clip((count/geometric_mean)^(-0.1), 0.8, 1.2). Persist the fixed scales in each model checkpoint and validate the feature specification during prediction. Preserve candidate embeddings, GRU topology, readout, loss, optimizer and training settings.",
+      "edits": [
+        {
+          "find": "        self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)\n        dropout = dropout_rate if num_layers > 1 else 0.0",
+          "replace": "        self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)\n        self.register_buffer(\"history_frequency_scale\", torch.ones(itemnum + 1))\n        self.history_frequency_scale[0] = 0.0\n        dropout = dropout_rate if num_layers > 1 else 0.0"
+        },
+        {
+          "find": "    def _interest_states(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))",
+          "replace": "    def _interest_states(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(\n            self.item_emb(seq) * self.history_frequency_scale[seq].unsqueeze(-1)\n        )"
+        },
+        {
+          "find": "    ).to(device)\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)",
+          "replace": "    ).to(device)\n    counts = np.zeros(itemnum + 1, dtype=np.int64)\n    for items in user_train.values():\n        np.add.at(counts, np.asarray(items, dtype=np.int64), 1)\n    observed_counts = counts[1:][counts[1:] > 0]\n    geometric_mean = float(np.exp(np.log(observed_counts.astype(np.float64)).mean()))\n    scales = np.clip(\n        (np.maximum(counts, 1).astype(np.float64) / geometric_mean) ** (-0.1),\n        0.8, 1.2,\n    ).astype(np.float32)\n    scales[0] = 0.0\n    with torch.no_grad():\n        model.history_frequency_scale.copy_(torch.from_numpy(scales).to(device))\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)"
+        },
+        {
+          "find": "            \"sequence_readout\": \"gru_0.8_causal_mean_0.2_half_life_4\",\n        }, f)",
+          "replace": "            \"sequence_readout\": \"gru_0.8_causal_mean_0.2_half_life_4\",\n            \"history_feature\": \"train_count_geomean_power_minus_0.1_clip_0.8_1.2\",\n        }, f)"
+        },
+        {
+          "find": "        if meta.get(\"sequence_readout\") != \"gru_0.8_causal_mean_0.2_half_life_4\":\n            raise RuntimeError(f\"Incompatible GRU sequence readout for {ds}\")\n        model = ModelClass(",
+          "replace": "        if meta.get(\"sequence_readout\") != \"gru_0.8_causal_mean_0.2_half_life_4\":\n            raise RuntimeError(f\"Incompatible GRU sequence readout for {ds}\")\n        if meta.get(\"history_feature\") != \"train_count_geomean_power_minus_0.1_clip_0.8_1.2\":\n            raise RuntimeError(f\"Incompatible GRU history feature for {ds}\")\n        model = ModelClass("
+        }
+      ]
+    }
+  ],
+  "change_summary": "Add fixed training-frequency history scaling with checkpointed buffers and matching predictor validation for each category’s single GRU4Rec model."
+}

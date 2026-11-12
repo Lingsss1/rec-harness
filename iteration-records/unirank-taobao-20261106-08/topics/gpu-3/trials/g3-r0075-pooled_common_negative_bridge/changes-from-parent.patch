@@ -1,0 +1,192 @@
+--- g3-r0074-pooled_positive_label_bit_positive/model.py
++++ g3-r0075-pooled_common_negative_bridge/model.py
+@@ -15,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'aligned', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_decomposed_label_bit', 'source_component': 'positive_label', 'source_label_assignment': 'pooled_aux_mean'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_decomposed_label_bit', 'source_component': 'positive_label', 'source_label_assignment': 'pooled_aux_mean'}
+ 
+ # Preserve true-label joint private learning; only the sign-source VJP
+@@ -766,4 +766,20 @@
+     pooled = detached[:, auxiliary_columns].mean()
+     return pooled.expand_as(detached)
++
++
++def _fixed_common_source_targets(probabilities):
++    """Detached FP32 constant 1/256 on EVERY row and task column.
++
++    The click column is never used in a source loss. The value is a predeclared
++    dyadic design constant; no search over this constant is performed. It is
++    positive even when a batch has no auxiliary positives. That difference
++    from pooled prevalence must be counted separately. At fixed state and
++    positive pooled prevalence, the ideal BCE-difference source cotangents
++    differ only by a positive scalar, which cannot change the tangent bit
++    away from degeneracy. Actual BCE/cast/reduction numerics can break this
++    equivalence. Private updates and native true-label geometry are retained.
++    """
++    return torch.full_like(probabilities.detach(), 1.0 / 256.0,
++                           dtype=torch.float32)
+ 
+ 
+@@ -999,4 +1015,92 @@
+ 
+ 
++def common_scale_bit_diagnostics(click_gradient, true_gradients,
++                                 pooled_gradients, fixed_gradients,
++                                 occupied, pooled_prevalence):
++    """Optional detached same-state host probe, NOT automatically collected.
++
++    Supply BCE(source)-BCE(0) context cotangents through the same recipient
++    graph, before the source surrogate/cast. The host must obtain those
++    VJPs through an authorized diagnostic interface; this helper never runs
++    additional forwards or gradients. It returns tensors, changes no state,
++    and never logs or accesses labels, files, sample IDs or network.
++    In exact arithmetic pooled = (256 * prevalence) * fixed. A zero pooled
++    target has no such positive-scale equivalence. Include empty histories,
++    all-zero sources, ties and degeneracy in the report, not just valid rows.
++    Geometry diagnostics precede repeated-ID scatter/adaptive optimization.
++    """
++    with torch.no_grad(), torch.autocast(device_type=click_gradient.device.type,
++                                        enabled=False):
++        if len(pooled_gradients) != 3 or len(fixed_gradients) != 3:
++            raise ValueError('Expected named-order cart/fav/buy source triples')
++        prevalence = torch.as_tensor(pooled_prevalence,
++                                     device=click_gradient.device,
++                                     dtype=torch.float64).reshape(())
++        scale = prevalence * 256.0
++        numerator = torch.zeros_like(prevalence)
++        denominator = torch.zeros_like(prevalence)
++        for pooled, fixed in zip(pooled_gradients, fixed_gradients):
++            reference = fixed.detach().to(dtype=torch.float64) * scale
++            numerator = numerator + (pooled.detach().to(dtype=torch.float64)
++                                     - reference).square().sum()
++            denominator = denominator + reference.square().sum()
++        tiny = torch.finfo(torch.float64).tiny
++
++        def pivot_summary(gradients):
++            _, _, orthogonal = _click_relative_components(
++                click_gradient, gradients, occupied)
++            replacement = _reassign_orthogonal(click_gradient, orthogonal, occupied)
++            tangent = _tangent_orthogonal(
++                click_gradient, orthogonal, occupied, replacement)
++            flat = tangent.reshape(-1)
++            index = flat.abs().argmax().reshape(1)
++            pivot = torch.gather(flat, dim=0, index=index).squeeze(0)
++            top = flat.abs().topk(min(2, flat.numel())).values
++            margin = top[0] - top[-1]
++            relative_margin = margin / top[0].clamp_min(tiny)
++            ties = (flat.abs() == top[0]).to(dtype=torch.int64).sum()
++            return {'bit': torch.where(pivot < 0, -torch.ones_like(pivot),
++                                       torch.ones_like(pivot)),
++                    'zero_tangent': top[0] == 0,
++                    'pivot_margin_relative': relative_margin,
++                    'max_abs_ties': ties}
++
++        pooled_summary = pivot_summary(pooled_gradients)
++        fixed_summary = pivot_summary(fixed_gradients)
++        output = {
++            'pooled_prevalence': prevalence,
++            'zero_pooled_target': prevalence == 0,
++            'ideal_positive_scale': scale,
++            'source_scale_l2_residual': numerator.sqrt(),
++            'source_scale_relative_l2_residual':
++                numerator.sqrt() / denominator.sqrt().clamp_min(tiny),
++            'reference_source_l2': denominator.sqrt(),
++            'bit_disagreement': pooled_summary['bit'] != fixed_summary['bit'],
++            'occupied_rows': occupied.to(dtype=torch.int64).sum(),
++        }
++        for name, summary in [('pooled', pooled_summary), ('fixed', fixed_summary)]:
++            for key, value in summary.items():
++                output[name + '_' + key] = value
++        for orientation in ('aligned', 'reversed'):
++            pooled_total = _reduce_context_transfer(
++                click_gradient, true_gradients, occupied, 'aligned', orientation,
++                'orthogonal_native', 'nuisance_line_fixed_angle_decomposed_label_bit',
++                pooled_gradients)
++            fixed_total = _reduce_context_transfer(
++                click_gradient, true_gradients, occupied, 'aligned', orientation,
++                'orthogonal_native', 'nuisance_line_fixed_angle_decomposed_label_bit',
++                fixed_gradients)
++            pooled_transfer = pooled_total.to(dtype=torch.float64) - click_gradient.to(dtype=torch.float64)
++            fixed_transfer = fixed_total.to(dtype=torch.float64) - click_gradient.to(dtype=torch.float64)
++            output[orientation + '_pooled_transfer_active'] = pooled_transfer.abs().amax() > 0
++            output[orientation + '_fixed_transfer_active'] = fixed_transfer.abs().amax() > 0
++            output[orientation + '_pooled_transfer_radius_after_cast'] = pooled_transfer.square().sum().sqrt()
++            output[orientation + '_fixed_transfer_radius_after_cast'] = fixed_transfer.square().sum().sqrt()
++            output[orientation + '_context_vjp_l2_difference'] = (
++                pooled_total.to(dtype=torch.float64) - fixed_total.to(dtype=torch.float64)
++            ).square().sum().sqrt()
++        return output
++
++
+ class _CollectedContextTransfer(torch.autograd.Function):
+     """Seven identity edges: click, true auxiliary, alternate-label auxiliary.
+@@ -1073,5 +1177,5 @@
+                  product_context_orientation='aligned',
+                  parallel_orientation='aligned',
+-                 orthogonal_orientation='aligned',
++                 orthogonal_orientation='reversed',
+                  centering_scope='aggregate',
+                  click_context_collection='joint',
+@@ -1147,5 +1251,5 @@
+         if source_component != 'positive_label':
+             raise ValueError('Assignment study freezes the positive-label-only source')
+-        if source_label_assignment not in ('native', 'batch_cycle', 'batch_mean', 'pooled_aux_mean'):
++        if source_label_assignment not in ('native', 'batch_cycle', 'batch_mean', 'pooled_aux_mean', 'fixed_common'):
+             raise ValueError('Unknown positive-label source assignment')
+         self.source_label_assignment = source_label_assignment
+@@ -1980,6 +2084,8 @@
+         The source is BCE(y_assignment)-BCE(0). batch_mean broadcasts
+         each task's prevalence; pooled_aux_mean broadcasts one common
+-        cart/fav/buy prevalence, never click prevalence. Native/cycle/
+-        task-mean/pooled-mean/zero source BCE graphs run in every cell.
++        cart/fav/buy prevalence, never click prevalence. fixed_common uses
++        a label-independent dyadic 1/256, including zero-positive batches.
++        Native/cycle/task-mean/pooled-mean/fixed/zero source BCE graphs run
++        in every cell; they do not change the private true-label objective.
+         Away from inherited probability-BCE saturation/clamps, their logit
+         derivatives are exactly -y_assignment. No new probability/logit
+@@ -2009,4 +2115,5 @@
+             mean_targets = _mean_source_targets(truth)
+             pooled_targets = _pooled_auxiliary_source_targets(truth, self.feature_map.labels)
++            fixed_targets = _fixed_common_source_targets(probabilities)
+             losses = []
+             zero_source_losses = []
+@@ -2015,4 +2122,5 @@
+             mean_source_losses = []
+             pooled_source_losses = []
++            fixed_source_losses = []
+             for index, label in enumerate(self.feature_map.labels):
+                 task_loss = nn.functional.binary_cross_entropy(
+@@ -2027,4 +2135,6 @@
+                     pooled_source_losses.append(nn.functional.binary_cross_entropy(
+                         probabilities[:, index].float(), pooled_targets[:, index], reduction='mean'))
++                    fixed_source_losses.append(nn.functional.binary_cross_entropy(
++                        probabilities[:, index].float(), fixed_targets[:, index], reduction='mean'))
+                     zero_source_losses.append(nn.functional.binary_cross_entropy(
+                         probabilities[:, index].float(), source_targets[:, index], reduction='mean'))
+@@ -2034,11 +2144,13 @@
+             mean_auxiliary_loss = torch.stack(mean_source_losses).sum()
+             pooled_auxiliary_loss = torch.stack(pooled_source_losses).sum()
++            fixed_auxiliary_loss = torch.stack(fixed_source_losses).sum()
+             # Match graph work, including zero-coefficient graphs. These
+             # labels never train private parameters or alter native geometry.
+-            native_weight, cycle_weight, mean_weight, pooled_weight = {
+-                'native': (1.0, 0.0, 0.0, 0.0),
+-                'batch_cycle': (0.0, 1.0, 0.0, 0.0),
+-                'batch_mean': (0.0, 0.0, 1.0, 0.0),
+-                'pooled_aux_mean': (0.0, 0.0, 0.0, 1.0),
++            native_weight, cycle_weight, mean_weight, pooled_weight, fixed_weight = {
++                'native': (1.0, 0.0, 0.0, 0.0, 0.0),
++                'batch_cycle': (0.0, 1.0, 0.0, 0.0, 0.0),
++                'batch_mean': (0.0, 0.0, 1.0, 0.0, 0.0),
++                'pooled_aux_mean': (0.0, 0.0, 0.0, 1.0, 0.0),
++                'fixed_common': (0.0, 0.0, 0.0, 0.0, 1.0),
+             }[self.source_label_assignment]
+             source_loss = (native_weight * true_auxiliary_loss
+@@ -2046,4 +2158,5 @@
+                            + mean_weight * mean_auxiliary_loss
+                            + pooled_weight * pooled_auxiliary_loss
++                           + fixed_weight * fixed_auxiliary_loss
+                            - zero_auxiliary_loss)
+             source_gradients = torch.autograd.grad(

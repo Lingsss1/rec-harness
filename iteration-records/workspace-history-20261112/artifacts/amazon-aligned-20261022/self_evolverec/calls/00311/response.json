@@ -1,0 +1,62 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting-point insights.** (1) Users distinguish specific interests from broad relevance. History aggregation should preserve narrow signals. (2) Occasional purchases can imply unsupported equipment or project needs. Limiting their influence is a testable intervention. (3) Electronics has training-margin p10=0.3256 and 7.67% negative margins. These motivate discrimination experiments, but establish no validation benefit.\n\n**Literature insights.** (1) [gSASRec](https://www.ijcai.org/proceedings/2024/939) motivates revisiting sampled objectives. Its evidence does not establish candidate-set cross-entropy superiority here. (2) [MARS](https://arxiv.org/abs/2409.00702) motivates separating interests. Its pretrained-content setting differs from this restriction. (3) [TALE](https://arxiv.org/abs/2412.07382) motivates simple temporal baselines. Recency cannot identify satisfied needs or compatibility.\n\nThree directions follow: improve candidate discrimination, preserve recent specific interests, and test whether candidate-dependent matching justifies additional complexity.\n\n### Framework\n\n| Representation / objective | Baseline objective | Uniform multi-negative CE |\n|---|---|---|\n| SASRec | Reference | A: objective isolation |\n| Bounded recency residual | Optional interaction control | B: simple context adaptation |\n| Bounded candidate-conditioned residual | Deferred | C: selective interest matching |\n\n### Ideas and assessments\n\nScores are prospective; difficulty 10 means hardest. Each cell gives **score: positive / negative**.\n\n| Dimension | A: CE only | B: recency + CE | C: candidate conditioning + CE |\n|---|---|---|---|\n| Originality | 2: clean isolation / established | 3: bounded integration / familiar pooling | 5: selective residual / known attention |\n| Future potential | 6: reusable foundation / limited representation | 7: extensible baseline / decay may oversimplify | 7: preserves interests / greater inference cost |\n| User alignment | 3: improves discrimination / lacks context mechanism | 6: emphasizes current evidence / recent accidents dominate | 7: candidate-specific evidence / similarity can reinforce substitutes |\n| Model alignment | 7: targets weak margins / scale can mislead | 6: tests contextual separation / no assured improvement | 6: conditional separation / additional overfitting |\n| Difficulty | 3: unchanged inference / sampler changes | 4: linear pooling / causal parity required | 7: compact attention / candidate-dependent diagnostics |\n\n### Selected idea: bounded recency residual with CE\n\nAt 20% progress, select **B**, staged after A. It explicitly targets **broad thematic recommendations** by emphasizing recent context, and **unsupported specialized recommendations** by attenuating older incidental evidence. These are hypotheses; it cannot infer ownership, compatibility, or unmet need. CE additionally targets Electronics’ weak lower-tail training separation.\n\nFor each causal prefix, exponentially pool item embeddings, project the result, and cap its norm at 0.25 times the SASRec feature norm. Add it through a zero-initialized tanh gate. Train against 32 uniform negatives using candidate-set CE. Compare baseline → A → B; advance to C only with remaining budget and evidence supporting B.\n\nExclude complete training histories during sampling; never consult held-out interactions. Preserve seeds, four-category routing, baseline validation schedule, and diagnostic interfaces. Export matching architecture and predictor code. Select exclusively by pinned macro validation HR@10; charge all execution against 43,200 GPU-seconds. The reported historical 0.5762 lacks a controlled comparison and does not establish this proposal’s benefit.",
+  "idea": {
+    "description": "Test uniform multi-negative candidate-set cross-entropy first, then add a bounded, candidate-independent recency residual to causal SASRec. Defer candidate-conditioned pooling until simpler stages demonstrate sufficient benefit to justify its cost.",
+    "motivation": "The chosen representation explicitly targets two observed user failures: broad thematic matches crowding out specific current interests, and specialized recommendations supported mainly by incidental historical purchases. Exponential recency pooling tests whether current behavioral context reduces these failures. Multi-negative CE addresses the model-facing weakness of lower-tail training separation, especially in Electronics. Neither component establishes ownership, compatibility, complementarity, or satisfied demand.",
+    "implementation_notes": "This is an experimental specification, not an implemented or validated result. Preserve RecHarness sasrec_perdataset preprocessing, splits, mappings, optimizer, batching, validation cadence, and checkpoint rules unless explicitly ablated. Use preprocessing seed 0 and training seed 42, including sampler and loader generators. Retain DATA_DIR = os.environ['GAGC_DATA_DIR'] and int(os.environ.get('SASREC_EPOCHS', '200')). Write artifacts beneath the trial directory and retain all four dataset routes.\n\nDefine recency by sequence position. For every causal prefix ending at t, pool valid raw item embeddings with weights proportional to exp(-softplus(beta_raw)*(t-j)); initialize the decay to 0.1. Apply a bias-free linear projection. Bound its norm by 0.25*||h_t|| using epsilon-protected division, and add tanh(g)*residual with scalar g initialized to zero. Padding contributes no mass; empty prefixes return zero. The cap is a fixed experimental choice, not an established optimum. Use the same feature construction for training, diagnosis, validation, and prediction.\n\nSample K=32 independent uniform negatives with replacement from the nonpadding catalog excluding each user's complete observed training history, including the positive target. Keep user identity available privately to the sampler; do not reconstruct exclusions from truncated sequences. Preserve duplicate draws. Skip and count examples with no eligible negatives. Use CE over one positive and 32 negatives at temperature 1, without logQ correction. This is a candidate-set objective, not an unbiased full-catalog likelihood. Chunk valid-position scoring with checkpointing if necessary; account for its execution cost.\n\nPredeclare baseline, CE-only, and recency-plus-CE comparisons. Where budget permits, recency with the baseline objective isolates objective–representation interaction. Compare actual GPU time as well as epoch limits. Candidate conditioning is a subsequent declared trial, not part of this initial architecture.\n\nKeep DiagnosisProbe(view, device).run_full_diagnosis(train_loader) returning metrics and metric_definitions. Preserve batches (None, sequence, positive, negative), each B x L, and expose the actual trained module through view.model. view.item_emb, log2feats, and predict_score must include the selected feature/scoring path. Use fixed diagnostic examples and negatives, explain logit-scale sensitivity, and report unavailable metadata explicitly. Higher embedding alignment alone does not establish harmful collapse or recommendation diversity.\n\nOnly histories, timestamps, titles, and descriptions are available. Do not use review text, ratings, prices, stores, item categories, simulator traits, external data, or pretrained weights. Serialize architecture configuration and checkpoints, and update the predictor writer so working/predict.py reconstructs identical features. Select using only pinned macro validation HR@10 across all four categories. Record qualitative failure changes descriptively if simulator feedback is supplied; sampled HR@10 cannot establish full-catalog usefulness. Keep execution single-GPU and include diagnostics, debugging, and failures in the shared 43,200 GPU-second budget.",
+    "pseudocode": "Declare variants = [baseline, CE_only, recency_CE]\nPreserve preprocessing_seed=0, training_seed=42, four dataset mappings and routes\nRead DATA_DIR from os.environ['GAGC_DATA_DIR']\nRead epochs from SASREC_EPOCHS, default 200\nReserve execution budget before each trial\n\nFor each variant and training batch:\n    h = SASRec(sequence)\n    if variant == recency_CE:\n        for each valid causal prefix t:\n            w[j] = masked_softmax(-softplus(beta_raw)*(t-j)), j <= t\n            pooled[t] = sum_j w[j]*item_emb(sequence[j])\n        r = bias_free_projection(pooled)\n        r = r * min(1, 0.25*norm(h)/clamp_min(norm(r), 1e-8))\n        h = h + tanh(g)*r  # g starts at zero\n    if variant == baseline:\n        loss = unchanged_baseline_loss(h)\n    else:\n        negatives = uniform_training_complement_samples(user_ids, K=32, replacement=True)\n        loss = valid_position_mean(CE(scores(h, [positive, negatives]), target=0))\n    backward(loss)\n    optimizer.step()\n\nRun unchanged validation schedule; select only by four-category macro HR@10\nRun adapted DiagnosisProbe using the exact selected feature/scoring path\nExport checkpoint, configuration, and matching predictor through predictor writer\nOnly consider candidate-conditioned pooling as a separately budgeted subsequent trial",
+    "originality": {
+      "score": 3,
+      "positive": "Combines a norm-bounded context residual with an explicit objective-first experiment addressing the supplied diagnoses.",
+      "negative": "Exponential pooling, residual gates, SASRec, and multi-negative cross-entropy are established techniques; no novel mechanism or gain is demonstrated."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Creates an inexpensive reference for later candidate-conditioned interests and temporal evidence while separating representation changes from objective changes.",
+      "negative": "A single decay curve may overweight recent accidental purchases and cannot resolve unmet need or compatibility."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "The residual uses linear-time pooling and retains candidate-independent features and standard dot-product scoring.",
+      "negative": "Complete-history negative exclusions, causal masking, memory-safe loss computation, diagnostic adaptation, and predictor parity require careful implementation."
+    }
+  },
+  "related_work": [
+    {
+      "title": "gSASRec (2024 extended abstract)",
+      "link": "https://www.ijcai.org/proceedings/2024/939",
+      "contributions": [
+        "Attributes weaknesses in sampled BCE training to overconfidence and motivates experiments with additional negatives and generalized BCE.",
+        "Supports isolating objective changes before attributing gains to a new history representation."
+      ],
+      "limitations": [
+        "Does not establish that the proposed candidate-set CE outperforms generalized BCE on this pinned benchmark.",
+        "Does not directly address ownership, compatibility, or unnecessary recommendations."
+      ]
+    },
+    {
+      "title": "MARS (CIKM 2024)",
+      "link": "https://arxiv.org/abs/2409.00702",
+      "contributions": [
+        "Uses multiple attribute-aware user and item representations to model preferences that a single summary may obscure.",
+        "Motivates a later candidate-dependent interest-matching experiment."
+      ],
+      "limitations": [
+        "Its pretrained-language-model setting differs from the present prohibition on pretrained weights.",
+        "Does not validate lightweight recency residuals under the supplied four-category protocol."
+      ]
+    },
+    {
+      "title": "TALE (WSDM 2025)",
+      "link": "https://arxiv.org/abs/2412.07382",
+      "contributions": [
+        "Studies linear item-item prediction with interval-aware weighting and changing-popularity normalization.",
+        "Motivates testing simple temporal mechanisms before more complex recurrence models."
+      ],
+      "limitations": [
+        "Its temporal mechanism differs from position-based exponential history pooling.",
+        "Temporal evidence alone does not reveal satisfied needs, functional duplication, or compatibility."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,949 @@
+From Feature Interaction to Feature Transport - A Unified Block for Scalable Recommendation Models
+Report GitHub Issue
+×
+Title:
+Content selection saved. Describe the issue below:
+Description:
+Submit without GitHub
+Submit in GitHub
+arXiv is now an independent nonprofit!
+Learn more
+×
+Back to arXiv
+Why HTML?
+Report Issue
+Back to Abstract
+Download PDF
+Abstract.
+1 Introduction
+2 Related Work
+2.1 Feature Interaction and Sequential Recommendation
+2.2 Unified Recommendation Backbones
+2.3 Scaling and Representation Collapse
+3 Problem Setup and Preliminaries
+4 Method
+4.1 Heterogeneous Tokenization
+4.2 Contextual Residual Feature Transport
+4.3 Bridge-based Information Exchange
+4.4 Prediction and Training
+5 Experiments
+5.1 Experimental Setup
+5.2 Main Results
+5.3 Scaling Results
+5.4 Representation Diagnostics
+References
+A Dataset Details and Feature Processing
+A.1 Structure-Aware Dense Tokenization
+A.2 Missing Values, Padding, and Sparse Robustness
+B System Components and Training Protocol
+B.1 Optimization and Stabilization
+B.2 Progressive Distillation
+C Ablation Studies
+D Representation Diagnostics
+D.1 KMeans-MI Analysis
+D.2 Qualitative Representation Geometry
+E Scaling Analysis
+E.1 Depth Scaling Expands Intent-Mediated Transport
+E.2 Width Scaling Increases Usable Representation Capacity
+E.3 Horizontal and Vertical Scaling Routes
+E.4 Layer-wise Representation Dynamics
+F Negative and Limited-Gain Findings
+G Appendix Summary
+License: arXiv.org perpetual non-exclusive license
+arXiv:2609.01655v1 [cs.IR] 31 Aug 2026
+\correspondingauthor
+From Feature Interaction to Feature Transport - A Unified Block for Scalable Recommendation Models
+Conference: KDD Cup 2026 Tencent UniRec Challenge Workshop; August 12, 2026; Jeju, Korea
+Zichen Luo
+Affiliation: Tianjin University, Jinnan Qu, Tianjin Shi, China
+email: luozichen@tju.edu.cn
+,
+Jiachen Guo
+Affiliation: Tianjin University, Jinnan Qu, Tianjin Shi, China
+,
+Keming Gu
+Affiliation: Tianjin University, Jinnan Qu, Tianjin Shi, China
+and
+Jie Zhang
+Affiliation: Tianjin University, Jinnan Qu, Tianjin Shi, China
+2026
+Abstract.
+Unified recommendation models aim to jointly model non-sequential multi-field features and sequential user behaviors, but existing interaction-centric designs mainly focus on mixing heterogeneous tokens within each layer. We argue that scalable unified recommendation also requires controlling how intent information is carried, filtered, and preserved across stacked blocks. Inspired by flow-based representation dynamics, we introduce feature transport, a view that treats deep unified recommendation as a discrete context-conditioned representation evolution process. We propose CRAFT, a Contextual Residual Adaptive Feature Transport block, which summarizes non-sequential features into a reliability-aware contextual field and uses it to generate residual displacement and memory-preserving signals for intent and sequence representations. In this way, non-sequential context acts as an active controller of representation evolution rather than a passive object of interaction. In the TAAC2026 advertising recommendation competition, CRAFT achieves a test AUC of 0.838090, surpassing the previous leaderboard-best score of 0.83798. Scaling experiments further show that CRAFT benefits from both depth and width expansion: stacking CRAFT to six blocks improves test AUC to 0.838148, while increasing the hidden dimension reaches 0.838106. These results demonstrate the effectiveness, scalability, and generalization potential of the feature transport paradigm. Source code: https://github.com/AshleyLuo001/CRAFT
+††footnotetext: KDD Cup 2026 Tencent UniRec Challenge Workshop, August 12, 2026, Jeju, Korea.
+Competition website: https://algo.qq.com/. em
+1. Introduction
+Figure 1. Effect of CRAFT and distillation on predictive performance and representation quality.
+Industrial CTR/CVR ranking models rely on both non-sequential multi-field features and sequential user behaviors. The former describe user profiles, item attributes, contextual signals, and cross features, and are commonly handled by feature-interaction networks (Guo et al., 2017; Wang et al., 2017; Lian et al., 2018; Zhu et al., 2025). The latter capture the temporal evolution of user interests and are usually modeled by target-aware or self-attentive sequence encoders (Zhou et al., 2018; Zhou et al., 2019; Kang and McAuley, 2018; Sun et al., 2019; Pi et al., 2020; Chai et al., 2025). However, many industrial systems still connect these two sources through separated modules or late-stage fusion, which limits intermediate feature-sequence exchange and weakens scaling benefits.Recent unified recommendation architectures address this issue by placing sequential and non-sequential signals in a shared modeling framework. InterFormer, OneTrans, and HyFormer strengthen feature-sequence interaction through unified blocks (Zhang et al., 2026; Huang et al., 2026; Zeng et al., 2025). HyFormer is especially relevant to query-based unified modeling: it generates global query tokens from non-sequential features, decodes long-sequence states with these queries, and updates the queries through token mixing. These works suggest that unified blocks are a natural path for scaling recommendation models (Zhang et al., 2024; Zhu et al., 2025; Chai et al., 2025).
+Figure 2. Overall architecture of CRAFT. Heterogeneous non-sequential and sequential features are first tokenized into non-sequential tokens, sequence summaries, and intent tokens. Each stacked CRAFT block performs contextual residual feature transport, where non-sequential context generates adaptive residual transformations to guide intent and sequence representations before unified interaction. This design enables layer-wise feature transport across heterogeneous signals while preserving stackability for depth scaling.
+Nevertheless, interaction-based unification alone is not enough. Recommendation inputs are highly heterogeneous: dense vectors, sparse categorical fields, contextual signals, and behavior tokens differ in variance, frequency, reliability, and semantic granularity. Some fields may induce collapsed embedding spaces in large recommendation models (Guo et al., 2023). In unified architectures, such instability can propagate through shared operators. TokenFormer reports a related phenomenon where collapsed non-sequential fields degrade sequential representations (Zhou et al., 2026). In query-based models, the bottleneck appears at the intent-carrier level: unreliable non-sequential representations may dominate query updates, dilute sequence evidence, and reduce intent diversity.
+We argue that scalable unified recommendation should move from feature interaction to feature transport. Instead of only asking how heterogeneous tokens interact within a layer, we ask how contextual information is carried, filtered, and preserved across stacked blocks. Inspired by flow-based representation dynamics, we view a deep unified model as a discrete context-conditioned representation evolution process. Each block should predict residual displacement for intent and sequence states while preserving useful memory from earlier layers, without requiring ODE solvers, stochastic paths, or flow-matching objectives.To this end, we propose CRAFT , a unified and stackable block for scalable CTR/CVR prediction. CRAFT summarizes non-sequential fields into a reliability-aware contextual field, which generates adaptive residual displacement and memory-preserving gates for intent and sequence representations before bridge-based information exchange. Thus, non-sequential context becomes an active controller of representation evolution rather than a passive object of interaction.
+Our contributions are summarized as follows:
+•
+We identify a feature transport bottleneck in unified recommendation: even when sequential and non-sequential features can interact, useful intent information may still be overwritten, compressed, or destabilized during layer-wise propagation. This provides a new explanation for why simply increasing interaction depth or model size does not always improve ranking performance.
+•
+We propose CRAFT , a unified feature transport block that changes the role of non-sequential features from passive interaction targets to active controllers of representation evolution. By generating context-conditioned residual displacement and memory-preserving gates, CRAFT explicitly regulates how non-sequential context guides intent and sequence representations across depth.
+•
+We instantiate this idea with reliability-aware context aggregation and stackable contextual residual transport, enabling heterogeneous sparse, dense, and sequential signals to be jointly modeled without collapsing them into an uncontrolled homogeneous token space.
+•
+We conduct extensive competition-scale experiments on TAAC2026. CRAFT achieves a test AUC of 0.838090, surpassing the previous leaderboard-best score of 0.83798, and further reaches 0.838148 when scaled to six blocks. Representation diagnostics show that CRAFT improves scaling by selectively expanding the intent-carrier transport space rather than merely increasing final-layer capacity.
+2. Related Work
+2.1. Feature Interaction and Sequential Recommendation
+Industrial CTR/CVR prediction has mainly developed along two lines. Feature interaction models capture sparse cross-field signals, from factorization machines and field-aware variants (Rendle, 2010; Juan et al., 2016), to neural CTR models with memorization, product interactions, and FM-based layers (Cheng et al., 2016; Guo et al., 2017; Qu et al., 2016; He and Chua, 2017). Later architectures model higher-order crosses with compressed interaction networks, explicit cross layers, bilinear weighting, or self-attentive field interaction (Lian et al., 2018; Wang et al., 2017; Wang et al., 2021; Huang et al., 2019).
+Sequential recommendation instead encodes user behavior histories. Early methods use recurrent or convolutional encoders (Hidasi et al., 2015; Tang and Wang, 2018). Target-aware CTR models retrieve candidate-relevant behaviors (Zhou et al., 2018; Zhou et al., 2019), while Transformer-based methods capture longer-range dependencies (Chen et al., 2019; Kang and McAuley, 2018; Sun et al., 2019). Recent industrial systems further extend history length through lifelong retrieval, real-time action modeling, and ultra-long sequence scaling (Chang et al., 2023; Xia et al., 2023; Si et al., 2024; Chai et al., 2025). However, these two lines are often connected by late fusion, limiting intermediate information flow between multi-field context and behavior sequences.
+2.2. Unified Recommendation Backbones
+Recent work moves toward unified backbones that jointly model sequential and non-sequential signals. Interaction-centric models suggest the benefit of joint field modeling (Wang et al., 2021; Zhou et al., 2018; Song et al., 2019). HiFormer and InterFormer use Transformer-style operators or explicit interaction tokens for heterogeneous feature interaction (Gui et al., 2023; Zeng et al., 2025). OneTrans unifies feature interaction and sequence modeling in one Transformer framework (Zhang et al., 2026). HyFormer introduces a query-based hybrid block for long-sequence and non-sequential feature modeling (Huang et al., 2026), while TokenFormer studies shared token-stream unification and its robustness risks (Zhou et al., 2026). These works show the promise of stackable unified blocks, but most designs still rely on direct token mixing, attention, or query decoding as the main mechanism for connecting heterogeneous features.
+2.3. Scaling and Representation Collapse
+Scaling recommendation models requires balancing capacity, computation, and representation quality. Industrial ranking systems such as LiRank study production-scale modeling constraints (Borisyuk et al., 2024), while Wukong and Rank-Mixer explore scalable and efficient ranking backbones (Zhang et al., 2024; Zhu et al., 2025). Other studies analyze scaling in sequential recommendation or efficient large recommendation models (Zivic et al., 2024; Khrylchenko et al., 2026; Xu et al., 2025; Kang and McAuley, 2018). Yet larger capacity does not necessarily yield richer representations: recommendation embeddings may collapse into low-dimensional subspaces (Guo et al., 2023), and advertising recommendation can suffer from collapsed or entangled representations under heterogeneous sparse signals (Pan et al., 2024). TokenFormer further connects this risk to unified token-stream modeling (Zhou et al., 2026), suggesting that robust scaling needs mechanisms beyond simply mixing more heterogeneous tokens.
+3. Problem Setup and Preliminaries
+We study post-click conversion rate prediction in large-scale advertising recommendation. Each instance contains heterogeneous information from multiple sources, including sparse user and item fields, dense vector features, contextual signals, and multi-domain behavior sequences. Formally, an instance is denoted as
+(1)
+x=[ℱu,ℱi,𝒟u,𝒟i⏟non-sequential features,𝒮1,…,𝒮M⏟multi-domain behavior sequences].x=\left[\underbrace{\mathcal{F}_{u},\mathcal{F}_{i},\mathcal{D}_{u},\mathcal{D}_{i}}_{\text{non-sequential features}},\underbrace{\mathcal{S}_{1},\ldots,\mathcal{S}_{M}}_{\text{multi-domain behavior sequences}}\right].
+where ℱu,ℱi\mathcal{F}_{u},\mathcal{F}_{i} denote sparse user and item fields, 𝒟u,𝒟i\mathcal{D}_{u},\mathcal{D}_{i} denote dense user and item features, and 𝒮m\mathcal{S}_{m} is the mm-th behavior sequence. The goal is to learn a scoring function fθ​(x)∈[0,1]f_{\theta}(x)\in[0,1] for ranking candidate items. The model is trained with binary cross-entropy and evaluated by AUC.
+The core challenge is to jointly model sequential and non-sequential signals. Behavior sequences describe dynamic user interests and require temporal or order-aware modeling. Non-sequential multi-field features provide global user/item priors, contextual cues, and dense semantic signals. These two sources are complementary but statistically heterogeneous: sequence tokens are high-variance and order-dependent, while many non-sequential fields are sparse, low-frequency, or distributionally unstable.
+A common unified modeling strategy is to map all features into tokens and perform direct token interaction through attention or MLP layers. Although this avoids late fusion, it also introduces a new difficulty: heterogeneous tokens are repeatedly mixed by shared operators. As the model becomes deeper or wider, unstable non-sequential fields may dominate query updates, dilute sequence evidence, or cause representation collapse. Thus, scalable unified recommendation requires not only stronger interaction, but also a controlled mechanism for carrying contextual information across stacked blocks.
+This motivates our design goal: a unified block should preserve the benefits of token-based modeling while controlling how non-sequential context influences sequence-aware representations over depth. The next section introduces CRAFT, which realizes this goal through contextual residual adaptive feature transport.
+4. Method
+We propose CRAFT, short for Contextual Residual Adaptive Feature Transport,
+a unified and stackable block for scalable recommendation. CRAFT is motivated
+by a shift from feature interaction to feature transport. Feature interaction
+focuses on how heterogeneous features are mixed inside each layer, for example
+through attention, MLPs, or cross networks. This view treats non-sequential
+fields mainly as objects to be fused with sequence representations. However,
+in deep unified recommendation models, the key issue is not only whether two
+features can interact, but also how contextual information is carried, filtered,
+and preserved across stacked blocks. We call this process feature transport.
+In CRAFT, non-sequential multi-field features are summarized into a contextual
+field. This field does not simply participate in one-shot fusion. Instead, it
+generates layer-wise residual displacement and memory-preserving signals that
+guide the evolution of intent and sequence representations. Therefore,
+non-sequential context changes from a passive object of interaction to an
+active controller of representation evolution.
+Given an input instance xx, CRAFT first maps heterogeneous raw features into
+three groups of tokens:
+(2)
+𝒳(0)=({𝐈m(0)}m=1M⏟intent tokens,𝐍(0)⏟non-sequential tokens,{𝐒m(0)}m=1M⏟sequence tokens).\mathcal{X}^{(0)}=\left(\underbrace{\{\mathbf{I}^{(0)}_{m}\}_{m=1}^{M}}_{\text{intent tokens}},\underbrace{\mathbf{N}^{(0)}}_{\text{non-sequential tokens}},\underbrace{\{\mathbf{S}^{(0)}_{m}\}_{m=1}^{M}}_{\text{sequence tokens}}\right).
+At layer ll, CRAFT maintains the same three groups:
+(3)
+𝒳(l)=({𝐈m(l)}m=1M,𝐍(l),{𝐒m(l)}m=1M),\mathcal{X}^{(l)}=\left(\{\mathbf{I}^{(l)}_{m}\}_{m=1}^{M},\mathbf{N}^{(l)},\{\mathbf{S}^{(l)}_{m}\}_{m=1}^{M}\right),
+where 𝐈m(l)\mathbf{I}^{(l)}_{m} are intent tokens for the mm-th behavior domain,
+𝐍(l)\mathbf{N}^{(l)} are non-sequential multi-field tokens, and
+𝐒m(l)\mathbf{S}^{(l)}_{m} are sequence tokens. Intent tokens act as compact
+instance-specific states that accumulate, filter, and transport information
+between global multi-field context and dynamic behavior evidence.
+Each CRAFT block has two stages. First, contextual residual transport uses
+non-sequential tokens to modulate intent and sequence states. Second,
+bridge-based exchange updates the transported states through sequence
+encoding, intent-to-sequence retrieval, and token mixing:
+(4)
+𝒳~(l)=𝒯(l)​(𝒳(l)),𝒳(l+1)=ℬ(l)​(𝒳~(l)).\widetilde{\mathcal{X}}^{(l)}=\mathcal{T}^{(l)}(\mathcal{X}^{(l)}),\qquad\mathcal{X}^{(l+1)}=\mathcal{B}^{(l)}(\widetilde{\mathcal{X}}^{(l)}).
+This decomposition makes CRAFT different from interaction-only designs:
+non-sequential features are not merely tokens to be mixed, but contextual
+controllers that shape the layer-wise movement of other representations.
+4.1. Heterogeneous Tokenization
+CRAFT first maps raw sparse, dense, paired, contextual, and sequential features
+into a shared dd-dimensional token space. Sparse user and item fields are
+compressed into a fixed number of non-sequential tokens by RankMixer-style
+tokenizers. Dense vectors are processed by structure-aware tokenizers: ordinary
+vectors are projected by dense MLP tokenizers, segmented vectors are pooled
+with masks, and structured dense features are decomposed according to their
+internal layout. Paired sparse-dense features are encoded by pair tokenizers
+that explicitly model ID-vector interactions.
+The resulting non-sequential tokens are denoted as:
+(5)
+𝐍(0)=[𝐍us​p,𝐍ud​e,𝐍is​p,𝐍id​e,𝐧t​i​m​e].\mathbf{N}^{(0)}=[\mathbf{N}_{u}^{sp},\mathbf{N}_{u}^{de},\mathbf{N}_{i}^{sp},\mathbf{N}_{i}^{de},\mathbf{n}_{time}].
+Behavior sequences are embedded into MM domain-specific streams
+{𝐒m(0)}m=1M\{\mathbf{S}^{(0)}_{m}\}_{m=1}^{M}. For each behavior domain, CRAFT constructs
+intent tokens from both non-sequential context and the corresponding sequence
+summary. Specifically, we first pool each sequence stream into a compact
+summary 𝐬¯m\bar{\mathbf{s}}_{m}, concatenate it with the flattened non-sequential
+tokens, and pass the result through a small intent generator:
+(6)
+𝐈m(0)=gint(Concat(Flatten(𝐍(0)),𝐬¯m)),m=1,…,M.\mathbf{I}^{(0)}_{m}=g_{\mathrm{int}}\left(\operatorname{Concat}(\operatorname{Flatten}(\mathbf{N}^{(0)}),\bar{\mathbf{s}}_{m})\right),\quad m=1,\ldots,M.
+where gint​(⋅)g_{\mathrm{int}}(\cdot) is an MLP-based generator that outputs
+fixed-size intent tokens initialized from both global non-sequential context
+and domain-specific behavior evidence.
+4.2. Contextual Residual Feature Transport
+The transport module is the core of CRAFT. At each layer, CRAFT summarizes
+non-sequential tokens into a contextual field. Instead of simple average
+pooling, we use reliability-weighted pooling so that different fields can
+contribute unequally:
+(7)
+𝐜(l)=∑k=1Kak(l)​𝐧k(l),ak(l)=softmaxk⁡r(l)​(𝐧k(l)).\mathbf{c}^{(l)}=\sum_{k=1}^{K}a_{k}^{(l)}\mathbf{n}^{(l)}_{k},\qquad a_{k}^{(l)}=\operatorname{softmax}_{k}r^{(l)}(\mathbf{n}^{(l)}_{k}).
+Here r(l)​(⋅)r^{(l)}(\cdot) is a small reliability scorer. The context vector
+𝐜(l)\mathbf{c}^{(l)} then generates transport parameters for intent and sequence
+streams:
+(8)
+(𝜸Z(l),𝜷Z(l),𝜼Z(l))=hZ(l)​(𝐜(l)),Z∈{I,S}.(\boldsymbol{\gamma}^{(l)}_{Z},\boldsymbol{\beta}^{(l)}_{Z},\boldsymbol{\eta}^{(l)}_{Z})=h_{Z}^{(l)}(\mathbf{c}^{(l)}),\quad Z\in\{I,S\}.
+For a target representation 𝐙m(l)\mathbf{Z}^{(l)}_{m}, where 𝐙\mathbf{Z} can be
+either intent or sequence tokens, CRAFT applies:
+(9)
+𝐙~m(l)=𝐙m(l)+𝜸Z(l)⊙RMSNorm⁡(𝐙m(l))+𝜷Z(l)+𝜼Z(l)⊙(𝐙m(0)−𝐙m(l)).\widetilde{\mathbf{Z}}^{(l)}_{m}=\mathbf{Z}^{(l)}_{m}+\boldsymbol{\gamma}^{(l)}_{Z}\odot\operatorname{RMSNorm}(\mathbf{Z}^{(l)}_{m})+\boldsymbol{\beta}^{(l)}_{Z}+\boldsymbol{\eta}^{(l)}_{Z}\odot(\mathbf{Z}^{(0)}_{m}-\mathbf{Z}^{(l)}_{m}).
+The first residual term performs context-conditioned displacement, while the
+last term preserves a gated path to the initial representation. This design
+lets non-sequential context continuously guide intent and sequence states
+without overwriting their original information. This operation can also be
+viewed as a discrete context-conditioned transport step: each block predicts
+a residual displacement for intent and sequence states conditioned on
+non-sequential context. Unlike generative flow models, CRAFT does not use ODE
+solvers or flow-matching losses; it keeps standard discriminative training
+while making representation evolution more controllable across depth.
+4.3. Bridge-based Information Exchange
+After contextual transport, CRAFT performs explicit information exchange. The
+bridge operator has three parts. First, each behavior sequence is refined by a
+lightweight sequence encoder. Second, transported intent tokens retrieve
+behavior evidence through intent-to-sequence cross-attention. Third, decoded
+intent tokens and non-sequential tokens are jointly mixed by RankMixer, which
+rewires token subspaces and applies normalized SwiGLU channel mixing.
+We write the bridge compactly as:
+(10)
+(𝐈(l+1),𝐍(l+1),𝐒(l+1))=ℬ(l)​(𝐈~(l),𝐍(l),𝐒~(l)).(\mathbf{I}^{(l+1)},\mathbf{N}^{(l+1)},\mathbf{S}^{(l+1)})=\mathcal{B}^{(l)}(\widetilde{\mathbf{I}}^{(l)},\mathbf{N}^{(l)},\widetilde{\mathbf{S}}^{(l)}).
+Unlike late-fusion systems, this bridge is applied at every layer. Therefore,
+sequence evidence, intent states, and non-sequential context are repeatedly
+aligned through stacked CRAFT blocks.
+4.4. Prediction and Training
+After LL CRAFT blocks, intent tokens from all behavior domains are
+concatenated and projected into a final ranking representation:
+(11)
+𝐳=Proj⁡([𝐈1(L),…,𝐈M(L)]),y^=σ⁡(MLP⁡(𝐳)).\mathbf{z}=\operatorname{Proj}\left([\mathbf{I}^{(L)}_{1},\ldots,\mathbf{I}^{(L)}_{M}]\right),\qquad\hat{y}=\sigma(\operatorname{MLP}(\mathbf{z})).
+The model is trained with binary cross-entropy. In the distilled setting, we
+further match teacher soft predictions:
+(12)
+ℒ=(1−α)​ℒBCE+α​ℒKD.\mathcal{L}=(1-\alpha)\mathcal{L}_{\mathrm{BCE}}+\alpha\mathcal{L}_{\mathrm{KD}}.
+Distillation is used as a training enhancement and is kept separate from the
+architectural contribution of CRAFT.
+Table 1. Main results on TAAC2026. Δ\Delta denotes the AUC improvement over the original baseline, measured in per mille (‰). Params are counted at inference time; GFLOPs exclude embedding lookup.
+Paradigm
+Model
+Test AUC
+Δ\Delta
+Params
+GFLOPs
+Intent-Rank
+Seq-Rank
+Original
+Original Baseline
+0.832688
+–
+182.21M
+–
+–
+–
+Interaction
+Optimized Baseline
+0.837165
++4.48
+307.27M
+6.955
+74.02
+8.06
+Optimized Baseline + Distill
+0.837983
++5.30
+334.87M
+9.889
+57.68
+8.89
+Transport
+CRAFT
+0.837231
++4.54
+308.69M
+6.970
+77.22
+9.86
+CRAFT + Distill
+0.838090
++5.40
+308.69M
+6.970
+84.33
+10.90
+5. Experiments
+We evaluate CRAFT on the TAAC2026 advertising recommendation task. The experiments focus on three questions: whether feature transport improves a strong unified interaction model, whether it is complementary to distillation, and whether the resulting block can scale along depth and width.
+5.1. Experimental Setup
+Dataset and metric.
+TAAC2026 contains large-scale user-item advertising interaction records with sparse user/item fields, dense vector features, contextual signals, and four groups of behavior sequences. The task is conversion-related ranking, and the official metric is test AUC.
+Compared methods.
+The Original Baseline is the initial official-style baseline. The Optimized Baseline is a strong HyFormer-style unified model with structure-aware tokenization, RankMixer-style non-sequential tokenization, stable optimization, and EMA. Optimized Baseline + Distill further applies teacher-student distillation. CRAFT replaces interaction-only propagation with contextual residual adaptive feature transport, and CRAFT + Distill applies the same distillation setting to CRAFT.
+Implementation and evaluation.
+Unless otherwise specified, CRAFT uses hidden dimension 420420, embedding dimension 6464, four attention heads, two intent tokens per behavior domain, SwiGLU sequence encoders, and RankMixer-style non-sequential tokenization. Distillation uses temperature 1.01.0 and weight 0.650.65. Params are counted at inference time, and GFLOPs are measured per sample under the same sequence-length setting, excluding embedding lookup. We also report effective rank of intent tokens and sequence summaries as representation diagnostics.
+5.2. Main Results
+Table 1 shows that CRAFT consistently improves over the interaction-based baseline. Without distillation, CRAFT increases test AUC from 0.8371650.837165 to 0.8372310.837231, indicating that feature transport provides gains beyond tokenization and optimization. With distillation, CRAFT reaches 0.8380900.838090, surpassing the distilled interaction baseline while using fewer inference-time parameters and lower measured GFLOPs. The higher Intent-Rank and Seq-Rank further suggest that feature transport preserves richer intermediate intent and sequence representations.
+5.3. Scaling Results
+Table 2. Depth and width scaling of CRAFT. GFLOPs are measured per sample and exclude embedding lookup.
+Model
+Blocks
+dmodeld_{\mathrm{model}}
+Test AUC
+GFLOPs
+CRAFT-1L
+1
+420
+0.837975
+3.960
+CRAFT-2L
+2
+420
+0.838090
+6.970
+CRAFT-4L
+4
+420
+0.838093
+12.992
+CRAFT-6L
+6
+420
+0.838148
+19.013
+CRAFT-D600
+2
+600
+0.838106
+13.679
+Table 2 evaluates scaling along depth and width. Increasing CRAFT from one to six blocks improves test AUC from 0.8379750.837975 to 0.8381480.838148, showing that the transport block remains stackable under larger depth. Increasing the hidden dimension from 420420 to 600600 at two blocks also improves AUC from 0.8380900.838090 to 0.8381060.838106. These results indicate that CRAFT benefits from both vertical and horizontal scaling, with the best current result obtained by six stacked blocks.
+Figure 3. Block-stacking diagnostic for CRAFT. We compare the effective ranks of query carriers, final outputs, and sequence summaries when increasing the number of CRAFT blocks from 1 to 6. Query carriers show a large rank increase from 70.4 to 158.2, while the final-output rank decreases and the sequence-summary rank remains low. This indicates that depth scaling mainly expands the query-mediated transport space rather than uniformly increasing the dimensionality of all representation spaces.
+5.4. Representation Diagnostics
+Representation diagnostics explain why CRAFT scales. Compared with interaction-only models, CRAFT improves the effective rank of intent and sequence representations, suggesting that contextual transport preserves more usable intermediate information. Additional visualizations and layer-wise analyses are provided in Appendix D.
+Ethics and Privacy Statement
+This work studies ranking models for large-scale advertising recommendation. While improved recommendation accuracy may benefit user experience and platform efficiency, such models may also amplify historical bias, over-personalization, or uneven exposure across user and item groups. We use anonymized competition data and do not attempt to identify individuals; future deployment should include privacy-preserving data governance, fairness auditing, and monitoring for distribution shift and misuse.
+Acknowledgements
+This work was supported by the National Science and Technology Major Project for New Generation Artificial Intelligence under Grant No. 2025ZD0122702, and by the Tencent Rhino-Bird WeChat Special Project under Grant No. WXG-FR-2026-11. We also thank Tencent for organizing the TAAC competition and the Tencent UNI-REC Challenge.
+References
+Borisyuk et al. (2024)
+F. Borisyuk, M. Zhou, Q. Song, S. Zhu, B. Tiwana, G. Parameswaran, S. Dangi, L. Hertel, Q. C. Xiao, X. Hou, et al.
+LiRank: industrial large scale ranking models at linkedin.
+In Proceedings of the 30th ACM SIGKDD Conference on Knowledge Discovery and Data Mining,
+pp. 4804–4815.
+Cited by: §2.3.
+Chai et al. (2025)
+Z. Chai, Q. Ren, X. Xiao, H. Yang, B. Han, S. Zhang, D. Chen, H. Lu, W. Zhao, L. Yu, et al.
+Longer: scaling up long sequence modeling in industrial recommenders.
+In Proceedings of the Nineteenth ACM Conference on Recommender Systems,
+pp. 247–256.
+Cited by: §1,
+§2.1.
+Chang et al. (2023)
+J. Chang, C. Zhang, Z. Fu, X. Zang, L. Guan, J. Lu, Y. Hui, D. Leng, Y. Niu, Y. Song, et al.
+TWIN: two-stage interest network for lifelong user behavior modeling in ctr prediction at kuaishou.
+In Proceedings of the 29th ACM SIGKDD Conference on Knowledge Discovery and Data Mining,
+pp. 3785–3794.
+Cited by: §2.1.
+Chen et al. (2019)
+Q. Chen, H. Zhao, W. Li, P. Huang, and W. Ou
+Behavior sequence transformer for e-commerce recommendation in alibaba.
+In Proceedings of the 1st international workshop on deep learning practice for high-dimensional sparse data,
+pp. 1–4.
+Cited by: §2.1.
+Cheng et al. (2016)
+H. Cheng, L. Koc, J. Harmsen, T. Shaked, T. Chandra, H. Aradhye, G. Anderson, G. Corrado, W. Chai, M. Ispir, et al.
+Wide & deep learning for recommender systems.
+In Proceedings of the 1st workshop on deep learning for recommender systems,
+pp. 7–10.
+Cited by: §2.1.
+Gui et al. (2023)
+H. Gui, R. Wang, K. Yin, L. Jin, M. Kula, T. Xu, L. Hong, and E. H. Chi
+Hiformer: heterogeneous feature interactions learning with transformers for recommender systems.
+arXiv preprint arXiv:2311.05884.
+Cited by: §2.2.
+Guo et al. (2017)
+H. Guo, R. Tang, Y. Ye, Z. Li, and X. He
+DeepFM: a factorization-machine based neural network for CTR prediction.
+In Proceedings of the Twenty-Sixth International Joint Conference on Artificial Intelligence,
+pp. 1725–1731.
+Cited by: §1,
+§2.1.
+Guo et al. (2023)
+X. Guo, J. Pan, X. Wang, B. Chen, J. Jiang, and M. Long
+On the embedding collapse when scaling up recommendation models.
+arXiv preprint arXiv:2310.04400.
+Cited by: §1,
+§2.3.
+He and Chua (2017)
+X. He and T. Chua
+Neural factorization machines for sparse predictive analytics.
+In Proceedings of the 40th International ACM SIGIR conference on Research and Development in Information Retrieval,
+pp. 355–364.
+Cited by: §2.1.
+Hidasi et al. (2015)
+B. Hidasi, A. Karatzoglou, L. Baltrunas, and D. Tikk
+Session-based recommendations with recurrent neural networks.
+arXiv preprint arXiv:1511.06939.
+Cited by: §2.1.
+Huang et al. (2019)
+T. Huang, Z. Zhang, and J. Zhang
+FiBiNET: combining feature importance and bilinear feature interaction for click-through rate prediction.
+In Proceedings of the 13th ACM conference on recommender systems,
+pp. 169–177.
+Cited by: §2.1.
+Huang et al. (2026)
+Y. Huang, S. Hong, X. Xiao, J. Jin, X. Luo, Z. Wang, Z. Chai, S. Wu, Y. Zheng, and J. Lin
+HyFormer: revisiting the roles of sequence modeling and feature interaction in CTR prediction.
+arXiv preprint arXiv:2601.12681.
+Cited by: §1,
+§2.2.
+Juan et al. (2016)
+Y. Juan, Y. Zhuang, W. Chin, and C. Lin
+Field-aware factorization machines for CTR prediction.
+In Proceedings of the 10th ACM Conference on Recommender Systems,
+pp. 43–50.
+Cited by: §2.1.
+Kang and McAuley (2018)
+W. Kang and J. McAuley
+Self-attentive sequential recommendation.
+In Proceedings of the 2018 IEEE International Conference on Data Mining,
+pp. 197–206.
+Cited by: §1,
+§2.1,
+§2.3.
+Khrylchenko et al. (2026)
+K. Khrylchenko, A. Matveev, S. Makeev, and V. Baikalov
+Scaling recommender transformers to one billion parameters.
+In Proceedings of the 32nd ACM SIGKDD Conference on Knowledge Discovery and Data Mining V. 1,
+pp. 2255–2265.
+Cited by: §2.3.
+Lian et al. (2018)
+J. Lian, X. Zhou, F. Zhang, Z. Chen, X. Xie, and G. Sun
+xDeepFM: combining explicit and implicit feature interactions for recommender systems.
+In Proceedings of the 24th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining,
+pp. 1754–1763.
+Cited by: §1,
+§2.1.
+Pan et al. (2024)
+J. Pan, W. Xue, X. Wang, H. Yu, X. Liu, S. Quan, X. Qiu, D. Liu, L. Xiao, and J. Jiang
+Ads recommendation in a collapsed and entangled world.
+In Proceedings of the 30th ACM SIGKDD Conference on Knowledge Discovery and Data Mining,
+pp. 5566–5577.
+Cited by: §2.3.
+Pi et al. (2020)
+Q. Pi, G. Zhou, Y. Zhang, Z. Wang, L. Ren, Y. Fan, X. Zhu, and K. Gai
+Search-based user interest modeling with lifelong sequential behavior data for click-through rate prediction.
+In Proceedings of the 29th ACM International Conference on Information & Knowledge Management,
+pp. 2685–2692.
+Cited by: §1.
+Qu et al. (2016)
+Y. Qu, H. Cai, K. Ren, W. Zhang, Y. Yu, Y. Wen, and J. Wang
+Product-based neural networks for user response prediction.
+In 2016 IEEE 16th international conference on data mining (ICDM),
+pp. 1149–1154.
+Cited by: §2.1.
+Rendle (2010)
+S. Rendle
+Factorization machines.
+In Proceedings of the 2010 IEEE International Conference on Data Mining,
+pp. 995–1000.
+Cited by: §2.1.
+Si et al. (2024)
+Z. Si, L. Guan, Z. Sun, X. Zang, J. Lu, Y. Hui, X. Cao, Z. Yang, Y. Zheng, D. Leng, et al.
+Twin v2: scaling ultra-long user behavior sequence modeling for enhanced ctr prediction at kuaishou.
+In Proceedings of the 33rd ACM International Conference on Information and Knowledge Management,
+pp. 4890–4897.
+Cited by: §2.1.
+Song et al. (2019)
+W. Song, C. Shi, Z. Xiao, Z. Duan, Y. Xu, M. Zhang, and J. Tang
+Autoint: automatic feature interaction learning via self-attentive neural networks.
+In Proceedings of the 28th ACM international conference on information and knowledge management,
+pp. 1161–1170.
+Cited by: §2.2.
+Sun et al. (2019)
+F. Sun, J. Liu, J. Wu, C. Pei, X. Lin, W. Ou, and P. Jiang
+BERT4Rec: sequential recommendation with bidirectional encoder representations from transformer.
+In Proceedings of the 28th ACM International Conference on Information and Knowledge Management,
+pp. 1441–1450.
+Cited by: §1,
+§2.1.
+Tang and Wang (2018)
+J. Tang and K. Wang
+Personalized top-n sequential recommendation via convolutional sequence embedding.
+In Proceedings of the eleventh ACM international conference on web search and data mining,
+pp. 565–573.
+Cited by: §2.1.
+Wang et al. (2017)
+R. Wang, B. Fu, G. Fu, and M. Wang
+Deep & cross network for ad click predictions.
+In Proceedings of the ADKDD’17,
+Cited by: §1,
+§2.1.
+Wang et al. (2021)
+R. Wang, R. Shivanna, D. Cheng, S. Jain, D. Lin, L. Hong, and E. Chi
+Dcn v2: improved deep & cross network and practical lessons for web-scale learning to rank systems.
+In Proceedings of the web conference 2021,
+pp. 1785–1797.
+Cited by: §2.1,
+§2.2.
+Xia et al. (2023)
+X. Xia, P. Eksombatchai, N. Pancha, D. D. Badani, P. Wang, N. Gu, S. V. Joshi, N. Farahpour, Z. Zhang, and A. Zhai
+Transact: transformer-based realtime user action model for recommendation at pinterest.
+In Proceedings of the 29th ACM SIGKDD Conference on Knowledge Discovery and Data Mining,
+pp. 5249–5259.
+Cited by: §2.1.
+Xu et al. (2025)
+S. Xu, S. Wang, D. Guo, X. Guo, Q. Xiao, B. Huang, G. Wu, and C. Luo
+Climber: toward efficient scaling laws for large recommendation models.
+In Proceedings of the 34th ACM International Conference on Information and Knowledge Management,
+pp. 6193–6200.
+Cited by: §2.3.
+Zeng et al. (2025)
+Z. Zeng, X. Liu, M. Hang, X. Liu, Q. Zhou, C. Yang, Y. Liu, Y. Ruan, L. Chen, Y. Chen, et al.
+InterFormer: effective heterogeneous interaction learning for click-through rate prediction.
+In Proceedings of the 34th ACM International Conference on Information and Knowledge Management,
+pp. 6225–6233.
+Cited by: §1,
+§2.2.
+Zhang et al. (2024)
+B. Zhang, L. Luo, Y. Chen, J. Nie, X. Liu, D. Guo, Y. Zhao, S. Li, Y. Hao, Y. Yao, et al.
+Wukong: towards a scaling law for large-scale recommendation.
+arXiv preprint arXiv:2403.02545.
+Cited by: §1,
+§2.3.
+Zhang et al. (2026)
+Z. Zhang, H. Pei, J. Guo, T. Wang, Y. Feng, H. Sun, S. Liu, and A. Sun
+Onetrans: unified feature interaction and sequence modeling with one transformer in industrial recommender.
+In Proceedings of the ACM Web Conference 2026,
+pp. 8162–8170.
+Cited by: §1,
+§2.2.
+Zhou et al. (2019)
+G. Zhou, N. Mou, Y. Fan, Q. Pi, W. Bian, C. Zhou, X. Zhu, and K. Gai
+Deep interest evolution network for click-through rate prediction.
+In Proceedings of the AAAI Conference on Artificial Intelligence,
+Vol. 33, pp. 5941–5948.
+Cited by: §1,
+§2.1.
+Zhou et al. (2018)
+G. Zhou, X. Zhu, C. Song, Y. Fan, H. Zhu, X. Ma, Y. Yan, J. Jin, H. Li, and K. Gai
+Deep interest network for click-through rate prediction.
+In Proceedings of the 24th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining,
+pp. 1059–1068.
+Cited by: §1,
+§2.1,
+§2.2.
+Zhou et al. (2026)
+Y. Zhou, Y. Hu, Z. Feng, J. Pan, K. Wu, H. Li, S. Zhang, S. Huang, Z. Zhu, C. Yin, et al.
+TokenFormer: unify the multi-field and sequential recommendation worlds.
+arXiv preprint arXiv:2604.13737.
+Cited by: §1,
+§2.2,
+§2.3.
+Zhu et al. (2025)
+J. Zhu, Z. Fan, X. Zhu, Y. Jiang, H. Wang, X. Han, H. Ding, X. Wang, W. Zhao, Z. Gong, et al.
+Rankmixer: scaling up ranking models in industrial recommenders.
+In Proceedings of the 34th ACM International Conference on Information and Knowledge Management,
+pp. 6309–6316.
+Cited by: §1,
+§2.3.
+Zivic et al. (2024)
+P. Zivic, H. Vazquez, and J. Sánchez
+Scaling sequential recommendation models with transformers.
+In Proceedings of the 47th international ACM SIGIR conference on research and development in information retrieval,
+pp. 1567–1577.
+Cited by: §2.3.
+Table 3. Feature groups in the TAAC2026 advertising recommendation data.
+Group
+Raw form
+Count
+Model-side token type
+Basic columns
+IDs and timestamps
+5
+Supervision/context fields
+User integer fields
+Scalar IDs / ID arrays
+54
+User non-sequential tokens
+User dense fields
+Float vectors / arrays
+17
+Dense and pair-aware tokens
+Item integer fields
+Scalar IDs / ID arrays
+17
+Item non-sequential tokens
+Item dense fields
+Float vectors
+4
+Item dense tokens
+Behavior sequences
+Ordered ID sequences
+45 in 4 domains
+Sequence tokens
+Appendix A Dataset Details and Feature Processing
+The TAAC2026 advertising recommendation data is organized as large-scale user-item interaction records. According to the official public schema description00
+0
+https://huggingface.co/datasets/TAAC2026/second_round_sample_1000, each instance contains five basic columns: user ID, item ID, label type, label time, and request timestamp. The remaining inputs are heterogeneous recommendation signals, including user-side integer fields, user-side dense fields, item-side integer fields, item-side dense fields, and multi-domain behavior sequences. Table 3 summarizes the major feature groups.
+Table 3 shows that the task input is not a homogeneous token stream. Sparse integer fields, dense numerical vectors, structured dense arrays, paired ID-dense arrays, and ordered behavior sequences have different statistical properties. Sparse fields are high-cardinality and unevenly updated. Dense fields may contain continuous embeddings, repeated segments, metadata-like suffixes, or missing-value conventions. Behavior sequences are order-dependent and should preserve temporal structure. Therefore, a unified model cannot simply concatenate all raw fields and rely on a downstream block to discover every structure automatically.
+This observation motivates the first design layer of our system: heterogeneous tokenization. Before CRAFT performs feature transport, different raw feature families are converted into stable token representations. The goal is not to manually inject semantic labels into anonymized fields, but to preserve their observed structural patterns and avoid creating noisy tokens that harm scaling.
+Table 4. Tokenization pipeline for heterogeneous recommendation features.
+Group
+Raw form
+Encoder
+Output
+User IDs
+Sparse IDs
+RankMixer
+User tokens
+Item IDs
+Sparse IDs
+RankMixer
+Item tokens
+Multi-value IDs
+ID arrays
+Masked pool
+Field tokens
+Dense fields
+Vectors
+MLP / structured
+Dense tokens
+ID-dense pairs
+Paired arrays
+Pair encoder
+Pair tokens
+Behaviors
+Sequences
+Seq encoder
+Seq tokens
+Context
+Time fields
+Embedding
+Context token
+Table 4 summarizes the tokenization pipeline. User and item integer fields are embedded and compressed into non-sequential tokens. Multi-value ID arrays are aggregated with masks so that padded positions do not become artificial evidence. Dense vectors are processed by either simple MLP projection or structure-aware tokenizers depending on their observed layout. Behavior histories remain sequence tokens because their order carries essential information for intent modeling. Timestamp-derived signals are encoded as contextual tokens.
+This tokenization stage is important for the feature transport view. CRAFT assumes that non-sequential tokens can provide a contextual field that guides intent and sequence states. If the contextual tokens themselves are noisy or structurally misaligned, the transport path can amplify bad evidence. In contrast, once heterogeneous fields are converted into reliable tokens, CRAFT can use non-sequential context as a stable controller of representation evolution.
+A.1. Structure-Aware Dense Tokenization
+Table 5. Structure-aware dense tokenization. Dense fields are grouped by observed structural pattern rather than anonymized field ID.
+Pattern
+Observed structure
+Encoder
+Output
+Plain vector
+Continuous vector
+BN + MLP
+1 token
+Segmented vector
+Repeated sub-vectors
+Masked segment pool
+1 token
+Positioned segments
+Position + segments + tail
+Pos + segment + tail fusion
+1 token
+Embedding + metadata
+Vector prefix + suffix
+Prefix projection
+1 token
+Item dense
+Item-side vectors
+Field pool
+1 token
+ID-dense pair
+Aligned ID/value arrays
+Pair encoder
+Field token
+Table 5 reports the dense-tokenization rules used in our system. The key observation is that anonymized dense vectors are not guaranteed to be ordinary continuous vectors. Some dense features behave like stable embedding vectors; some contain repeated fixed-size sub-vectors; some contain all-zero padded segments; some combine vector blocks with position-like metadata or low-dimensional tail statistics; and some are aligned with ID arrays. Treating all of them as flat vectors can mix semantically different subspaces and make the resulting token unstable.
+For plain dense vectors, batch normalization followed by an MLP projection is sufficient because the vector behaves as one continuous feature. For segmented dense vectors, all-zero segments often indicate padding or missing entries. We therefore project each valid segment and aggregate them with a mask. This prevents zero segments from distorting normalization and pooling. For positioned segmented vectors, the position code, segment body, and tail statistics play different roles; we encode them separately and fuse them into one token. For stable embedding vectors with metadata suffixes, we use the stable vector prefix when the suffix appears distribution-sensitive. This avoids letting a small unstable suffix dominate a high-dimensional useful embedding.
+For item dense fields, per-field projection followed by pooling is used because item dense features are fewer but semantically distinct. For ID-dense pairs, the dense value at each position is meaningful only together with the ID at the same position. The pair encoder therefore models ID embeddings, dense projections, multiplicative interactions, and difference features before masked aggregation.
+This design supports the central claim of the paper. CRAFT is not merely a larger interaction layer; it depends on reliable feature transport. Reliable transport requires that dense fields first be converted into tokens whose internal structure is respected. Otherwise, increasing depth or width may simply transport dense-feature noise more strongly.
+A.2. Missing Values, Padding, and Sparse Robustness
+Table 6. Robust handling of missingness and padding.
+Feature type
+Dataset pattern
+Operation
+Scalar ID
+Missing code
+Reserved embedding
+ID array
+Padding code
+Masked aggregation
+Dense vector
+Invalid values
+Sanitization + norm
+Segmented dense
+Empty segment
+Segment mask
+Behavior sequence
+Padded events
+Sequence mask
+ID-dense pair
+Invalid pair
+Pair-validity mask
+Large-vocab ID
+Oversized vocabulary
+Hashing / skip rule
+Table 6 summarizes the missing-value and padding rules. Missingness is common in industrial recommendation logs. It can be a valid signal, but it can also create fake interactions if handled incorrectly. Scalar ID fields use reserved missing embeddings so that missingness can be learned as a categorical pattern. Multi-value ID arrays and behavior sequences use masks to ensure that padding positions do not enter pooling or attention as real events.
+Dense features require additional care because NaN, infinite values, and all-zero segments can destabilize normalization layers. We sanitize invalid numerical values, normalize dense vectors, and apply explicit masks for segmented dense fields. For aligned ID-dense arrays, pair validity is determined at the aligned-position level. This allows the model to retain useful dense evidence when present while preventing padded pairs from contributing to the token.
+These robustness rules are closely related to representation collapse. If missing values are treated as normal feature values, the model may learn spurious low-diversity directions shared by many samples. Such directions can dominate non-sequential context and then propagate through unified blocks. By explicitly modeling missingness and padding, the input token space becomes less prone to such collapse-prone artifacts.
+Appendix B System Components and Training Protocol
+This section provides the system-level details behind the main results. Unless otherwise specified, controlled comparisons keep the data split, sequence lengths, tokenizer configuration, optimizer setting, EMA strategy, distillation teacher, distillation weight, and effective global batch fixed. Runs that require a different data protocol or effective batch due to memory constraints are treated as engineering explorations rather than clean scaling points.
+B.1. Optimization and Stabilization
+Table 7. Optimization and stabilization settings.
+Component
+Setting
+Applied to
+Sparse optimizer
+Adagrad
+Sparse embeddings
+Dense optimizer
+MuonPlus/AdamW-style update
+Dense parameters
+EMA
+Dense-parameter EMA
+Validation/checkpoint selection
+Embedding refresh
+Early sparse reinitialization
+Sparse embeddings
+LR schedule
+Step-wise cosine decay
+Dense optimizer
+Model selection
+Validation-based early stopping
+Whole model
+Figure 4. Comparison of horizontal and vertical scaling routes. Horizontal scaling increases dmodeld_{\mathrm{model}} at fixed depth, while vertical scaling increases the number of CRAFT blocks at fixed dmodel=420d_{\mathrm{model}}=420.
+Table 7 separates sparse and dense optimization. Sparse ID embeddings receive highly uneven and frequency-dependent gradients. Frequent IDs may receive stable updates, while rare IDs may receive only a few noisy gradients. Adagrad is therefore suitable because it adapts learning rates by coordinate frequency. Dense matrices, token mixers, sequence encoders, and CRAFT transport modules have different optimization geometry and are optimized with dense-parameter optimizers.
+EMA is used to smooth the dense ranking function used for validation and checkpoint selection. This is especially useful in recommendation because validation AUC can fluctuate due to noisy labels and distribution shift. Early sparse reinitialization refreshes unreliable sparse embeddings at the beginning of training, reducing the chance that early noisy embedding states dominate later transport.
+The broader lesson is that scaling a unified recommendation model is not only an architectural problem. Sparse memorization, dense representation learning, and sequence modeling have different training dynamics. A stable training protocol is necessary before evaluating whether a new block such as CRAFT can truly scale.
+B.2. Progressive Distillation
+In the distilled setting, the student is trained with both binary labels and teacher soft predictions:
+(13)
+ℒ=(1−α)​ℒBCE+α​ℒKD,\mathcal{L}=(1-\alpha)\mathcal{L}_{\mathrm{BCE}}+\alpha\mathcal{L}_{\mathrm{KD}},
+where ℒKD\mathcal{L}_{\mathrm{KD}} matches teacher and student probabilities with temperature 1.01.0.
+Table 8. Progressive distillation protocol.
+Stage
+Teacher source
+Student initialization
+Distillation weight
+Supervised anchor
+None
+Random
+0
+First-generation distillation
+Strong supervised anchor
+Random
+0.50
+Second-generation distillation
+First-generation distilled model
+Random
+0.65
+Table 8 describes the distillation protocol. Distillation is treated as a training enhancement rather than part of the CRAFT architecture. This distinction is important for interpretation. In noisy implicit-feedback recommendation, the binary label only gives partial preference information. Teacher probabilities provide smoother signals over difficult samples and encode relative uncertainty that is not visible in hard labels.
+This explains why distillation improves both the interaction baseline and CRAFT. However, distillation and CRAFT affect the model differently. Distillation mainly improves the supervision signal, while CRAFT changes the internal representation pathway by controlling how non-sequential context is transported into intent and sequence states. The ablation in Appendix C separates these two effects.
+Appendix C Ablation Studies
+Table 9. CRAFT ablation results. “Trans” indicates contextual feature transport; “T-AUC” denotes official test AUC.
+Model
+Trans
+Distill
+T-AUC
+Params
+Optim. Base
+No
+No
+0.837165
+307.27M
+CRAFT
+Yes
+No
+0.837231
+308.69M
+Optim. Base + Distill
+No
+Yes
+0.837983
+334.87M
+CRAFT + Distill
+Yes
+Yes
+0.838090
+308.69M
+Table 9 isolates two sources of improvement: contextual feature transport and distillation. Without distillation, CRAFT improves the optimized interaction baseline from 0.8371650.837165 to 0.8372310.837231. This verifies that feature transport brings architectural value even when the training objective remains unchanged. The gain is small in absolute AUC but meaningful in this competition-scale setting, where the optimized baseline already includes strong tokenization, stable optimization, and unified feature-sequence interaction.
+Distillation gives a larger improvement for both paradigms. The interaction baseline improves from 0.8371650.837165 to 0.8379830.837983, while CRAFT with the same distillation setting reaches 0.8380900.838090. This shows that CRAFT is not redundant with distillation. If CRAFT merely duplicated the effect of a stronger teacher, its advantage would disappear after distillation. Instead, CRAFT still improves over the distilled interaction baseline.
+The parameter comparison further strengthens this interpretation. CRAFT + Distill achieves the strongest main result with 308.69308.69M inference-time parameters, while the distilled interaction baseline uses 334.87334.87M parameters in our implementation. Therefore, the improvement is not explained by a larger inference model. It is better explained by how CRAFT changes the information path: non-sequential context becomes a controller of intent and sequence evolution, instead of only another object in an interaction layer.
+Appendix D Representation Diagnostics
+Table 10. Representation diagnostics on sampled validation batches. Rank denotes effective rank; Cos denotes average absolute cosine similarity.
+Model
+Test AUC
+I-Rank
+I-Cos
+NS-Rank
+NS-Cos
+Seq-Rank
+Seq-Cos
+Final-Rank
+Final-Cos
+Optimized Baseline
+0.837165
+74.02
+0.171
+187.68
+0.188
+8.06
+0.476
+35.67
+0.263
+CRAFT
+0.837231
+77.22
+0.210
+180.98
+0.127
+9.86
+0.485
+33.29
+0.263
+Optimized Baseline + Distill
+0.837983
+57.68
+0.225
+207.44
+0.210
+8.89
+0.477
+47.55
+0.239
+CRAFT + Distill
+0.838090
+84.33
+0.233
+202.70
+0.125
+10.90
+0.514
+32.15
+0.270
+Table 10 reports effective rank and cosine diagnostics for major representation spaces. The optimized baseline already has strong performance, but its intent and sequence spaces remain relatively limited. Adding CRAFT increases I-Rank from 74.0274.02 to 77.2277.22 and Seq-Rank from 8.068.06 to 9.869.86. This indicates that feature transport preserves more diverse intent directions and richer sequence evidence.
+The non-sequential space behaves differently. CRAFT decreases NS-Cos from 0.1880.188 to 0.1270.127. This suggests that CRAFT does not simply make non-sequential features more dominant. Instead, it makes non-sequential context less redundant and uses it to modulate other states. This is consistent with the transport view: non-sequential features act as contextual controllers, while intent and sequence states become the main evolving representations.
+Distillation changes the geometry in a different way. The distilled interaction baseline obtains strong AUC but has lower I-Rank than the non-distilled optimized baseline. This means that soft labels can improve final ranking quality without necessarily expanding the intermediate intent space. By contrast, CRAFT + Distill obtains both the best AUC and the highest I-Rank and Seq-Rank among the main models. This suggests a complementary mechanism: distillation improves supervision smoothness, while CRAFT improves representation transport.
+Final-Rank should not be interpreted as “the higher the better.” The final representation is a readout space for producing a calibrated ranking score. It can be compact as long as the intermediate transport spaces preserve useful evidence. The more relevant signal for CRAFT is that intent and sequence representations become richer before final projection.
+D.1. KMeans-MI Analysis
+Figure 8 examines where label-discriminative information is encoded inside CRAFT. Intent carriers contain the strongest intermediate label signal, with MI increasing from 0.0560.056 at Layer 0 to 0.0680.068 at Layer 2. Sequence-summary representations remain much less informative, with MI below 0.0090.009 across layers. Non-sequential context representations provide moderate signal but gradually decrease from 0.0420.042 to 0.0350.035. The final output reaches the highest MI of 0.0750.075, as expected for the prediction space.
+This result is important because it identifies the role of each representation group. Sequence summaries alone are not the primary label-discriminative space. Non-sequential context alone is also not the final answer. Instead, CRAFT progressively organizes label-relevant evidence through intent carriers. This supports the design of intent tokens as the transport interface between non-sequential context and sequential evidence.
+The MI trend also helps distinguish CRAFT from simple feature interaction. In a pure interaction view, one may expect all useful information to be mixed directly into a final hidden vector. In CRAFT, useful information is first gathered and reorganized in intent carriers, then projected into the final prediction space. This explains why intermediate intent-rank expansion can coexist with a compact final readout.
+D.2. Qualitative Representation Geometry
+(a) PCA projection.
+(b) t-SNE projection.
+Figure 5. Qualitative projections of layer-2 hidden representations in CRAFT-2L, CRAFT-4L, and CRAFT-6L. Rows correspond to non-sequential, sequence-summary, and intent-carrier representations, and columns correspond to model depth. Both PCA and t-SNE show that the clearest depth-dependent restructuring occurs in the intent-carrier space.
+Figure 5 provides qualitative evidence for the representation changes observed in Table 10. We visualize layer-2 states because this is the deepest shared post-transport state across CRAFT-2L, CRAFT-4L, and CRAFT-6L. The non-sequential representation space remains relatively stable across depths, while the sequence-summary space stays compact. The most visible geometric change occurs in the intent-carrier space.
+These visualizations should not be interpreted as standalone proof of performance improvement. Their role is diagnostic. They show where the model changes when depth increases. The fact that the strongest geometric evolution occurs in intent carriers is consistent with the feature transport mechanism: additional CRAFT blocks mainly refine the interface that carries contextual and sequential evidence, instead of uniformly expanding every hidden representation.
+Appendix E Scaling Analysis
+Table 11. Clean CRAFT scaling results.
+Model
+Blocks
+dmodeld_{\mathrm{model}}
+Test AUC
+Params
+GFLOPs
+CRAFT-2L
+2
+420
+0.838090
+308.69M
+6.970
+CRAFT-4L
+4
+420
+0.838093
+330.63M
+12.992
+CRAFT-6L
+6
+420
+0.838148
+352.56M
+19.013
+CRAFT-D600
+2
+600
+0.838106
+375.41M
+13.679
+Table 11 reports the clean scaling points. Along the depth axis, increasing CRAFT from one block to six blocks improves test AUC from 0.8379750.837975 to 0.8381480.838148. Along the width axis, increasing dmodeld_{\mathrm{model}} from 420420 to 600600 at two blocks improves test AUC from 0.8380900.838090 to 0.8381060.838106. These results show that CRAFT can benefit from both vertical scaling and horizontal scaling.
+The depth trend is positive but not perfectly linear. CRAFT-4L gives only a small improvement over CRAFT-2L, while CRAFT-6L gives a clearer gain. This suggests that stackability is not a trivial consequence of adding layers. Additional blocks must preserve useful intent information long enough for deeper refinement to help. The strong CRAFT-6L result supports the claim that contextual residual transport improves the stackability of unified recommendation blocks.
+The width result is also useful. CRAFT-D600 improves over CRAFT-2L, showing that the transport block can absorb a wider hidden state. However, width scaling increases both parameter count and per-layer computation more aggressively than adding shallow depth. Therefore, the best route depends on the compute budget. In our current results, depth scaling to six blocks gives the best AUC, while width scaling provides complementary evidence that CRAFT uses additional capacity.
+E.1. Depth Scaling Expands Intent-Mediated Transport
+Figure 3 investigates why CRAFT benefits from stacking more blocks. When increasing the number of CRAFT blocks from 1 to 6, the effective rank of intent carriers increases from 70.470.4 to 158.2158.2. In contrast, the final-output rank decreases from 36.636.6 to 27.727.7, and the sequence-summary rank remains low, changing from 10.210.2 to 7.97.9.
+This contrast is central to the scaling interpretation. Deeper CRAFT does not uniformly inflate every representation space. Instead, additional blocks mainly expand the intent-mediated transport space. The final output can remain compact because it only needs to read out the transported evidence. The sequence-summary space can also remain compact because CRAFT does not rely on raw sequence summaries as the only information path. The model stores and refines cross-feature evidence in intent carriers.
+This also explains why the feature transport view is more suitable than a pure feature interaction view for describing our model. The main effect of depth is not simply more pairwise mixing. It is the progressive expansion and refinement of the representation space that transports information between non-sequential context and behavior evidence.
+E.2. Width Scaling Increases Usable Representation Capacity
+Figure 6. Width-scaling diagnostic for CRAFT. Increasing dmodeld_{\mathrm{model}} from 420 to 600 increases the combined effective-rank budget of intent-carrier and non-sequential context representations.
+Table 12. Negative or limited-gain findings from controlled explorations.
+Direction
+Controlled change
+Observed outcome
+Dense tokenization
+Flat projection for structured dense vectors
+Weaker scaling behavior
+Segmented dense fields
+Remove segment-aware pooling
+Lower robustness
+Stable dense embeddings
+Use metadata suffix with vector prefix
+Worse generalization
+Dense tokenizer complexity
+Add heavier self-attention tokenizer
+Higher cost and instability
+Optimization
+Use one optimizer for all parameters
+Weaker stability
+FFN expansion
+Increase hidden multiplier
+Limited or negative gain
+Training duration
+Continue after early best epoch
+Overfitting trend
+Figure 6 studies whether increasing dmodeld_{\mathrm{model}} provides usable capacity rather than merely adding parameters. Under the same 2-layer CRAFT architecture, increasing dmodeld_{\mathrm{model}} from 420420 to 600600 raises intent-carrier rank from 84.384.3 to 103.8103.8 and non-sequential context rank from 202.7202.7 to 255.4255.4. The combined rank budget increases from 287.0287.0 to 359.2359.2, together with a positive AUC change from 0.8380900.838090 to 0.8381060.838106.
+This suggests that the added width is absorbed by meaningful intermediate representation spaces. The larger model does not only increase parameter count; it also expands the capacity of the context and intent spaces that participate in feature transport. This is useful evidence for width scaling, even though the absolute AUC gain is smaller than the best depth-scaling result.
+E.3. Horizontal and Vertical Scaling Routes
+Figure 4 compares horizontal and vertical scaling under the compute axis. CRAFT-1L is a strong low-compute starting point, but CRAFT-2L improves AUC from 0.8379750.837975 to 0.8380900.838090, showing that the second transport block is useful. Beyond CRAFT-2L, both scaling routes yield positive gains. At a similar compute level, CRAFT-D600 gives a larger AUC than CRAFT-4L, while CRAFT-6L achieves the best current AUC.
+This result gives a practical scaling guideline. Width scaling is useful when increasing representation capacity at moderate depth. Depth scaling is useful when the model can preserve and refine intent information across more blocks. Under the current experimental budget, the strongest result comes from vertical scaling to six CRAFT blocks.
+E.4. Layer-wise Representation Dynamics
+To examine how sequential information evolves across stacked blocks, we measure the effective rank of sequence-summary representations at each layer. Effective rank reflects how broadly representation energy is distributed across independent directions. We use it as a geometric diagnostic rather than a direct measure of representation quality.
+Figure 7. Layer-wise evolution of sequence effective rank. Layer 0 denotes the sequence summary before the first modeling block. The interaction baseline progressively compresses the sequence space, whereas CRAFT enables later blocks to recover task-relevant representation directions. Effective rank is used as a geometric diagnostic rather than a direct measure of representation quality.
+As shown in Figure 7, the interaction baseline exhibits progressive compression, with its sequence rank decreasing from 9.3939.393 at Layer 0 to 8.0578.057 at Layer 2. Distillation alleviates this degradation, but its final rank (8.8928.892) remains close to the initial value (8.9638.963). CRAFT exhibits a different evolution pattern: its rank first decreases from 10.01710.017 to 8.9648.964, then recovers to 9.8599.859. This non-monotonic trajectory suggests that CRAFT does not indiscriminately expand representations. Instead, the first block filters sequence information, while subsequent contextual transport recovers task-relevant directions that are progressively lost by interaction-only updates.
+Combining CRAFT with distillation produces the strongest effect. Its sequence rank remains stable in the first block (9.661→9.5249.661\rightarrow 9.524) and then increases to 10.90310.903, yielding a net expansion over the initial representation. Together with the AUC improvements in Table 1, these results indicate that CRAFT changes how sequential evidence is preserved and reorganized across depth, while distillation provides complementary predictive supervision. Therefore, the gain of distilled CRAFT cannot be attributed to distillation alone.
+Appendix F Negative and Limited-Gain Findings
+Figure 8. KMeans-MI heatmap of label-discriminative information across CRAFT representation spaces. KMeans clustering with K=128K=128 is applied to each representation, and mutual information is computed between cluster assignments and labels.
+Table 12 summarizes important negative and limited-gain explorations. These results are useful because they clarify the boundary of our method. The final improvement does not come from blindly adding complexity. Heavier dense tokenizers, larger FFN multipliers, and longer training do not automatically improve ranking quality. In some cases, they increase cost or instability.
+The first group of findings concerns dense features. Structured dense vectors should not be flattened indiscriminately. When repeated segments, metadata suffixes, and stable vector prefixes are mixed by a generic projection, the model may learn unstable shortcuts. This weakens scaling because larger models can amplify these shortcuts. Structure-aware dense tokenization therefore acts as a reliability filter before feature transport.
+The second group concerns capacity allocation. Increasing FFN expansion or adding heavier dense self-attention does not necessarily help. This suggests that recommendation scaling is not only about total parameter count. Capacity must be placed where the data structure supports it. In our experiments, useful capacity is better allocated to intent-mediated transport and carefully tokenized context representations.
+The third group concerns training dynamics. Continuing training after the early best region often causes overfitting. This differs from many large-scale generative settings where long training can steadily improve performance. In CTR/CVR prediction, labels are noisy, data distribution is time-sensitive, and validation/test mismatch can appear quickly. Therefore, checkpoint selection, EMA, and early stopping are not minor engineering details; they are necessary for reliable model comparison.
+Together, these negative findings support the final design. CRAFT works best when built on stable tokenization and training. The model should not transport raw heterogeneous noise more strongly; it should transport cleaned, structured, and reliability-aware context.
+Appendix G Appendix Summary
+The full system contains three coupled layers. First, heterogeneous raw features are converted into stable tokens through structure-aware tokenization and robust missing-value handling. Second, sparse and dense parameters are optimized with different training dynamics, and distillation is used as a separate training enhancement. Third, CRAFT performs contextual residual adaptive feature transport inside each unified block.
+The evidence across ablation, representation diagnostics, and scaling analysis is consistent. CRAFT improves ranking performance without relying on a larger inference model. It increases intent and sequence representation diversity, organizes label-discrimin-ative information through intent carriers, and benefits from both depth and width scaling. The strongest current result is obtained by stacking CRAFT to six blocks, suggesting that controlled feature transport is a practical mechanism for scalable unified recommendation.
+Experimental support, please
+view the build logs
+for errors. Generated by
+L
+A
+T
+E
+xml
+.
+Instructions for reporting errors
+We are continuing to improve HTML versions of papers, and your feedback helps enhance accessibility and mobile
+support. To report errors in the HTML that will help us improve conversion and rendering, choose any of the
+methods listed below:
+Click the "Report Issue" (
+) button, located in the page header.
+Tip: You can select the relevant text first, to include it in your report.
+Our team has already identified the following issues. We appreciate your time reviewing and reporting rendering errors we
+may not have found yet. Your efforts will help us improve the HTML versions for all readers, because disability
+should not be a barrier to accessing research. Thank you for your continued support in championing open access for
+all.
+Have a free development cycle? Help support accessibility at arXiv! Our collaborators at LaTeXML maintain a list of packages that need conversion, and welcome developer contributions.
+We gratefully acknowledge support from
+our major funders,
+member institutions, ,
+and all contributors.
+About
+·
+Help
+·
+Contact
+·
+Subscribe
+·
+Copyright
+·
+Privacy
+·
+Accessibility
+·
+Operational Status (opens in new tab)
+Major funding support from

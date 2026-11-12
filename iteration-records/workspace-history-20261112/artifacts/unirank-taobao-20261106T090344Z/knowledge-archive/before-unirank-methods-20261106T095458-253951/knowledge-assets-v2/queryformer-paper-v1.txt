@@ -1,0 +1,591 @@
+QueryFormer: Winning Solution for KDD Cup 2026 Tencent UniRec Challenge
+Report GitHub Issue
+×
+Title:
+Content selection saved. Describe the issue below:
+Description:
+Submit without GitHub
+Submit in GitHub
+arXiv is now an independent nonprofit!
+Learn more
+×
+Back to arXiv
+Why HTML?
+Report Issue
+Back to Abstract
+Download PDF
+Abstract.
+1 Introduction
+2 Related Work
+2.1 Feature Interaction and Sequence Modeling
+2.2 Token-Based Architectures
+3 Preliminaries
+4 Methodology
+4.1 Overview
+4.2 Query-Driven Architecture
+4.2.1 Query-Generation Pipeline
+4.2.2 Embedding Matrix
+4.2.3 Co-Transformer
+4.2.4 Retrieval
+4.2.5 SeqQueryCrossAttn
+4.3 Supporting Components
+4.3.1 NS Token Construction
+4.3.2 Dense Feature Fusion
+4.3.3 Sequence Token Embedding
+4.3.4 Blocks
+4.4 Training Recipe
+4.4.1 Multi-Loss Supervision
+4.4.2 Optimization
+5 Experiments
+5.1 Experimental Setup
+5.2 Ablation Study
+5.3 Competition Results
+5.4 Scaling Analysis
+5.4.1 Architectural Scaling Efficiency
+6 Conclusion
+References
+License: CC BY 4.0
+arXiv:2609.16548v1 [cs.AI] 15 Sep 2026
+QueryFormer: Winning Solution for KDD Cup 2026 Tencent UniRec Challenge
+Conference: KDD Cup 2026 Tencent UniRec Challenge Workshop; August 12, 2026; Jeju, Korea
+Yuanzhe Zhou
+Affiliation: Wuhan University
+email:
+and
+Zhaoyang Zeng
+Affiliation: Sun Yat-sen University
+email:
+2026
+Abstract.
+Post-click conversion rate (pCVR) prediction requires jointly modeling feature interactions and sequential user behaviors. The KDD Cup 2026 Tencent UniRec Challenge calls for a unified architecture addressing both. We observe that existing unified architectures often generate query tokens—the central information hub—with projection-based multi-layer perceptrons (MLPs), without explicit token-to-query attention for refining the query side. We propose QueryFormer, centered on a stackable unified field–sequence block that bridges non-sequential multi-field features and behavioral sequences, and provide a latency-aware scaling study over view width HH, model width, depth, data, and compute. The block generates queries through cross-attention and packs sequence queries into shared-parameter attention. QueryFormer secured 1st place in the Industrial Track, achieving an official test area under the ROC curve (AUC) of 0.83254; a modest post-competition scale-up reached 0.832713. Within our grid, HH-scaling improves validation AUC from 0.84540 to 0.84615 and beats HyFormer at comparable budgets. Ablation identifies query generation as the largest contributor. Packed shared-parameter cross-attention keeps H=8H{=}8 inference latency to only 1.89×1.89{\times} that of H=1H{=}1, positioning the bridge as an efficient stackable unified block.
+Architecture diagram showing QueryFormer's query-driven bridge from non-sequential tokens to behavioral sequences through CoTransformerBlock, QuerySeqCrossAttn, and SeqQueryCrossAttn, with H independent tokenization columns.
+Figure 1. QueryFormer architecture. The reusable stackable query-generation bridge takes non-sequential field tokens and behavioral sequence tokens as input, returns generated query probes and mixed representations, and preserves the HH dimension as parallel tokenization columns with shape-(Bs,H,T,dmodel)(B_{s},H,T,d_{\text{model}}) views, where BsB_{s} is batch size and TT is token count, before per-column outputs are combined.Architecture diagram showing QueryFormer's query-driven bridge from non-sequential tokens to behavioral sequences through CoTransformerBlock, QuerySeqCrossAttn, and SeqQueryCrossAttn, with H independent tokenization columns.
+Figure 2. Scaling evidence for the stackable query-generation bridge. (a) Parameter scaling: QueryFormer traces a stronger AUC–dense-parameter frontier than HyFormer (Huang et al., 2026) within the explored budgets, with separate dmodeld_{\text{model}}- and HH-scaling paths. (b) Data efficiency: QueryFormer (Pdense=87.1​MP_{\mathrm{dense}}{=}87.1\mathrm{M}, H=4H{=}4) remains above HyFormer (Pdense=105.8​MP_{\mathrm{dense}}{=}105.8\mathrm{M}) from about 20% to full training data. Both x-axes are logarithmic; PdenseP_{\mathrm{dense}} denotes dense parameter count.Two-panel scaling analysis. (a) Parameter scaling: AUC vs dense parameters for QueryFormer d\_model-scaling, H-scaling, and HyFormer. (b) Data efficiency: AUC vs training samples for HyFormer (P\_dense=105.8M) and QueryFormer (P\_dense=87.1M, H=4). Both subplots use log x-axes.
+1. Introduction
+The KDD Cup 2026 Tencent UniRec Challenge requires post-click conversion rate (pCVR) models that jointly handle multi-field features and user behavior sequences. Our solution, QueryFormer, won the Industrial Track. The key observation is that existing unified architectures often generate query tokens with projection-based multi-layer perceptrons (MLPs), which provide nonlinear context compression but lack explicit token-to-query attention. Since the field-to-sequence cross-attention channel ⟨N,B⟩\langle N,B\rangle (non-sequential field tokens attending to behavioral sequence tokens) is dominant (Liu et al., 2026), query quality directly determines what sequence evidence is retrieved and how user-item context is aggregated.
+QueryFormer redesigns query processing as a stronger query-generation mechanism. It combines token-level self/cross attention, item-to-sequence retrieval, and cross-attention-based query generation (Figure 1). Its reusable unit is a stackable unified field–sequence block: field and behavior tokens enter a token-in/token-out bridge, generated query probes retrieve sequence evidence, and packed shared-parameter attention keeps multi-view execution efficient. Ablations show that replacing SeqQueryCrossAttn with an MLP causes the largest degradation, and scaling the embedding matrix width HH gives consistent gains. Figure 2 previews the scaling results against HyFormer.
+Our key contributions are:
+(1)
+Query Generation Mechanism: cross-attention-driven query generation adds explicit token-to-query attention beyond projection-based MLP generation.
+(2)
+Unified Block: a token-in/token-out field–sequence bridge composes with token-based recommenders and uses packed shared-parameter attention.
+(3)
+Latency-Aware Scaling Study: H=4H=4 independent tokenization columns form a shape-(Bs,H,T,dmodel)(B_{s},H,T,d_{\text{model}}) embedding matrix, enabling batch-parallel scaling across views, depth, width, data, and compute.
+(4)
+Industrial Validation: 1st place in the KDD Cup 2026 Industrial Track (test AUC 0.83254) with consistent scaling trends across multiple dimensions.
+2. Related Work
+2.1. Feature Interaction and Sequence Modeling
+DeepFM (Guo et al., 2017), DCN-V2 (Wang et al., 2021), Fi-GNN (Li et al., 2019), and DLRM (Naumov et al., 2019) model static feature interactions through product, cross-network, graph, or embedding-interaction layers. Sequential recommenders such as DIN (Zhou et al., 2018), DIEN (Zhou et al., 2019), SIM (Pi et al., 2020), BERT4Rec (Sun et al., 2019), SASRec (Kang and McAuley, 2018), and HSTU (Zhai et al., 2024) extract interest from behavior histories. These lines are usually optimized as separate modules; QueryFormer instead lets field tokens and behavior evidence interact through a unified query pipeline.
+2.2. Token-Based Architectures
+Recent token-based models (Ding et al., 2023; Huang et al., 2026; Zhang et al., 2026; Zhou et al., 2026) represent heterogeneous recommendation features as tokens processed by Transformer-style blocks. EST (Liu et al., 2026) shows that ⟨N,B⟩\langle N,B\rangle cross-attention is the dominant interaction channel, but it does not optimize how the query side is generated. HyFormer and OneTrans reuse MLP-generated queries; LENS, GAP-Net, and HeMix calibrate MLP queries with gates, cascades, or mixed static/dynamic components. QueryFormer takes a stronger step: it generates query probes through cross-attention and repeatedly refines them through a query-centric pipeline (Table 1). In Table 1, Bridge describes how explicitly a method connects non-sequential field tokens with behavioral sequence evidence during query generation.
+Table 1. Unified-block positioning. Tok→\toQ: explicit token-to-query attention; token I/O: token input/output; Packed: shared-parameter packed attention for multi-view queries.
+Method
+Query
+Tok→\toQ
+Bridge
+Views
+Packed
+HyFormer (Huang et al., 2026)
+MLP
+×\times
+implicit
+×\times
+×\times
+HeMix (Wang et al., 2026a)
+Mixed
+×\times
+mixed
+×\times
+×\times
+LENS (Wang et al., 2026b)
+Gate
+×\times
+gated
+×\times
+×\times
+GAP-Net (Ke et al., 2026)
+Cascade
+×\times
+cascade
+×\times
+×\times
+QueryFormer
+Cross-Attn
+✓
+token I/O
+HH
+✓
+Recent scaling studies in recommendation (Li et al., 2026) motivate treating capacity allocation as a first-class design axis. For optimization, we combine Muon-style dense updates (Jordan et al., 2024; Devin et al., 2025; Zhou, 2026), Adagrad for sparse embeddings (Duchi et al., 2011), and exponential moving average (EMA) weight averaging (Izmailov et al., 2018).
+3. Preliminaries
+Unified token-based architectures embed heterogeneous features into a shared dmodeld_{\text{model}}-dimensional space. We denote non-sequential (NS) user tokens as NuN_{u}, item tokens as NiN_{i}, their union as N=Nu∪NiN=N_{u}\cup N_{i}, and behavioral sequence tokens from SS domains as B={B1,…,BS}B=\{B_{1},\ldots,B_{S}\}. For two token sets XX and YY, ⟨X,Y⟩\langle X,Y\rangle denotes a cross-attention interaction using XX as queries and YY as keys/values. We use this notation below to distinguish item-to-sequence retrieval from behavior-initialized query generation.
+Existing architectures often generate queries through projection-based MLPs:
+(1)
+𝐪=MLP​(pool​(B)⊕𝐍)\mathbf{q}=\text{MLP}\big(\text{pool}(B)\oplus\mathbf{N}\big)
+where ⊕\oplus denotes concatenation. Such MLPs are nonlinear and can fuse pooled context, but they do not explicitly let query tokens attend to field or sequence tokens. Recent methods calibrate query quality via gating (Wang et al., 2026b) or cascading (Ke et al., 2026); QueryFormer instead generates queries through context-aware attention.
+4. Methodology
+4.1. Overview
+QueryFormer processes user/item sparse features, dense features, four behavior domains, and temporal context through a unified token pipeline. Its two tiers are Query-Driven Architecture (Section 4.2), where three attention stages build high-quality query representations, and Supporting Components (Section 4.3), which provide tokenization and interaction infrastructure.
+4.2. Query-Driven Architecture
+Design Principles.
+(1)
+Generate through attention, not projection alone. Cross-attention over NS tokens yields data-dependent query probes beyond projection-only summaries.
+(2)
+Refine through interaction. Queries are enriched via self-attention and cross-attention before they retrieve behavioral evidence.
+(3)
+Scale through diversity. The embedding matrix provides HH independent tokenization views, improving the explored scaling frontier.
+4.2.1. Query-Generation Pipeline
+The query-generation pipeline updates the NS context and then constructs final query probes:
+(2)
+N′\displaystyle N^{\prime}
+=FeatureInteract⁡(Nu,Ni),\displaystyle=\mathrm{FeatureInteract}(N_{u},N_{i}),
+(3)
+R\displaystyle R
+=SeqRetrieve⁡(Ni′,B),\displaystyle=\mathrm{SeqRetrieve}(N^{\prime}_{i},B),
+(4)
+Q\displaystyle Q
+=QueryGenerate⁡(pool⁡(B),N′∪R),\displaystyle=\mathrm{QueryGenerate}(\mathrm{pool}(B),N^{\prime}\cup R),
+(5)
+Y\displaystyle Y
+=Mix⁡(Q,N′,B).\displaystyle=\mathrm{Mix}(Q,N^{\prime},B).
+Here Ni′N^{\prime}_{i} denotes the item-token slice of N′N^{\prime}. This pipeline exposes the reusable bridge component of QueryFormer: NS tokens first retrieve sequence evidence, then generated query tokens re-query the refined NS context. The bridge targets the field–sequence interaction point of token-based recommenders: it takes field tokens and behavior tokens as input, and returns generated query probes plus mixed representations for downstream towers. Because its interface is token-in/token-out, the bridge is architecturally stackable with existing unified recommenders rather than tied to a single backbone. It is also computationally stackable: sequence queries are concatenated and evaluated by shared-parameter cross-attention, amortizing key/value projections and graphics processing unit (GPU) kernel launches instead of invoking cross-attention serially. Table 2 gives the operator-to-mechanism mapping.
+Table 2 lists the four attention mechanisms organized into three architectural stages. Together they form a query-centric refinement pipeline: queries are enriched via self-attention, cross-interact with counterpart tokens, attend to behavioral sequences, and drive query generation through explicit token-to-query attention.
+Table 2. Attention mechanisms by architectural stage. For SeqQueryCrossAttn, QBQ_{B} denotes behavior-initialized query probes.
+Stage
+Mechanism
+Type
+Interaction
+Co-Transformer
+QuerySelfAttn
+SelfAttn
+⟨Nu,Nu⟩\langle N_{u},N_{u}\rangle, ⟨Ni,Ni⟩\langle N_{i},N_{i}\rangle
+QueryCrossAttn
+CrossAttn
+⟨Nu,Ni⟩\langle N_{u},N_{i}\rangle
+QuerySeqCrossAttn
+—
+CrossAttn
+⟨Ni,B⟩\langle N_{i},B\rangle
+SeqQueryCrossAttn
+—
+CrossAttn
+⟨QB,N⟩\langle Q_{B},N\rangle
+4.2.2. Embedding Matrix
+Instead of a flat token sequence, QueryFormer uses an embedding matrix with HH independent columns. Each column tokenizes the same input through its own pipeline, producing a tensor of shape (Bs,H,T,dmodel)(B_{s},H,T,d_{\text{model}}), where BsB_{s} is batch size and TT is token count. This implements view diversity in one batch-parallel forward pass and exposes a direct scaling axis. Figure 3 shows that increasing HH from 1 to 8 consistently improves validation AUC and LogLoss at fixed dmodel=272d_{\text{model}}=272.
+Training curves showing that wider embedding matrices achieve better final AUC and LogLoss.
+Figure 3. Validation AUC and LogLoss vs. training steps for H∈{1,2,4,8}H\in\{1,2,4,8\} at dmodel=272d_{\text{model}}{=}272.Training curves showing that wider embedding matrices achieve better final AUC and LogLoss.
+4.2.3. Co-Transformer
+The Co-Transformer contains two layers. Each layer first applies QuerySelfAttn within user and item token sets, then QueryCrossAttn between user and item tokens with gated fusion. This separates within-field refinement from cross-side interaction and lets us ablate the two effects independently.
+4.2.4. Retrieval
+QuerySeqCrossAttn retrieves behavior evidence by using aggregated item NS tokens as queries over each of the four behavior domains. The retrieved vectors summarize item-relevant historical evidence and are appended to the NS token set.
+4.2.5. SeqQueryCrossAttn
+SeqQueryCrossAttn generates Nq=2N_{q}=2 query probes per sequence domain. Mean/max-pooled behavior summaries initialize probes, and cross-attention over refined NS tokens makes them context-aware:
+(6)
+𝐪d,k=CrossAttnd​(𝐪d,k(0),𝐍,𝐍).\mathbf{q}_{d,k}=\mathrm{CrossAttn}_{d}(\mathbf{q}_{d,k}^{(0)},\mathbf{N},\mathbf{N}).
+4.3. Supporting Components
+4.3.1. NS Token Construction
+NS tokens are built from user/item integer features, dense feature slices, temporal features, item ID, and four retrieved sequence tokens, yielding 26 NS tokens.
+4.3.2. Dense Feature Fusion
+User and item dense features are processed by DenseFusionModel, which combines a low-rank DCN-V2 layer (L=1L=1, rank r=8r=8), a SiLU-activated MLP, and Squeeze-and-Excitation (SENet) recalibration (Hu et al., 2018).
+4.3.3. Sequence Token Embedding
+Each behavior domain embeds side-information independently, projects it to dmodeld_{\text{model}}, and adds a 65-bucket recency embedding.
+4.3.4. Blocks
+Following HyFormer and OneTrans (Huang et al., 2026; Zhang et al., 2026), K=2K=2 lightweight processing blocks evolve behavior sequences with Swish-Gated Linear Unit (SwiGLU) encoders, attend from queries to sequences, and mix tokens through parameter-free permutation.
+4.4. Training Recipe
+4.4.1. Multi-Loss Supervision
+The training objective combines binary cross-entropy (BCE) with an auxiliary mean absolute error (MAE) loss on log-transformed conversion time (λ=0.1\lambda=0.1). Removing it reduces validation AUC from 0.84606 to 0.84590, a smaller effect than any attention ablation.
+4.4.2. Optimization
+We use MuonPlus for dense parameters, Adagrad for sparse embeddings, CosineAnnealingLR, gradient clipping at ℓ2\ell_{2}-norm 1.0, EMA decay 0.999, bfloat16, and torch.compile.
+5. Experiments
+5.1. Experimental Setup
+Input data is stored in Apache Parquet format with a 90/10 Row-Group-level train/validation split across 142 feature columns and four behavioral domains (a, b, c, d). All experiments use a fixed sequence limit Lseq=256L_{\mathrm{seq}}=256: sequences are padded to 256 positions and longer histories are truncated to the most recent positions. Labels include conversion type and log-transformed conversion timestamp.
+We evaluate on the Round 2 Industrial Track dataset using area under the ROC curve (AUC) as the primary metric, coupled with LogLoss (logarithmic loss) and inference latency constraints. In this leaderboard setting, AUC differences around 10−410^{-4} were ranking-relevant; the top two official submissions differ by 0.00037. QueryFormer targets the competition’s innovation criteria with a stackable field–sequence bridge and a latency-aware scaling study over HH, KK, dmodeld_{\text{model}}, training length, data, and compute cost. Evidence is organized as follows: Table 3 compares the optimized recipe with HyFormer, Table 4 isolates the bridge mechanisms, Table 6 measures packed-attention latency, and Table 7/Figure 2 summarize multi-axis scaling.
+Validation AUC is consistently higher than test AUC (best val 0.84631 vs. test 0.83254), reflecting the expected distribution shift between temporally proximate train/val splits and the held-out test period. The relative ordering was preserved for submitted architectural and scaling changes, so we report validation AUC for most experiments due to limited test submission slots. Models are trained on NVIDIA GPUs with multi-GPU distributed data parallel (DDP) via torchrun. The PyTorch implementation uses a custom IterableDataset with pre-allocated NumPy buffers, row-group-balanced DDP sharding, EMA-shadow validation, and sidecar configs for checkpoint recovery. For final submission, training on the full 35M samples (no validation holdout) yields ∼\sim++0.0001 AUC, and ensemble distillation with multiple variants supervising a single student (Tang and Wang, 2018; Ding et al., 2026; Lai et al., 2025; Zhu et al., 2020) yields ∼\sim++0.0007 test AUC at single-model inference cost. Due to the competition timeline, we did not exhaustively sweep all high-capacity configurations; the post-competition result suggests additional gains remain available.
+Table 3. Validation comparison under the optimized training recipe. Dense parameters are in millions; all runs use Lseq=256L_{\mathrm{seq}}{=}256.
+Model
+HH
+Dense
+Val AUC
+LogLoss
+HyFormer (Huang et al., 2026)
+–
+105.8
+0.84477
+–
+QueryFormer
+4
+87.1
+0.84606
+0.210309
+QueryFormer
+4
+220.8
+0.84631
+0.210241
+5.2. Ablation Study
+Table 4 reports ablation results; Figure 4 shows per-epoch trends. The degradation order—cross-attention query generation causes the largest drop, followed by cross-attention, sequence attention, and self-attention—confirms that query quality is the primary performance driver. Removing all four mechanisms compounds the loss (Δ=−0.00110\Delta=-0.00110), validating the additive benefit of each component.
+Table 4. Ablation of attention mechanisms (H=4H{=}4, dmodel=272d_{\text{model}}{=}272).
+Configuration
+Best AUC
+Δ\Delta
+Full Model (baseline)
+0.84606
+—
+- Replace SeqQueryCrossAttn with MLP
+0.84568
+−-0.00038
+- Remove QueryCrossAttn
+0.84577
+−-0.00029
+- Remove QuerySeqCrossAttn
+0.84583
+−-0.00023
+- Remove QuerySelfAttn
+0.84586
+−-0.00020
+- Remove all four attention mechanisms
+0.84496
+−-0.00110
+All runs: K=2K{=}2, 4 epochs.
+Validation AUC across training epochs for four ablation configurations: replacing cross-attention query generation with MLP causes the largest drop, followed by removing QueryCrossAttn, QuerySeqCrossAttn, and QuerySelfAttn, confirming each mechanism independently contributes.
+Figure 4. Per-epoch ablation of four attention mechanisms.Validation AUC across training epochs for four ablation configurations: replacing cross-attention query generation with MLP causes the largest drop, followed by removing QueryCrossAttn, QuerySeqCrossAttn, and QuerySelfAttn, confirming each mechanism independently contributes.
+5.3. Competition Results
+Table 5 shows the final leaderboard of the Industrial Track. QueryFormer ranks 1st with a test AUC of 0.83254. Post-competition, a modest parameter scale-up improved test AUC to 0.832713; due to limited post-competition time, this configuration was not exhaustively tuned and likely remains below the best attainable setting.
+Table 5. Industrial Track leaderboard (top 3), with post-competition improvement.
+Rank
+Team
+Test AUC
+Δ\Delta
+1st
+QueryFormer (日之光面)
+0.83254
+—
+2nd
+RClaw
+0.83217
+−-0.00037
+3rd
+load_state_dict
+0.83145
+−-0.00109
+–
+QF-scaled-post
+0.832713
+++0.000173
+5.4. Scaling Analysis
+Model capacity was a binding constraint in this competition: the 35M-sample dataset demanded representations beyond a single-column architecture. The scaling study asks which stackable axis gives the best AUC-latency trade-off: view width HH, block depth KK, model width dmodeld_{\text{model}}, or training compute. We report packed-attention latency separately because Round 2 imposed tight inference limits.
+Table 6. Latency-aware HH scaling of the packed bridge on 31.35M training samples and 3.48M validation samples.
+HH
+Train Time
+Eval Time
+Eval Throughput
+Latency / sample
+1
+43.7 min
+1.8 min
+32.2k samples/s
+31.1 μ\mus
+2
+56.0 min
+2.0 min
+29.0k samples/s
+34.5 μ\mus
+4
+80.1 min
+2.5 min
+23.2k samples/s
+43.1 μ\mus
+8
+137.3 min
+3.4 min
+17.0k samples/s
+58.7 μ\mus
+Table 7. Multi-axis scaling grid (SwiGLU encoders; params in millions). Unspecified values use K=2K{=}2, H=4H{=}4, dmodel=272d_{\text{model}}{=}272, and 4 epochs.
+Setting
+Sparse
+Dense
+Val AUC
+LogLoss
+H=1H{=}1
+530
+50
+0.84540
+0.210651
+H=2H{=}2
+563
+62
+0.84575
+0.210432
+H=4H{=}4
+628
+87
+0.84606
+0.210309
+H=8H{=}8
+757
+137
+0.84615
+0.210225
+K=1K{=}1
+628
+77
+0.84598
+0.210302
+K=3K{=}3
+628
+97
+0.84616
+0.210270
+11 epochs
+628
+87
+0.84616
+0.210712
+d=68d{=}68
+557
+10
+0.84462
+0.210942
+d=136d{=}136
+581
+27
+0.84552
+0.210540
+d=204d{=}204
+604
+53
+0.84593
+0.210360
+d=544d{=}544
+722
+221
+0.84631
+0.210241
+Table 7 presents a scaling analysis across four dimensions within our explored grid. First, increasing HH from 1 to 8 monotonically improves AUC and LogLoss, making view diversity the strongest observed scaling direction. Under Round-2’s tight latency constraint, Table 6 identifies H=4H{=}4 as the practical operating point for a GPU-efficient unified architecture: it gains ++0.00066 AUC over H=1H{=}1 with validation time increasing from 1.8 to 2.5 minutes. The packed shared-attention implementation keeps latency growth sublinear: H=8H{=}8 is only 1.89×1.89{\times} slower than H=1H{=}1 (58.7 vs. 31.1 μ\mus/sample), rather than approaching an 8×8{\times} serial cost. Second, increasing the block count from K=1K{=}1 to K=3K{=}3 gives a smaller gain at fixed H=4H{=}4 and dmodel=272d_{\text{model}}{=}272, suggesting that depth-only stacking is not the dominant path in our grid. Third, extending training from 4 to 11 epochs gives only ++0.00010 AUC and worse LogLoss, suggesting compute saturation. Fourth, increasing dmodeld_{\text{model}} improves AUC but with diminishing returns as dense parameters grow quadratically. Together, these results support multi-axis stackability: the bridge scales across HH views, depth, width, data/compute, and packed execution, rather than only repeated layers.
+5.4.1. Architectural Scaling Efficiency
+Figure 2 compares QueryFormer and HyFormer (Huang et al., 2026) under the optimized recipe (MuonPlus, EMA, Adagrad, SwiGLU). QueryFormer achieves higher AUC at comparable dense-parameter budgets, while data scaling shows the same trend from about 20% to full data. Fitting Δ​AUC=C⋅Pk\Delta\mathrm{AUC}=C\cdot P^{k} following UniMixer (Ha et al., 2026), where PP denotes dense parameter count and QF/HF abbreviate QueryFormer/HyFormer, gives:
+(7)
+Δ​AUCQF,d\displaystyle\Delta\mathrm{AUC}_{\text{QF},d}
+=3.82×10−4⋅P0.286(R2=0.896),\displaystyle=3.82{\times}10^{-4}\cdot P^{0.286}\quad(R^{2}{=}0.896),
+(8)
+Δ​AUCQF,H\displaystyle\Delta\mathrm{AUC}_{\text{QF},H}
+=8.7×10−6⋅P0.924(R2=0.811),\displaystyle=8.7{\times}10^{-6}\cdot P^{0.924}\quad(R^{2}{=}0.811),
+(9)
+Δ​AUCHF\displaystyle\Delta\mathrm{AUC}_{\text{HF}}
+=1.9×10−4⋅P0.326.\displaystyle=1.9{\times}10^{-4}\cdot P^{0.326}.
+Within the explored range, HH-scaling is close to linear while dmodeld_{\text{model}}-scaling saturates. We view these fits as empirical scaling diagnostics rather than universal laws. They suggest a practical rule for this dataset: allocate budget to view diversity before representation depth; broader high-capacity sweeps remain future work.
+6. Conclusion
+QueryFormer improves unified recommendation by generating query tokens through explicit token-to-query attention rather than projection-only MLP generation. As a unified block, its reusable contribution is a token-in/token-out field–sequence bridge with efficient packed attention. As a scaling study, it identifies view width HH as a strong axis alongside depth, width, data, and compute. The evidence is consistent across three paths: cross-attention query generation is the strongest ablated component, HH exposes a stronger scaling axis than standard width in our grid, and packed execution keeps H=8H{=}8 latency to only 1.89×1.89{\times} that of H=1H{=}1. QueryFormer won the KDD Cup 2026 Industrial Track, with post-competition results indicating further headroom under larger sweeps. Limitations include reliance on one large-scale dataset and the latency cost of wider embedding matrices.
+References
+Devin et al. (2025)
+Devin, A. Ogurtsov, and Y. Zhou
+CMI—detect behavior with sensor data, 1st place solution.
+Note: Kaggle competition solutionAccessed: 2026-07-05
+Cited by: §2.2.
+Ding et al. (2026)
+H. Ding, W. Zhao, Y. Jiang, J. Li, J. Zhu, X. Li, Y. Zhao, Y. Zhang, A. Qiao, J. Dong, et al.
+Rec-distill: an industrial distillation pipeline for large-scale recommendation models.
+arXiv preprint arXiv:2605.29755.
+Cited by: §5.1.
+Ding et al. (2023)
+K. Ding, A. J. Liang, B. Perozzi, T. Chen, R. Wang, L. Hong, E. H. Chi, H. Liu, and D. Z. Cheng
+HyperFormer: learning expressive sparse feature representations via hypergraph transformer.
+In Proceedings of the 46th international ACM SIGIR conference on research and development in information retrieval,
+pp. 2062–2066.
+Cited by: §2.2.
+Duchi et al. (2011)
+J. Duchi, E. Hazan, and Y. Singer
+Adaptive subgradient methods for online learning and stochastic optimization..
+Journal of machine learning research 12 (7).
+Cited by: §2.2.
+Guo et al. (2017)
+H. Guo, R. Tang, Y. Ye, Z. Li, and X. He
+DeepFM: a factorization-machine based neural network for ctr prediction.
+arXiv preprint arXiv:1703.04247.
+Cited by: §2.1.
+Ha et al. (2026)
+M. Ha, G. Wang, L. Chen, X. Rao, Y. Shi, T. Ma, Z. Liu, Y. Fan, Z. Lu, Y. Niu, et al.
+UniMixer: a unified architecture for scaling laws in recommendation systems.
+arXiv preprint arXiv:2604.00590.
+Cited by: §5.4.1.
+Hu et al. (2018)
+J. Hu, L. Shen, and G. Sun
+Squeeze-and-excitation networks.
+In Proceedings of the IEEE conference on computer vision and pattern recognition,
+pp. 7132–7141.
+Cited by: §4.3.2.
+Huang et al. (2026)
+Y. Huang, S. Hong, X. Xiao, J. Jin, X. Luo, Z. Wang, Z. Chai, S. Wu, Y. Zheng, and J. Lin
+HyFormer: revisiting the roles of sequence modeling and feature interaction in ctr prediction.
+arXiv preprint arXiv:2601.12681.
+Cited by: Figure 2,
+§2.2,
+Table 1,
+§4.3.4,
+§5.4.1,
+Table 3.
+Izmailov et al. (2018)
+P. Izmailov, D. Podoprikhin, T. Garipov, D. Vetrov, and A. G. Wilson
+Averaging weights leads to wider optima and better generalization.
+arXiv preprint arXiv:1803.05407.
+Cited by: §2.2.
+Jordan et al. (2024)
+K. Jordan Y. Jin et al.
+Muon: an optimizer for hidden layers in neural networks.
+Note: Blog postAvailable at https://kellerjordan.github.io/posts/muon/
+Cited by: §2.2.
+Kang and McAuley (2018)
+W. Kang and J. McAuley
+Self-attentive sequential recommendation.
+In 2018 IEEE international conference on data mining (ICDM),
+pp. 197–206.
+Cited by: §2.1.
+Ke et al. (2026)
+S. Ke, J. Wei, and Q. Hua
+GAP-net: calibrating user intent via gated adaptive progressive learning for ctr prediction.
+arXiv preprint arXiv:2601.07613.
+Cited by: Table 1,
+§3.
+Lai et al. (2025)
+W. Lai, B. Jin, J. Zhang, Y. Zheng, J. Dong, J. Cheng, J. Lei, and X. Wang
+Exploring scaling laws of ctr model for online performance improvement.
+In Proceedings of the Nineteenth ACM Conference on Recommender Systems,
+pp. 114–123.
+Cited by: §5.1.
+Li et al. (2026)
+G. Li, S. Zhang, J. Pan, W. Ning, J. Chen, G. Xue, C. Zhou, S. Huang, H. Gu, and M. Yang
+Expand more, shrink less: shaping effective-rank dynamics for dense scaling in recommendation.
+arXiv preprint arXiv:2605.23191.
+Cited by: §2.2.
+Li et al. (2019)
+Z. Li, Z. Cui, S. Wu, X. Zhang, and L. Wang
+Fi-gnn: modeling feature interactions via graph neural networks for ctr prediction.
+In Proceedings of the 28th ACM international conference on information and knowledge management,
+pp. 539–548.
+Cited by: §2.1.
+Liu et al. (2026)
+M. Liu, Y. Bai, Z. Chan, S. Chen, X. Sheng, H. Zhu, J. Xu, and X. Chen
+EST: towards efficient scaling laws in click-through rate prediction via unified modeling.
+arXiv preprint arXiv:2602.10811.
+Cited by: §1,
+§2.2.
+Naumov et al. (2019)
+M. Naumov, D. Mudigere, H. M. Shi, J. Huang, N. Sundaraman, J. Park, X. Wang, U. Gupta, C. Wu, A. G. Azzolini, et al.
+Deep learning recommendation model for personalization and recommendation systems.
+arXiv preprint arXiv:1906.00091.
+Cited by: §2.1.
+Pi et al. (2020)
+Q. Pi, G. Zhou, Y. Zhang, Z. Wang, L. Ren, Y. Fan, X. Zhu, and K. Gai
+Search-based user interest modeling with lifelong sequential behavior data for click-through rate prediction.
+In Proceedings of the 29th ACM International Conference on Information & Knowledge Management,
+pp. 2685–2692.
+Cited by: §2.1.
+Sun et al. (2019)
+F. Sun, J. Liu, J. Wu, C. Pei, X. Lin, W. Ou, and P. Jiang
+BERT4Rec: sequential recommendation with bidirectional encoder representations from transformer.
+In Proceedings of the 28th ACM international conference on information and knowledge management,
+pp. 1441–1450.
+Cited by: §2.1.
+Tang and Wang (2018)
+J. Tang and K. Wang
+Ranking distillation: learning compact ranking models with high performance for recommender system.
+In Proceedings of the 24th ACM SIGKDD international conference on knowledge discovery & data mining,
+pp. 2289–2298.
+Cited by: §5.1.
+Wang et al. (2026a)
+F. Wang, G. Yang, X. Zhou, S. Yang, and P. Wang
+Query-mixed interest extraction and heterogeneous interaction: a scalable ctr model for industrial recommender systems.
+arXiv preprint arXiv:2602.09387.
+Cited by: Table 1.
+Wang et al. (2021)
+R. Wang, R. Shivanna, D. Cheng, S. Jain, D. Lin, L. Hong, and E. Chi
+Dcn v2: improved deep & cross network and practical lessons for web-scale learning to rank systems.
+In Proceedings of the web conference 2021,
+pp. 1785–1797.
+Cited by: §2.1.
+Wang et al. (2026b)
+Y. Wang, Y. Liu, J. Zhang, and J. Jiang
+LENS: a staged design for interaction granularityin sequential ctr prediction.
+arXiv preprint arXiv:2605.25583.
+Cited by: Table 1,
+§3.
+Zhai et al. (2024)
+J. Zhai, L. Liao, X. Liu, Y. Wang, R. Li, X. Cao, L. Gao, Z. Gong, F. Gu, M. He, et al.
+Actions speak louder than words: trillion-parameter sequential transducers for generative recommendations.
+arXiv preprint arXiv:2402.17152.
+Cited by: §2.1.
+Zhang et al. (2026)
+Z. Zhang, H. Pei, J. Guo, T. Wang, Y. Feng, H. Sun, S. Liu, and A. Sun
+Onetrans: unified feature interaction and sequence modeling with one transformer in industrial recommender.
+In Proceedings of the ACM Web Conference 2026,
+pp. 8162–8170.
+Cited by: §2.2,
+§4.3.4.
+Zhou et al. (2019)
+G. Zhou, N. Mou, Y. Fan, Q. Pi, W. Bian, C. Zhou, X. Zhu, and K. Gai
+Deep interest evolution network for click-through rate prediction.
+In Proceedings of the AAAI conference on artificial intelligence,
+Vol. 33, pp. 5941–5948.
+Cited by: §2.1.
+Zhou et al. (2018)
+G. Zhou, X. Zhu, C. Song, Y. Fan, H. Zhu, X. Ma, Y. Yan, J. Jin, H. Li, and K. Gai
+Deep interest network for click-through rate prediction.
+In Proceedings of the 24th ACM SIGKDD international conference on knowledge discovery & data mining,
+pp. 1059–1068.
+Cited by: §2.1.
+Zhou et al. (2026)
+Y. Zhou, Y. Hu, Z. Feng, J. Pan, K. Wu, H. Li, S. Zhang, S. Huang, Z. Zhu, C. Yin, et al.
+TokenFormer: unify the multi-field and sequential recommendation worlds.
+arXiv preprint arXiv:2604.13737.
+Cited by: §2.2.
+Zhou (2026)
+Y. Zhou
+NFL Big Data Bowl 2026—prediction, 2nd place solution.
+Note: Kaggle competition solutionAccessed: 2026-07-05
+Cited by: §2.2.
+Zhu et al. (2020)
+J. Zhu, J. Liu, W. Li, J. Lai, X. He, L. Chen, and Z. Zheng
+Ensembled ctr prediction via knowledge distillation.
+In Proceedings of the 29th ACM international conference on information & knowledge management,
+pp. 2941–2958.
+Cited by: §5.1.
+Experimental support, please
+view the build logs
+for errors. Generated by
+L
+A
+T
+E
+xml
+.
+Instructions for reporting errors
+We are continuing to improve HTML versions of papers, and your feedback helps enhance accessibility and mobile
+support. To report errors in the HTML that will help us improve conversion and rendering, choose any of the
+methods listed below:
+Click the "Report Issue" (
+) button, located in the page header.
+Tip: You can select the relevant text first, to include it in your report.
+Our team has already identified the following issues. We appreciate your time reviewing and reporting rendering errors we
+may not have found yet. Your efforts will help us improve the HTML versions for all readers, because disability
+should not be a barrier to accessing research. Thank you for your continued support in championing open access for
+all.
+Have a free development cycle? Help support accessibility at arXiv! Our collaborators at LaTeXML maintain a list of packages that need conversion, and welcome developer contributions.
+We gratefully acknowledge support from
+our major funders,
+member institutions, ,
+and all contributors.
+About
+·
+Help
+·
+Contact
+·
+Subscribe
+·
+Copyright
+·
+Privacy
+·
+Accessibility
+·
+Operational Status (opens in new tab)
+Major funding support from

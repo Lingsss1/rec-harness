@@ -1,0 +1,92 @@
+{
+  "markdown_report": "The best first experiment is **gated recent-and-repeated interest SASRec with multi-negative supervision**. It targets weak adjacent-interest recommendations, excessive influence from older interests, and poor lower-tail score separation. Gains remain hypotheses until measured by pinned macro validation HR@10.\n\n**Insights and directions.** Three starting-point insights motivate the design: (1) SASRec already learns useful ordering, so preserve its collaborative pathway; positive mean margins support this conservative starting point. (2) Electronics has 14.95% negative-over-positive errors and a −0.4812 margin p10, motivating stronger ranking supervision. (3) Users favor recent, repeated interests over loose historical associations, motivating explicit local-context conditioning. These observations do not establish compatibility or unmet need.\n\nThree literature insights organize the alternatives: (1) LSTASRec separates persistent and transient interests [2], suggesting a lightweight gated branch. (2) gSASRec motivates revisiting single-negative supervision [3], while R²NS cautions that immediate hard mining can hurt [4]. (3) TedRec and WhitenRec motivate selective text use but warn that semantic similarity alone lacks discrimination [5,6]; pretrained results do not establish scratch-text gains here.\n\n| Direction | Existing mechanism | Proposed experiment | Remaining gap |\n|---|---|---|---|\n| Intent | Long/short extractors [2] | Causal recent/repeated pooling | Preferences remain latent |\n| Supervision | Generalized BCE [3] | Uniform 16-negative softmax | False negatives remain |\n| Content | Text–ID fusion [5,6] | Bounded scratch-text residual | Compatibility unverified |\n\n**Candidate assessments.** Scores are 0–10; difficulty increases with implementation effort. Each entry gives a positive (+) and negative (−) reason.\n\n1. **Gated intent ranking, selected.** Originality 4: + integrates context and ranking; − familiar components. Potential 8: + extensible intent conditioning; − benchmark dependence. User alignment 8: + targets stale and adjacent interests; − cannot verify satisfaction. Model alignment 8: + directly trains competing scores; − margins may not generalize. Difficulty 4: + small SASRec extension; − causal pooling needs care.\n2. **Sixteen-negative softmax alone.** Originality 2: + clean hypothesis; − established technique. Potential 6: + reusable baseline; − limited architectural insight. User alignment 4: + stronger discrimination; − no explicit temporal correction. Model alignment 8: + addresses weak margins; − random negatives may be easy. Difficulty 2: + vectorized loss; − extra scoring cost.\n3. **Bounded scratch-text residual.** Originality 4: + task-compatible adaptation; − familiar fusion. Potential 7: + content-sensitive matching; − sparse supervision. User alignment 7: + may capture specific formats; − wording cannot certify compatibility. Model alignment 5: + additional discrimination; − may amplify confusion. Difficulty 6: + compact encoder; − tokenization and serving changes.\n\n**Selected algorithm.** At each causal position, gate SASRec features with an exponentially weighted recent-window pool; boost repeated item occurrences using prefix-only counts. Optimize the fused representation against one positive and 16 uniform unseen negatives. This encourages recent/repeated evidence and directly targets weak separation. Ablate pooling, loss, and their combination; select solely by prescribed macro validation HR@10. Preserve all four routes, seeds, predictor parity, and diagnostic contracts.",
+  "idea": {
+    "description": "Extend each category's SASRec with one causal recent-interest residual. Pool the last five available item embeddings with exponential recency weights multiplied by a bounded function of each item's occurrence count in the observed prefix. A learned scalar gate combines this pool with SASRec's existing representation. Train candidate scores using 16 uniformly sampled negatives per valid position.",
+    "motivation": "The user diagnosis identifies stale interests and loosely adjacent recommendations displacing direct current-interest matches. Explicit recent and repeated evidence addresses both patterns without claiming that purchases reveal satisfaction or equipment compatibility. Multi-negative supervision targets the measured weak separation, especially Electronics' negative margin p10 and 14.95% sampled ordering-error rate. The observed embedding similarity near the mapped zero-cosine baseline does not justify prioritizing collapse regularization.",
+    "implementation_notes": "Keep DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, existing splits, all four category routes, and trial-local artifacts. Respect SASREC_EPOCHS, whose host default is 200. Pool only prefix items at every training position; count repeats only inside that prefix. Use window size 5, initial recency decay 0.8, repeat multiplier 1 + log(1 + max(count - 1, 0)), and normalize pooling weights. Project the pool to SASRec's hidden dimension and use fused = LayerNorm(sasrec + sigmoid(gate([sasrec, pool])) * projection(pool)); initialize the gate bias to -2. These are starting hyperparameters, not measured optima. Score positive and negative items with the same trained item embeddings. Exclude padding, the positive, and observed training-history items from negatives; handle tiny eligible catalogs without infinite rejection loops. Use a numerically stable cross-entropy over one positive and 16 negatives. Compare baseline, pooling only, loss only, and their combination within the shared GPU budget; report category HR@10 alongside the selection macro average. Update the predictor writer to reconstruct the gate, projection, normalization, and pooling exactly. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). Make view.log2feats return fused features and view.predict_score use deployed scoring. Return measured metrics with definitions; unavailable category breakdowns should explicitly state unavailable rather than infer categories. Measure margin diagnostics with a fixed negative protocol across variants because changing sampling changes their interpretation. No pretrained weights or additional data are required.",
+    "pseudocode": "for category in four_categories:\n    initialize SASRec and recent_pool_gate with training seed 42\n    for epoch in configured_epochs:\n        for _, sequence, positive, negative in train_loader:\n            base = SASRec.log2feats(sequence)\n            for valid causal position t:\n                prefix = sequence[:t+1] without padding\n                window = last_5(prefix)\n                weights = recency_decay(window) * bounded_repeat_weight(prefix, window)\n                recent[t] = weighted_mean(item_emb(window), weights)\n            fused = layer_norm(base + sigmoid(gate(concat(base, recent))) * project(recent))\n            negatives = sample_16_uniform_eligible_items_per_position()\n            logits = dot(fused, item_emb(concat(positive, negatives)))\n            loss = cross_entropy(logits[valid_positions], positive_index=0)\n            optimize(loss)\n    save model configuration and weights beneath trial directory\n    emit predictor implementing identical fused scoring\ncompare authorized variants with pinned validation macro HR@10\nretain the best validated configuration across all four routes",
+    "originality": {
+      "score": 4,
+      "positive": "Combines explicit causal recent/repeated evidence with richer ranking supervision in a small extension suited to the observed failure patterns.",
+      "negative": "Gated interest fusion and multi-negative objectives are established mechanisms; novelty is primarily the task-specific combination."
+    },
+    "future_potential": {
+      "score": 8,
+      "positive": "Provides a tractable foundation for studying when recent evidence should override broad historical affinity.",
+      "negative": "Benefits may depend on history density, repeat frequency, and evaluation candidate sampling; compatibility and satisfaction remain unobserved."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Reuses SASRec embeddings, encoder, category routing, and dot-product scoring with a small residual branch.",
+      "negative": "Prefix-safe repeat counts, eligible negative sampling, and exact training/inference parity require careful implementation."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Introduces causal self-attention for sequential next-item recommendation.",
+        "Provides the collaborative sequence encoder retained by the proposal."
+      ],
+      "limitations": [
+        "Does not establish that historical affinity identifies current unmet needs or equipment compatibility."
+      ]
+    },
+    {
+      "title": "LSTASRec (2025 preprint)",
+      "link": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=5238143",
+      "contributions": [
+        "The supplied search summary describes separate long- and short-term interest extraction with adaptive fusion."
+      ],
+      "limitations": [
+        "Its reported results do not establish improvements on this pinned benchmark.",
+        "The proposed lightweight pooling branch is an adaptation, not a reproduction."
+      ]
+    },
+    {
+      "title": "gSASRec extended abstract",
+      "link": "https://www.ijcai.org/proceedings/2024/0939.pdf",
+      "contributions": [
+        "Examines overconfidence from sampled binary cross-entropy and motivates generalized BCE.",
+        "Supports investigating the training objective rather than attributing every failure to encoder capacity."
+      ],
+      "limitations": [
+        "Generalized BCE and the proposed sampled-softmax objective are different methods.",
+        "Objective changes require independent validation on the requested four categories."
+      ]
+    },
+    {
+      "title": "R²NS, WWW 2026",
+      "link": "https://renzhaochun.github.io/assets/pdf/WWW_2026_Camera_Ready.pdf",
+      "contributions": [
+        "The supplied summary supports uniform-negative warm-up and progressive hard-negative sampling.",
+        "Motivates avoiding immediate deterministic hardest-negative mining."
+      ],
+      "limitations": [
+        "Does not guarantee that harder negatives improve this task.",
+        "Unobserved items can still be false negatives."
+      ]
+    },
+    {
+      "title": "TedRec",
+      "link": "https://arxiv.org/abs/2402.18166",
+      "contributions": [
+        "Combines text and collaborative ID sequences through frequency-domain operations."
+      ],
+      "limitations": [
+        "Uses pretrained language representations, so reported gains do not validate the allowed scratch-trained text alternative."
+      ]
+    },
+    {
+      "title": "WhitenRec",
+      "link": "https://arxiv.org/abs/2402.10602",
+      "contributions": [
+        "Highlights discrimination limitations in text representations for sequential recommendation."
+      ],
+      "limitations": [
+        "Semantic similarity does not certify functional compatibility or a valid next-item transition."
+      ]
+    }
+  ]
+}

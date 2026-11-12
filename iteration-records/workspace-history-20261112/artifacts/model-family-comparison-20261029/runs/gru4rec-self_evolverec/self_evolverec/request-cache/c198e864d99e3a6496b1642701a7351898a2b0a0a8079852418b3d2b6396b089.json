@@ -1,0 +1,66 @@
+{
+  "request_sha256": "c198e864d99e3a6496b1642701a7351898a2b0a0a8079852418b3d2b6396b089",
+  "response": {
+    "markdown_report": "At 0% progress, prioritize a small, testable modification: **recency-gated GRU4Rec trained with regularized BPR-max**. This is a hypothesis; no improvement has been measured.\n\n**Insights from the starting point.** (1) Users reject revived interests and weak connections to current activity. A learned recency gate could strengthen immediate context. (2) Electronics has 9.7% negative-over-positive comparisons and a 0.0265 lower-decile margin. These identify ranking confusion, but do not establish validation performance. (3) Collapse scores correspond to approximately zero mean cosine similarity. Embedding decorrelation therefore lacks diagnostic support.\n\n**Insights from related work.** (1) [GRU4Rec](https://hidasi.eu/assets/pdf/gru4rec_v2_cikm18.pdf) uses BPR-max to emphasize high-scoring negatives. This directly motivates testing improved separation. (2) [TIEN](https://www.sciencedirect.com/science/article/abs/pii/S095741742301905X) motivates adaptive recurrent interest updates. An item-conditioned gate avoids requiring timestamps in the predictor interface. (3) [Ask the GRU](https://arxiv.org/html/1609.02116) motivates jointly learned textual representations. Titles could improve identifiable connections, although shared words may reproduce broad-relevance errors.\n\n**Framework and candidate ideas.** Organize interventions into ranking supervision, current-intent representation, and item grounding. Scores below are judgments, not measurements; higher difficulty means more implementation effort. O/P/U/M/D denote originality, potential, user alignment, model alignment, and difficulty.\n\n| Idea | O/P/U/M/D | Positive assessment; negative assessment |\n|---|---|---|\n| BPR-max alone | 2/7/5/9/2 | Established, inexpensive ranking intervention; does not explicitly distinguish current from old intent. |\n| Recency gate + BPR-max **(selected)** | 4/8/8/9/4 | Couples immediate context with difficult-negative discrimination; recent interactions can be incidental. |\n| Joint title encoder | 4/7/7/6/6 | Shares evidence across sparse items; lexical similarity can reinforce unsuitable matches. |\n\n**Selected algorithm.** Preserve the corrected GRU backbone. At each valid position, combine its hidden state with a projected current-item embedding through a learned vector gate. Both branches are internal layers of one jointly trained network. This targets two observed user failures: reviving older interests and recommending items weakly connected to recent activity. BPR-max targets measured negative-over-positive errors, particularly in Electronics. Compatibility and redundant ownership remain unresolved without reliable supervision.\n\n```text\nh_t = masked_GRU(e_t, h_previous)\ng_t = sigmoid(W [h_t; e_t] + b)\nf_t = g_t * h_t + (1-g_t) * P(e_t)\nr = dot(f_t, candidate_embedding)\nw = softmax(negative_scores)\nloss = -log(sum(w * sigmoid(positive_score-negative_scores)))\n       + lambda * sum(w * negative_scores²)\n```\n\nUse training-history-filtered random negatives, excluding padding and the positive. Compare baseline, BPR-max alone, and the gated model under identical limits; select exclusively by four-category macro validation HR@10. Preserve seeds, routing, splits, and one checkpoint per category. Mask padding updates, read the final nonpadding position, and embed the identical architecture in the predictor writer. Retain diagnostic interfaces and report unavailable metadata breakdowns explicitly.",
+    "idea": {
+      "description": "A single GRU4Rec network per category with a learned vector gate combining recurrent state and projected current-item embedding, trained using regularized BPR-max.",
+      "motivation": "The gate explicitly tests whether immediate context can reduce revived historical interests and recommendations weakly connected to recent activity. BPR-max addresses the measured ranking confusion, strongest in Electronics. These are proposed mechanisms, not demonstrated improvements.",
+      "implementation_notes": "Extend the supplied corrected baseline rather than replace its backbone. Keep DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, maximum 200 epochs and 200 batches per epoch. Train all four categories on a single GPU and write artifacts beneath the trial directory. Keep one trained checkpoint per category and no score fusion. Initialize the gate bias toward the recurrent branch to make the change conservative. Apply padding masks to recurrent updates and returned features; locate the final nonpadding index by position, never count-1. Keep item_emb accessible, log2feats(sequence) returning B x L x D features, and predict_score(features, items) consistent with the trained scorer. Update the embedded predictor writer with the same gate, projection, parameter names and configuration. Keep DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis); compute margins through the actual scoring interface. Do not fabricate unavailable category, rating, review or user-trait information. Use only training interactions to exclude known positives from negative sampling. Use stable logsumexp computation for BPR-max. Retain the baseline validation cadence and select exclusively using macro validation HR@10. Compare baseline, loss-only, and gated-loss configurations within the shared budget; report no assumed gains.",
+      "pseudocode": "class GatedGRU4Rec(CorrectedBaseline):\n    def log2feats(sequence):\n        e = item_emb(sequence)\n        h = baseline_masked_gru(e, sequence != 0)\n        gate = sigmoid(gate_linear(concat(h, e)))\n        features = gate * h + (1 - gate) * recent_projection(e)\n        return features * (sequence != 0).unsqueeze(-1)\n\n    def predict_score(features, items):\n        return dot_product_with_baseline_broadcasting(features, item_emb(items))\n\nfor category in four_categories:\n    initialize_one_model(seed=42)\n    for epoch in range(min(configured_epochs, 200)):\n        for batch in range(200):\n            sequence, positive, negatives = sample_training_only_batch()\n            features = model.log2feats(sequence)\n            valid = (sequence != 0) & (positive != 0)\n            positive_scores = model.predict_score(features, positive)[valid]\n            negative_scores = model.predict_score(features, negatives)[valid]\n            log_weights = log_softmax(negative_scores, dim=-1)\n            log_prob = logsigmoid(positive_scores[:, None] - negative_scores)\n            ranking = -logsumexp(log_weights + log_prob, dim=-1)\n            regularizer = lambda_ * sum(exp(log_weights) * negative_scores.square(), dim=-1)\n            optimize(mean(ranking + regularizer))\n    save_selected_single_checkpoint_and_matching_predictor()\n\n# Inference for left-padded histories:\npositions = arange(sequence_length)\nlast = where(sequence != 0, positions, -1).amax(dim=-1)\n# Handle empty histories using the supplied baseline policy.\nfeatures = model.log2feats(sequence)[batch_indices, last]",
+      "originality": {
+        "score": 4,
+        "positive": "Combines immediate-context gating with a GRU-specific ranking objective in one jointly trained network.",
+        "negative": "Both gated representations and BPR-max have established precedents; novelty lies in the diagnostic-driven adaptation."
+      },
+      "future_potential": {
+        "score": 8,
+        "positive": "Provides a compact foundation for studying when recurrent history should yield to recent intent.",
+        "negative": "A current-item shortcut may overreact to incidental purchases, and no benchmark gain is established."
+      },
+      "code_difficulty": {
+        "score": 4,
+        "positive": "Requires a small projection, gate and loss change while preserving the sequence-only interface.",
+        "negative": "Multi-negative broadcasting, stable loss computation and predictor/checkpoint consistency require careful implementation."
+      }
+    },
+    "related_work": [
+      {
+        "title": "Recurrent Neural Networks with Top-k Gains for Session-based Recommendations",
+        "link": "https://hidasi.eu/assets/pdf/gru4rec_v2_cikm18.pdf",
+        "contributions": [
+          "Introduces ranking objectives including BPR-max that emphasize high-scoring sampled negatives.",
+          "Provides the direct objective precedent for the proposed GRU4Rec experiment."
+        ],
+        "limitations": [
+          "Does not establish gains on the pinned four-category Amazon benchmark.",
+          "Hard-negative emphasis can penalize unobserved items that users would actually like."
+        ]
+      },
+      {
+        "title": "TIEN: interest-evolution modeling with modified recurrent updates",
+        "link": "https://www.sciencedirect.com/science/article/abs/pii/S095741742301905X",
+        "contributions": [
+          "The supplied search summary describes recurrent updates incorporating item information, time intervals and hidden states.",
+          "Motivates adaptive treatment of changing interest."
+        ],
+        "limitations": [
+          "The proposed output gate is an adaptation, not a reproduction of TIEN.",
+          "Reported architectural motivation does not establish RecHarness improvements."
+        ]
+      },
+      {
+        "title": "Ask the GRU: Multi-task Learning for Deep Text Recommendations",
+        "link": "https://arxiv.org/html/1609.02116",
+        "contributions": [
+          "Jointly learns text representations with recommendation.",
+          "Motivates an alternative using randomly initialized title-token embeddings."
+        ],
+        "limitations": [
+          "Its recommendation setup does not directly validate a sequential GRU4Rec backbone.",
+          "Text similarity alone cannot establish compatibility, current need or avoidance of redundant purchases."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/model-family-comparison-20261029/runs/gru4rec-self_evolverec/self_evolverec/calls/00082"
+}

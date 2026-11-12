@@ -1,0 +1,62 @@
+{
+  "markdown_report": "The next experiment should isolate whether independent historical support makes the recurring-interest residual useful. At 20% progress, a small, falsifiable change is preferable to adding another model or auxiliary objective.\n\n**Insights from the starting point.** (1) Electronics has a 16.98% sampled training-pair reversal rate versus 1.91% for CDs_and_Vinyl; this motivates category-level reporting, but does not predict validation gains. (2) Qualitative feedback favors repeated, recent interests over broad associations; recurrence is therefore a testable modeling hypothesis, not an observed preference trait. (3) Positive-offset pooling and downward-only norm clipping preserve weak evidence, whereas norm matching can amplify it.\n\n**Insights from related work.** (1) TASTE motivates using text in sequential recommendation, but its reported gains do not establish recurrence as the mechanism [1]. (2) CoDeR motivates distinguishing demand shifts from noise; lexical repetition alone cannot identify either causally [2]. (3) Sampled evaluation can change model ordering, so auxiliary diagnostics must remain separate from the pinned selection objective [3].\n\n**Framework and directions.** Organize methods along three axes: evidence source (ID history versus lexical history), temporal scope (recent versus recurring), and intervention strength (normalized pooling versus confidence-preserving residuals). This yields three directions: strengthen evidence independence, calibrate residual magnitude, and test component reliance. Compatibility remains outside what recurrence can establish.\n\n**Candidate ideas.** Scores are originality/potential/difficulty, each out of ten; higher difficulty means harder implementation.\n\n| Idea | Scores | Positive assessment | Negative assessment |\n|---|---|---|---|\n| Two-witness confidence residual [1] | 4/7/5 | Explicit support makes isolated matches insufficient | Conservative filtering may discard useful sparse interests |\n| Learned recency decay [2] | 3/6/3 | Adds one parameter per category | May overfit validation and confound the recurrence test |\n| Popularity-matched text shuffle [1,3] | 3/6/4 | Tests lexical reliance beyond frequency | Diagnostic control, without direct accuracy benefit |\n\n**Selected algorithm.** For each historical anchor, require two different-item witnesses, distinct from the anchor and separated by at least three retained positions. Define confidence as the largest minimum TF–IDF cosine over eligible witness pairs. Compute it separately within every causal prefix; missing text or absent pairs yield zero. Pool ID embeddings using confidence times positional recency, divide by one plus total weight, and clip magnitude downward before a zero-initialized scalar gate adds the residual.\n\nKeep the baseline objective and training settings. Compare unchanged SASRec, the existing residual, and this modification within the shared GPU budget. Select solely by pinned macro validation HR@10; report completed comparisons without inventing results. Export identical training and prediction paths, retain all four routes and diagnosis interfaces, and verify causal-prefix and predictor parity.\n\n[1] [TASTE](https://arxiv.org/abs/2308.14029). [2] [CoDeR](https://ojs.aaai.org/index.php/AAAI/article/view/33379). [3] [Hidasi and Czapp](https://hidasi.eu/assets/pdf/eval_flaws_recsys23.pdf).",
+  "idea": {
+    "description": "Add a causal two-witness confidence residual to SASRec. Each historical anchor contributes only when two distinct historical item identities, different from the anchor, provide separated lexical support. Confidence-weighted ID embeddings form a bounded residual retained during inference.",
+    "motivation": "The supplied feedback identifies isolated interactions and broad associations as possible sources of irrelevant recommendations. Requiring independent witnesses operationalizes sustained lexical support without inferring ownership, unmet needs, compatibility, ratings, or simulator traits. This is a hypothesis to evaluate, with no validation improvement established.",
+    "implementation_notes": "Fit category-specific, frozen TF–IDF on titles and descriptions of unique training-history items only; transform other available item text with that transform. Use lowercase word unigrams and bigrams, token_pattern='(?u)\\\\b\\\\w\\\\w+\\\\b', min_df=2, max_features=20000, sublinear_tf=True, and L2 normalization. Empty documents map to zero; an empty fitted vocabulary disables the branch for that category. Serialize configuration, vocabulary, IDF and item mapping beneath the trial directory.\n\nFor each causal retained prefix ending at t, anchor j has confidence c[j,t] equal to the maximum of min(sim(j,k),sim(j,l)) across valid witnesses k,l <= t. Require three different item IDs for j,k,l and abs(k-l)>=3 in retained-event positions. This spacing is a proposed fixed hyperparameter, not an empirically established timescale. Nonnegative cosine and zero-vector handling make missing evidence contribute zero. All positions, including the anchor, must lie within the prefix. Recompute support after truncation; no departing event may remain a witness. Avoid catalog-wide similarities. Prototype the exact operation on gathered prefix similarities with blocked tensor operations; do not materialize a B x L x L x L tensor. Include profiling and any failed implementation in the shared budget.\n\nSet w[j,t]=c[j,t]*exp(-(t-j)/20), p[t]=sum_j(w[j,t]*embedding[j])/(1+sum_j(w[j,t])). Set r[t]=p[t]*min(1,detach(RMS(base[t]))/(RMS(p[t])+1e-8)). Return base[t]+tanh(alpha)*r[t], with alpha initialized to zero and padding outputs masked. Weak evidence is never scaled upward. Gradients flow through pooled embeddings and their norm; the cap's base-feature norm is detached. Keep the baseline embedding scale and scoring convention consistent across training and export.\n\nPreserve DATA_DIR=os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, SASREC_EPOCHS default 200, original splits, four dataset routes and single-GPU execution. Keep baseline loss, optimizer and other settings for the first comparison. Predeclare checkpoint cadence and allocate the shared 43,200 GPU-second budget across unchanged SASRec, the starting residual and the selected modification using accounted runtimes; incomplete arms remain explicitly incomplete. Use only the pinned host macro validation HR@10 for selection. No test access, external weights or additional datasets.\n\nUpdate the predictor writer to serialize and execute the same architecture, text mapping, masks and retained-prefix computation. Preserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), metrics and metric_definitions, with view.model pointing to the trained module and compatibility hooks exposing the residual features. Restore model mode and RNG states after probes. Verify causal prefixes, repeated IDs, missing text, no eligible witnesses, padding, truncated windows and exported-score parity. Twenty simulator users receive full-catalog unseen-item recommendations for descriptive inspection only; absent metadata and traits remain unavailable.",
+    "pseudocode": "For each category:\n    fit and serialize frozen training-only TFIDF\n    initialize SASRec and alpha = 0\n    for sequence, positive, negative in baseline training batches:\n        base = SASRec.log2feats(sequence)\n        S = nonnegative_cosine(frozen_text(sequence))\n        mask padding in S\n        for each valid causal prefix ending at t:\n            for each valid anchor j <= t:\n                eligible = witness pairs (k,l) within prefix\n                require item[j], item[k], item[l] all different\n                require abs(k-l) >= 3\n                c[j] = max(min(S[j,k], S[j,l]) over eligible, default=0)\n                w[j] = c[j] * exp(-(t-j)/20)\n            pooled = sum(w[j] * item_embedding(sequence[j])) / (1 + sum(w))\n            cap = min(1, detach(RMS(base[t])) / (RMS(pooled) + 1e-8))\n            features[t] = base[t] + tanh(alpha) * cap * pooled\n        mask padding features\n        optimize unchanged baseline objective\n    export identical architecture and feature computation through predictor writer\nCompare prespecified arms within the shared budget\nSelect only using host macro validation HR@10\nReport measured category outcomes and completed controls",
+    "originality": {
+      "score": 4,
+      "positive": "Distinct-item, temporally separated witnesses provide an explicit confidence rule that can be isolated experimentally within the existing residual.",
+      "negative": "Text similarity, historical pooling, temporal weighting and gated residuals are established components; novelty of their precise combination is unverified."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "A controlled improvement could motivate support-calibrated history aggregation and adaptive evidence requirements across sparse recommendation settings.",
+      "negative": "Lexical overlap can reflect boilerplate or substitutes, while the witness rule may suppress emerging interests and cannot establish practical compatibility."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "The modification adds one trainable scalar and deterministic weighting while retaining the baseline encoder and objective.",
+      "negative": "Exact causal witness-pair computation needs careful blocking, profiling and predictor parity; naive implementations have cubic work and excessive intermediate memory."
+    }
+  },
+  "related_work": [
+    {
+      "title": "TASTE (2023)",
+      "link": "https://arxiv.org/abs/2308.14029",
+      "contributions": [
+        "The supplied research summary reports improved sequential recommendation through text matching and reduced popularity bias.",
+        "Motivates testing lexical information alongside interaction histories."
+      ],
+      "limitations": [
+        "Does not establish that the proposed two-witness rule captures sustained interests.",
+        "Reported results do not demonstrate gains on this pinned four-category benchmark."
+      ]
+    },
+    {
+      "title": "CoDeR (2025)",
+      "link": "https://ojs.aaai.org/index.php/AAAI/article/view/33379",
+      "contributions": [
+        "The supplied summary describes counterfactual modeling intended to distinguish demand shifts from noise.",
+        "Motivates separating transient evidence from persistent historical support."
+      ],
+      "limitations": [
+        "Causal interpretations depend on modeling assumptions.",
+        "Lexical witness confidence alone does not identify demand shifts or user intent."
+      ]
+    },
+    {
+      "title": "Hidasi and Czapp: Evaluation flaws in recommender systems research (RecSys 2023)",
+      "link": "https://hidasi.eu/assets/pdf/eval_flaws_recsys23.pdf",
+      "contributions": [
+        "Documents that sampled and full-catalog evaluation can produce different model orderings.",
+        "Supports keeping the mandated sampled-candidate selection objective explicit."
+      ],
+      "limitations": [
+        "Does not supply evidence that the proposed architecture improves HR@10.",
+        "Auxiliary full-catalog diagnostics cannot replace the pinned host evaluation."
+      ]
+    }
+  ]
+}

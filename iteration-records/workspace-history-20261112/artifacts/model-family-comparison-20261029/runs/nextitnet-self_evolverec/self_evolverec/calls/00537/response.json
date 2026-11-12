@@ -1,0 +1,69 @@
+{
+  "markdown_report": "At 10% progress, select **causal, normalized residual-depth aggregation**: a small NextItNet extension targeting overly broad recommendations and stale historical interests. Benefits remain hypotheses requiring validation.\n\n**Insights from the starting point.** (1) Residual depths expose different receptive fields. Their aggregation can preserve specific recent evidence alongside longer preferences. (2) Normalization makes depth comparisons less sensitive to activation magnitude. It does not guarantee richer representations. (3) Positionwise gates preserve causal training. Explicit padding masks remain necessary throughout.\n\n**Insights from related work.** (1) [NextItNet](https://arxiv.org/abs/1808.05163) provides causal multiscale features without replacing the backbone. Those existing features make depth aggregation inexpensive. (2) [ScaleRec](https://doi.org/10.1016/j.ipm.2025.104318) motivates adaptive temporal granularity. It does not establish this extension’s effectiveness. (3) [R²NS](https://renzhaochun.github.io/assets/pdf/WWW_2026_Camera_Ready.pdf) motivates gradual negative difficulty. Unseen items nevertheless remain uncertain negatives.\n\n**Framework.** Three directions address different gaps: representation selection → normalized depth gates; ranking supervision → gradual multi-negative training; temporal evidence → observed-gap conditioning. Explore them separately to preserve attribution.\n\n**Candidate assessments.** Each cell gives score/10, then one positive (+) and negative (−); higher difficulty means harder implementation.\n\n| Idea | Originality | Potential | User alignment | Model alignment | Difficulty |\n|---|---|---|---|---|---|\n| Normalized depth gates [NextItNet; ScaleRec] | 5: +causal synthesis; −established gating | 8: +adaptive specificity; −unverified | 8: +recent/persistent balance; −compatibility unobserved | 7: +retains shallow directions; −rank benefit uncertain | 3: +small head; −predictor synchronization |\n| Gradual multi-negative loss [R²NS] | 3: +task adaptation; −known curriculum | 7: +ranking pressure; −false negatives | 5: +discriminates plausible alternatives; −intent indirect | 7: +challenges easy separation; −Industrial already weaker | 5: +shared backbone; −sampling overhead |\n| Gap-conditioned residual gates [NextItNet; TemProxRec] | 5: +time/depth combination; −known temporal gating | 7: +timeliness evidence; −timestamps noisy | 7: +stale-interest control; −occasion unobserved | 5: +additional context; −no measured timing defect | 6: +small embeddings; −timestamp plumbing |\n\n**Selected algorithm.** Normalize each residual-block state across channels, then learn per-position softmax weights conditioned on the current causal state, masked prefix mean, and prefix length. Add the weighted representation through a modest learned residual coefficient. All layers train jointly with one scoring head.\n\nThis explicitly targets **broad similarity replacing specific preferences** and **historical interests overwhelming current purpose** by allowing shallow and deeper evidence different weights. It cannot establish device compatibility or present mood. Industrial’s endpoint effective rank of 6.71, versus 26.83–28.16 elsewhere, motivates retaining intermediate directions; concentration is a diagnostic concern, not demonstrated ranking failure. Other categories’ 98–99% sampled training accuracy motivates measuring held-out ranking rather than further margin inflation.\n\nCompare final-block-only, uniform normalized aggregation, and learned gates. Preserve fixed seeds, splits, 200-epoch ceiling, 200 batches/epoch, routing, and diagnostic interfaces. Select using pinned four-category macro validation HR@10; report representation statistics separately. Deploy exactly one checkpoint per category.",
+  "idea": {
+    "description": "Extend the supplied corrected NextItNet with channel-normalized, causal positionwise aggregation of its existing residual-block states. A small jointly trained gate chooses receptive-field depth at each position; one residual output and one item-scoring head produce all predictions.",
+    "motivation": "The user diagnosis identifies overly broad associations and stale historical interests as distinct failure modes. Adaptive depth selection could retain specific recent evidence while using longer context when supported. Industrial's identified-user endpoint effective rank of 6.71 motivates examining intermediate representations, although covariance concentration alone does not establish defective recommendations. No improvement is claimed before pinned validation.",
+    "implementation_notes": "Implement inside the host-supplied corrected baseline; its source is not included in this prompt. Retain existing causal convolutions, dilation schedule, item_emb, sampler, loss, and optimizer for the initial controlled experiment. For every intermediate state, apply channel-only LayerNorm and multiply by the nonpadding mask. Compute prefix means using cumulative masked sums divided by clamped cumulative nonpadding counts. A shared small MLP maps concatenated normalized current state, normalized prefix summary, and log1p(prefix length) to one logit per residual depth. Depth softmax never operates across sequence positions. Use a residual coefficient initialized to 0.1, optionally bounded through tanh, and retain the baseline final normalization. Mask the combined output again. log2feats returns B x L x D; predict_score retains the baseline item-scoring semantics. Endpoint extraction uses the largest nonzero position and explicitly handles empty histories. Save aggregation parameters and configuration in the same category checkpoint and emit the identical architecture through the predictor writer. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis); adapt graph/receptive-field inspection for the causal prefix-summary path rather than reporting baseline-only reachability. Preserve existing diagnostic definitions and mark unavailable quantities null. DATA_DIR remains os.environ['GAGC_DATA_DIR']; artifacts remain beneath the trial directory. Keep all four category routes, preprocessing seed 0, training seed 42, at most 200 epochs and exactly 200 batches per executed epoch. No independent scoring components, checkpoint averaging, test access, extra data, or pretrained weights.",
+    "pseudocode": "def log2feats(sequence):\n    mask = (sequence != 0).unsqueeze(-1)\n    x = baseline_embedding_path(sequence) * mask\n    states = []\n    for block, depth_norm in zip(blocks, depth_norms):\n        x = block(x) * mask\n        states.append(depth_norm(x) * mask)\n    depth_states = stack(states, dim=2)  # B,L,K,D\n    current = states[-1]\n    count = mask.cumsum(dim=1).to(current.dtype)\n    prefix = current.cumsum(dim=1) / count.clamp_min(1)\n    gate_input = cat([current, prefix, log1p(count)], dim=-1)\n    weights = softmax(gate_mlp(gate_input), dim=-1)\n    aggregate = (weights.unsqueeze(-1) * depth_states).sum(dim=2)\n    return baseline_final_norm(x + tanh(alpha) * aggregate) * mask\n\n# alpha starts at atanh(0.1); all parameters train jointly.\n# Retain baseline sampling, objective, scoring, seeds and training limits.\n# For inference/endpoint probes:\npositions = arange(sequence.shape[1], device=sequence.device)\nlast = where(sequence != 0, positions, -1).amax(dim=1)\nfeatures = log2feats(sequence)[arange(batch_size), last.clamp_min(0)]\nfeatures = features * (last >= 0).unsqueeze(-1)\nscores = predict_score(features, candidate_items)\n# Save/load one matching network checkpoint per category.\n# Compare final-only, uniform aggregation and learned aggregation using\n# the authorized pinned macro validation HR@10; do not invent results.",
+    "originality": {
+      "score": 5,
+      "positive": "Combines causal residual-depth selection, masked prefix conditioning, and channel normalization within the required NextItNet family.",
+      "negative": "Multiscale aggregation and gating are established techniques; novelty is the constrained synthesis rather than a new general principle."
+    },
+    "future_potential": {
+      "score": 8,
+      "positive": "Offers a low-cost starting point for investigating when specific recent evidence or persistent preferences should dominate one sequential network.",
+      "negative": "No supplied experiment demonstrates improved HR@10, useful gate specialization, or a causal relationship between endpoint concentration and recommendation failures."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Reuses existing residual states and adds only normalization modules, a small gate, and a residual coefficient.",
+      "negative": "Requires consistent predictor serialization, padding-safe prefix computation, and updated causal-graph diagnostics."
+    }
+  },
+  "related_work": [
+    {
+      "title": "NextItNet",
+      "link": "https://arxiv.org/abs/1808.05163",
+      "contributions": [
+        "Uses residual causal dilated convolutions to capture sequential dependencies across receptive-field scales.",
+        "Provides the backbone and intermediate states reused by the proposed single network."
+      ],
+      "limitations": [
+        "Does not establish the effectiveness of the proposed adaptive normalized residual-depth aggregation."
+      ]
+    },
+    {
+      "title": "ScaleRec",
+      "link": "https://doi.org/10.1016/j.ipm.2025.104318",
+      "contributions": [
+        "The supplied search summary describes multiple temporal granularities, transient versus stable interests, and context-adaptive aggregation."
+      ],
+      "limitations": [
+        "Its results do not demonstrate benefits for this NextItNet extension or the pinned four-category benchmark."
+      ]
+    },
+    {
+      "title": "R²NS",
+      "link": "https://renzhaochun.github.io/assets/pdf/WWW_2026_Camera_Ready.pdf",
+      "contributions": [
+        "Motivates uniform-negative warm-up followed by stochastic selection from increasingly difficult candidate pools."
+      ],
+      "limitations": [
+        "High-scoring unseen items may be potential positives.",
+        "Negative sampling is a separate experimental direction and should remain unchanged in the first aggregation experiment."
+      ]
+    },
+    {
+      "title": "TemProxRec",
+      "link": "https://arxiv.org/abs/2402.09784",
+      "contributions": [
+        "Motivates distinguishing within-user elapsed-time information from cross-user temporal proximity."
+      ],
+      "limitations": [
+        "Does not establish benefits from gap-conditioned NextItNet gates.",
+        "The next interaction timestamp is unavailable at prediction and cannot be used as an input."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,104 @@
+--- g0-r0049-block_retrieval_transfer/model.py
++++ g0-r0050-content_keys_blocked/model.py
+@@ -1,13 +1,11 @@
+-"""Prospective context-conditioned retrieval over ten existing history blocks.
+-
+-Reuse the incumbent's task-specific rank-16 projections to select block
+-contributions only inside its context/history correction. Preserve original
+-base pooling, moment summaries, residual adapters and native Dice populations.
+-Cross contextual/uniform readout with the existing auxiliary adapter-context
+-gradient gate. All four cells compute the same retrieval operations, instantiate
+-the same learned modules in the same order, and add no parameters or buffers.
+-Uniform selects the original history tensor as a parent bridge. Selective
+-readout preserves the ordinary sum at equal scores in real arithmetic; host
+-BF16 checks must establish numerical behavior. No predictive or novelty claim.
++"""Prospective content-key replacement in task-conditioned block retrieval.
++
++Cross unscored/scored addressing with the inherited auxiliary context gate.
++Content mode reuses the already computed masked uniform block means as keys;
++all task-specific signed target-score-weighted block VALUES remain unchanged.
++Scored mode replays the preceding retrieval implementation. Same modules,
++initialization, native Dice populations and occupied-block support in all cells.
++No new parameters or buffers. Auxiliary content inputs are detached alongside
++other item/action values during training. No measured benefit or novelty claim.
+ """
+ import torch
+@@ -18,5 +16,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'history_retrieval': 'context'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': True, 'context_fusion': 'product', 'interaction_rank': 16, 'history_retrieval': 'context', 'retrieval_key_source': 'content'}
+ 
+ 
+@@ -36,7 +34,7 @@
+                  auxiliary_train_population='primary', auxiliary_eval_population='primary',
+                  block_aux_tower_context_grad=True,
+-                 block_aux_adapter_context_grad=False,
++                 block_aux_adapter_context_grad=True,
+                  context_fusion='product', interaction_rank=16,
+-                 history_retrieval='context',
++                 history_retrieval='context', retrieval_key_source='content',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -75,4 +73,7 @@
+             raise ValueError('Unknown history block readout')
+         self.history_retrieval = history_retrieval
++        if retrieval_key_source not in ('content', 'scored'):
++            raise ValueError('Unknown retrieval key source')
++        self.retrieval_key_source = retrieval_key_source
+         if residual_input != 'match_detail':
+             raise ValueError('The original match-detail channel must be retained')
+@@ -683,5 +684,5 @@
+ 
+     def _context_history_correction(self, index, context, history,
+-                                    block_base, block_counts):
++                                    block_base, block_counts, block_content):
+         # Only supplied context and already-masked compressed history enter.
+         # FP32 bounded projections and a shared RMS denominator reduce gross
+@@ -692,5 +693,12 @@
+         # Counts are valid events, not target scorer weights. Empty blocks
+         # remain excluded even if a future source gives them nonzero values.
+-        means = block_base.float() / block_counts.float().clamp_min(1).unsqueeze(-1)
++        # Address with unscored content OR the original scored contribution.
++        # Uniform means precede all target-scorer factors; no division by
++        # a learned score (which may be zero or negative) is needed.
++        # Keep the original target-weighted block_base as VALUES below.
++        # Both key-source alternatives execute in every factorial cell.
++        scored_means = block_base.float() / block_counts.float().clamp_min(1).unsqueeze(-1)
++        content_means = block_content.float() * (block_counts > 0).unsqueeze(-1).to(torch.float32)
++        means = content_means if self.retrieval_key_source == 'content' else scored_means
+         keys = torch.tanh(torch.nn.functional.linear(
+             means, self.history_projections[index].weight[:, :self.value_width]).float())
+@@ -840,4 +848,13 @@
+         grouped_counts = counts.reshape(counts.shape[0], 10, 3)
+         block_counts = grouped_counts[:, :, 0]
++        # Every branch above leaves the SAME first three unscored compressed
++        # means in values. Uniform row0 covers all valid events independently
++        # of the target scorer and the two complementary feedback strata.
++        block_content = values.reshape(batch, 10, 3, self.value_width)[:, :, 0, :]
++        # No new auxiliary path into shared item/action embeddings or scorer.
++        # Context remains attached/blocked at the existing adapter gate below.
++        aux_block_content = (block_content.detach()
++                             if self.training and self.block_aux_item_grad
++                             else block_content)
+         total_count = grouped_counts[:, :, 0].sum(dim=1, keepdim=True)
+         has_history = (total_count > 0).to(uniform.dtype)
+@@ -847,4 +864,5 @@
+                 task_context, task_target, base = context, target, uniform
+                 task_blocks = primary_block_strata[:, :, 0, :]
++                task_content = block_content
+                 task_detail = detail
+                 task_position_detail = position_detail
+@@ -855,4 +873,5 @@
+                 task_context, task_target, base = aux_context, aux_target, feedback
+                 task_blocks = aux_block_strata[:, :, 1, :] + aux_block_strata[:, :, 2, :]
++                task_content = aux_block_content
+                 task_detail = aux_detail
+                 task_position_detail = aux_position_detail
+@@ -886,5 +905,5 @@
+             history_features = torch.cat([base, match_counts.to(base.dtype), signal], dim=-1)
+             correction = correction + self._context_history_correction(
+-                index, adapter_context, history_features, task_blocks, block_counts)
++                index, adapter_context, history_features, task_blocks, block_counts, task_content)
+             pooled = base + has_history * correction
+             features = torch.cat([tower_context, task_target, pooled], dim=-1)

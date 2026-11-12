@@ -1,0 +1,61 @@
+{
+  "request_sha256": "b4bad201b3d97b0c0af9c4f737320d815d9316e63a2485280cc247bf94a9f447",
+  "response": {
+    "category_edits": [
+      {
+        "category": "feature_construction",
+        "rationale": "Scale input item embeddings using training-only frequency features to reduce frequent-item dominance. Preserve learned embeddings, Transformer topology and candidate scoring. Save counts and scaling in each category checkpoint and reconstruct them through the predictor writer. Enforce the required data environment and 200-epoch cap.",
+        "edits": [
+          {
+            "find": "NUM_EPOCHS   = int(os.environ.get(\"SASREC_EPOCHS\",    \"300\"))",
+            "replace": "NUM_EPOCHS   = min(200, int(os.environ.get(\"SASREC_EPOCHS\", \"200\")))"
+          },
+          {
+            "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+            "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+          },
+          {
+            "find": "                 num_heads: int = 1, dropout_rate: float = 0.5, maxlen: int = 128):\n        super().__init__()\n        self.hidden_units = hidden_units\n        self.maxlen = maxlen\n        self.itemnum = itemnum",
+            "replace": "                 num_heads: int = 1, dropout_rate: float = 0.5, maxlen: int = 128,\n                 item_counts=None):\n        super().__init__()\n        self.hidden_units = hidden_units\n        self.maxlen = maxlen\n        self.itemnum = itemnum\n\n        counts = (np.ones(itemnum + 1, dtype=np.float32) if item_counts is None\n                  else np.asarray(item_counts, dtype=np.float32).copy())\n        counts[0] = 0.0\n        observed_counts = counts[counts > 0]\n        median_count = float(np.median(observed_counts)) if observed_counts.size else 1.0\n        input_scale = np.clip(\n            (median_count / np.maximum(counts, 1.0)) ** 0.1, 0.75, 1.25\n        ).astype(np.float32)\n        input_scale[0] = 0.0\n        self.register_buffer(\"item_counts\", torch.from_numpy(counts))\n        self.register_buffer(\"input_scale\", torch.from_numpy(input_scale))"
+          },
+          {
+            "find": "        seq_emb = self.item_emb(seq) * (self.hidden_units ** 0.5)",
+            "replace": "        seq_emb = self.item_emb(seq) * self.input_scale[seq].unsqueeze(-1)\n        seq_emb = seq_emb * (self.hidden_units ** 0.5)"
+          },
+          {
+            "find": "    user_train, user_valid, itemnum = load_dataset(dataset_name, data_dir)\n    print(f\"  [{dataset_name}] users={len(user_train)}  items={itemnum}\", flush=True)",
+            "replace": "    user_train, user_valid, itemnum = load_dataset(dataset_name, data_dir)\n    item_counts = np.zeros(itemnum + 1, dtype=np.float32)\n    for history in user_train.values():\n        np.add.at(item_counts, np.asarray(history, dtype=np.int64), 1.0)\n    item_counts[0] = 0.0\n    print(f\"  [{dataset_name}] users={len(user_train)}  items={itemnum}\", flush=True)"
+          },
+          {
+            "find": "        maxlen=MAXLEN,\n    ).to(device)",
+            "replace": "        maxlen=MAXLEN,\n        item_counts=item_counts,\n    ).to(device)"
+          },
+          {
+            "find": "            \"maxlen\": MAXLEN,\n        }, f)",
+            "replace": "            \"maxlen\": MAXLEN,\n            \"item_counts\": item_counts.tolist(),\n        }, f)"
+          },
+          {
+            "find": "            maxlen=meta[\"maxlen\"],\n        ).to(_device)",
+            "replace": "            maxlen=meta[\"maxlen\"],\n            item_counts=meta[\"item_counts\"],\n        ).to(_device)"
+          }
+        ]
+      },
+      {
+        "category": "learning_objective",
+        "rationale": "Coordinate frequency-scaled inputs with frequency-balanced supervision: mix 75% baseline positive/negative BCE with 25% pairwise softplus ranking loss, then weight valid positions by clipped inverse target frequency normalized to mean one. Preserve sampling, optimizer, schedule and readout.",
+        "edits": [
+          {
+            "find": "    bce_criterion = nn.BCEWithLogitsLoss()",
+            "replace": "    bce_criterion = nn.BCEWithLogitsLoss(reduction=\"none\")\n    observed_counts = item_counts[item_counts > 0]\n    median_count = float(np.median(observed_counts)) if observed_counts.size else 1.0\n    target_loss_weights = torch.clamp(\n        (median_count / model.item_counts.clamp_min(1.0)).pow(0.25),\n        min=0.5, max=2.0,\n    )\n    target_loss_weights[0] = 0.0"
+          },
+          {
+            "find": "            pos_labels = torch.ones(pos_logits[indices].shape, device=device)\n            neg_labels = torch.zeros(neg_logits[indices].shape, device=device)\n            loss = bce_criterion(pos_logits[indices], pos_labels)\n            loss = loss + bce_criterion(neg_logits[indices], neg_labels)",
+            "replace": "            positive_logits = pos_logits[indices]\n            negative_logits = neg_logits[indices]\n            pos_labels = torch.ones_like(positive_logits)\n            neg_labels = torch.zeros_like(negative_logits)\n            baseline_loss = (\n                bce_criterion(positive_logits, pos_labels)\n                + bce_criterion(negative_logits, neg_labels)\n            )\n            ranking_loss = torch.nn.functional.softplus(negative_logits - positive_logits)\n            weights = target_loss_weights[pos_t[indices]]\n            weights = weights / weights.mean().clamp_min(1e-8)\n            loss = (weights * (0.75 * baseline_loss + 0.25 * ranking_loss)).mean()"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Apply training-frequency input scaling and frequency-balanced BCE/ranking supervision to one SASRec model per category. Persist feature state and update the embedded predictor writer; preserve routing, seeds, splits and training configuration with a 200-epoch cap."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-sasrec-default-prompt-v2-43200-20261029/run-01/experiment/recharness/calls/00012"
+}

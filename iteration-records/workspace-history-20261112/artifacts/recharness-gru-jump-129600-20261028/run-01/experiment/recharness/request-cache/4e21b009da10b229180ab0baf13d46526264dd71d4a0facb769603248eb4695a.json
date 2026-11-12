@@ -1,0 +1,23 @@
+{
+  "request_sha256": "4e21b009da10b229180ab0baf13d46526264dd71d4a0facb769603248eb4695a",
+  "response": {
+    "category_edits": [
+      {
+        "category": "interest_aggregation",
+        "rationale": "Replace last-state readout with a padding-masked exponential mean of causal GRU states, using a five-interaction half-life. Apply the same aggregation to each training prefix and inference history. Preserve the GRU, embeddings, scoring, loss, optimizer, and dataset routing. The generated predictor imports the updated model class directly.",
+        "edits": [
+          {
+            "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        # Histories are LEFT padded; count-1 indexes padding on short histories.\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n",
+            "replace": "    def aggregate_states(self, out: torch.Tensor, seq: torch.Tensor) -> torch.Tensor:\n        # Prefix normalization yields weight 2**(-age/5) at every valid step.\n        positions = torch.arange(seq.size(1), device=out.device, dtype=torch.float32)\n        weights = torch.exp2((positions - (seq.size(1) - 1)) / 5.0)\n        weights = weights.unsqueeze(0) * seq.ne(0).float()\n        numerator = torch.cumsum(out.float() * weights.unsqueeze(-1), dim=1)\n        denominator = torch.cumsum(weights, dim=1).unsqueeze(-1)\n        pooled = numerator / denominator.clamp_min(torch.finfo(torch.float32).tiny)\n        return pooled.to(out.dtype)\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        out = self.aggregate_states(out, seq)\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n"
+          },
+          {
+            "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n",
+            "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        out = self.aggregate_states(out, seq)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Use causal exponential pooling with a five-interaction half-life for training and inference readouts. Retain one GRU model per category; predictor imports remain compatible."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/run-01/experiment/recharness/calls/00065"
+}

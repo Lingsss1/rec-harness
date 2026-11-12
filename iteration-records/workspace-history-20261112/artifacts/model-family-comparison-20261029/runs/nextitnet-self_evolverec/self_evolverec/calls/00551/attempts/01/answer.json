@@ -1,0 +1,68 @@
+{
+  "markdown_report": "**Proposed direction: candidate-depth diagnostics for the existing NextItNet models.** At 10% research progress, prioritize a small, controlled extension that tests whether sampled separation survives stronger ranking competition. No improvement in validation HR@10 is claimed.\n\n**Insights from the starting point**\n\n1. Electronics has a 12.27% sampled negative-win rate, versus 0.96% for CDs_and_Vinyl. This motivates category-specific investigation, although differing score scales prevent direct interpretation of raw margin magnitudes.\n2. Reported embedding alignment scores of 0.507–0.523 imply mean cosine similarities near zero. They provide little evidence of global directional collapse, but cannot establish useful representation geometry.\n3. Existing probes already control padding, causality and perturbation geometry. Extending their ranking measurements is therefore a smaller next step than adding another intervention mechanism.\n\n**Insights from related work**\n\n1. [Krichene–Rendle](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/) demonstrate that sampled metrics can reverse model comparisons. Candidate-depth sensitivity can reveal dependence on the diagnostic candidate set without replacing the pinned evaluator.\n2. [Negative-sampling research](https://arxiv.org/abs/2410.17276) reports popularity-dependent performance differences. Training-frequency strata can expose failures hidden by aggregate pairwise accuracy.\n3. [Patching methodology](https://arxiv.org/abs/2309.16042) shows that intervention choices affect conclusions. Paired targets and nested candidate sets similarly help isolate candidate-depth effects from changing examples.\n\n**Framework and research directions**\n\n| Direction | Existing evidence | Missing measurement |\n|---|---|---|\n| Ranking competition | Single-negative margins | Rank under increasing competition |\n| Failure localization | Category aggregates | Frequency and history-length strata |\n| Temporal mechanism | Controlled history perturbations | Block-specific causal recovery |\n\n**Candidate ideas**\n\nScores are originality/potential/difficulty; higher difficulty means harder implementation.\n\n- **Nested candidate-depth audit — 4/8/3.** Originality: task-specific pairing is useful, but sampling audits are established. Potential: identifies fragile ranking, but cannot establish validation gains. Difficulty: reuses scoring hooks, but requires careful eligibility and uncertainty handling. References: Krichene–Rendle; negative-sampling research.\n- **Frequency-stratified training negatives — 3/7/4.** Originality: simple adaptation, but standard sampling machinery. Potential: may improve confusing comparisons, but may amplify false negatives. Difficulty: compact sampler change, but sampling weights require validation. Reference: negative-sampling research.\n- **Residual-block activation recovery — 6/7/7.** Originality: transfers patching to NextItNet, but uses established interventions. Potential: localizes temporal computation, but recovery need not improve recommendations. Difficulty: hooks are available, but valid corruption and distributed effects complicate interpretation. Reference: patching methodology.\n\n**Selected algorithm**\n\nFreeze each category’s single checkpoint. Sample fixed training-prefix targets and unique negatives excluding that user’s observed training items and target; evaluate nested sets of 99, 499 and 999 negatives where eligible. Report target rank, diagnostic hit rate and positive-minus-tenth-negative margin, stratified by training frequency and prefix length. Bootstrap users with paired candidate sets; label every result in-sample and exploratory.\n\nPreserve both diagnostic entry points, model modes, RNG states and final-nonpadding readout. Use `ModelView` scoring, bounded chunks and explicit eligibility counts. Keep training, checkpoints, routing and the host’s four-category macro validation HR@10 selection unchanged.",
+  "idea": {
+    "description": "Extend the existing padding-aware NextItNet diagnostic adapter with a paired, nested candidate-depth audit. Evaluate fixed training-prefix targets against increasingly large unique negative sets, using one frozen independently trained checkpoint per category.",
+    "motivation": "Electronics exhibits weaker sampled training separation than the other categories, while the available embedding alignment measurements do not indicate strong directional collapse. Increasing diagnostic ranking competition can test whether apparently good pairwise separation persists across candidate depths. These measurements cannot establish validation performance or explain unobserved compatibility, saturation or current intent.",
+    "implementation_notes": "Retain DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). Preserve the existing probes and add bounded audit measurements through view.log2feats and view.predict_score. Use only mapped training histories and training item frequencies. Select prefix targets from training histories and explicitly label them in-sample. Exclude padding, the target, and all items observed in the user's training history from negative pools. Draw a single deterministic ordered pool per eligible target, then take nested prefixes; report unavailable depths when insufficient unique negatives exist. Hold the target population fixed for paired depth comparisons and separately report eligibility coverage. Select the largest nonzero sequence index for left-padded histories and skip empty histories. Aggregate metrics by users before category summaries; bootstrap users, retaining all their prefixes together. A macro diagnostic summary requires all four categories and must remain distinct from host validation HR@10. Preserve model modes and RNG states. Do not change the predictor, train an auxiliary scorer, inspect other trials, or use unavailable metadata. Any subsequent training experiment must retain the supplied NextItNet backbone, seeds, splits, maximum 200 epochs and 200 batches per epoch, and synchronize its predictor writer with the trained architecture.",
+    "pseudocode": "class DiagnosisProbe:\n    def run_full_diagnosis(self, train_loader):\n        with preserve_module_modes_and_rng(self.view.model):\n            self.view.model.eval()\n            with torch.no_grad():\n                result = run_existing_probes(train_loader)\n                records = []\n                for user, prefix, target in fixed_training_prefix_sample():\n                    sequence = left_pad(prefix)\n                    endpoint = largest_nonzero_index(sequence)\n                    if endpoint is None:\n                        continue\n                    feature = self.view.log2feats(sequence)[endpoint]\n                    eligible = real_training_items - set(training_history(user)) - {target}\n                    negatives = deterministic_sample_without_replacement(eligible, maximum=999)\n                    scores = score_in_chunks(self.view, feature, [target] + negatives)\n                    for depth in (99, 499, 999):\n                        if len(negatives) < depth:\n                            record_unavailable(user, depth, reason='insufficient unique negatives')\n                            continue\n                        negative_scores = scores[1:depth + 1]\n                        rank = rank_with_declared_tie_policy(scores[0], negative_scores)\n                        records.append({user, depth, rank, diagnostic_hit_at_10: rank <= 10,\n                                        margin_to_tenth_negative: scores[0] - tenth_largest(negative_scores),\n                                        training_frequency_bin, prefix_length_bin})\n                result.update(aggregate_with_paired_user_bootstrap(records))\n                return {'metrics': result,\n                        'metric_definitions': definitions_with_populations_ties_coverage_and_in_sample_warning()}\n\ndef diagnosis_interpreter_prompt(raw_diagnosis):\n    return build_prompt(raw_diagnosis['metrics'], raw_diagnosis['metric_definitions'],\n                        constraints='Exploratory training diagnostics; no inferred intent or validation gains; single NextItNet model per category.')",
+    "originality": {
+      "score": 4,
+      "positive": "Combines nested candidate sets, paired user-level uncertainty and existing NextItNet diagnostic controls in a task-specific adapter.",
+      "negative": "Candidate-sampling sensitivity and frequency-stratified evaluation are established techniques; this is a practical extension rather than a new estimator."
+    },
+    "future_potential": {
+      "score": 8,
+      "positive": "Can identify candidate-depth and frequency-specific weaknesses that motivate targeted sampling experiments under the fixed validation criterion.",
+      "negative": "In-sample ranking sensitivity may not predict held-out improvement or explain the simulator's qualitative rejection reasons."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Reuses the existing ModelView interface and requires no model, checkpoint or inference changes.",
+      "negative": "Unique-negative eligibility, paired populations, tie handling, bounded scoring and user-cluster uncertainty require careful implementation."
+    }
+  },
+  "related_work": [
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled recommendation metrics can produce inconsistent model comparisons.",
+        "Motivates explicit candidate-set sensitivity measurements."
+      ],
+      "limitations": [
+        "Does not establish that a particular diagnostic candidate depth predicts this task's validation HR@10.",
+        "Does not justify changing the pinned host evaluator."
+      ]
+    },
+    {
+      "title": "Evaluating Performance and Bias of Negative Sampling",
+      "link": "https://arxiv.org/abs/2410.17276",
+      "contributions": [
+        "Examines how negative sampling affects sequential recommendation performance across popularity bands."
+      ],
+      "limitations": [
+        "Its findings do not establish an optimal negative sampler for these four NextItNet category models."
+      ]
+    },
+    {
+      "title": "NextItNet: A Simple Convolutional Generative Network for Next Item Recommendation",
+      "link": "https://arxiv.org/abs/1808.05163",
+      "contributions": [
+        "Introduces causal dilated convolutions and residual connections for sequential recommendation."
+      ],
+      "limitations": [
+        "Architectural access to historical positions does not establish their learned influence or current user intent."
+      ]
+    },
+    {
+      "title": "Towards Best Practices of Activation Patching in Language Models",
+      "link": "https://arxiv.org/abs/2309.16042",
+      "contributions": [
+        "Demonstrates sensitivity of activation-patching conclusions to corruption and measurement choices."
+      ],
+      "limitations": [
+        "Provides transferable methodological guidance rather than validated NextItNet-specific intervention results."
+      ]
+    }
+  ]
+}

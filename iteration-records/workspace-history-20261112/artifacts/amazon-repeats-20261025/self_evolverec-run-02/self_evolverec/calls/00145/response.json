@@ -1,0 +1,125 @@
+{
+  "markdown_report": "## Insights and directions\n\n**Starting point.** (1) Feedback motivates testing recent, repeated evidence; histories do not establish intent. (2) Training margins cannot establish top-10 accuracy or complement usefulness. (3) Categories, ratings and reviews are unavailable; use histories, timestamps, titles/descriptions and explicit unknowns.\n\n**Related work.** (1) *Measuring Recency Bias* cautions against unconditional recency weighting. (2) Krichene–Rendle show sampled ranking can reverse comparisons; auxiliary full-catalog diagnostics cannot replace pinned selection. (3) ECCR distinguishes compatibility from co-purchase. (4) HGN already gates recent embeddings with a default five-item window; SHAN combines historical and recent representations through attention. The proposed scalar interpolation is incremental. (5) Ji et al. require held-out events to be excluded before backbone training.\n\nDirections remain adaptive history aggregation, controlled history interventions, and evidence-aware compatibility diagnostics.\n\n## Framework\n\n| Direction | Observable evidence | Intervention | Main limitation |\n|---|---|---|---|\n| History aggregation | Ordered training interactions | Learned recent-history residual | Recent activity may be incidental |\n| Dependence diagnosis | Natural training prefixes | Equal-size recent/older edits | Sensitivity does not prove usefulness |\n| Compatibility diagnosis | Titles/descriptions | Supported/contradicted/unknown labels | Missing prerequisites remain unknown |\n\n## Candidate ideas\n\nScores are originality/potential/code difficulty; higher difficulty means harder implementation.\n\n1. **Gated recent-interest residual — 3/6/3.** Originality: + precise SASRec integration; − pooling and fusion precedents include HGN/SHAN. Potential: + tests reported history-weighting weakness; − may duplicate attention or exploit popularity. Difficulty: + small pooling/gating addition; − causal scoring and predictor serialization require care.\n2. **Paired prefix intervention probe — 3/6/4.** Originality: + connects dependence with prefix accuracy; − intervention diagnostics exist. Potential: + identifies harmful reliance; − no direct ranking improvement. Difficulty: + reuses scoring; − genuine holdouts require leakage-free retraining. Motivated by attribution studies and Ji et al.\n3. **Evidence-aware compatibility reranker — 5/5/7.** Originality: + explicit unknown states; − compatibility recommendation is established. Potential: + addresses equipment mismatches; − limited entertainment applicability. Difficulty: + auditable evidence; − reliable cross-catalog parsing is substantial. Motivated by ECCR.\n\n## Selected idea\n\nAt 0% progress, retain the **gated recent-interest residual** for feasibility. Define mₜ=LayerNorm(mean of up to five valid causal input embeddings), gₜ=sigmoid(wᵀ[hₜ;mₜ]+b), and zₜ=(1−gₜ)hₜ+gₜmₜ. Use embeddings before positions/dropout; initialize w=0, b=−4. SASRec context is history-dependent, not inherently long-term. LayerNorm normalizes features, unlike SHAN’s attention softmax.\n\nPreserve baseline optimization, negatives, seeds 0/42, four routes and the 200-epoch environment default. Prioritize baseline, fixed mixture and learned gate; budget permitting, test last-item, older/full-history pools and a matched-parameter context adapter. Inspect gate saturation, popularity strata and paired category effects. Gains do not establish preference change or compatibility.\n\nFreeze checkpoints and persist identical candidates, exclusions and tie-breaking across perturbations. Without separate leakage-free training, label prefix experiments training-history sensitivity. Update predictor and compatibility view together; check padding and causal windows. Select exclusively on pinned macro validation HR@10; twenty-user full-catalog overlap, coverage and popularity remain unlabeled diagnostics. All auxiliary work shares the GPU budget; no improvement is claimed before measurement.",
+  "idea": {
+    "description": "Add an input-conditioned scalar gate that interpolates each per-dataset SASRec contextual feature with a LayerNorm-normalized mean of up to five causal input item embeddings. This is an incremental combination of established recent-item pooling and gated fusion, distinguished from HGN’s feature/instance gates and additive scoring, and SHAN’s two-stage attention. Use the identical representation during training, diagnosis and prediction.",
+    "motivation": "Qualitative feedback suggests incidental or older interactions can crowd out recent, specific evidence. The branch offers a low-cost, falsifiable test of whether unordered recent-item information improves next-item ranking. The original proposal does not explicitly distinguish repeated interests from incidental events; repetition-specific benefits require additional stratified evidence. Histories do not reveal intent, continued ownership, satisfaction, prerequisite availability or compatibility. SASRec features already depend on history, so describing the interpolation as separate long-term and short-term preference modeling would overstate the distinction.",
+    "implementation_notes": "Keep DATA_DIR = os.environ['GAGC_DATA_DIR'], existing input splits, preprocessing seed 0, training seed 42, all four dataset routes and trial-local artifacts. Honor the SASREC_EPOCHS environment setting, whose host default is 200. Keep execution single-GPU. Preserve baseline optimizer, learning rate, loss, sampling, embedding initialization, batch size and checkpoint procedure initially; record their inherited values and every changed setting in the trial configuration.\n\nAt position t, take raw shared item embeddings before positional encoding and embedding dropout. Pool positions max(0,t-4)..t, excluding zero IDs and dividing by the number of valid IDs. The current input item is allowed; its next-item target must never enter this window. Apply a trainable LayerNorm(D) to the mean, initialized with scale one and bias zero. Use Linear(2D,1) on concatenated contextual and pooled features, with zero weights and bias -4, so the initial mean-branch gate is exactly sigmoid(-4), approximately 0.018. Interpolate the complete feature vectors and explicitly zero padding positions after normalization and interpolation. Compute pooling with causal cumulative sums and valid-count differences. With ordinary initialization, the model is close to, but not exactly, unchanged SASRec; include a branch-off endpoint to establish exact baseline behavior. LayerNorm does not equalize the norms of the two branches, so inspect feature norms and score scales alongside gates.\n\nTrain through the existing loss using positive != 0 as its validity mask. The shared item embedding receives gradients from both paths. Update the predictor writer so generated working/predict.py reconstructs the backbone, gate and normalization, loads all state parameters, uses the existing last-valid-position convention, and preserves dataset routing. Store window width and architectural configuration with each checkpoint. Verify causal pooling on padded sequences, absence of target leakage and numerical agreement between training-time evaluation and generated prediction.\n\nPreserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. view.model must be the actual trained module; view.log2feats returns blended B x L x D features; view.item_emb exposes the shared embedding; view.predict_score supports B x L x 2 candidate IDs. Retain user_train, meta_data and review_data compatibility fields without fabricating unavailable contents. Set evaluation mode on view.model, disable gradients and restore its original mode afterward. Retain embedding alignment and margin diagnostics, but identify alignment as directional similarity rather than proof of collapse. Add valid-sample counts; empty measurements must be null rather than healthy-looking zero failure rates. Unavailable category breakdowns remain empty and explicitly unavailable.\n\nWithin the shared 43,200 GPU-second budget, prioritize unchanged SASRec, a fixed mixture with g=sigmoid(-4), and the conditioned gate, under identical inherited training settings. Use the same existing checkpoint-selection schedule and log actual GPU time. If budget permits, preregister a small extension: last-item-only, older-window and full-history pooling; mean-only and branch-off endpoints; a matched-parameter context-only adapter; and initialization logit 0 versus -4. Further window sizes 1/5/10/full, mean/max/attention pools, global versus conditioned/vector gates, and normalization ablations are optional follow-ups, not a required Cartesian search. Keep tuning effort comparable and report incomplete controls rather than implying they ran.\n\nFor inference sensitivity, freeze the checkpoint. Persist each user/cutoff's target, candidates, candidate order, original-history exclusions and tie-breaking once. Compare equal-sized recent/older edits, suffix-only histories and order shuffling using those same objects. Preserve the final item when testing within-window order, then test membership changes separately. Because mean pooling is permutation-invariant within a fixed window, surviving such shuffles does not demonstrate order modeling. Distinguish inference perturbations from separately retrained shuffling controls. Match replacement items on permitted training popularity and availability where possible, and compare with random edits and popularity-only scores.\n\nA checkpoint trained on a purported auxiliary target cannot support held-out generalization claims. To measure that, split permitted training histories before fitting a separate diagnostic backbone, then construct all training windows and learned statistics from the truncated data. Excluded targets must not reappear inside later windows. Freeze this separate model across perturbations. Per-user truncation supports a user-prefix experiment but not strict global temporal claims; those require global or rolling cutoffs across users. Restrict auxiliary candidates and metadata to prediction-time availability where known, labeling first interaction as only an availability proxy. If retraining is unaffordable, report training-history sensitivity instead. Never modify the host splits or evaluator.\n\nReport paired per-user validation differences by category, then their equal-weight macro average; use user-clustered uncertainty estimates when multiple prefixes share a user. These intervals do not measure training-seed variability. Inspect history length, training-frequency popularity strata, gate saturation and branch norms to detect popularity shortcuts or concentration of gains. Repeated validation selection can overfit the 800 pinned users: predeclare the small primary comparison, log all trials and avoid broad post hoc tuning. Select only with the pinned macro validation HR@10: 200 users/category, 99 unique negatives and evaluation seed 42. Auxiliary diagnostics, including full-catalog metrics from legitimate training-only holdouts, never replace that criterion. For the twenty real training users, report unseen-item overlap, popularity and coverage without claiming full-catalog accuracy, immediate purchase intent or observed diversity/conformity traits.",
+    "pseudocode": "configuration = inherit_baseline_settings_and_record_changes()\nfor category in four_existing_routes:\n    model = SASRecWithRecentGate(width=5, gate_weight=0, gate_bias=-4)\n    for batch in existing_training_loader:\n        seq, pos, neg = batch.sequence, batch.positive, batch.negative\n        valid = (seq != 0)\n        h = model.backbone.log2feats(seq)\n        e = model.item_emb(seq) * valid[..., None]  # before positions/dropout\n        sums, counts = causal_window_sums_and_counts(e, valid, width=5)\n        mean = sums / counts.clamp_min(1)[..., None]\n        m = model.recent_norm(mean) * valid[..., None]\n        g = sigmoid(model.gate(concat(h, m)))\n        z = ((1 - g) * h + g * m) * valid[..., None]\n        loss = existing_loss(score(z, pos), score(z, neg), mask=(pos != 0))\n        optimize(loss)\n    save_all_parameters_and_configuration_beneath_trial_directory()\n    emit_predictor_with_identical_features_scoring_and_dataset_routing()\n    verify_predictor_parity_and_causal_padding_behavior()\nselect_using_existing_pinned_macro_validation_HR10()\n\n# Optional sensitivity analysis: this is not held-out generalization.\nfreeze(trained_checkpoint)\nrecords = persist_training_prefix_targets_candidates_original_exclusions_and_ties()\nfor intervention in predeclared_equal_size_history_edits:\n    score_identical_records_with_frozen_checkpoint(records, intervention)\nreport_paired_differences_as_training_history_sensitivity()\n\n# Optional generalization analysis, only if budget permits.\npermitted_prefixes, auxiliary_targets = split_training_histories_before_any_fit()\nwindows = construct_windows_only_from(permitted_prefixes)\ndiagnostic_model = train_from_scratch(windows, permitted_statistics_only=True)\nfreeze(diagnostic_model)\nrun_paired_interventions_with_fixed_targets_candidates_exclusions_and_ties()",
+    "originality": {
+      "score": 3,
+      "positive": "The precise SASRec feature interpolation and shared diagnosis/inference implementation provide a clear, testable integration.",
+      "negative": "HGN and SHAN establish recent-history aggregation and gated or attentive fusion; a five-item mean and scalar mixture provide limited architectural novelty."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "A controlled, inexpensive branch can establish when explicit recent-item aggregation adds value across four distinct domains and guide subsequent diagnostic work.",
+      "negative": "The branch may reproduce existing attention or popularity associations; sampled HR@10 gains do not establish changing preferences, compatibility or better full-catalog recommendations."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "The core change needs only causal pooling, LayerNorm and a small gate, with no external data or pretrained weights.",
+      "negative": "Causal masking, score-scale effects, predictor parity and compatible per-position diagnostics require care; separate leakage-free diagnostic retraining adds substantial experimental cost beyond this core implementation score."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Measuring Recency Bias (2024)",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "The supplied summary reports that excessive recency emphasis can impair recommendation accuracy, motivating adaptive weighting and ablations."
+      ],
+      "limitations": [
+        "Does not establish that the proposed residual improves the four Amazon datasets or identifies immediate intent."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation — Krichene and Rendle",
+      "link": "https://ijcai.org/proceedings/2021/651",
+      "contributions": [
+        "Shows that sampled ranking metrics can disagree with full-ranking comparisons, motivating separation of pinned selection and auxiliary diagnostics."
+      ],
+      "limitations": [
+        "Identical candidates reduce paired comparison noise but do not eliminate sampled-ranking bias.",
+        "Does not justify changing the pinned host evaluator or guarantee that a particular loss improves its HR@10."
+      ]
+    },
+    {
+      "title": "Explainable and Coherent Complement Recommendation Based on Large Language Models",
+      "link": "https://www.amazon.science/publications/explainable-and-coherent-complement-recommendation-based-on-large-language-models",
+      "contributions": [
+        "Distinguishes relevance and compatibility in complement recommendation."
+      ],
+      "limitations": [
+        "Co-purchase and title similarity alone do not establish compatibility, prerequisites or ownership in this task."
+      ]
+    },
+    {
+      "title": "Counterfactual Explanations via Genetic Algorithms (2025)",
+      "link": "https://arxiv.org/abs/2508.03606",
+      "contributions": [
+        "The supplied summary describes searching for small sequence edits that alter recommendations, motivating history-dependence probes."
+      ],
+      "limitations": [
+        "Recommendation changes reveal model sensitivity rather than correctness of inferred user preferences.",
+        "History edits can create unfamiliar inputs and do not by themselves establish causal preference effects."
+      ]
+    },
+    {
+      "title": "Hierarchical Gating Networks for Sequential Recommendation — HGN (KDD 2019)",
+      "link": "https://arxiv.org/abs/1906.09217",
+      "contributions": [
+        "Uses user-conditioned feature and instance gates over recent item embeddings, with pooling to construct short-term representations.",
+        "Uses a default recent window of five items and combines user–candidate, pooled-history–candidate and recent-item–candidate scoring terms."
+      ],
+      "limitations": [
+        "Its gates and additive scoring differ from a scalar interpolation of a complete SASRec feature and a normalized recent mean.",
+        "Its results do not establish effectiveness under the pinned four-category protocol."
+      ]
+    },
+    {
+      "title": "Sequential Recommendation with User Memory Networks — SHAN (IJCAI 2018)",
+      "link": "https://www.ijcai.org/Proceedings/2018/0546.pdf",
+      "contributions": [
+        "Uses user-conditioned attention over history, followed by attention combining the historical representation with recent embeddings.",
+        "Provides a precedent for combining historical and recent evidence."
+      ],
+      "limitations": [
+        "Attention softmax normalizes item weights; the proposed LayerNorm normalizes feature statistics and serves a different purpose.",
+        "Does not directly validate scalar interpolation with SASRec."
+      ]
+    },
+    {
+      "title": "Temporal-leakage analysis in recommendation — Ji et al.",
+      "link": "https://arxiv.org/abs/2010.11060",
+      "contributions": [
+        "The supplied summary motivates excluding auxiliary held-out events before fitting the backbone, constructing windows and fitting learned statistics."
+      ],
+      "limitations": [
+        "Removing an event only from inference inputs cannot undo its prior use in model training.",
+        "Per-user truncation alone does not prevent future information from other users."
+      ]
+    },
+    {
+      "title": "Time to Split",
+      "link": "https://doi.org/10.1145/3705328.3748164",
+      "contributions": [
+        "The supplied summary motivates careful temporal splitting, availability controls and separation of user-prefix experiments from global temporal claims."
+      ],
+      "limitations": [
+        "Strict auxiliary temporal protocols require additional training and do not authorize altering the host benchmark splits.",
+        "First observed interaction is only a proxy for item availability when release dates are unknown."
+      ]
+    },
+    {
+      "title": "History-shuffling study — Woolridge et al.",
+      "link": "https://ceur-ws.org/Vol-2955/paper8.pdf",
+      "contributions": [
+        "The supplied summary reports generally modest effects of history shuffling outside MovieLens-1M, including improved results on Beauty.",
+        "Motivates separating recent-item membership effects from order sensitivity."
+      ],
+      "limitations": [
+        "Does not establish that order is irrelevant in these four datasets or that a recent pooling branch captures preference changes."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,396 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "proposal": {
+        "category_edits": [
+          {
+            "category": "feature_construction",
+            "rationale": "Use training-only adjacent-item counts to scale each history input embedding by 1+0.05*c/(c+5). Positions without a real predecessor retain scale 1. This fixed feature preserves the learned embeddings, GRU, readout, loss and optimizer across all four category models.",
+            "edits": [
+              {
+                "find": "                 dropout_rate: float = 0.1):\n        super().__init__()\n        self.itemnum = itemnum\n        self.hidden_units = hidden_units",
+                "replace": "                 dropout_rate: float = 0.1, transition_keys=None, transition_counts=None):\n        super().__init__()\n        self.itemnum = itemnum\n        self.hidden_units = hidden_units\n        self.register_buffer(\n            \"transition_keys\",\n            torch.as_tensor([] if transition_keys is None else transition_keys, dtype=torch.long),\n        )\n        self.register_buffer(\n            \"transition_counts\",\n            torch.as_tensor([] if transition_counts is None else transition_counts, dtype=torch.float32),\n        )"
+              },
+              {
+                "find": "    def _interest_states(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)",
+                "replace": "    def _interest_states(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.item_emb(seq)\n        if self.transition_keys.numel() > 0:\n            previous = torch.cat((torch.zeros_like(seq[:, :1]), seq[:, :-1]), dim=1)\n            pair_keys = previous * (self.itemnum + 1) + seq\n            indices = torch.searchsorted(self.transition_keys, pair_keys.contiguous())\n            safe_indices = indices.clamp(max=self.transition_keys.numel() - 1)\n            matched = (\n                previous.ne(0)\n                & seq.ne(0)\n                & indices.lt(self.transition_keys.numel())\n                & self.transition_keys[safe_indices].eq(pair_keys)\n            )\n            counts = torch.where(\n                matched,\n                self.transition_counts[safe_indices],\n                torch.zeros_like(seq, dtype=self.transition_counts.dtype),\n            )\n            scale = 1.0 + 0.05 * counts / (counts + 5.0)\n            emb = emb * scale.to(emb.dtype).unsqueeze(-1)\n        emb = self.dropout(emb)\n        out, _ = self.gru(emb)"
+              },
+              {
+                "find": "    model = GRU4RecModel(\n        itemnum=itemnum,\n        hidden_units=HIDDEN_UNITS,\n        num_layers=NUM_LAYERS,\n        dropout_rate=DROPOUT_RATE,\n    ).to(device)",
+                "replace": "    transition_counter = defaultdict(int)\n    for history in user_train.values():\n        for previous, current in zip(history, history[1:]):\n            if previous > 0 and current > 0:\n                transition_counter[previous * (itemnum + 1) + current] += 1\n    transition_keys = sorted(transition_counter)\n    transition_counts = [transition_counter[key] for key in transition_keys]\n    model = GRU4RecModel(\n        itemnum=itemnum,\n        hidden_units=HIDDEN_UNITS,\n        num_layers=NUM_LAYERS,\n        dropout_rate=DROPOUT_RATE,\n        transition_keys=transition_keys,\n        transition_counts=transition_counts,\n    ).to(device)"
+              },
+              {
+                "find": "            \"sequence_readout\": \"gru_0.8_causal_mean_0.2_half_life_3\",\n",
+                "replace": "            \"sequence_readout\": \"gru_0.8_causal_mean_0.2_half_life_3\",\n            \"input_feature\": \"training_adjacent_count_scale_0.05_smoothing_5\",\n"
+              },
+              {
+                "find": "        model = ModelClass(\n            itemnum=meta[\"itemnum\"],\n            hidden_units=meta[\"hidden_units\"],\n            num_layers=meta[\"num_layers\"],\n            dropout_rate=0.0,\n        ).to(_device)\n        model.load_state_dict(torch.load(ckpt_path, map_location=_device, weights_only=True))",
+                "replace": "        if meta.get(\"input_feature\") != \"training_adjacent_count_scale_0.05_smoothing_5\":\n            raise RuntimeError(f\"Incompatible GRU input feature for {ds}\")\n        state = torch.load(ckpt_path, map_location=\"cpu\", weights_only=True)\n        model = ModelClass(\n            itemnum=meta[\"itemnum\"],\n            hidden_units=meta[\"hidden_units\"],\n            num_layers=meta[\"num_layers\"],\n            dropout_rate=0.0,\n            transition_keys=state[\"transition_keys\"],\n            transition_counts=state[\"transition_counts\"],\n        ).to(_device)\n        model.load_state_dict(state)"
+              }
+            ]
+          }
+        ],
+        "change_summary": "Add sparse, checkpointed training-transition count features to history inputs and synchronize the embedded predictor loader. Retain one GRU4Rec checkpoint per category and all existing training settings.",
+        "edits": [
+          {
+            "find": "                 dropout_rate: float = 0.1):\n        super().__init__()\n        self.itemnum = itemnum\n        self.hidden_units = hidden_units",
+            "replace": "                 dropout_rate: float = 0.1, transition_keys=None, transition_counts=None):\n        super().__init__()\n        self.itemnum = itemnum\n        self.hidden_units = hidden_units\n        self.register_buffer(\n            \"transition_keys\",\n            torch.as_tensor([] if transition_keys is None else transition_keys, dtype=torch.long),\n        )\n        self.register_buffer(\n            \"transition_counts\",\n            torch.as_tensor([] if transition_counts is None else transition_counts, dtype=torch.float32),\n        )"
+          },
+          {
+            "find": "    def _interest_states(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)",
+            "replace": "    def _interest_states(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.item_emb(seq)\n        if self.transition_keys.numel() > 0:\n            previous = torch.cat((torch.zeros_like(seq[:, :1]), seq[:, :-1]), dim=1)\n            pair_keys = previous * (self.itemnum + 1) + seq\n            indices = torch.searchsorted(self.transition_keys, pair_keys.contiguous())\n            safe_indices = indices.clamp(max=self.transition_keys.numel() - 1)\n            matched = (\n                previous.ne(0)\n                & seq.ne(0)\n                & indices.lt(self.transition_keys.numel())\n                & self.transition_keys[safe_indices].eq(pair_keys)\n            )\n            counts = torch.where(\n                matched,\n                self.transition_counts[safe_indices],\n                torch.zeros_like(seq, dtype=self.transition_counts.dtype),\n            )\n            scale = 1.0 + 0.05 * counts / (counts + 5.0)\n            emb = emb * scale.to(emb.dtype).unsqueeze(-1)\n        emb = self.dropout(emb)\n        out, _ = self.gru(emb)"
+          },
+          {
+            "find": "    model = GRU4RecModel(\n        itemnum=itemnum,\n        hidden_units=HIDDEN_UNITS,\n        num_layers=NUM_LAYERS,\n        dropout_rate=DROPOUT_RATE,\n    ).to(device)",
+            "replace": "    transition_counter = defaultdict(int)\n    for history in user_train.values():\n        for previous, current in zip(history, history[1:]):\n            if previous > 0 and current > 0:\n                transition_counter[previous * (itemnum + 1) + current] += 1\n    transition_keys = sorted(transition_counter)\n    transition_counts = [transition_counter[key] for key in transition_keys]\n    model = GRU4RecModel(\n        itemnum=itemnum,\n        hidden_units=HIDDEN_UNITS,\n        num_layers=NUM_LAYERS,\n        dropout_rate=DROPOUT_RATE,\n        transition_keys=transition_keys,\n        transition_counts=transition_counts,\n    ).to(device)"
+          },
+          {
+            "find": "            \"sequence_readout\": \"gru_0.8_causal_mean_0.2_half_life_3\",\n",
+            "replace": "            \"sequence_readout\": \"gru_0.8_causal_mean_0.2_half_life_3\",\n            \"input_feature\": \"training_adjacent_count_scale_0.05_smoothing_5\",\n"
+          },
+          {
+            "find": "        model = ModelClass(\n            itemnum=meta[\"itemnum\"],\n            hidden_units=meta[\"hidden_units\"],\n            num_layers=meta[\"num_layers\"],\n            dropout_rate=0.0,\n        ).to(_device)\n        model.load_state_dict(torch.load(ckpt_path, map_location=_device, weights_only=True))",
+            "replace": "        if meta.get(\"input_feature\") != \"training_adjacent_count_scale_0.05_smoothing_5\":\n            raise RuntimeError(f\"Incompatible GRU input feature for {ds}\")\n        state = torch.load(ckpt_path, map_location=\"cpu\", weights_only=True)\n        model = ModelClass(\n            itemnum=meta[\"itemnum\"],\n            hidden_units=meta[\"hidden_units\"],\n            num_layers=meta[\"num_layers\"],\n            dropout_rate=0.0,\n            transition_keys=state[\"transition_keys\"],\n            transition_counts=state[\"transition_counts\"],\n        ).to(_device)\n        model.load_state_dict(state)"
+          }
+        ],
+        "scope_validation": "exact categories and nontrivial AST changes; semantic labels prompt-enforced"
+      }
+    }
+  ],
+  "receipt": {
+    "id": "round-0022-slot-2-attempt-1",
+    "status": "success",
+    "gpu": 6,
+    "allocated_gpu_seconds": 406.6196875423193,
+    "output": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/gru4rec/recharness/trials/round-0022-slot-2-attempt-1",
+    "source_sha256": "a4501a0430a99d72359ddfae3e7e35bb835118b0a59f652852dd85bbffcab5be",
+    "score": 0.6025,
+    "aggregate": {
+      "HR@5": 0.46,
+      "HR@10": 0.6025,
+      "HR@20": 0.7025,
+      "NDCG@5": 0.3328,
+      "NDCG@10": 0.3786,
+      "NDCG@20": 0.4039,
+      "Movies_and_TV/HR@5": 0.52,
+      "Movies_and_TV/HR@10": 0.665,
+      "Movies_and_TV/HR@20": 0.755,
+      "Movies_and_TV/NDCG@5": 0.3681,
+      "Movies_and_TV/NDCG@10": 0.4132,
+      "Movies_and_TV/NDCG@20": 0.436,
+      "Industrial_and_Scientific/HR@5": 0.5,
+      "Industrial_and_Scientific/HR@10": 0.625,
+      "Industrial_and_Scientific/HR@20": 0.75,
+      "Industrial_and_Scientific/NDCG@5": 0.362,
+      "Industrial_and_Scientific/NDCG@10": 0.402,
+      "Industrial_and_Scientific/NDCG@20": 0.4332,
+      "Electronics/HR@5": 0.315,
+      "Electronics/HR@10": 0.45,
+      "Electronics/HR@20": 0.53,
+      "Electronics/NDCG@5": 0.2319,
+      "Electronics/NDCG@10": 0.2753,
+      "Electronics/NDCG@20": 0.2956,
+      "CDs_and_Vinyl/HR@5": 0.505,
+      "CDs_and_Vinyl/HR@10": 0.67,
+      "CDs_and_Vinyl/HR@20": 0.775,
+      "CDs_and_Vinyl/NDCG@5": 0.3693,
+      "CDs_and_Vinyl/NDCG@10": 0.4241,
+      "CDs_and_Vinyl/NDCG@20": 0.4508
+    },
+    "per_dataset": {
+      "Movies_and_TV": {
+        "metrics": {
+          "HR@5": 0.52,
+          "HR@10": 0.665,
+          "HR@20": 0.755,
+          "NDCG@5": 0.3681,
+          "NDCG@10": 0.4132,
+          "NDCG@20": 0.436
+        },
+        "n_users": 200
+      },
+      "Industrial_and_Scientific": {
+        "metrics": {
+          "HR@5": 0.5,
+          "HR@10": 0.625,
+          "HR@20": 0.75,
+          "NDCG@5": 0.362,
+          "NDCG@10": 0.402,
+          "NDCG@20": 0.4332
+        },
+        "n_users": 200
+      },
+      "Electronics": {
+        "metrics": {
+          "HR@5": 0.315,
+          "HR@10": 0.45,
+          "HR@20": 0.53,
+          "NDCG@5": 0.2319,
+          "NDCG@10": 0.2753,
+          "NDCG@20": 0.2956
+        },
+        "n_users": 200
+      },
+      "CDs_and_Vinyl": {
+        "metrics": {
+          "HR@5": 0.505,
+          "HR@10": 0.67,
+          "HR@20": 0.775,
+          "NDCG@5": 0.3693,
+          "NDCG@10": 0.4241,
+          "NDCG@20": 0.4508
+        },
+        "n_users": 200
+      }
+    },
+    "evaluation_seconds": 2.767479583621025,
+    "predictor_sha256": "2aa6911d0dafc8ac16db0af7787cb739b35892f71b1b5e05a87869833a9f05b9"
+  },
+  "native_result": {
+    "spec": {
+      "dimension": "feature_construction",
+      "delta": -1.0,
+      "estimated_cost_secs": 3113.9100338108838,
+      "code_diff": "",
+      "code_edits": [],
+      "code_content": "",
+      "arm": "feature_construction",
+      "composite_dims": [
+        "feature_construction"
+      ],
+      "strategy_arm": null,
+      "round_role": "lowlevel_routing",
+      "parallel_group_estimated_wall_secs": 12455.640135243535,
+      "budget_safe_if_global_budget_gte": 12455.640135243535,
+      "budget_accounting": "Parallel group cost is sum(estimated_cost_secs) across the selected candidates.",
+      "code_hint": "REGULAR MUTATION: change only this one direction. 特征构造: Construct input features solely from supplied training interactions, such as frequency or recency indicators. No external metadata, independent scorer or score fusion. Keep learned embedding design, registered model topology, readout, loss and optimizer fixed.\nMaintain shape, checkpoint and predictor consistency for changes in the selected directions; preserve the registered direction boundaries.",
+      "hypothesis": "Thompson: low success rate (0.17, 10 obs) — explore cautiously; Memory available in state; agent should write a short arm-specific hypothesis; Agent hypothesis: Across all four datasets, derive adjacent-item transition counts solely from training histories. For each observed history item with a real predecessor, multiply its input embedding by 1+0.05*c/(c+5), where c is that ordered pair's training count; use scale 1 otherwise. Recurrent inputs may benefit from distinguishing supported transitions. This fixed input feature adds no prediction score or learned module. Preserve embedding design, GRU topology, readout, loss and optimizer; checkpoint the count table and reproduce preprocessing in the predictor writer.",
+      "is_jumping": false,
+      "implementation_backend": "claude_code",
+      "implementation_prompt": "REGULAR MUTATION: change only this one direction. 特征构造: Construct input features solely from supplied training interactions, such as frequency or recency indicators. No external metadata, independent scorer or score fusion. Keep learned embedding design, registered model topology, readout, loss and optimizer fixed.\nMaintain shape, checkpoint and predictor consistency for changes in the selected directions; preserve the registered direction boundaries.",
+      "allowed_files": [
+        "train.py",
+        "predict.py"
+      ],
+      "claude_attempts": 3,
+      "arm_design": "semantic_v4",
+      "selected_categories": [
+        "feature_construction"
+      ],
+      "hypothesis_key": "slot-2",
+      "sampling_draw": {
+        "slot": 2,
+        "rank": 3,
+        "arm": "feature_construction",
+        "sampled_values": {
+          "feature_construction": 0.3437656637399173,
+          "embedding_representation": 0.4071926195988332,
+          "architecture_interaction": 0.1833730646269178,
+          "sequence_interest": 0.268835567693543,
+          "learning_objective": 0.3297296076113109,
+          "hyperparameter_tuning": 0.43088039500817255
+        }
+      },
+      "max_trial_gpu_seconds": 3113.9100338108838,
+      "protected_gpu_seconds": 0.0,
+      "jump_trigger": null,
+      "predict_code_edits": [],
+      "predict_code_content": "",
+      "agent_hypothesis": "Across all four datasets, derive adjacent-item transition counts solely from training histories. For each observed history item with a real predecessor, multiply its input embedding by 1+0.05*c/(c+5), where c is that ordered pair's training count; use scale 1 otherwise. Recurrent inputs may benefit from distinguishing supported transitions. This fixed input feature adds no prediction score or learned module. Preserve embedding design, GRU topology, readout, loss and optimizer; checkpoint the count table and reproduce preprocessing in the predictor writer.",
+      "gagc_memory_context": {
+        "experiment_skill": "# RecHarness Experiment Skill\n\n## Objective\nUse benchmark val_score as the search and winner criterion.\nDo not use held-out test metrics during search.\nThompson Sampling chooses arms; this skill only guides how to edit code within selected arms.\n\n## Recent Patch Lessons\n- Round 22, feature_construction: Add causal prefix-maturity scaling to history inputs for all four category models and synchronize predictor metadata validation. Preserve existing training settings and single-checkpoint routing.; validation=0.5775, delta_vs_input=-0.0287, outcome=regressed, promoted=False, GPU seconds=290.1. An observation of this exact configuration, not a rule against the whole direction.\n- Round 22, architecture_interaction: Add the specified 0.1 embedding residual before causal pooling across all four category models, with matching architecture metadata and embedded predictor validation.; validation=0.5975, delta_vs_input=-0.0087, outcome=regressed, promoted=False, GPU seconds=416.8. An observation of this exact configuration, not a rule against the whole direction.\n- Round 22, learning_objective: Add only a 0.2 margin to the shared pairwise loss. Preserve one GRU4Rec model per category and all other training and prediction settings.; validation=0.575, delta_vs_input=-0.0312, outcome=regressed, promoted=False, GPU seconds=320.7. An observation of this exact configuration, not a rule against the whole direction.\n\n## Concrete Avoids\n- Configuration Coordinate partial normalization of tied item embeddings with learning rate 0.0005, dropout 0.05 and batch size 256 for all four independent category GRU4Rec models. Preserve the mixed loss, routing, splits, seeds and training caps.: timeout at cap=436.0; error=Candidate GPU allowance exhausted. Repair or reassess this exact setup. Incomplete execution gives no completed validation comparison.\n- Configuration Coordinate training-frequency history features, fixed 0.75-norm tied embeddings, temperature-scaled ranking loss, and lower learning rate/dropout across all four independent category GRU4Rec models. Preserve sampling, observed histories, GRU topology, final-real-position readout, routing and training limits; update checkpoint and predictor plumbing.: timeout at cap=436.0; error=Candidate GPU allowance exhausted. Repair or reassess this exact setup. Incomplete execution gives no completed validation comparison.\n",
+        "recent_text_gradients": [
+          "Round 22, feature_construction: Add causal prefix-maturity scaling to history inputs for all four category models and synchronize predictor metadata validation. Preserve existing training settings and single-checkpoint routing.; validation=0.5775, delta_vs_input=-0.0287, outcome=regressed, promoted=False, GPU seconds=290.1. An observation of this exact configuration, not a rule against the whole direction.",
+          "Round 22, architecture_interaction: Add the specified 0.1 embedding residual before causal pooling across all four category models, with matching architecture metadata and embedded predictor validation.; validation=0.5975, delta_vs_input=-0.0087, outcome=regressed, promoted=False, GPU seconds=416.8. An observation of this exact configuration, not a rule against the whole direction.",
+          "Round 22, learning_objective: Add only a 0.2 margin to the shared pairwise loss. Preserve one GRU4Rec model per category and all other training and prediction settings.; validation=0.575, delta_vs_input=-0.0312, outcome=regressed, promoted=False, GPU seconds=320.7. An observation of this exact configuration, not a rule against the whole direction."
+        ],
+        "failure_memory": [
+          {
+            "round_idx": 6,
+            "arm": "combination_jump",
+            "failure_type": "timeout",
+            "patch_pattern": "eecfe2798b38b46ea4b7c7d28e21cbded806ad9cb952e33474fcd88234a9cf0f",
+            "normalized_pattern": "eecfe2798b38b46ea4b7c7d28e21cbded806ad9cb952e33474fcd88234a9cf0f:436.0",
+            "avoid_rule": "Configuration Coordinate partial normalization of tied item embeddings with learning rate 0.0005, dropout 0.05 and batch size 256 for all four independent category GRU4Rec models. Preserve the mixed loss, routing, splits, seeds and training caps.: timeout at cap=436.0; error=Candidate GPU allowance exhausted. Repair or reassess this exact setup. Incomplete execution gives no completed validation comparison.",
+            "count": 1
+          },
+          {
+            "round_idx": 6,
+            "arm": "combination_jump",
+            "failure_type": "timeout",
+            "patch_pattern": "cb06459dfba492c220b20e81f93a06342937bddc9a73b72a47a035038f805bc8",
+            "normalized_pattern": "cb06459dfba492c220b20e81f93a06342937bddc9a73b72a47a035038f805bc8:436.0",
+            "avoid_rule": "Configuration Coordinate training-frequency history features, fixed 0.75-norm tied embeddings, temperature-scaled ranking loss, and lower learning rate/dropout across all four independent category GRU4Rec models. Preserve sampling, observed histories, GRU topology, final-real-position readout, routing and training limits; update checkpoint and predictor plumbing.: timeout at cap=436.0; error=Candidate GPU allowance exhausted. Repair or reassess this exact setup. Incomplete execution gives no completed validation comparison.",
+            "count": 1
+          }
+        ],
+        "skill_notes": "Round 22: best_ever=0.6062, recent=0.6062, trend=plateau. Top arms: combination_jump, sequence_interest, learning_objective."
+      },
+      "trial_group_id": "trialgrp_1793452865506_2865811",
+      "trial_id": 2
+    },
+    "wall_time_secs": 406.6196875423193,
+    "timed_out": false,
+    "oom": false,
+    "val_score": 0.6025,
+    "val_metrics": {
+      "Movies_and_TV": {
+        "HR@5": 0.52,
+        "HR@10": 0.665,
+        "HR@20": 0.755,
+        "NDCG@5": 0.3681,
+        "NDCG@10": 0.4132,
+        "NDCG@20": 0.436
+      },
+      "Industrial_and_Scientific": {
+        "HR@5": 0.5,
+        "HR@10": 0.625,
+        "HR@20": 0.75,
+        "NDCG@5": 0.362,
+        "NDCG@10": 0.402,
+        "NDCG@20": 0.4332
+      },
+      "Electronics": {
+        "HR@5": 0.315,
+        "HR@10": 0.45,
+        "HR@20": 0.53,
+        "NDCG@5": 0.2319,
+        "NDCG@10": 0.2753,
+        "NDCG@20": 0.2956
+      },
+      "CDs_and_Vinyl": {
+        "HR@5": 0.505,
+        "HR@10": 0.67,
+        "HR@20": 0.775,
+        "NDCG@5": 0.3693,
+        "NDCG@10": 0.4241,
+        "NDCG@20": 0.4508
+      }
+    },
+    "test_score": null,
+    "test_metrics": null,
+    "convergence_trace": [
+      0.57,
+      0.615,
+      0.605,
+      0.62,
+      0.63,
+      0.625,
+      0.655,
+      0.62,
+      0.625,
+      0.67,
+      0.635,
+      0.63,
+      0.65,
+      0.66,
+      0.575,
+      0.605,
+      0.59,
+      0.575,
+      0.615,
+      0.565,
+      0.635,
+      0.615,
+      0.58,
+      0.575,
+      0.62,
+      0.435,
+      0.425,
+      0.435,
+      0.415,
+      0.455,
+      0.435,
+      0.42,
+      0.425,
+      0.44,
+      0.515,
+      0.56,
+      0.595,
+      0.605,
+      0.63,
+      0.63,
+      0.62,
+      0.65,
+      0.67,
+      0.66,
+      0.625,
+      0.62,
+      0.635
+    ],
+    "error_message": null,
+    "stdout_tail": "mparison-20261031/runs/gru4rec/recharness/trials/round-0022-slot-2-attempt-1/working/Industrial_and_Scientific_model.pt\n  [Electronics] users=27601  items=31533\n  [Electronics] epoch   5/200  loss=0.4368  val_score: 0.4350  HR@20=0.5600  NDCG@10=0.2512\n  [Electronics] epoch  10/200  loss=0.3047  val_score: 0.4250  HR@20=0.5600  NDCG@10=0.2614\n  [Electronics] epoch  15/200  loss=0.2479  val_score: 0.4350  HR@20=0.5850  NDCG@10=0.2594\n  [Electronics] epoch  20/200  loss=0.2206  val_score: 0.4150  HR@20=0.5500  NDCG@10=0.2442\n  [Electronics] epoch  25/200  loss=0.2006  val_score: 0.4550  HR@20=0.5200  NDCG@10=0.2793\n  [Electronics] epoch  30/200  loss=0.1883  val_score: 0.4350  HR@20=0.5600  NDCG@10=0.2810\n  [Electronics] epoch  35/200  loss=0.1786  val_score: 0.4200  HR@20=0.5550  NDCG@10=0.2601\n  [Electronics] epoch  40/200  loss=0.1709  val_score: 0.4250  HR@20=0.5800  NDCG@10=0.2654\n  [Electronics] epoch  45/200  loss=0.1632  val_score: 0.4400  HR@20=0.5550  NDCG@10=0.2661\n  [Electronics] Early stopping at epoch 45\n  [Electronics] Best val HR@10=0.4550  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/gru4rec/recharness/trials/round-0022-slot-2-attempt-1/working/Electronics_model.pt\n  [CDs_and_Vinyl] users=18481  items=30951\n  [CDs_and_Vinyl] epoch   5/200  loss=0.3481  val_score: 0.5150  HR@20=0.6500  NDCG@10=0.2934\n  [CDs_and_Vinyl] epoch  10/200  loss=0.2304  val_score: 0.5600  HR@20=0.7400  NDCG@10=0.3114\n  [CDs_and_Vinyl] epoch  15/200  loss=0.1879  val_score: 0.5950  HR@20=0.7450  NDCG@10=0.3574\n  [CDs_and_Vinyl] epoch  20/200  loss=0.1684  val_score: 0.6050  HR@20=0.7700  NDCG@10=0.3542\n  [CDs_and_Vinyl] epoch  25/200  loss=0.1534  val_score: 0.6300  HR@20=0.7700  NDCG@10=0.3802\n  [CDs_and_Vinyl] epoch  30/200  loss=0.1438  val_score: 0.6300  HR@20=0.7800  NDCG@10=0.3861\n  [CDs_and_Vinyl] epoch  35/200  loss=0.1364  val_score: 0.6200  HR@20=0.7450  NDCG@10=0.3861\n  [CDs_and_Vinyl] epoch  40/200  loss=0.1310  val_score: 0.6500  HR@20=0.7600  NDCG@10=0.4080\n  [CDs_and_Vinyl] epoch  45/200  loss=0.1265  val_score: 0.6700  HR@20=0.7700  NDCG@10=0.4092\n  [CDs_and_Vinyl] epoch  50/200  loss=0.1228  val_score: 0.6600  HR@20=0.7900  NDCG@10=0.4192\n  [CDs_and_Vinyl] epoch  55/200  loss=0.1189  val_score: 0.6250  HR@20=0.7650  NDCG@10=0.3933\n  [CDs_and_Vinyl] epoch  60/200  loss=0.1176  val_score: 0.6200  HR@20=0.7750  NDCG@10=0.3772\n  [CDs_and_Vinyl] epoch  65/200  loss=0.1150  val_score: 0.6350  HR@20=0.7700  NDCG@10=0.4094\n  [CDs_and_Vinyl] Early stopping at epoch 65\n  [CDs_and_Vinyl] Best val HR@10=0.6700  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/gru4rec/recharness/trials/round-0022-slot-2-attempt-1/working/CDs_and_Vinyl_model.pt\npredict.py written -> /home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/gru4rec/recharness/trials/round-0022-slot-2-attempt-1/working/predict.py\n\nAll datasets done. Average val HR@10 = 0.6075\n",
+    "stderr_tail": "",
+    "memory_evidence": {
+      "parameter_changes": [],
+      "changed_definitions": [
+        "GRU4RecModel",
+        "GRU4RecModel.__init__",
+        "GRU4RecModel._interest_states",
+        "train_one_dataset",
+        "write_predict_script"
+      ],
+      "summary": "Add sparse, checkpointed training-transition count features to history inputs and synchronize the embedded predictor loader. Retain one GRU4Rec checkpoint per category and all existing training settings.",
+      "proposal_history": [
+        {
+          "attempt": 1,
+          "summary": "Add sparse, checkpointed training-transition count features to history inputs and synchronize the embedded predictor loader. Retain one GRU4Rec checkpoint per category and all existing training settings."
+        }
+      ],
+      "hypothesis": "Across all four datasets, derive adjacent-item transition counts solely from training histories. For each observed history item with a real predecessor, multiply its input embedding by 1+0.05*c/(c+5), where c is that ordered pair's training count; use scale 1 otherwise. Recurrent inputs may benefit from distinguishing supported transitions. This fixed input feature adds no prediction score or learned module. Preserve embedding design, GRU topology, readout, loss and optimizer; checkpoint the count table and reproduce preprocessing in the predictor writer.",
+      "input_source_sha256": "b5d6ac2ae54cf18e03e67777c6b1ae3ba7d56c657009b1b1c6b07656aefc6f4e",
+      "candidate_source_sha256": "a4501a0430a99d72359ddfae3e7e35bb835118b0a59f652852dd85bbffcab5be",
+      "input_normalized_sha256": "b9e6da406acd309f2e850bfd4807c7a496a218a1e5c8910b6e8142948f71229c",
+      "candidate_normalized_sha256": "203c7064cc6c0962bf579d4be70e3c5ed285098734ecc5388341045655e01f51",
+      "patch_sha256": "36485c28b4a3fcdd3d54ff719fa9ea2caab2f173c1569ed75afec6a774d495e7",
+      "diff_excerpt": "--- \n+++ \n@@ -188,8 +188,16 @@\n class GRU4RecModel(nn.Module):\n     def __init__(self, itemnum: int, hidden_units: int = 128, num_layers: int = 1,\n-                 dropout_rate: float = 0.1):\n+                 dropout_rate: float = 0.1, transition_keys=None, transition_counts=None):\n         super().__init__()\n         self.itemnum = itemnum\n         self.hidden_units = hidden_units\n+        self.register_buffer(\n+            \"transition_keys\",\n+            torch.as_tensor([] if transition_keys is None else transition_keys, dtype=torch.long),\n+        )\n+        self.register_buffer(\n+            \"transition_counts\",\n+            torch.as_tensor([] if transition_counts is None else transition_counts, dtype=torch.float32),\n+        )\n         self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)\n         dropout = dropout_rate if num_layers > 1 else 0.0\n@@ -202,5 +210,24 @@\n \n     def _interest_states(self, seq: torch.Tensor) -> torch.Tensor:\n-        emb = self.dropout(self.item_emb(seq))\n+        emb = self.item_emb(seq)\n+        if self.transition_keys.numel() > 0:\n+            previous = torch.cat((torch.zeros_like(seq[:, :1]), seq[:, :-1]), dim=1)\n+            pair_keys = previous * (self.itemnum + 1) + seq\n+            indices = torch.searchsorted(self.transition_keys, pair_keys.contiguous())\n+            safe_indices = indices.clamp(max=self.transition_keys.numel() - 1)\n+            matched = (\n+                previous.ne(0)\n+                & seq.ne(0)\n+                & indices.lt(self.transition_keys.numel())\n+                & self.transition_keys[safe_indices].eq(pair_keys)\n+            )\n+            counts = torch.where(\n+                matched,\n+                self.transition_counts[safe_indices],\n+                torch.zeros_like(seq, dtype=self.transition_counts.dtype),\n+            )\n+            scale = 1.0 + 0.05 * counts / (counts + 5.0)\n+            emb = emb * scale.to(emb.dtype).unsqueeze(-1)\n+        emb = self.dropout(emb)\n         out, _ = self.gru(emb)\n         positions = torch.arange(seq.size(1), device=seq.device)\n@@ -240,4 +267,11 @@\n         raise RuntimeError(f\"empty dataset or item vocabulary for {dataset_name}\")\n \n+    transition_counter = defaultdict(int)\n+    for history in user_train.values():\n+        for previous, current in zip(history, history[1:]):\n+            if previous > 0 and current > 0:\n+                transition_counter[previous * (itemnum + 1) + current] += 1\n+    transition_keys = sorted(transition_counter)\n+    transition_counts = [transition_counter[key] for key in transition_keys]\n     model = GRU4RecModel(\n         itemnum=itemnum,\n@@ -245,4 +279,6 @@\n         num_layers=NUM_LAYERS,\n         dropout_rate=DROPOUT_RATE,\n+        transition_keys=transition_keys,\n+        transition_counts=transition_counts,\n     ).to(device)\n     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)\n@@ -301,4 +337,5 @@\n             \"dropout_rate\": DRO",
+      "category_rationales": [
+        {
+          "category": "feature_construction",
+          "rationale": "Use training-only adjacent-item counts to scale each history input embedding by 1+0.05*c/(c+5). Positions without a real predecessor retain scale 1. This fixed feature preserves the learned embeddings, GRU, readout, loss and optimizer across all four category models."
+        }
+      ],
+      "baseline_validation": 0.6062,
+      "basin_id": "default",
+      "execution_status": "success",
+      "attempt_count": 1,
+      "training_attempt_count": 1,
+      "training_attempts": [
+        {
+          "id": "round-0022-slot-2-attempt-1",
+          "status": "success",
+          "source_sha256": "a4501a0430a99d72359ddfae3e7e35bb835118b0a59f652852dd85bbffcab5be",
+          "allocated_gpu_seconds": 406.6196875423193,
+          "error": "",
+          "score": 0.6025
+        }
+      ],
+      "checkpoint_fingerprints": {
+        "Movies_and_TV_model.pt": "e9659cf846225498f47f755def53ffab5eadb6bb69cca6d34e59230f3e50541e",
+        "Industrial_and_Scientific_model.pt": "1fe95155fb19ff6ea430a579e7ed72efd8add1f36a1533f4caa89b267590f92f",
+        "Electronics_model.pt": "0ccbdead9eb047c87dcca87c8c69e94249aa25671cba41c01f07140de9f8d1e7",
+        "CDs_and_Vinyl_model.pt": "99dc0d79976d8cb65c8a4708c5e9f1b1109429b3aaf3871ada7f043c220dcba9"
+      },
+      "repair_errors": [],
+      "phase": "regular"
+    }
+  },
+  "gpu_seconds_all_attempts": 406.6196875423193,
+  "training_attempts": [
+    {
+      "id": "round-0022-slot-2-attempt-1",
+      "status": "success",
+      "source_sha256": "a4501a0430a99d72359ddfae3e7e35bb835118b0a59f652852dd85bbffcab5be",
+      "allocated_gpu_seconds": 406.6196875423193,
+      "error": "",
+      "score": 0.6025
+    }
+  ],
+  "checkpoint_fingerprints": {
+    "Movies_and_TV_model.pt": "e9659cf846225498f47f755def53ffab5eadb6bb69cca6d34e59230f3e50541e",
+    "Industrial_and_Scientific_model.pt": "1fe95155fb19ff6ea430a579e7ed72efd8add1f36a1533f4caa89b267590f92f",
+    "Electronics_model.pt": "0ccbdead9eb047c87dcca87c8c69e94249aa25671cba41c01f07140de9f8d1e7",
+    "CDs_and_Vinyl_model.pt": "99dc0d79976d8cb65c8a4708c5e9f1b1109429b3aaf3871ada7f043c220dcba9"
+  }
+}

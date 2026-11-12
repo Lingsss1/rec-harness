@@ -1,0 +1,134 @@
+{
+  "markdown_report": "At 10% progress, prioritize a sparse transition residual with frozen training-derived scales, matched popularity tuning, and a joint-fusion control. No validation improvement has been established.\n\n**Insights from the starting point.** (1) Electronics shows substantial sampled training errors. These cannot establish validation HR@10. (2) Recent deletion sometimes changes ranks more than older deletion. Small, perturbed training samples motivate a recency hypothesis without establishing intent. (3) Embedding alignment and sampled separation vary independently across attempts. Neither identifies the appropriate intervention.\n\n**Insights from related work.** (1) [FOSSIL](https://arxiv.org/abs/1609.09152) already combines historical preference with additive recent transitions. Originality therefore lies primarily in controlled evaluation. (2) Spotify’s [protocol](https://github.com/spotify-research/sequential-capacity-probes/blob/main/docs/PROTOCOL.md) distinguishes transition counts, smoothed probabilities, and popularity adjustments. Its full-catalog results do not transfer directly to this benchmark. (3) [Disentangling sequence patterns](https://doi.org/10.1145/3705328.3748042) motivates availability-aware controls. First appearance remains an availability proxy. (4) [Krichene and Rendle](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/) establish sampled-metric limitations. Fixed candidates support paired comparisons without removing sampling bias.\n\nThree directions follow: add explicit local evidence, distinguish transitions from popularity, and control measurement and selection uncertainty.\n\n| Framework component | Evidence | Main limitation |\n|---|---|---|\n| SASRec | Contextual interaction history | Local evidence is difficult to isolate |\n| Popularity residual | Training item frequency | No user-specific connection |\n| Transition residual | Directed training adjacency | Sparse support and popularity confounding |\n| Joint residual | Transitions plus popularity | More validation selection opportunities |\n\n**Candidate ideas.** Scores are originality/potential/difficulty; higher difficulty means harder implementation.\n\n- **Frozen-scale transition residual: 2/7/5.** Originality: explicit calibration supports interpretation; additive fusion is established. Potential: cheap incremental evidence; sparse coverage limits benefit. Difficulty: lookup is simple; fused probes and predictor parity require coordination.\n- **Support-gated transition residual: 3/7/5.** Originality: reliability-aware fusion is useful; shrinkage is established. Potential: suppresses unsupported evidence; adds tuning. Difficulty: few operations; calibration and support definitions complicate evaluation.\n- **Title-neighbor backoff: 3/6/5.** Originality: connects lexical similarity with transitions; content hybrids are established. Potential: improves coverage; wording cannot establish compatibility. Difficulty: TF–IDF needs no pretrained weights; retrieval and serialization add work.\n\n**Selected algorithm.** Count directed adjacent pairs exclusively within training histories. Set `T[a,i]=count[a,i]/(out_count[a]+10)`, retaining 100 entries per source. Pool five recent source rows with normalized `0.8**lag` weights; absent edges contribute zero. Freeze training-derived component scales and score `neural/a + λT·transition + λP·popularity`.\n\nReuse one unchanged SASRec training run. Predeclare nine settings from `{0,0.1,0.3}²`, sharing coefficients across categories. These cover baseline, popularity, transitions, and both with matched grids. Select using pinned macro validation HR@10; deterministic ties favor baseline and smaller residuals. Report category results, coverage, component influence, and paired uncertainty when available. [Selection bias](https://www.jmlr.org/papers/v11/cawley10a.html) remains after ordinary bootstrapping. Freeze the winner before held-out evaluation; full-catalog simulator recommendations remain separate descriptive evidence. Preserve routing, seeds, diagnostic interfaces, predictor reconstruction, and budget accounting. Compatibility, ownership, and simulator traits remain unobserved.",
+  "idea": {
+    "description": "Fuse each unchanged per-dataset SASRec predictor with a sparse, recency-weighted directed-transition residual and a separately weighted popularity residual. Freeze training-derived scales and compare a predeclared nine-setting factorial grid covering baseline, popularity alone, transitions alone, and both.",
+    "motivation": "The supplied feedback motivates testing whether explicit recent item associations improve ranking. Existing diagnostics establish neither validation gains nor compatibility failures. FPMC, FOSSIL, and recent transition baselines establish strong prior art, making this a controlled empirical adaptation. Sharing neural artifacts and matching residual tuning help distinguish additional transition information from popularity effects, although they cannot establish causal user intent.",
+    "implementation_notes": "Build separate statistics and mappings for Movies_and_TV, Industrial_and_Scientific, Electronics, and CDs_and_Vinyl. Use only adjacent pairs wholly inside each user's training history, preserving the baseline history order and excluding padding. Retain repeated events and self-transitions when present; never form pairs across users or include validation targets. Let C[a,i] count adjacent occurrences and out_count[a] sum the full unpruned row. Compute T[a,i]=C[a,i]/(out_count[a]+10), retain the largest 100 entries per row, and break ties by ascending item ID. Do not renormalize after pruning. This is a shrunk empirical transition score, not a calibrated probability distribution. Set qT to the nearest-rank 95th percentile of positive retained entries, or 1 when empty; replace entries with min(T/qT,1). Pool the last five nonpadding input items, including the final input item, with normalized weights 0.8**lag, where lag zero is most recent. Repeated source items retain repeated weight. Empty history returns zero. Define popularity from all training interaction occurrences as log1p(count), divide by the nearest-rank 95th percentile among positive-count catalog items, and clip to [0,1]; use scale 1 when empty and zero for unseen items. Padding always receives zero residual.\n\nAfter the baseline checkpoint is fixed, estimate neural scale a independently per category using CPU RNG seed 42. Sample up to 4,096 eligible training users uniformly without replacement in sorted user-ID order; for each, sample one source position uniformly, construct its causal prefix using the baseline truncation and padding convention, and sample two distinct nonpadding catalog IDs uniformly without excluding history. Compute RMS of their finite neural score differences in evaluation mode. Restore model mode afterward. Use a=1 if support is empty or the RMS is nonfinite or <=1e-8. Record support and fallback reasons. Freeze all scales before any fusion validation. Candidate-wise normalization is prohibited because scores must remain consistent across candidate panels and full-catalog chunks. Training-derived scales deliberately avoid additional validation fitting; this differs from the supplied suggestion to fit scales on validation. Scaling neural scores alone preserves rankings mathematically, but verify numerical parity with the unchanged baseline; the zero-residual configuration must invoke the original scorer directly for exact baseline behavior.\n\nPredeclare the global coefficient grid lambda_T,lambda_P in {0,0.1,0.3}; use the same pair across all four categories, with no per-category coefficient selection. Evaluate nine combinations using the same fixed neural checkpoints and pinned host candidates. Do not retrain SASRec for each fusion setting. Preserve the baseline checkpoint evaluation and selection schedule exactly, logging it before execution; any existing checkpoint selection also contributes validation search exposure. Select the completed setting with maximum four-category macro validation HR@10. Resolve exact ties by ascending (lambda_T+lambda_P, lambda_T, lambda_P), which favors baseline, smaller total residual weight, and popularity over transitions at equal total weight. Record every attempted configuration, all category outcomes, and incomplete evaluations. Nine settings increase selection risk relative to the original five; disclose this expansion and treat small gains as exploratory. Do not add adaptive coefficient, pruning, shrinkage, window, or calibration sweeps. Log-compressed transitions, support gating, and title backoff are separately budgeted follow-ups.\n\nKeep DATA_DIR=os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, SASREC_EPOCHS environment behavior with host default 200, single-GPU execution, unchanged splits and evaluator, all dataset routes, and trial-local artifacts. Serialize baseline architecture configuration and checkpoint, sparse matrices, popularity vectors, scales, mappings, selected coefficients, and tie rules. Update the predictor writer so working/predict.py reconstructs identical scoring for arbitrary candidate order, candidate subsets, batches, and chunked full-catalog recommendations. Retain baseline final-position conventions and seen-item filtering. Verify zero-residual equality, causal prefix alignment, padding and empty-history behavior, sparse lookup against a small dense calculation, candidate-subset/chunk invariance, and checkpoint/predictor parity before expensive evaluations.\n\nRetain DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). Keep view.model as the actual trained nn.Module and preserve item_emb, log2feats, predict_score, user_train, meta_data, and review_data compatibility. Neural features alone do not contain the sparse residual: add an explicit sequence-aware fused-scoring adapter and use it consistently in inference and fused probes. For training position t, score from sequence[:, :t+1], never the full sequence. Return measured metrics and metric_definitions, report support, and restore model mode in finally. Keep neural and fused margins distinct. Mark unsupported evidence unavailable rather than zero; leave category lists empty and do not consume ratings, reviews, prices, stores, or inferred simulator traits.\n\nMeasure zero-transition frequency, nonzero residual quantiles, source/edge support, scaled component contributions, and top-10 entries/exits on explicitly identified diagnostic panels. Report component-removal results with coefficients and scales frozen as model sensitivity, separately from retrained comparisons. Training transition diagnostics otherwise self-count observed edges: subtract the queried user's entire training contribution from C, outgoing totals, and popularity counts before rebuilding that diagnostic user's sparse rows, using frozen original scales. Recompute top-100 rows from full counts after subtraction, not just the retained matrix. Label these leave-user-out training diagnostics; they remain explanatory rather than generalization evidence. If this computation cannot fit the budget, mark it unmeasured and omit generalization interpretations of training residual margins.\n\nReversed transitions and strength-preserving randomized graphs are useful deferred controls. Directed degree preservation alone does not preserve weighted incoming/outgoing strengths. Any future null model must specify its sampler, validate preserved quantities, report seeds, and distinguish count preservation before pruning from residual strengths after normalization and pruning. Availability-constrained history shuffles use training first appearance only as a proxy and do not establish release dates. Do not claim transition structure beyond popularity from an aggregate gain alone.\n\nWhere existing permitted host outputs expose per-user hits, report baseline differences, discordant-user counts, and paired dataset-stratified bootstrap intervals: CPU seed 42, 10,000 replicates, sample 200 users with replacement independently within each category, reuse identical sampled indices for every setting, and average category differences equally. Use 2.5th and 97.5th percentile endpoints. Do not modify or reconstruct the evaluator to obtain missing records. Intervals condition on fitted models, four datasets, and fixed candidates; they exclude training-seed variability, candidate-resampling variability, and selection optimism. One changed hit moves category HR by 0.005 and macro HR by 0.00125. Report results explicitly as pinned 99-negative validation HR@10, without claiming full-catalog improvement. Preserve twenty real training users' full-catalog unseen-item recommendations, five per category, as separate descriptive output.\n\nAccount for all training, verification, diagnostics, evaluations, and failed attempts against 43,200 GPU-seconds. Estimate remaining costs before launching additional work, record skipped or incomplete settings, and select only among settings with complete four-category outcomes. Freeze the selected artifacts before independent held-out evaluation. Access no hidden test data, fetch no datasets or pretrained weights, and claim no experiments or gains have occurred.",
+    "pseudocode": "declare coefficient_grid = product([0, 0.1, 0.3], repeat=2)\ndeclare tie_key = (lambda_T + lambda_P, lambda_T, lambda_P)\nlog baseline_checkpoint_schedule, grid, constants, budget\n\nfor category in FOUR_CATEGORIES:\n    model = train_unchanged_sasrec(category, preprocessing_seed=0, training_seed=42)\n    checkpoint = select_with_unchanged_baseline_protocol(model)\n    C = directed_adjacent_counts(training_histories[category])\n    outgoing = row_sum(C)  # before pruning\n    T = keep_topk_per_row(C / (outgoing + 10), k=100, ties='item_id')\n    qT = nearest_rank_percentile(positive_entries(T), 95, empty=1)\n    T = clip(T / qT, 0, 1)\n    P = clipped_log_popularity(training_histories[category])\n    a = frozen_training_pair_difference_rms(checkpoint, seed=42, max_users=4096)\n    save_trial_local(checkpoint, T, P, a, mappings, configuration)\n\nfunction score(category, history, candidates, lambda_T, lambda_P):\n    neural = baseline_score(category, history, candidates)\n    if lambda_T == 0 and lambda_P == 0:\n        return neural\n    recent = reverse(last_nonpadding_items(history, 5))\n    weights = [0.8**lag for lag in range(len(recent))]\n    transition = weighted_mean([T[item, candidates] for item in recent], weights, empty=0)\n    return neural / a + lambda_T * transition + lambda_P * P[candidates]\n\nwrite_matching_predictor_and_sequence_aware_diagnostic_adapter()\nverify_baseline_equivalence_causality_padding_sparse_lookup_and_predictor_parity()\nfor setting in coefficient_grid:\n    if complete_evaluation_fits_remaining_budget():\n        # Consume unchanged host validation outcomes; never reconstruct the evaluator.\n        record_four_category_host_validation(setting)\n    else:\n        record_skipped(setting)\nselect_complete_setting(max_macro_hr10=True, tie_key=tie_key)\nreport_category_changes_and_conditional_paired_intervals_if_host_hits_available()\nfreeze_selected_artifacts_without_accessing_test_labels()",
+    "originality": {
+      "score": 2,
+      "positive": "Frozen calibration, matched factorial controls, and explicit diagnostic boundaries make the adaptation interpretable and reproducible.",
+      "negative": "FPMC, FOSSIL, SeqRules, and PCTM already establish combinations of historical preference, recent transitions, and popularity; this introduces no new model principle."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides an inexpensive foundation for testing transition support, reliability-aware fusion, and incremental information across four distinct datasets.",
+      "negative": "Sparse coverage, popularity and availability shortcuts, and repeated validation selection may limit reliable gains; interaction data cannot establish compatibility or immediate intent."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "The recommendation branch reuses fixed SASRec checkpoints and needs only sparse preprocessing and additive inference.",
+      "negative": "Sequence-aware fused diagnostics, leave-user-out counts, exact baseline behavior, routing, score calibration, and predictor serialization require more coordinated work than the original rating suggested."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Factorizing Personalized Markov Chains for Next-Basket Recommendation",
+      "link": "https://doi.org/10.1145/1772690.1772773",
+      "contributions": [
+        "Combines user–item preference factorization with first-order item-transition modeling.",
+        "Establishes prior art for separating persistent preferences from recent transition signals."
+      ],
+      "limitations": [
+        "Does not establish incremental benefit from a sparse residual added to this SASRec implementation.",
+        "Its task and evaluation do not establish outcomes under the pinned RecHarness protocol."
+      ]
+    },
+    {
+      "title": "Fusing Similarity Models with Markov Chains for Sparse Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1609.09152",
+      "contributions": [
+        "FOSSIL combines historical item representations with additive recent-item transition terms and lag weights.",
+        "Clarifies that additive higher-order history terms differ from joint contextualization by Transformers."
+      ],
+      "limitations": [
+        "Makes additive preference-plus-transition fusion established prior art rather than a novel principle here.",
+        "Does not validate the proposed sparse calibration, controls, or four-category benchmark results."
+      ]
+    },
+    {
+      "title": "Do Sequential Recommendation Benchmarks Really Require Higher-Order Sequence Modelling?",
+      "link": "https://research.atspotify.com/2026/10/do-sequential-recommendation-benchmarks-require-higher-order-sequence-modelling",
+      "contributions": [
+        "The supplied results report strong SeqRules and PCTM transition baselines on Amazon Beauty, Sports, Toys, and MovieLens-1M, with weaker relative results on MovieLens-20M.",
+        "Motivates simple transition comparisons without assuming Transformers always require higher-order context."
+      ],
+      "limitations": [
+        "The datasets differ from the four RecHarness categories.",
+        "Full-catalog NDCG@10 with seen-item filtering differs from pinned 99-negative HR@10.",
+        "Standalone transition results do not establish incremental benefit when fused with SASRec."
+      ]
+    },
+    {
+      "title": "Sequential Capacity Probes: Formulas and Evaluation Protocol",
+      "link": "https://github.com/spotify-research/sequential-capacity-probes/blob/main/docs/PROTOCOL.md",
+      "contributions": [
+        "Documents distance- and recency-weighted SeqRules and smoothed PCTM transition scoring.",
+        "Distinguishes sparse transition terms from a separate popularity adjustment."
+      ],
+      "limitations": [
+        "The selected shrunk top-100 residual is an adaptation, not a reproduction of SeqRules or PCTM.",
+        "The protocol does not guarantee that frozen calibration or additive fusion improves RecHarness HR@10."
+      ]
+    },
+    {
+      "title": "Disentangling User and Item Sequence Patterns",
+      "link": "https://doi.org/10.1145/3705328.3748042",
+      "contributions": [
+        "Compares random and availability-constrained history shuffling.",
+        "Shows why apparent sequential signal can reflect both user behavior and item availability."
+      ],
+      "limitations": [
+        "First observed appearance is an availability proxy rather than a verified release date.",
+        "Does not establish a validated strength-preserving graph randomization protocol for this residual."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled ranking evaluations can reverse model comparisons relative to full-catalog evaluation.",
+        "Supports keeping training margins, pinned sampled validation, and full-catalog descriptive recommendations distinct."
+      ],
+      "limitations": [
+        "Fixing negative candidates does not eliminate sampling bias.",
+        "Does not make training-pair separation equivalent to the mandated validation objective."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how optimizing noisy selection criteria can produce substantial selection bias.",
+        "Motivates limited, disclosed searches and freezing selected configurations before independent evaluation."
+      ],
+      "limitations": [
+        "Ordinary paired bootstrap intervals after choosing the winning fusion setting do not correct selection optimism.",
+        "Does not quantify the selection bias of this experiment without observed outcomes."
+      ]
+    },
+    {
+      "title": "Directed and Weighted Network Randomization Research",
+      "link": "https://journals.aps.org/pre/abstract/10.1103/PhysRevE.85.046103",
+      "contributions": [
+        "The supplied search material motivates explicit null-model constraints and careful randomization sampling.",
+        "Distinguishes preserving directed neighbor counts from preserving weighted transition strengths."
+      ],
+      "limitations": [
+        "A degree-preserving swap does not automatically preserve weighted incoming and outgoing strengths.",
+        "Any adaptation must validate its preserved quantities and sampling behavior; no such control has been executed here."
+      ]
+    },
+    {
+      "title": "Weighted Network Null-Model Research",
+      "link": "https://www.nature.com/articles/srep02729.pdf",
+      "contributions": [
+        "The supplied search material motivates weighted null models for controlling frequency-related structure."
+      ],
+      "limitations": [
+        "Does not directly specify a drop-in null model for pruned, shrunk, clipped transition residuals.",
+        "Preserving raw count strengths does not guarantee preservation after nonlinear normalization and pruning."
+      ]
+    }
+  ]
+}

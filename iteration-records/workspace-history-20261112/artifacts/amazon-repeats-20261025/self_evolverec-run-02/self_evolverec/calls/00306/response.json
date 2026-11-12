@@ -1,0 +1,163 @@
+{
+  "markdown_report": "At 0% progress, prioritize **recency-weighted transition residual scoring with multi-negative training**, strengthened against target-statistic shortcuts. Benefits remain hypotheses requiring pinned validation.\n\n**Insights and directions.** Three starting-point insights: (1) Electronics’ 14.95% wrong-ranking rate motivates discrimination, but training margins do not establish validation HR@10. (2) Similarity near 0.54 does not establish severe collapse. (3) Users report incidental-history influence and broad relatedness without current purpose, motivating recency and transition evidence.\n\nThree literature insights: (1) [GaGNN](https://doi.org/10.1016/j.ins.2024.120623) supports investigating directed associations, without establishing compatibility. (2) [LSIDN](https://arxiv.org/abs/2407.14743) motivates separating recent and persistent interests. (3) [eSASRec](https://arxiv.org/html/2508.06450v1) motivates multi-negative objectives, although architecture changes confound attribution. Directions remain transition evidence, temporal relevance, and ranking supervision.\n\n| Framework axis | Existing approach | Proposed role / gap |\n|---|---|---|\n| Sequence context | SASRec attention | Retain personalization |\n| Recent intent | LSIDN encoders | Decay recent sources |\n| Directed association | GaGNN graphs | Cross-fitted, smoothed transition lift |\n| Discrimination | eSASRec sampled softmax | Explicit candidate-set CE |\n\n**Candidate assessments.** Scores are originality / future potential / user alignment / model alignment / code difficulty, each 0–10; higher difficulty means harder. Each cell includes a strength and limitation.\n\n| Idea | Originality | Potential | User | Model | Difficulty |\n|---|---|---|---|---|---|\n| Multi-negative SASRec | 2: direct; established | 7: reusable; incremental | 4: finer ranking; no temporal mechanism | 9: confusion; false negatives | 2: small; masking |\n| Gated recent/history fusion | 4: targeted; familiar | 7: extensible; unstable gates | 8: incidental-interest control; prerequisites unresolved | 6: context; indirect separation | 5: modular; inference changes |\n| **Recent transition residual + CE** | 4: targeted combination; established parts | 7: reusable; sparse support | 8: recent purpose; compatibility unresolved | 8: discrimination; graph bias | 6: sparse operations; cross-fitting |\n\n**Selected algorithm.** Build training-only adjacent-transition graphs using five user-grouped folds; each training user receives graph statistics excluding their fold. This adapts [CatBoost’s](https://arxiv.org/abs/1706.09516) target-statistic safeguards; causal prefixes alone do not prevent graph target exposure. Smooth toward destination popularity, aggregate clipped log-lift over exponentially weighted recent sources, and add it to SASRec scores. Use the full training graph at inference; measure sensitivity to this graph-density shift.\n\nTrain with unique uniform unseen negatives and uncorrected candidate-set CE, explicitly distinct from catalog-softmax estimation. Decay targets older/incidental influence; directed evidence targets broad relatedness; CE targets weak separation. Compatibility, fulfilled needs, and latent positives remain unresolved.\n\nPseudocode: `exclude user fold → build graph; score = SASRec + λ·recent_lift; optimize candidate_CE; infer with full training graph`.\n\nCompare baseline, loss-only, residual-only, and combined arms; retain Markov and recent item-kNN as inexpensive contextual baselines. Predeclare configurations, checkpoints, stopping rules, and budget allocations. Report paired category-stratified bootstrap deltas and interaction, with exploratory intervals: selection optimism remains ([Cawley–Talbot](https://jmlr.csail.mit.edu/papers/v11/cawley10a.html)), and sampled rankings need not transfer to full catalogs ([Krichene–Rendle](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/)). Preserve routing, seeds, splits, evaluator, predictor writer, and diagnostics. No improvement is claimed.",
+  "idea": {
+    "description": "Add a recency-weighted, popularity-adjusted directed-transition residual to per-dataset SASRec and train with multi-negative candidate-set cross-entropy. Use user-grouped cross-fitting for graph features during training to prevent a user's targets from directly entering their own graph statistics. The proposal explicitly targets incidental older-history influence, broad relatedness without a supported next-step association, and weak positive–negative separation, especially in Electronics.",
+    "motivation": "At initial research progress, retaining SASRec offers a controlled starting point. Sparse transitions add an inexpensive hypothesis about predictive next steps without unavailable relation labels or pretrained encoders. The supplied diagnostics favor investigating ranking confusion rather than severe embedding collapse. Cross-fitting addresses a methodological gap in the original proposal: training-only graph construction and causal sequence prefixes do not prevent a target transition from appearing in aggregate graph features. The combination remains an empirical proposal, not evidence of compatibility, complementarity, satiation, or improved HR@10.",
+    "implementation_notes": "Preserve DATA_DIR=os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, all four categories and dataset routing, pinned splits and evaluator, and SASREC_EPOCHS default 200. Write every artifact beneath the trial directory. Do not access hidden test information, unavailable reviews/ratings/categories/prices/stores, extra datasets, pretrained weights, or unobserved simulator traits.\n\nGraph specification: assign users deterministically to five folds with a seeded permutation of sorted canonical user IDs using seed 0. For each training example use the graph built from the other four folds. Count each directed adjacent pair at most once per supporting user, exclude padding, and retain self-transitions when present in training. Aggregate fold contributions so excluded-fold counts and destination marginals can be reconstructed without materializing five dense matrices. Define C(i,j) as distinct-user support for pair i→j, C_i=sum_j C(i,j), and p_j=(sum_i C(i,j)+1)/(sum_i,j C(i,j)+N), for N valid items in that graph's fixed dataset vocabulary. Recompute counts and marginals after fold exclusion. Set q(j|i)=(C(i,j)+alpha*p_j)/(C_i+alpha). For the latest K_h valid prefix positions define normalized weights w_r proportional to exp(-r/h), where r=0 is the newest position, and residual R(H,j)=sum_r w_r*clip(log(q(j|H_r)/p_j),-c,c). Use R=0 for empty histories. A source with no outgoing support gives zero lift; a missing edge from an observed source generally gives a negative contribution. Preserve this contribution during sparse inference rather than silently treating every missing edge as zero. Optional edge-support shrinkage is a later hypothesis, not part of the initial search.\n\nFreeze K_h=10, h=3 positions, alpha=10, c=3, temperature tau=1, and unnormalized dot-product scores for the first experiment. These are declared starting values, not established optimal settings. Use score(H,j)=dot(f_SASRec(H),e_j)+lambda_graph*R(H,j). Tune a single lambda shared across categories over {0.1,0.3}, retaining lambda=0 as the nested control. Avoid timestamps initially; positional recency does not imply elapsed-time decay. At inference use the full training-user graph and serialize its statistics. This changes graph density relative to cross-fitted training; report it as a limitation and inspect residual magnitudes without using held-out labels. Cross-fitting reduces direct target exposure but does not eliminate popularity shortcuts or distribution shift.\n\nObjective specification: for every valid prediction position, draw K=min(K_requested,M_u) unique negatives uniformly without replacement from valid IDs excluding every item in that user's training history; M_u is the eligible catalog size. Skip a position if M_u=0. Use K_requested in {32,64}. Rejection-sample with a seeded generator, deduplicate and refill, and use a deterministic complement-sampling fallback for dense histories. This defines candidate-set CE, not an importance-corrected estimate of a full-catalog denominator. With scores s, loss=logsumexp([s_positive,s_negative_1,...,s_negative_K])-s_positive. Apply no proposal correction; exclude padding and target collisions, and mask unused candidate slots with negative infinity. Known training positives are filtered only from negative sampling; the encoder sees causal prefixes. This removes known conflicts but cannot identify latent positives. Seed Python, NumPy, torch, CUDA, worker initialization, sampler generators, and data-loader generators; fix worker count and draw order and log software versions and deterministic settings. Keep baseline architecture, optimizer, and other training settings unchanged for attribution.\n\nAblation specification: baseline retains original single-negative BCE and no graph; loss-only uses CE without graph; residual-only retains BCE with the graph residual included in both positive and negative logits; combined uses CE with the residual. For residual-only, use the same user-positive exclusion policy as the baseline and document it; differences in negative exclusion between baseline BCE and CE remain part of the loss treatment. Candidate configurations per arm are respectively 1, 2, 2, and 4. Train all categories for every configuration, preserving the existing per-dataset training and selection procedure. Evaluate complete four-category configurations at epochs 50,100,150,200 using the host-compatible pinned validation routine; select a common checkpoint epoch by macro HR@10. Do not introduce independent category-specific tuning.\n\nBudget and stopping: cap the four arms at 9,000 GPU-seconds each, leaving 7,200 GPU-seconds for diagnostics, timing, sparse baseline comparisons, and failures. Charge every operation, including failed trials, to the shared 43,200 GPU-second budget. Within each arm, run configuration rungs at epochs 50 and 100, retain ceil(n/2) configurations after each rung by macro HR@10, then complete survivors through 150 and 200 when budget permits. Break ties by lower lambda, then fewer negatives. Freeze this schedule and the hypothesis comparisons before search. Measure representative batch time and peak memory first; if equal arm caps cannot support the minimum four-arm comparison, reduce the common epoch ceiling before querying validation and record the revised ceiling. Stop at an arm cap, preserving only completed checkpoints. Budget-censored comparisons must report their differing training exposure. Keep the complete configuration/checkpoint/query log. Declare a practical gain threshold of 0.005 absolute macro HR@10 and prefer the simpler model when that threshold is not met or paired uncertainty remains inconclusive.\n\nAnalysis: retain pinned per-user hit indicators for each frozen finalist, if exposed by the permitted validation interface. Use 10,000 paired bootstrap resamples with bootstrap seed 42, sampling 200 users with replacement independently within each category and sharing resampling indices across models. Compute delta as the mean of the four category hit-rate differences. Report percentile 95% intervals, category deltas, and category counts of A-hit/B-miss and A-miss/B-hit users. For the factorial interaction combined−loss−graph+baseline, compare matched K and lambda settings; independently tuned arm winners do not identify a clean loss×graph interaction. Predeclare comparisons; use Holm adjustment for formal fixed-comparison tests if performed. All selected-model intervals remain exploratory and conditional on trained models and pinned candidates: they exclude training and candidate-sampling variability and do not correct adaptive selection. If per-user indicators are unavailable, omit bootstrap rather than fabricate them. Leave confirmation to the host's held-out evaluation. The twenty-user full-catalog simulator diagnosis remains qualitative and must not replace macro validation HR@10 selection.\n\nEfficient implementation: store sorted int64 keys source*(N+1)+destination with values, use torch.searchsorted with bounds and equality checks, and chunk valid positions/candidates. Scoring also incurs the history window: graph lookup is approximately O(P*K*K_h*log E) for P valid positions and E graph edges; embedding scores cost O(P*K*d). For full-catalog inference, initialize each source's missing-edge residual contribution and scatter edge-specific corrections from CSR rows, then aggregate recent-source weights. Time representative workloads rather than assume feasibility. Use smoothed first-order Markov scoring and recent item-kNN as contextual baselines only within the reserved budget; a factorized-transition model such as FPMC is a later comparator requiring separate training allocation.\n\nPrediction and diagnostics: update the predictor writer to reconstruct the trained architecture, full graph, item mappings, residual settings, checkpoint, and identical scoring. Retain DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. view.model must be the actual trained nn.Module. Preserve item_emb, user_train, meta_data, review_data, log2feats(sequence), and predict_score(features, items); represent diagnostic features as a documented structure containing encoder features and the causal history needed for residual scoring, adapting probes accordingly. Support both position-level and final-position candidate shapes. Report raw embedding similarity separately from final-score margins, and explicitly label whether margins use the full inference graph or cross-fitted graph. Never generate category breakdowns from unavailable category metadata; return unavailable with an explanation. No implementation, training, or validation results have been produced here.",
+    "pseudocode": "freeze_protocol_and_budget()\nfor dataset in four_datasets:\n    folds = seeded_user_partition(sorted_training_user_ids, n_folds=5, seed=0)\n    full_graph, fold_contributions = count_distinct_user_adjacent_pairs(training_histories, folds)\n    for arm, configuration in predefined_search:\n        initialize_original_sasrec(seed=42)\n        for batch in deterministic_training_batches:\n            features = model.log2feats(batch.sequence)\n            for valid position t:\n                history = causal_prefix(batch.sequence, t)\n                graph = full_graph_minus_user_fold(batch.user, fold_contributions)\n                recompute_or_lookup_excluded_graph_marginals(graph)\n                candidates = target_plus_negatives_for_arm(batch.user, t, arm)\n                residual = recent_clipped_smoothed_log_lift(history, candidates, graph)\n                scores = dot(features[t], item_embeddings[candidates])\n                scores += lambda_for_arm(arm) * residual\n                accumulate(original_BCE(scores) if arm_uses_BCE else candidate_set_CE(scores))\n            optimize(mean_loss_over_valid_positions)\n        at_predeclared_rungs_evaluate_all_categories_and_apply_budgeted_halving()\nfreeze_finalists_and_matched_factorial_contrast()\nif_per_user_validation_hits_available_run_paired_stratified_bootstrap(seed=42, resamples=10000)\nwrite_predictor_with_identical_model_full_training_graph_scoring_and_dataset_routing()\nrun_adapted_diagnostics_with_explicit_graph_scope_and_available_metadata_only()",
+    "originality": {
+      "score": 4,
+      "positive": "Combines recency-weighted directed lift and multi-negative discrimination around observed failures, with a defensible user-grouped cross-fitting safeguard.",
+      "negative": "The components and target-statistic safeguard are established ideas; their application here is an empirical combination rather than a new model class."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Creates a controlled baseline for learned temporal gates, asymmetric relations, and robust transition statistics.",
+      "negative": "Sparse support, graph-density shift, popularity shortcuts, and limited evidence about compatibility may constrain improvements and transfer."
+    },
+    "code_difficulty": {
+      "score": 6,
+      "positive": "Retains the SASRec encoder and avoids dense catalog-by-catalog matrices or external resources.",
+      "negative": "Cross-fitted marginals, efficient history-dependent sparse scoring, budgeted ablations, and agreement between training, prediction, and diagnostic interfaces require substantial care."
+    }
+  },
+  "related_work": [
+    {
+      "title": "SASRec: Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Provides the causal self-attention starting architecture and shared item scoring."
+      ],
+      "limitations": [
+        "The supplied baseline diagnostics show uneven sampled candidate separation across datasets.",
+        "Sequence prediction does not identify compatibility or fulfilled demand."
+      ]
+    },
+    {
+      "title": "GaGNN (2024)",
+      "link": "https://doi.org/10.1016/j.ins.2024.120623",
+      "contributions": [
+        "The supplied search summary describes group and individual transition graphs combined with sequential representations."
+      ],
+      "limitations": [
+        "Does not establish gains for this pinned four-category benchmark.",
+        "Transition associations cannot be treated as verified complementarity."
+      ]
+    },
+    {
+      "title": "LSIDN (2024)",
+      "link": "https://arxiv.org/abs/2407.14743",
+      "contributions": [
+        "The supplied search summary describes separate long- and short-term interest encoders with denoising."
+      ],
+      "limitations": [
+        "Additional encoders increase implementation and tuning cost.",
+        "Interest separation does not establish equipment prerequisites or compatibility."
+      ]
+    },
+    {
+      "title": "eSASRec (RecSys 2025)",
+      "link": "https://arxiv.org/html/2508.06450v1",
+      "contributions": [
+        "The supplied search summary reports strong SASRec results using sampled softmax."
+      ],
+      "limitations": [
+        "Transformer changes prevent attributing reported gains solely to the objective.",
+        "Multiple sampled negatives can include unobserved relevant items.",
+        "The proposed uncorrected candidate-set CE must be specified independently of other sampled-softmax estimators."
+      ]
+    },
+    {
+      "title": "CatBoost: Unbiased Boosting with Categorical Features",
+      "link": "https://arxiv.org/abs/1706.09516",
+      "contributions": [
+        "Provides a precedent for guarding against target leakage through target-derived statistics.",
+        "Motivates the proposed user-grouped cross-fitting adaptation."
+      ],
+      "limitations": [
+        "Does not establish a sequential-recommendation result for leave-user-fold-out transition features.",
+        "Cross-fitting can introduce a graph-density difference between training and inference."
+      ]
+    },
+    {
+      "title": "TensorFlow sampled_softmax_loss documentation",
+      "link": "https://www.tensorflow.org/api_docs/python/tf/nn/sampled_softmax_loss",
+      "contributions": [
+        "Documents sampled-softmax conventions including sampling corrections and accidental-hit handling.",
+        "Helps distinguish corrected denominator estimation from uncorrected candidate-set CE."
+      ],
+      "limitations": [
+        "Its estimator is not the objective selected here.",
+        "Finite-sample corrections do not guarantee unbiased logged losses or gradients."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://jmlr.csail.mit.edu/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how model selection can produce optimistic performance estimates.",
+        "Supports freezing contrasts and logging validation queries."
+      ],
+      "limitations": [
+        "Does not provide an automatic correction for this adaptive search.",
+        "Bootstrapping a selected winner does not remove selection optimism."
+      ]
+    },
+    {
+      "title": "Paired bootstrap principles for evaluation",
+      "link": "https://aclanthology.org/W04-3250/",
+      "contributions": [
+        "Supports paired resampling when comparing systems evaluated on the same examples.",
+        "Motivates category-stratified user resampling with shared indices across models."
+      ],
+      "limitations": [
+        "The proposed recommender analysis is an adaptation.",
+        "Intervals condition on trained models and fixed candidates and exclude training randomness."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Explains why sampled recommendation metrics can differ from full-catalog evaluation."
+      ],
+      "limitations": [
+        "Does not invalidate the required pinned metric.",
+        "Does not establish full-catalog performance for the proposed model."
+      ]
+    },
+    {
+      "title": "Hyperband: A Novel Bandit-Based Approach to Hyperparameter Optimization",
+      "link": "https://www.jmlr.org/beta/papers/v18/16-558.html",
+      "contributions": [
+        "Motivates predefined successive-halving resource allocation."
+      ],
+      "limitations": [
+        "Early validation rankings may eliminate configurations that improve later.",
+        "Budget-censored arms require transparent reporting of training exposure."
+      ]
+    },
+    {
+      "title": "Controlled study of session-based recommendation algorithms",
+      "link": "https://arxiv.org/abs/1910.12781",
+      "contributions": [
+        "The supplied search summary identifies nearest-neighbor methods as serious comparison baselines."
+      ],
+      "limitations": [
+        "Session-recommendation findings do not establish superiority on these Amazon next-item tasks.",
+        "Additional trained comparators must fit the same shared search budget."
+      ]
+    },
+    {
+      "title": "PyTorch searchsorted documentation",
+      "link": "https://docs.pytorch.org/docs/stable/generated/torch.searchsorted.html",
+      "contributions": [
+        "Provides a primitive for batched lookup of sorted sparse transition keys."
+      ],
+      "limitations": [
+        "Requires explicit bounds and equality checks.",
+        "Does not eliminate the history-window factor in candidate-scoring cost."
+      ]
+    }
+  ]
+}

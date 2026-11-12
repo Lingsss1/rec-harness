@@ -1,0 +1,27 @@
+{
+  "request_sha256": "484ca1c012423f09d3a1ca0bea3085ab51dc2cd35b81b16bb86662ef7a0fcec6",
+  "response": {
+    "category_edits": [
+      {
+        "category": "interest_aggregation",
+        "rationale": "Implement the specified 80% current-state and 20% causal exponential-pooling readout using weighted prefix sums. This preserves the five-position half-life while avoiding a dense pooling matrix. Training and prediction share the same SASRec implementation; update metadata and predictor checks consistently. All four dataset models retain their existing backbone, embeddings, scoring, loss, optimizer and routing.",
+        "edits": [
+          {
+            "find": "        states = self.last_layernorm(seq_emb)\n        valid = (~timeline_mask).to(dtype=states.dtype)\n        positions = torch.arange(M, device=seq.device)\n        distance = positions.unsqueeze(1) - positions.unsqueeze(0)\n        causal_weights = torch.exp(\n            -math.log(2.0) * distance.clamp_min(0).to(states.dtype) / 5.0\n        ) * distance.ge(0).to(states.dtype)\n        weights = causal_weights.unsqueeze(0) * valid.unsqueeze(1)\n        weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-8)\n        pooled = torch.bmm(weights, states * valid.unsqueeze(-1))\n        return (0.8 * states + 0.2 * pooled) * valid.unsqueeze(-1)",
+            "replace": "        states = self.last_layernorm(seq_emb)\n        valid = (~timeline_mask).to(dtype=states.dtype)\n        # At each t, exp(j * log(2) / 5) normalizes to weights\n        # proportional to 2 ** (-(t-j) / 5) over valid j <= t.\n        # Prefix sums therefore implement causal pooling without M x M weights.\n        positions = torch.arange(M, device=seq.device, dtype=torch.float32)\n        prefix_scale = torch.exp(positions * (math.log(2.0) / 5.0))\n        valid_scale = valid.float() * prefix_scale.unsqueeze(0)\n        numerator = torch.cumsum(\n            states.float() * valid_scale.unsqueeze(-1), dim=1\n        )\n        denominator = torch.cumsum(valid_scale, dim=1).unsqueeze(-1)\n        pooled = (numerator / denominator.clamp_min(1e-8)).to(states.dtype)\n        return (0.8 * states + 0.2 * pooled) * valid.unsqueeze(-1)"
+          },
+          {
+            "find": "            \"interest_aggregation\": \"causal_recency_half_life_5_blend_0.2_v1\",",
+            "replace": "            \"interest_aggregation\": \"causal_recency_half_life_5_blend_0.2_prefix_v2\","
+          },
+          {
+            "find": "        if meta.get(\"interest_aggregation\") != \"causal_recency_half_life_5_blend_0.2_v1\":",
+            "replace": "        if meta.get(\"interest_aggregation\") != \"causal_recency_half_life_5_blend_0.2_prefix_v2\":"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Replace dense causal exponential readout with equivalent weighted prefix pooling and synchronize predictor metadata. No tools or training were run."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-sasrec-default-prompt-v2-43200-20261029/run-02/experiment/recharness/calls/00027"
+}

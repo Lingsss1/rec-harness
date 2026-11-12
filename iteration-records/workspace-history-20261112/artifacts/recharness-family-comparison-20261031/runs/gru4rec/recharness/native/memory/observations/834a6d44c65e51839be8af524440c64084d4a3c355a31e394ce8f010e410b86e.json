@@ -1,0 +1,96 @@
+{
+  "schema_version": 2,
+  "protocol_id": "63d884e335450b4c7d4c05470c02cfbc484d52d6b839640f603abc93a1b33219",
+  "record": {
+    "round_idx": 14,
+    "trial_group_id": "trialgrp_1793446315248_2865811",
+    "trial_id": 0,
+    "arm": "sequence_interest",
+    "selected_categories": [
+      "sequence_interest"
+    ],
+    "patch_summary": "Blend supervised and inference GRU states with 20% causal exponential interest pooling, excluding padding and using a four-interaction half-life. Update predictor metadata validation; retain one checkpoint per category and all existing training limits.",
+    "benchmark_score": 0.605,
+    "val_score": 0.605,
+    "is_winner": true,
+    "is_group_winner": true,
+    "valid": true,
+    "failure_type": null,
+    "delta_vs_prev_best": 0.015,
+    "delta_vs_input": 0.015,
+    "outcome": "improved",
+    "val_support": "improved",
+    "gpu_seconds": 381.078923612833,
+    "trial_cap_seconds": 6858.011210873723,
+    "per_dataset_hr10": {
+      "Movies_and_TV": 0.63,
+      "Industrial_and_Scientific": 0.645,
+      "Electronics": 0.465,
+      "CDs_and_Vinyl": 0.68
+    },
+    "error": "",
+    "parameter_changes": [
+      {
+        "name": "DATA_DIR",
+        "before_expression": "os.environ.get('GAGC_DATA_DIR', './input/trainval')",
+        "after_expression": "os.environ['GAGC_DATA_DIR']"
+      }
+    ],
+    "changed_definitions": [
+      "GRU4RecModel",
+      "GRU4RecModel._interest_states",
+      "GRU4RecModel.encode",
+      "GRU4RecModel.forward",
+      "train_one_dataset",
+      "write_predict_script"
+    ],
+    "summary": "Blend supervised and inference GRU states with 20% causal exponential interest pooling, excluding padding and using a four-interaction half-life. Update predictor metadata validation; retain one checkpoint per category and all existing training limits.",
+    "proposal_history": [
+      {
+        "attempt": 1,
+        "summary": "Blend supervised and inference GRU states with 20% causal exponential interest pooling, excluding padding and using a four-interaction half-life. Update predictor metadata validation; retain one checkpoint per category and all existing training limits."
+      }
+    ],
+    "hypothesis": "Across all four datasets, replace each supervised GRU-state readout with 0.8*h_t + 0.2*m_t, where m_t is the normalized exponentially weighted mean of real-item states through t, with a four-interaction half-life. Exclude padding from the mean and use only causal prefixes. Apply the same readout at the final real position during inference. This may retain broader interests while emphasizing recent behavior. Keep history truncation, embeddings, GRU topology, dot-product scoring, loss and optimizer fixed; update the predictor writer consistently.",
+    "input_source_sha256": "2f828056331db2698b5c8032b85609725fef4bc57c8600f0257244d128dc2bc6",
+    "candidate_source_sha256": "a8e47e71c18270bbe947edf6aef97be7f86631980ae0e9ab2e034de39aefea89",
+    "input_normalized_sha256": "c4176606b7e19d614ac87d83229ac165cc2de6d1f0369447a8ffdef42979b874",
+    "candidate_normalized_sha256": "aa418c4406e21a0c1d8e14c49cb5d962d5dab49de0150f37353b862f3e8161d8",
+    "patch_sha256": "11e3a45228e1a8e3883abb39e8cbd011c05cd66f002fa4029668201670e799be",
+    "diff_excerpt": "--- \n+++ \n@@ -30,5 +30,5 @@\n ]\n \n-DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")\n+DATA_DIR = os.environ['GAGC_DATA_DIR']\n \n SEED = int(os.environ.get(\"GAGC_SEED\", \"42\"))\n@@ -201,8 +201,20 @@\n             self.item_emb.weight[0].zero_()\n \n-    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n+    def _interest_states(self, seq: torch.Tensor) -> torch.Tensor:\n         emb = self.dropout(self.item_emb(seq))\n         out, _ = self.gru(emb)\n-        # Histories are LEFT padded; count-1 indexes padding on short histories.\n+        positions = torch.arange(seq.size(1), device=seq.device)\n+        distances = positions[:, None] - positions[None, :]\n+        weights = torch.exp2(-distances.clamp(min=0).to(out.dtype) / 4.0)\n+        weights = weights.masked_fill(distances < 0, 0.0)\n+        real = seq.ne(0).to(out.dtype).unsqueeze(-1)\n+        numerator = torch.matmul(weights, out * real)\n+        denominator = torch.matmul(real.squeeze(-1), weights.transpose(0, 1)).unsqueeze(-1)\n+        mean = numerator / denominator.clamp(min=torch.finfo(out.dtype).tiny)\n+        return (0.8 * out + 0.2 * mean) * real\n+\n+    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n+        out = self._interest_states(seq)\n+        # Histories are LEFT padded; select the final real position.\n         positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n         last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n@@ -210,6 +222,5 @@\n \n     def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n-        emb = self.dropout(self.item_emb(seq))\n-        out, _ = self.gru(emb)\n+        out = self._interest_states(seq)\n         pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n         neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n@@ -289,4 +300,5 @@\n             \"num_layers\": NUM_LAYERS,\n             \"dropout_rate\": DROPOUT_RATE,\n+            \"sequence_readout\": \"gru_0.8_causal_mean_0.2_half_life_4\",\n         }, f)\n     print(f\"  [{dataset_name}] Best val HR@10={max(best_hr10, 0.0):.4f}  ckpt={ckpt_path}\", flush=True)\n@@ -344,4 +356,6 @@\n         with open(meta_path, \"rb\") as f:\n             meta = pickle.load(f)\n+        if meta.get(\"sequence_readout\") != \"gru_0.8_causal_mean_0.2_half_life_4\":\n+            raise RuntimeError(f\"Incompatible GRU sequence readout for {ds}\")\n         model = ModelClass(\n             itemnum=meta[\"itemnum\"],\n",
+    "category_rationales": [
+      {
+        "category": "sequence_interest",
+        "rationale": "Test a conservative interest readout across all four categories: blend each GRU state with a padding-excluding causal exponential mean using a four-interaction half-life. Preserve embeddings, recurrence, truncation, scoring, loss and optimizer. Training and inference share the readout, with unchanged checkpoint shapes."
+      }
+    ],
+    "baseline_validation": 0.59,
+    "basin_id": "default",
+    "execution_status": "success",
+    "attempt_count": 1,
+    "training_attempt_count": 1,
+    "training_attempts": [
+      {
+        "id": "round-0013-slot-0-attempt-1",
+        "status": "success",
+        "source_sha256": "a8e47e71c18270bbe947edf6aef97be7f86631980ae0e9ab2e034de39aefea89",
+        "allocated_gpu_seconds": 381.078923612833,
+        "error": "",
+        "score": 0.605
+      }
+    ],
+    "checkpoint_fingerprints": {
+      "Movies_and_TV_model.pt": "7b4964b1704d558abd146771b60aeaafd92f02b6cd186db3836a2ca21f53cee9",
+      "Industrial_and_Scientific_model.pt": "f7bcd03b173d8e8f838df4b0c415704128482ca00e78345000e8b5f6574d51e5",
+      "Electronics_model.pt": "cf055564b5a1157659f8675af88df41516e02b422595e5d4dec20448e8dc6997",
+      "CDs_and_Vinyl_model.pt": "d76dd08167513e615bb58e2eb80a7c0d811206643f55892664064bfdf92c4b39"
+    },
+    "repair_errors": [],
+    "phase": "regular",
+    "promoted": true,
+    "provisional": false,
+    "protocol_id": "63d884e335450b4c7d4c05470c02cfbc484d52d6b839640f603abc93a1b33219",
+    "evidence_id": "834a6d44c65e51839be8af524440c64084d4a3c355a31e394ce8f010e410b86e"
+  },
+  "record_sha256": "83ae5ac99b09ee65a04a91299b796f939ceeb02c61c45e43ee872c437b673cb8"
+}

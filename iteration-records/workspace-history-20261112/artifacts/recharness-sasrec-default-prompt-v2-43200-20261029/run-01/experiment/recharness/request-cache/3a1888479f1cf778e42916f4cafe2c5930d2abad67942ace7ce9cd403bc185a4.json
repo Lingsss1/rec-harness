@@ -1,0 +1,67 @@
+{
+  "request_sha256": "3a1888479f1cf778e42916f4cafe2c5930d2abad67942ace7ce9cd403bc185a4",
+  "response": {
+    "category_edits": [
+      {
+        "category": "feature_construction",
+        "rationale": "Add a bounded causal repeat-frequency feature to input item vectors: 1 + 0.1*min(log1p(c_t), 2), with counts computed before truncation. Apply it consistently during training, validation and prediction across all four datasets, preserving the existing embeddings, backbone, readout, objective and optimizer.",
+        "edits": [
+          {
+            "find": "def sample_batch(user_train: dict, itemnum: int, batch_size: int, maxlen: int):",
+            "replace": "def build_repeat_scale(history, maxlen: int):\n    counts = {}\n    scales = []\n    for item in history:\n        if item == 0:\n            scales.append(0.0)\n            continue\n        earlier = counts.get(item, 0)\n        scales.append(1.0 + 0.1 * min(math.log1p(earlier), 2.0))\n        counts[item] = earlier + 1\n    result = np.zeros(maxlen, dtype=np.float32)\n    retained = scales[-maxlen:]\n    if retained:\n        result[-len(retained):] = retained\n    return result\n\n\ndef sample_batch(user_train: dict, itemnum: int, batch_size: int, maxlen: int,\n                 user_repeat_scales: dict):"
+          },
+          {
+            "find": "    batch_seq, batch_pos, batch_neg = [], [], []",
+            "replace": "    batch_seq, batch_pos, batch_neg = [], [], []\n    batch_repeat_scale = []"
+          },
+          {
+            "find": "        batch_neg.append(neg)\n    return np.array(batch_seq), np.array(batch_pos), np.array(batch_neg)",
+            "replace": "        batch_neg.append(neg)\n        batch_repeat_scale.append(user_repeat_scales[u])\n    return (np.array(batch_seq), np.array(batch_pos), np.array(batch_neg),\n            np.array(batch_repeat_scale))"
+          },
+          {
+            "find": "    def log2feats(self, seq: torch.Tensor) -> torch.Tensor:\n        B, M = seq.shape\n        seq_emb = self.item_emb(seq) * self.input_scale[seq].unsqueeze(-1)",
+            "replace": "    def log2feats(self, seq: torch.Tensor, repeat_scale: torch.Tensor) -> torch.Tensor:\n        B, M = seq.shape\n        seq_emb = self.item_emb(seq) * self.input_scale[seq].unsqueeze(-1)\n        seq_emb = seq_emb * repeat_scale.to(seq_emb.dtype).unsqueeze(-1)"
+          },
+          {
+            "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor | None = None,\n                neg: torch.Tensor | None = None):\n        log_feats = self.log2feats(seq)",
+            "replace": "    def forward(self, seq: torch.Tensor, repeat_scale: torch.Tensor,\n                pos: torch.Tensor | None = None,\n                neg: torch.Tensor | None = None):\n        log_feats = self.log2feats(seq, repeat_scale)"
+          },
+          {
+            "find": "    def predict(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:\n        log_feats = self.log2feats(seq)",
+            "replace": "    def predict(self, seq: torch.Tensor, candidates: torch.Tensor,\n                repeat_scale: torch.Tensor) -> torch.Tensor:\n        log_feats = self.log2feats(seq, repeat_scale)"
+          },
+          {
+            "find": "            scores = model.predict(seq_t, cand_t)[0].cpu().numpy().tolist()",
+            "replace": "            repeat_t = torch.tensor(\n                build_repeat_scale(user_train[u], maxlen),\n                dtype=torch.float32, device=device,\n            ).unsqueeze(0)\n            scores = model.predict(seq_t, cand_t, repeat_t)[0].cpu().numpy().tolist()"
+          },
+          {
+            "find": "    user_train, user_valid, itemnum = load_dataset(dataset_name, data_dir)\n    item_counts = np.zeros(itemnum + 1, dtype=np.float32)",
+            "replace": "    user_train, user_valid, itemnum = load_dataset(dataset_name, data_dir)\n    user_repeat_scales = {\n        u: build_repeat_scale(history[:-1], MAXLEN)\n        for u, history in user_train.items() if len(history) >= 2\n    }\n    item_counts = np.zeros(itemnum + 1, dtype=np.float32)"
+          },
+          {
+            "find": "            seq, pos, neg = sample_batch(user_train, itemnum, BATCH_SIZE, MAXLEN)\n            seq_t = torch.tensor(seq, dtype=torch.long, device=device)\n            pos_t = torch.tensor(pos, dtype=torch.long, device=device)\n            neg_t = torch.tensor(neg, dtype=torch.long, device=device)\n\n            pos_logits, neg_logits = model(seq_t, pos_t, neg_t)",
+            "replace": "            seq, pos, neg, repeat_scale = sample_batch(\n                user_train, itemnum, BATCH_SIZE, MAXLEN, user_repeat_scales\n            )\n            seq_t = torch.tensor(seq, dtype=torch.long, device=device)\n            pos_t = torch.tensor(pos, dtype=torch.long, device=device)\n            neg_t = torch.tensor(neg, dtype=torch.long, device=device)\n            repeat_t = torch.tensor(repeat_scale, dtype=torch.float32, device=device)\n\n            pos_logits, neg_logits = model(seq_t, repeat_t, pos_t, neg_t)"
+          },
+          {
+            "find": "_models: dict = {}\n_metas: dict = {}\n_device = None",
+            "replace": "_models: dict = {}\n_metas: dict = {}\n_device = None\n_repeat_scale_builder = None"
+          },
+          {
+            "find": "    return mod.SASRec\n\n\ndef _ensure_loaded():\n    global _device",
+            "replace": "    return mod.SASRec, mod.build_repeat_scale\n\n\ndef _ensure_loaded():\n    global _device, _repeat_scale_builder"
+          },
+          {
+            "find": "    SASRec = _load_model_class()",
+            "replace": "    SASRec, _repeat_scale_builder = _load_model_class()"
+          },
+          {
+            "find": "    seq_t = torch.tensor([seq_arr], dtype=torch.long, device=_device)\n\n    with torch.no_grad():\n        cand_t   = torch.tensor([candidates], dtype=torch.long, device=_device)\n        scores   = model.predict(seq_t, cand_t)[0].cpu().tolist()",
+            "replace": "    seq_t = torch.tensor([seq_arr], dtype=torch.long, device=_device)\n    repeat_t = torch.as_tensor(\n        _repeat_scale_builder(history, maxlen),\n        dtype=torch.float32, device=_device,\n    ).unsqueeze(0)\n\n    with torch.no_grad():\n        cand_t   = torch.tensor([candidates], dtype=torch.long, device=_device)\n        scores   = model.predict(seq_t, cand_t, repeat_t)[0].cpu().tolist()"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Add causal repeat-frequency input scaling with counts computed before truncation and shared feature construction in the generated predictor. Preserve four-category routing, one checkpoint per category, seeds and the 200-epoch cap."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-sasrec-default-prompt-v2-43200-20261029/run-01/experiment/recharness/calls/00018"
+}

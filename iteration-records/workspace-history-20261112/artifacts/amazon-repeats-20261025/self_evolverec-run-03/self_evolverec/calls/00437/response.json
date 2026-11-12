@@ -1,0 +1,70 @@
+{
+  "markdown_report": "Three starting insights motivate a conservative extension. First, recent deletion lowers training margins in every dataset. This supports preserving recent evidence, but repacking confounds causal interpretation. Second, Movies_and_TV retains 5.05% wrong training-pair ranks. This identifies residual discrimination errors without explaining validation performance. Third, users report both unsupported broad matches and overextended older interests. Candidate-specific historical support could address these two failures.\n\nThree literature insights sharpen the design. [DIN](https://arxiv.org/abs/1706.06978) aggregates history separately for each candidate. This motivates selective retrieval rather than one shared recent pool. [SComGNN](https://arxiv.org/abs/2401.02130) separates relatedness from complementarity. This motivates directional behavioral evidence, although transitions cannot establish compatibility. [gSASRec](https://www.ijcai.org/proceedings/2024/939) questions sampled-BCE calibration. This makes an objective-only control essential before attributing gains to fusion.\n\nThe conceptual framework separates three directions:\n\n| Direction | Existing mechanism | Proposed experiment | Remaining gap |\n|---|---|---|---|\n| Candidate discrimination | SASRec; gSASRec | Uniform multi-negative softmax | Training margins versus validation ranking |\n| Current-interest support | Recent pooling; DIN | Candidate attention with learned recency bias | Older but relevant evidence |\n| Behavioral specificity | SComGNN inspiration | Directional history-to-candidate residual | Compatibility remains unobserved |\n\nThree minimal ideas follow. Scores are 0–10; higher difficulty means harder. Each cell gives a positive and negative reason. U/M denote user/model diagnosis alignment.\n\n| Idea | Originality | Potential | U | M | Difficulty |\n|---|---|---|---|---|---|\n| A: Softmax-only control [gSASRec motivation] | 2: useful comparison / established | 7: cheap foundation / limited mechanism | 4: sharper ranking / no intent evidence | 8: more competitors / training-only evidence | 2: small loss edit / sampler care |\n| B: Gated multiscale pooling [starting idea] | 3: adaptive fusion / familiar | 6: economical / candidate independent | 7: current-interest focus / broad affinity persists | 6: history targeting / deletion confounded | 3: small module / masking care |\n| C: Candidate-conditioned directional residual [DIN; SComGNN inspiration] | 5: economical combination / established components | 8: selective evidence / sparse transitions | 8: specificity and recency / compatibility unknown | 7: candidate separation / improvement unproven | 5: small module / scoring integration |\n\nSelect **C** at 10% progress, using one lightweight residual and staged controls. Each candidate attends to causal historical item embeddings through a directional bilinear score plus a learned nonnegative recency penalty. Add the resulting candidate score to SASRec through a zero-initialized scalar gate.\n\nThis explicitly targets unsupported broad-affinity matches and older isolated interests by requiring learned candidate-specific historical support. It targets Movies_and_TV’s residual discrimination errors through candidate-dependent scoring. These are hypotheses, not established improvements; functional duplication remains unresolved.\n\nCompare A, B, and C under the same objective and negative count, then remove C’s recency bias and directionality separately. Select solely by pinned four-category macro validation HR@10; preserve seeds, routing, diagnostic contracts, predictor parity, and the shared GPU budget.",
+  "idea": {
+    "description": "Add a zero-initialized candidate-conditioned directional history residual to the existing per-dataset SASRec. For candidate j and prefix ending at t, compute attention over permitted history positions using a directional bilinear interaction and a nonnegative recency penalty. Convert the attended history into an additional scalar candidate score and gate it into the existing SASRec logit.",
+    "motivation": "The user diagnosis identifies unsupported broad-affinity recommendations and excessive reliance on older isolated interactions. Candidate-specific historical support with adaptive recency directly targets both, while directional scoring can represent predictive transitions beyond symmetric similarity. Movies_and_TV's 5.05% wrong training-pair ranks provide a concrete model-facing discrimination target. Neither these measurements nor the cited literature establish validation gains, functional compatibility, or complementary usefulness.",
+    "implementation_notes": "Implement as a small scoring head around the supplied SASRec rather than replacing its encoder. Let e_i be shared item embeddings, q_j=Wq e_j, k_r=Wk e_r, and v_r=Wv e_r. Use attention logits q_j^T k_r/sqrt(d)-softplus(beta)*(t-r), masked to nonpadding positions r<=t. Set residual R_tj=e_j^T sum_r attention_r*v_r/sqrt(d), and score S_tj=h_t^T e_j+alpha*R_tj, initializing alpha=0 while initializing projection matrices normally; zeroing both would prevent learning. Do not impose symmetry between query and key projections. Use sequence-position ages initially so inference requires no unavailable timestamps. Empty prefixes receive a zero residual. Chunk candidate scoring to bound memory, and compute training attention only for valid causal positions. Start with 64 unique uniform negatives per positive, excluding observed training positives only; reduce the count when fewer eligible items exist. This is candidate-set cross-entropy, not an unbiased full-catalog likelihood. Compare loss-only, multiscale-pooling, and residual variants with identical negative counts and optimizer settings. Use unchanged RecHarness preprocessing seed 0 and training seed 42; honor SASREC_EPOCHS with default 200. Retain all four dataset routes, DATA_DIR=os.environ['GAGC_DATA_DIR'], trial-local artifacts, and single-GPU execution. Save all head parameters and configuration, and update the predictor writer so working/predict.py implements identical candidate-dependent scoring. Preserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. Keep view.model as the actual model, expose item_emb and log2feats, and make predict_score(features, items) retain sufficient causal history context to reproduce the residual; adapt probes to call this scorer rather than a plain embedding dot product. Preserve fixed training-only diagnostic samples and definitions; report missing metadata explicitly. No test access or claimed benchmark improvement is required or justified.",
+    "pseudocode": "For each unchanged dataset route:\n    initialize SASRec and residual head with training seed 42\n    alpha = trainable scalar initialized to zero\n    for epoch in range(environment SASREC_EPOCHS, default 200):\n        for (_, sequence, positive, negative) in train_loader:\n            H = SASRec.log2feats(sequence)\n            for valid causal positions, processed in memory-bounded chunks:\n                candidates = [positive] + unique_uniform_training_eligible_negatives(K=64)\n                base = dot(H[position], item_emb(candidates))\n                attention = masked_softmax(\n                    directional_query(candidates) @ history_keys(prefix).T / sqrt(d)\n                    - softplus(beta) * position_age(prefix)\n                )\n                residual = dot(item_emb(candidates), attention @ history_values(prefix)) / sqrt(d)\n                logits = base + alpha * residual\n                loss = cross_entropy(logits, positive_index=0)\n            update parameters using mean valid-position loss\n    save checkpoint and complete scoring configuration beneath trial directory\nGenerate working/predict.py with identical encoder, residual scorer, and four-category routing.\nCompare controlled variants using host macro validation HR@10; record category results and GPU cost.\nRun unchanged-protocol training diagnostics through the adapted compatibility view.",
+    "originality": {
+      "score": 5,
+      "positive": "Combines candidate-specific retrieval, directional scoring, and a zero-initialized SASRec residual in a compact benchmark-specific experiment.",
+      "negative": "Candidate attention, asymmetric interactions, recency biases, and residual gating are established techniques; this is an adaptation rather than a new model family."
+    },
+    "future_potential": {
+      "score": 8,
+      "positive": "Creates a controlled path toward testing whether candidate-specific historical evidence improves current-interest ranking and later supports permitted text features.",
+      "negative": "Sparse interaction sequences may not identify useful transitions, and observational histories cannot establish device compatibility or functional complementarity."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "Retains the existing encoder and introduces only several small projections, one recency parameter, and one residual gate.",
+      "negative": "Candidate-dependent scoring increases training and full-catalog inference cost and requires synchronized predictor generation plus history-aware diagnostic adapters."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Introduces causal self-attention for sequential recommendation and supplies the required SASRec starting architecture."
+      ],
+      "limitations": [
+        "Its shared sequence representation does not explicitly retrieve different historical evidence for each candidate.",
+        "Published results do not establish performance under this pinned RecHarness protocol."
+      ]
+    },
+    {
+      "title": "Deep Interest Network for Click-Through Rate Prediction",
+      "link": "https://arxiv.org/abs/1706.06978",
+      "contributions": [
+        "Uses candidate-dependent attention to aggregate historical behaviors, motivating the proposed residual."
+      ],
+      "limitations": [
+        "CTR prediction differs from next-item ranking under the supplied benchmark.",
+        "Candidate-conditioned attention alone does not establish compatibility or complementarity."
+      ]
+    },
+    {
+      "title": "SComGNN",
+      "link": "https://arxiv.org/abs/2401.02130",
+      "contributions": [
+        "Models complementary relationships using relatedness and dissimilarity, motivating separation of directional behavioral evidence from broad similarity."
+      ],
+      "limitations": [
+        "The proposed lightweight bilinear residual does not reproduce its graph-filter architecture.",
+        "Sequential observations alone cannot identify true complementary relationships."
+      ]
+    },
+    {
+      "title": "gSASRec",
+      "link": "https://www.ijcai.org/proceedings/2024/939",
+      "contributions": [
+        "Examines overconfidence under negative-sampled BCE and motivates objective-only and negative-count controls."
+      ],
+      "limitations": [
+        "Its generalized BCE differs from the proposed candidate-set softmax.",
+        "Its reported improvements do not establish gains on the four-category pinned evaluation."
+      ]
+    }
+  ]
+}

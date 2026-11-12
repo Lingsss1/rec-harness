@@ -1,0 +1,23 @@
+{
+  "category_edits": [
+    {
+      "category": "network_architecture",
+      "rationale": "Apply learned LayerNorm only to each GRU layer's candidate-state preactivation before tanh. Preserve reset/update gates, hidden-state interpolation, embeddings, pooling, scoring, loss and optimizer. The existing predictor imports the updated model class and loads its normalization parameters from each category's single checkpoint.",
+      "edits": [
+        {
+          "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+          "replace": "DATA_DIR = os.environ[\"GAGC_DATA_DIR\"]"
+        },
+        {
+          "find": "class GRU4RecModel(nn.Module):",
+          "replace": "@torch.jit.script\ndef _candidate_normalized_gru_scan(\n    input_gates: torch.Tensor,\n    hidden: torch.Tensor,\n    weight_hh: torch.Tensor,\n    bias_hh: torch.Tensor,\n    norm_weight: torch.Tensor,\n    norm_bias: torch.Tensor,\n    eps: float,\n) -> tuple[torch.Tensor, torch.Tensor]:\n    outputs = torch.jit.annotate(list[torch.Tensor], [])\n    for step in range(input_gates.size(0)):\n        recurrent_gates = torch.nn.functional.linear(hidden, weight_hh, bias_hh)\n        input_reset, input_update, input_candidate = input_gates[step].chunk(3, dim=-1)\n        hidden_reset, hidden_update, hidden_candidate = recurrent_gates.chunk(3, dim=-1)\n        reset = torch.sigmoid(input_reset + hidden_reset)\n        update = torch.sigmoid(input_update + hidden_update)\n        candidate_preactivation = input_candidate + reset * hidden_candidate\n        candidate = torch.tanh(torch.nn.functional.layer_norm(\n            candidate_preactivation, [hidden.size(-1)], norm_weight, norm_bias, eps\n        ))\n        hidden = candidate + update * (hidden - candidate)\n        outputs.append(hidden)\n    return torch.stack(outputs, dim=0), hidden\n\n\nclass CandidateNormalizedGRU(nn.GRU):\n    def __init__(self, input_size: int, hidden_size: int, num_layers: int = 1,\n                 batch_first: bool = True, dropout: float = 0.0):\n        super().__init__(input_size, hidden_size, num_layers=num_layers,\n                         batch_first=batch_first, dropout=dropout)\n        self.candidate_norms = nn.ModuleList([\n            nn.LayerNorm(hidden_size) for _ in range(num_layers)\n        ])\n\n    def forward(self, inputs: torch.Tensor, hx: torch.Tensor | None = None):\n        layer_input = inputs.transpose(0, 1) if self.batch_first else inputs\n        final_states = []\n        for layer, norm in enumerate(self.candidate_norms):\n            hidden = (layer_input.new_zeros(layer_input.size(1), self.hidden_size)\n                      if hx is None else hx[layer])\n            input_gates = torch.nn.functional.linear(\n                layer_input, getattr(self, f\"weight_ih_l{layer}\"),\n                getattr(self, f\"bias_ih_l{layer}\")\n            )\n            layer_input, hidden = _candidate_normalized_gru_scan(\n                input_gates, hidden, getattr(self, f\"weight_hh_l{layer}\"),\n                getattr(self, f\"bias_hh_l{layer}\"), norm.weight, norm.bias, norm.eps\n            )\n            final_states.append(hidden)\n            if layer + 1 < self.num_layers and self.dropout > 0.0:\n                layer_input = torch.nn.functional.dropout(\n                    layer_input, p=self.dropout, training=self.training\n                )\n        output = layer_input.transpose(0, 1) if self.batch_first else layer_input\n        return output, torch.stack(final_states, dim=0)\n\n\nclass GRU4RecModel(nn.Module):"
+        },
+        {
+          "find": "        self.gru = nn.GRU(hidden_units, hidden_units, num_layers=num_layers,\n                          batch_first=True, dropout=dropout)",
+          "replace": "        self.gru = CandidateNormalizedGRU(\n            hidden_units, hidden_units, num_layers=num_layers,\n            batch_first=True, dropout=dropout\n        )"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Normalize only GRU candidate preactivations across all four category models. Preserve the existing training and inference behavior elsewhere; predictor loading automatically uses the updated architecture."
+}

@@ -37,7 +37,7 @@ def configuration(path):
             return result
         return value
     config=expand(read_json(path))
-    if config.get('adapter') not in {None,'amazon-nextitnet-v1','research-evolution-v1','research-project-v1'}:
+    if config.get('adapter') not in {None,'amazon-nextitnet-v1','research-evolution-v1','research-project-v1','kuairand-research-v1'}:
         raise ContractError('unsupported autoresearch adapter')
     if config.get('adapter')=='research-project-v1':
         for kind in ('model','tool','harness'):
@@ -45,6 +45,9 @@ def configuration(path):
             if key in config:config[kind]=configuration(path.parent/config.pop(key))
     for key in ('source','study'):
         if key in config:config[key]=str((path.parent/config[key]).resolve())
+    if config.get('adapter') == 'kuairand-research-v1':
+        for key in ('benchmark','python','data_root','baseline_output','graph_audit'):
+            config[key] = str((path.parent/config[key]).absolute())
     if 'semantic_encoder' in config and isinstance(config['semantic_encoder'],dict) and 'model_path' in config['semantic_encoder']:
         config['semantic_encoder']['model_path']=str((path.parent/config['semantic_encoder']['model_path']).resolve())
     if 'source_history_studies' in config:
@@ -92,6 +95,14 @@ def configuration(path):
 
 def autoresearch(root,config_file=None,*,agent=None):
     root=Path(root).resolve()
+    if (root/'kuairand-auto.json').exists() or (config_file is not None and configuration(config_file).get('adapter')=='kuairand-research-v1'):
+        from .adapters.kuairand_research import KuaiRandResearch
+        if (root/'kuairand-auto.json').exists():
+            if config_file is not None: raise ContractError('campaign already frozen; resume without --config')
+        else: KuaiRandResearch.init(root, configuration(config_file))
+        research = KuaiRandResearch(root, agent=agent)
+        try: return research.run()
+        finally: research.store.close()
     from .adapters.amazon_autonomous import AmazonAutoresearch
     from .evolution_auto import AutonomousEvolution
     from .project import ResearchProject

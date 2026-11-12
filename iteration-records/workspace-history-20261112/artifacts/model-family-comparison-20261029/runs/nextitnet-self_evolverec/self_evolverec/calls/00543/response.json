@@ -1,0 +1,136 @@
+{
+  "markdown_report": "At 10% progress, select **causal, normalized residual-depth aggregation**: a small NextItNet extension targeting overly broad recommendations and stale historical interests. Benefits remain hypotheses requiring validation.\n\n**Insights from the starting point.** (1) Residual depths expose different receptive fields; aggregation may preserve specific recent evidence alongside persistent preferences. (2) Channel normalization reduces activation-scale differences, but cannot guarantee richer representations. (3) Positionwise gates preserve causality only with causal inputs and padding-safe intermediate operations. Industrial’s endpoint effective rank is 6.71 versus 26.83–28.16 elsewhere; this motivates investigation, not a conclusion that concentration causes poor ranking.\n\n**Insights from related work.** (1) [NextItNet](https://arxiv.org/abs/1808.05163) supplies reusable causal multiscale features. (2) [ScaleRec](https://doi.org/10.1016/j.ipm.2025.104318) motivates adaptive temporal aggregation without establishing this extension. (3) [Dynamic layer aggregation](https://ojs.aaai.org/index.php/AAAI/article/download/3772/3650) already uses position-specific weights; novelty is limited. (4) [ELMo](https://aclanthology.org/N18-1202/) provides a necessary static-weight control. (5) [R²NS](https://renzhaochun.github.io/assets/pdf/WWW_2026_Camera_Ready.pdf) motivates gradual negative difficulty, while unseen items remain uncertain negatives.\n\n**Framework.** Representation selection → normalized depth gates; ranking supervision → gradual multi-negative training; temporal evidence → observed-gap conditioning. Explore these separately for attribution.\n\n**Candidate assessments.** Scores /10 include one positive (+) and negative (−); higher difficulty means harder implementation.\n\n| Idea | Originality | Potential | User alignment | Model alignment | Difficulty |\n|---|---|---|---|---|---|\n| Normalized depth gates [NextItNet; dynamic aggregation] | 3: +family adaptation; −direct precedents | 7: +adaptive specificity; −unverified | 7: +recent/persistent balance; −compatibility unobserved | 6: +retains intermediate directions; −concentration not proven harmful | 5: +small head; −masking, controls, serialization |\n| Gradual multi-negative loss [R²NS] | 3: +task adaptation; −known curriculum | 7: +ranking pressure; −false negatives | 5: +plausible-alternative discrimination; −intent indirect | 7: +challenges easy separation; −Industrial already weaker | 5: +shared backbone; −sampling overhead |\n| Gap-conditioned residual gates [NextItNet; TemProxRec] | 5: +time/depth combination; −known temporal gating | 7: +timeliness evidence; −timestamps noisy | 7: +stale-interest control; −occasion unobserved | 5: +additional context; −no measured timing defect | 6: +small embeddings; −timestamp plumbing |\n\n**Selected algorithm.** Normalize residual-block states across channels. Learn depth-softmax weights from the current causal state, masked prefix mean, and prefix length; add the weighted states through a modest residual coefficient. All layers share one jointly trained scoring head.\n\nThis targets **broad similarity replacing specific preferences** and **historical interests overwhelming current purpose** through adaptive depth selection. It cannot establish compatibility, redundancy, or current mood. Industrial’s concentrated endpoints and weaker sampled separation motivate testing; other categories’ 98–99% training pairwise accuracy does not establish held-out quality.\n\nCompare final-only, uniform, global-weight, and position-dependent aggregation. Stage prefix on/off and normalization controls within budget; summary-matched controls distinguish aggregation from expanded context. Prefix summaries expand the gate’s receptive field beyond the convolution stack. Check causality, padding invariance, reload consistency, gate entropy, and cost.\n\nPreserve seeds, splits, routing, diagnostic interfaces, 200-epoch ceiling, and 200 batches/epoch. Deploy one checkpoint/category. Select by pinned macro validation HR@10. Log all queries and costs; report paired gained/lost hits where authorized. One changed hit shifts macro HR by 0.125 percentage points. Sampled HR does not establish full-catalog quality, and post-selection intervals remain exploratory.",
+  "idea": {
+    "description": "Extend the supplied corrected NextItNet with channel-normalized, causal positionwise aggregation of its existing residual-block states. A small jointly trained gate selects residual depth at each position. Retain a direct final-block residual path, one item-scoring head, and exactly one deployed checkpoint per category. Treat masked-prefix conditioning as an explicitly controlled component because it expands the gate's context.",
+    "motivation": "The user diagnosis identifies broad associations replacing specific preferences and historical interests carrying into recommendations without sufficient attention to current purpose. Adaptive depth weighting could emphasize specific recent evidence while retaining persistent preferences when supported. These are two explicit user-facing targets, not demonstrated benefits. Industrial's identified-user endpoint effective rank of 6.71 and sampled training pairwise accuracy of 92.07% motivate examining concentrated endpoint representations and weaker sampled separation. Neither statistic proves that aggregation will improve ranking. Movies, Electronics, and CDs already achieve approximately 98–99% sampled training pairwise accuracy, so larger training margins are insufficient evidence of progress. At 10% research progress, this controlled architectural adaptation is preferable to simultaneously changing supervision, metadata inputs, and temporal features.",
+    "implementation_notes": "Integrate into the host-supplied corrected baseline; its source and exact forward graph are not included here, so this is an integration specification rather than a complete replacement train.py. Preserve the NextItNet backbone, depth, dilation schedule, embedding path, item_emb, family-specific sample_batch, objective, optimizer, and sampling for the first experiment. Keep DATA_DIR = os.environ['GAGC_DATA_DIR']; write artifacts beneath the trial directory. Retain Movies_and_TV, Industrial_and_Scientific, Electronics, and CDs_and_Vinyl routing, preprocessing seed 0, training seed 42, at most 200 epochs, exactly 200 batches per executed epoch, and single-GPU execution. Honor the SASREC_EPOCHS environment default of 200 without allowing a larger ceiling.\n\nUse the original mask m=(sequence!=0)[...,None] throughout. Keep all temporal convolutions left-causal with padding (kernel_size-1)*dilation. Mask embeddings and every intermediate activation before another temporal convolution: convolution biases and LayerNorm offsets can otherwise create padded activations that contaminate valid positions within a block. For pre-normalized blocks, mask after normalization before temporal mixing; also mask residual sums and final normalized outputs. Channel normalization on B x L x D uses LayerNorm(D), never a normalization over time. Retain the baseline affine normalizations unchanged. For aggregation values, use one additional non-affine LayerNorm(D, eps=1e-5) per depth. Use a separate non-affine channel LayerNorm on the masked prefix mean for gate conditioning, making gate-input normalization distinct from value normalization.\n\nLet z_k be each normalized, masked residual-block state, c=z_K, n=cumsum(m), and p=LayerNorm(cumsum(c)/clamp(n,1))*m. The combined gate input is concat(c,p,log1p(n)), so it uses no future events. Its explicit architecture is Linear(2D+1,D), GELU, Linear(D,K), with biases and no extra dropout. Initialize the final gate layer's weights and biases to zero for uniform initial depth weights. Use a learned scalar alpha initialized to atanh(0.1), bounded through tanh, and retain the baseline final normalization. Gate softmax is over K existing depths, which is always nonempty; all-padding rows have finite inputs and are explicitly zeroed afterward. Prefix summaries are computed at every position from that position's observed prefix. They give the gate access to the entire retained prefix, even when convolutional receptive fields are shorter; this must be reflected in diagnostics and attribution.\n\nKeep log2feats(sequence) returning B x L x D and predict_score(features, items) retaining baseline scoring and broadcasting semantics. Extract the endpoint at the largest nonzero index, never nonpadding-count minus one; explicitly zero empty-history features. Store aggregation configuration and parameters in the same checkpoint as the backbone. Update the embedded predictor writer with the identical architecture, padding operations, and configuration, and compare features and candidate scores before and after checkpoint reload. Each category loads exactly one independently trained network; no score fusion, independent experts, checkpoint averaging, or separately fitted popularity/transition component.\n\nPreserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis), returning measured metrics and definitions through the existing host interfaces. view.model remains the actual trained module; preserve item_emb, log2feats, predict_score, user_train, meta_data, and review_data. The loader remains (None, sequence, positive, negative), each tensor B x L. Update graph recognition for depth aggregation and the prefix-summary path; do not label expanded-context models as the unchanged baseline graph. Preserve training-position versus identified-user distinctions and mark unavailable observations null with reasons. Use only observed histories, titles, descriptions, and timestamps. Do not infer ratings, review text, categories, prices, stores, simulator traits, compatibility labels, or complement/substitute ground truth.\n\nWith dropout disabled, test future-token changes and appends at multiple cutoffs, aligned features and candidate scores under additional left padding without truncation, mixed lengths, empty/short histories, every dilation, and multiple blocks. Deliberately set nonzero convolution biases and normalization offsets in isolated test copies to expose masking defects. Check intermediate padded states remain zero. Repeat causality, padding, and reload checks after training using atol=1e-6 and rtol=1e-5; inspect any failure before accepting validation. Such tests establish implementation properties, not ranking quality.\n\nUse a budget-aware staged comparison. First compare final-only, uniform normalized aggregation, global ELMo-style weights, and local-state position-dependent weights with identical backbone states. Then test prefix conditioning on/off, local-only versus summary-only versus combined gates, and aggregation normalization on/off while specifying gate-input normalization separately. Include parameter-count-matched final-layer-plus-summary and uniform-mixture-plus-summary controls before attributing gains to adaptive depth selection. For summary controls, use the same combined gate input and hidden width to generate a D-dimensional summary residual; add inert parameters only if necessary for exact count matching, and report active parameter counts separately. Train controls separately; never combine their predictions. Replacing adaptive weights with their training-set mean at evaluation is an optional sensitivity probe and is weaker evidence than retrained static controls. Do not automatically execute the full factorial; account for the shared 43,200 GPU-second budget and predeclare a small staged trial order.\n\nRecord gate entropy, mean depth weights by observed prefix-length bins 1–4, 5–16, 17–64, and 65+, residual coefficient, parameter counts, runtime, and raw/unit-normalized endpoint covariance statistics. Empty bins are unavailable. Low entropy or length-dependent weights do not alone demonstrate useful intent selection. Gates may exploit length or activation patterns as shortcuts, and additional capacity can overfit training users. Keep the baseline regularization initially, inspect gate saturation, and judge changes using pinned validation rather than forcing higher effective rank or desired gate behavior.\n\nKeep the evaluator unchanged: 200 validation users/category, 99 unique negative candidates, evaluation seed 42, and equal-weight macro HR@10. Where the host exposes authorized per-user validation outcomes, compare identical users/candidates using gained hits, lost hits, and category differences. A stratified paired bootstrap with 2,000 seed-42 resamples can describe macro-difference uncertainty; an exact category-level McNemar test is optional. These analyses condition on fitted models and fixed candidate draws, omit training/candidate variation, and do not correct adaptive-selection bias. If outcomes are unavailable, report that limitation instead of reconstructing hidden interfaces. A changed hit moves category HR by 0.5 percentage points and macro HR by 0.125 points. Log every proposal, checkpoint evaluation, validation query, failure, GPU-second cost, and the checkpoint/selection rule. Preserve the host baseline checkpoint rule for the first comparison and document it before execution; do not introduce extra checkpoint queries silently. Label selected-winner intervals exploratory. The supplied historical combined_score=0.5300 is not a newly measured improvement or evidence of full-catalog intent quality. No test access, external datasets, pretrained weights, or other-trial checkpoints.",
+    "pseudocode": "class DepthAggregation:\n    # D: host hidden size; K: existing residual-block count.\n    # value_norms: K non-affine LayerNorm(D, eps=1e-5).\n    # prefix_norm: non-affine LayerNorm(D, eps=1e-5).\n    # gate: Linear(2*D+1,D) -> GELU -> Linear(D,K).\n    # Initialize last gate Linear weight/bias to zero.\n    # alpha: learned scalar initialized to atanh(0.1).\n    pass\n\ndef log2feats(sequence):\n    mask = (sequence != 0).unsqueeze(-1)\n    x = baseline_embedding_path(sequence) * mask\n    states = []\n    for block, norm in zip(blocks, value_norms):\n        # Modify the existing block's internal forward, retaining its graph:\n        # mask after normalization/activation/dropout and convolution stages,\n        # before every following temporal convolution; mask residual sums.\n        x = padding_safe_existing_block(block, x, mask) * mask\n        states.append(norm(x) * mask)\n    values = stack(states, dim=2)                 # B,L,K,D\n    current = states[-1]\n    count = mask.to(current.dtype).cumsum(dim=1)\n    prefix = current.cumsum(dim=1) / count.clamp_min(1)\n    prefix = prefix_norm(prefix) * mask\n    gate_input = cat([current, prefix, log1p(count)], dim=-1)\n    weights = softmax(gate(gate_input), dim=-1)  # depth axis only\n    aggregate = (weights.unsqueeze(-1) * values).sum(dim=2)\n    return baseline_final_norm(x + tanh(alpha) * aggregate) * mask\n\ndef endpoint(sequence):\n    features = log2feats(sequence)\n    positions = arange(sequence.shape[1], device=sequence.device)\n    last = where(sequence != 0, positions, -1).amax(dim=1)\n    rows = arange(sequence.shape[0], device=sequence.device)\n    return features[rows, last.clamp_min(0)] * (last >= 0).unsqueeze(-1)\n\n# Each variant below is a separate single-network experiment.\n# No model or checkpoint predictions are combined.\nfor variant in predeclared_budgeted_trial_order:\n    for category in FOUR_FIXED_CATEGORIES:\n        reset_training_seed(42)\n        model = integrate_into_corrected_host_nextitnet(variant)\n        verify_causality_and_padding(model)\n        train_with_fixed_host_splits_sampler_loss_optimizer(\n            model, epochs_at_most=200, batches_per_epoch=200\n        )\n        checkpoint = select_using_documented_host_checkpoint_rule(model)\n        save_one_category_checkpoint(checkpoint, matching_configuration=True)\n        write_matching_embedded_predictor()\n        verify_reload_features_scores_causality_and_padding()\n    # Host evaluation only; retain fixed users, candidates and evaluator.\n    log_authorized_macro_validation_and_query_costs()\n    if authorized_per_user_hits_available:\n        report_paired_gained_lost_hits_and_exploratory_stratified_intervals()\n# Select by pinned macro validation HR@10 under the recorded rule.\n# Preserve DiagnosisProbe, ModelView and interpreter interfaces throughout.",
+    "originality": {
+      "score": 3,
+      "positive": "Applies normalized residual-depth selection and explicit causal prefix conditioning to a constrained NextItNet setting, with controls that can identify which component matters.",
+      "negative": "Position-specific feed-forward depth weighting has direct precedents in dynamic layer aggregation; ELMo and Jumping Knowledge further limit novelty claims. The proposed conditioning mechanism has no supplied supporting experiment."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides a practical route to studying recent versus persistent evidence within one sequential network and can produce interpretable depth-use diagnostics.",
+      "negative": "Neither improved HR@10 nor useful gate specialization is established. Sampled ranking gains may not transfer to full-catalog recommendations or the user-facing intent failures, and adaptive validation reuse can exaggerate gains."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "Reuses the supplied residual backbone and adds only small normalization, gating, and residual components without additional fitted predictors.",
+      "negative": "Correct internal padding masks, expanded-context diagnostics, matched controls, checkpoint/predictor synchronization, and causal regression checks require materially more work than adding a small output head."
+    }
+  },
+  "related_work": [
+    {
+      "title": "NextItNet",
+      "link": "https://arxiv.org/abs/1808.05163",
+      "contributions": [
+        "Uses residual causal dilated convolutions to capture sequential dependencies across receptive-field scales.",
+        "Provides the required backbone and intermediate states reused by the proposed single network."
+      ],
+      "limitations": [
+        "Does not establish the effectiveness of adaptive normalized residual-depth aggregation.",
+        "Architectural causality still requires correct normalization axes, padding operations, and predictor implementation."
+      ]
+    },
+    {
+      "title": "NextItNet implementation in Microsoft Recommenders",
+      "link": "https://recommenders-team.github.io/recommenders/_modules/recommenders/models/deeprec/models/sequential/nextitnet.html",
+      "contributions": [
+        "Provides a concrete reference for causal temporal convolutions and channel-wise normalization."
+      ],
+      "limitations": [
+        "A reference implementation does not establish padding invariance for a modified host architecture; intermediate masking and empirical checks remain necessary."
+      ]
+    },
+    {
+      "title": "ScaleRec",
+      "link": "https://doi.org/10.1016/j.ipm.2025.104318",
+      "contributions": [
+        "The supplied search summary describes multiple temporal granularities, transient versus stable interests, and context-adaptive aggregation."
+      ],
+      "limitations": [
+        "Its results do not establish benefits for the proposed NextItNet extension or the pinned four-category benchmark."
+      ]
+    },
+    {
+      "title": "Dynamic Layer Aggregation for Neural Machine Translation",
+      "link": "https://ojs.aaai.org/index.php/AAAI/article/download/3772/3650",
+      "contributions": [
+        "Provides direct precedent for position-specific feed-forward layer aggregation and routing-based aggregation."
+      ],
+      "limitations": [
+        "Addresses a different task and architecture.",
+        "Makes position-specific softmax depth weighting insufficient as a standalone novelty claim."
+      ]
+    },
+    {
+      "title": "Deep Contextualized Word Representations (ELMo)",
+      "link": "https://aclanthology.org/N18-1202/",
+      "contributions": [
+        "Learns task-specific softmax scalar layer weights shared across positions, together with an overall scale.",
+        "Motivates a retrained global-weight aggregation control."
+      ],
+      "limitations": [
+        "Does not establish that position-dependent aggregation outperforms shared weights in sequential recommendation."
+      ]
+    },
+    {
+      "title": "Representation Learning on Graphs with Jumping Knowledge Networks",
+      "link": "https://proceedings.mlr.press/v80/xu18c.html",
+      "contributions": [
+        "Aggregates intermediate representations using concatenation, max pooling, or adaptive attention to select useful neighborhood ranges."
+      ],
+      "limitations": [
+        "Graph neighborhoods differ from causal temporal receptive fields.",
+        "Provides conceptual precedent rather than evidence for this benchmark."
+      ]
+    },
+    {
+      "title": "R²NS",
+      "link": "https://renzhaochun.github.io/assets/pdf/WWW_2026_Camera_Ready.pdf",
+      "contributions": [
+        "Motivates uniform-negative warm-up followed by stochastic selection from increasingly difficult candidate pools."
+      ],
+      "limitations": [
+        "High-scoring unseen items may be potential positives.",
+        "Negative sampling remains a separate experimental direction and should stay unchanged in the first aggregation experiment."
+      ]
+    },
+    {
+      "title": "TemProxRec",
+      "link": "https://arxiv.org/abs/2402.09784",
+      "contributions": [
+        "Motivates distinguishing within-user elapsed-time information from cross-user temporal proximity."
+      ],
+      "limitations": [
+        "Does not establish benefits from gap-conditioned NextItNet gates.",
+        "The next interaction timestamp is unavailable at prediction and cannot be used as an input."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled recommendation metrics can produce model orderings inconsistent with full-catalog evaluation."
+      ],
+      "limitations": [
+        "Does not invalidate using the user-mandated pinned sampled HR@10 for selection.",
+        "Does not supply a correction that should replace the host evaluator."
+      ]
+    },
+    {
+      "title": "Generalization in Adaptive Data Analysis and Holdout Reuse",
+      "link": "https://papers.neurips.cc/paper_files/paper/2015/hash/bad5f33780c42f2588878a9d07405083-Abstract.html",
+      "contributions": [
+        "Explains how repeated adaptive analysis can overfit reused holdout data.",
+        "Motivates transparent validation-query accounting and cautious interpretation of selected winners."
+      ],
+      "limitations": [
+        "Logging search intensity and reporting paired intervals do not themselves remove adaptive-selection bias.",
+        "No protected holdout mechanism is supplied for this experiment."
+      ]
+    }
+  ]
+}

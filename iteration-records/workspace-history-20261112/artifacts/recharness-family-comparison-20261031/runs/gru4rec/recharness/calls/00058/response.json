@@ -1,0 +1,27 @@
+{
+  "category_edits": [
+    {
+      "category": "sequence_interest",
+      "rationale": "Test whether excluding left-padding steps from GRU recurrence improves short-history representations across all four datasets. Pack observed items, run the unchanged GRU, and restore states to their original supervised positions. Preserve final-real-position readout, embeddings, scoring, loss, optimizer and sampling. The predictor imports the updated model class and verifies matching sequence-policy metadata.",
+      "edits": [
+        {
+          "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+          "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+        },
+        {
+          "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        # Histories are LEFT padded; count-1 indexes padding on short histories.\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores",
+          "replace": "    def _sequence_states(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        batch_size, width = seq.shape\n        valid = seq.ne(0)\n        lengths = valid.sum(dim=1)\n        positions = torch.arange(width, device=seq.device).expand_as(seq)\n        # Move each LEFT-padded history to the beginning without changing order.\n        offsets = width - lengths\n        compact_indices = (positions + offsets.unsqueeze(1)).clamp(max=width - 1)\n        compact_emb = emb.gather(\n            1, compact_indices.unsqueeze(-1).expand(-1, -1, self.hidden_units)\n        )\n        packed = nn.utils.rnn.pack_padded_sequence(\n            compact_emb, lengths.clamp(min=1).cpu(),\n            batch_first=True, enforce_sorted=False,\n        )\n        packed_out, _ = self.gru(packed)\n        compact_out, _ = nn.utils.rnn.pad_packed_sequence(\n            packed_out, batch_first=True, total_length=width,\n        )\n        # Restore states to the original positions used by positive/negative targets.\n        aligned_indices = (positions - offsets.unsqueeze(1)).clamp(min=0)\n        out = compact_out.gather(\n            1, aligned_indices.unsqueeze(-1).expand(-1, -1, self.hidden_units)\n        )\n        return out.masked_fill(~valid.unsqueeze(-1), 0.0)\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        out = self._sequence_states(seq)\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        out = self._sequence_states(seq)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores"
+        },
+        {
+          "find": "            \"maxlen\": MAXLEN,\n            \"hidden_units\": HIDDEN_UNITS,",
+          "replace": "            \"maxlen\": MAXLEN,\n            \"sequence_policy\": \"packed_nonpadding_v1\",\n            \"hidden_units\": HIDDEN_UNITS,"
+        },
+        {
+          "find": "        with open(meta_path, \"rb\") as f:\n            meta = pickle.load(f)\n        model = ModelClass(",
+          "replace": "        with open(meta_path, \"rb\") as f:\n            meta = pickle.load(f)\n        if meta.get(\"sequence_policy\") != \"packed_nonpadding_v1\":\n            raise RuntimeError(f\"Incompatible GRU sequence policy for {ds}\")\n        if not hasattr(ModelClass, \"_sequence_states\"):\n            raise RuntimeError(\"Predictor requires the packed-history GRU model class\")\n        model = ModelClass("
+        }
+      ]
+    }
+  ],
+  "change_summary": "Exclude left padding from GRU recurrence while preserving observed context, aligned training targets and final-real-state inference. Record and verify the sequence policy in the predictor writer; checkpoint parameter shapes remain unchanged."
+}

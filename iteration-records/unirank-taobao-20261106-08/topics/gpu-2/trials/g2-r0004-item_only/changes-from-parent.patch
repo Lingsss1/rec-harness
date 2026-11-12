@@ -1,0 +1,93 @@
+--- g2-r0003-both_blocked/model.py
++++ g2-r0004-item_only/model.py
+@@ -1,11 +1,17 @@
+-"""Prospective gradient attribution for task-selective history compression.
+-
+-Four cells retain identical parameters, initialization order, 30 summaries,
+-UF readout, four BCE losses and inference. Only auxiliary gradient paths into
+-shared scorer parameters and/or embeddings differ. Training recomputes the
+-scorer with cloned buffers; persistent Dice state updates exactly once.
+-No training or numerical execution performed in the preparation environment.
+-Requires host PyTorch with torch.func.functional_call and numerical gates.
+-This is an attribution experiment, not a verified new architecture claim.
++"""Prospective source-path attribution under fixed compressed UF histories.
++
++Auxiliary gradients into the shared scorer are always blocked. Independent
++switches control auxiliary gradients through supplied context embeddings and
++through target/history item-and-action embeddings. Four cells keep identical
++modules, initialization order, 30 summaries, forward values and inference.
++Neither/both endpoints correspond to the earlier both_blocked/scorer_only
++operators. Same-seed endpoint replays are consistency checks, not repetition.
++
++These are computational path gates: tied target/history tables remain tied,
++and cross-source aliases must be audited by the host before ownership claims.
++Persistent Dice state updates only in the primary scorer call. Preparation
++performs no numerical execution or training; torch.func support and the
++forward/backward/masking gates in proposal.json remain host prerequisites.
++No architecture novelty or new predictive improvement is claimed.
+ """
+ import torch
+@@ -23,14 +29,15 @@
+     'compression_routes': 'uf',
+     'block_aux_scorer_grad': True,
+-    'block_aux_embedding_grad': True,
++    'block_aux_context_grad': True,
++    'block_aux_item_grad': False,
+ }
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='TaskSelectiveCompression', gpu=-1,
++    def __init__(self, feature_map, model_id='SourcePathCompression', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+                  compression_routes='uf', block_aux_scorer_grad=True,
+-                 block_aux_embedding_grad=True, num_tasks=None,
++                 block_aux_context_grad=True, block_aux_item_grad=False, num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -41,12 +48,15 @@
+             raise ValueError('Unnormalized DIN activation is required')
+         if compression_routes != 'uf':
+-            raise ValueError('This gradient study freezes click/auxiliary routes to uf')
++            raise ValueError('This source-path study freezes click/auxiliary routes to uf')
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         self.compression_routes = compression_routes
+-        if not isinstance(block_aux_scorer_grad, bool) or not isinstance(block_aux_embedding_grad, bool):
+-            raise ValueError('Gradient-routing switches must be booleans')
++        if block_aux_scorer_grad is not True:
++            raise ValueError('Auxiliary scorer parameter gradients must stay blocked')
++        if not isinstance(block_aux_context_grad, bool) or not isinstance(block_aux_item_grad, bool):
++            raise ValueError('Source-path switches must be booleans')
+         self.block_aux_scorer_grad = block_aux_scorer_grad
+-        self.block_aux_embedding_grad = block_aux_embedding_grad
++        self.block_aux_context_grad = block_aux_context_grad
++        self.block_aux_item_grad = block_aux_item_grad
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -143,7 +153,7 @@
+ 
+     def _auxiliary_activation(self, interactions):
+-        # Functional evaluation uses the SAME learned scorer, with optional
+-        # parameter stop-gradient. Do not use no_grad: input gradients must
+-        # survive in the scorer-only intervention.
++        # Functional evaluation uses the SAME learned scorer with parameter
++        # stop-gradient fixed on. Do not use no_grad: gradients into each
++        # allowed embedding source must survive the shared scoring operator.
+         parameters = {
+             name: (parameter.detach() if self.block_aux_scorer_grad else parameter)
+@@ -175,7 +185,10 @@
+ 
+         if self.training:
+-            aux_context = context.detach() if self.block_aux_embedding_grad else context
+-            aux_target = target.detach() if self.block_aux_embedding_grad else target
+-            aux_values = values.detach() if self.block_aux_embedding_grad else values
++            # Item fields share tables across current target and past events:
++            # gate both uses together. Historical action joins this group.
++            # Context includes only supplied non-item/non-action features.
++            aux_context = context.detach() if self.block_aux_context_grad else context
++            aux_target = target.detach() if self.block_aux_item_grad else target
++            aux_values = values.detach() if self.block_aux_item_grad else values
+             aux_weights = self._auxiliary_activation(self._interactions(aux_target, aux_values))
+             aux_strata = self._pool(aux_weights, aux_values, counts)

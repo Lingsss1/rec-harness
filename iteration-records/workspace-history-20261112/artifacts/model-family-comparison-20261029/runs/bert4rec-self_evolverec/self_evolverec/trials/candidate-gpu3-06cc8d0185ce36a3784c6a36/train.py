@@ -1,0 +1,760 @@
+"""Per-dataset BERT4Rec baseline for Amazon Reviews.
+
+Trains one independent BERT4Rec checkpoint per dataset while sharing one default
+hyper-parameter profile across datasets. The generated predict.py routes by the
+optional dataset_name keyword used by the RecHarness Amazon Reviews harness.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import pickle
+import random
+from collections import defaultdict
+
+import numpy as np
+import torch
+import torch.nn as nn
+
+DEFAULT_DATASETS = [
+    "Movies_and_TV",
+    "Industrial_and_Scientific",
+    "Electronics",
+    "CDs_and_Vinyl",
+]
+DATASETS = [
+    part.strip()
+    for part in os.environ.get("GAGC_DATASETS", ",".join(DEFAULT_DATASETS)).split(",")
+    if part.strip()
+]
+
+### >>> Self_EvolveRec-BLOCK-START: Fixed benchmark data source and training seed
+DATA_DIR = os.environ["GAGC_DATA_DIR"]
+
+SEED = 42
+### <<< Self_EvolveRec-BLOCK-END
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
+
+def _read_split(path: str) -> dict[int, list[int]]:
+    data: dict[int, list[int]] = defaultdict(list)
+    if not os.path.isfile(path):
+        return {}
+    with open(path) as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) == 2:
+                data[int(parts[0])].append(int(parts[1]))
+    return dict(data)
+
+
+def _load_itemnum(data_dir: str, dataset_name: str) -> int:
+    stats_path = os.path.join(data_dir, "dataset_stats.json")
+    if os.path.isfile(stats_path):
+        with open(stats_path) as f:
+            stats = json.load(f)
+        if dataset_name in stats:
+            return int(stats[dataset_name]["itemnum"])
+    itemnum = 0
+    for split in ("train", "valid"):
+        path = os.path.join(data_dir, f"{dataset_name}_{split}.txt")
+        if not os.path.isfile(path):
+            continue
+        with open(path) as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) == 2:
+                    itemnum = max(itemnum, int(parts[1]))
+    return itemnum
+
+
+def load_dataset(dataset_name: str, data_dir: str):
+    user_train = _read_split(os.path.join(data_dir, f"{dataset_name}_train.txt"))
+    user_valid = _read_split(os.path.join(data_dir, f"{dataset_name}_valid.txt"))
+    itemnum = _load_itemnum(data_dir, dataset_name)
+    return user_train, user_valid, itemnum
+
+
+### >>> Self_EvolveRec-BLOCK-START: Leakage-free terminal prefixes with independent uniform candidate sampling
+TERMINAL_NEGATIVES = 32
+TERMINAL_WEIGHT = 0.5
+
+
+def sample_batch(
+    user_train: dict[int, list[int]],
+    itemnum: int,
+    batch_size: int,
+    maxlen: int,
+    *,
+    return_training_metadata=False,
+    rng=None,
+    candidate_rng=None,
+):
+    # The four-argument diagnostic interface still returns three B x L arrays.
+    # Source audit: the supplied baseline has only interior one-negative BPR,
+    # pooled over supervised positions, and no separate branch coefficients.
+    # Thus this trial bundles terminal-prefix allocation and CE32; it cannot
+    # isolate cross-entropy from candidate count or terminal supervision.
+    sampler = random if rng is None else rng
+    if maxlen < 2 or batch_size < 2 or batch_size % 2:
+        raise ValueError("Require maxlen >= 2 and a positive even batch size")
+    if return_training_metadata and candidate_rng is None:
+        raise ValueError("Training requires a dedicated candidate RNG")
+    users = [u for u, items in user_train.items() if len(items) >= 2]
+    if not users:
+        raise RuntimeError("no users with at least two training interactions")
+    terminal_rows = [True] * (batch_size // 2) + [False] * (batch_size // 2)
+    sampler.shuffle(terminal_rows)
+    batch_seq, batch_pos, batch_neg = [], [], []
+    terminal_exclusions = []
+    for terminal in terminal_rows:
+        history = user_train[sampler.choice(users)]
+        seq = np.zeros(maxlen, dtype=np.int64)
+        pos = np.zeros(maxlen, dtype=np.int64)
+        neg = np.zeros(maxlen, dtype=np.int64)
+        if terminal:
+            endpoint = sampler.randrange(1, len(history))
+            context = history[max(0, endpoint - maxlen + 1) : endpoint]
+            seq[-len(context) - 1 : -1] = context
+            seq[-1] = history[endpoint]
+            selected = [maxlen - 1]
+        else:
+            # Retain the supplied interior window and masking policy.
+            items = history[-maxlen:]
+            seq[-len(items) :] = items
+            eligible = list(range(maxlen - len(items), maxlen))
+            selected = [i for i in eligible if sampler.random() < 0.2]
+            if not selected:
+                selected = [sampler.choice(eligible)]
+            if sampler.random() < 0.5 and maxlen - 1 not in selected:
+                selected.append(maxlen - 1)
+        interacted = {int(item) for item in history if 1 <= int(item) <= itemnum}
+        if len(interacted) >= itemnum:
+            raise RuntimeError("no unobserved negative item available")
+        for i in selected:
+            pos[i] = seq[i]
+            seq[i] = itemnum + 1
+            item = sampler.randint(1, itemnum)
+            while item in interacted:
+                item = sampler.randint(1, itemnum)
+            neg[i] = item
+        if terminal:
+            # Same full-training-history exclusion policy as baseline BPR.
+            # Later training events affect exclusions, never terminal input.
+            terminal_exclusions.append(interacted | {int(pos[-1])})
+        batch_seq.append(seq)
+        batch_pos.append(pos)
+        batch_neg.append(neg)
+    result = (np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg))
+    if not return_training_metadata:
+        return result
+
+    candidates = np.zeros((batch_size // 2, TERMINAL_NEGATIVES), dtype=np.int64)
+    eligible_counts = np.empty(batch_size // 2, dtype=np.int64)
+    for row, blocked in enumerate(terminal_exclusions):
+        available = itemnum - len(blocked)
+        eligible_counts[row] = available
+        k = min(TERMINAL_NEGATIVES, available)
+        if k < 1:
+            raise RuntimeError("No eligible terminal candidate")
+        if available <= TERMINAL_NEGATIVES or available * 2 < itemnum:
+            pool = np.asarray(
+                [item for item in range(1, itemnum + 1) if item not in blocked],
+                dtype=np.int64,
+            )
+            candidates[row, :k] = candidate_rng.choice(pool, size=k, replace=False)
+        else:
+            # Exact uniform sampling without replacement by rejection.
+            accepted, seen = [], set()
+            while len(accepted) < k:
+                draws = candidate_rng.integers(1, itemnum + 1, size=2 * k)
+                for value in draws:
+                    item = int(value)
+                    if item not in blocked and item not in seen:
+                        seen.add(item)
+                        accepted.append(item)
+                        if len(accepted) == k:
+                            break
+            candidates[row, :k] = accepted
+    return (
+        *result,
+        np.asarray(terminal_rows, dtype=np.bool_),
+        candidates,
+        eligible_counts,
+    )
+
+
+### <<< Self_EvolveRec-BLOCK-END
+
+
+def _history_to_tensor(
+    history: list[int], maxlen: int, device: torch.device
+) -> torch.Tensor:
+    seq_arr = np.zeros(maxlen, dtype=np.int64)
+    for i, item in enumerate(reversed(history[-maxlen:])):
+        seq_arr[maxlen - 1 - i] = item
+    return torch.tensor([seq_arr], dtype=torch.long, device=device)
+
+
+def evaluate_val(
+    model: nn.Module,
+    user_train: dict[int, list[int]],
+    user_valid: dict[int, list[int]],
+    itemnum: int,
+    device: torch.device,
+    maxlen: int,
+    num_users: int = 200,
+) -> dict[str, float]:
+    ### >>> Self_EvolveRec-BLOCK-START: Freeze local validation sampling independently of training randomness
+    rng = random.Random(SEED)
+    previous_training = model.training
+    val_users = [u for u in user_valid if u in user_train and user_valid[u]]
+    if len(val_users) > num_users:
+        val_users = rng.sample(val_users, num_users)
+    ### <<< Self_EvolveRec-BLOCK-END
+    if not val_users:
+        return {"HR@10": 0.0, "HR@20": 0.0, "NDCG@10": 0.0, "NDCG@20": 0.0}
+
+    hr10 = hr20 = ndcg10 = ndcg20 = 0.0
+    model.eval()
+    with torch.no_grad():
+        for user in val_users:
+            target = user_valid[user][0]
+            history = user_train[user]
+            interacted = set(history) | {target, 0}
+            ### >>> Self_EvolveRec-BLOCK-START: Reuse deterministic unique local validation candidates and reject insufficient pools
+            candidates = [target]
+            excluded_real = sum(1 for item in interacted if 1 <= item <= itemnum)
+            if itemnum - excluded_real < 99:
+                raise RuntimeError(
+                    f"Validation user {user} has fewer than 99 eligible negatives"
+                )
+            while len(candidates) < 100:
+                neg_item = rng.randint(1, itemnum)
+                if neg_item not in interacted:
+                    interacted.add(neg_item)
+                    candidates.append(neg_item)
+            ### <<< Self_EvolveRec-BLOCK-END
+            seq_t = _history_to_tensor(history, maxlen, device)
+            cand_t = torch.tensor(candidates, dtype=torch.long, device=device)
+            scores = model.score_candidates(seq_t, cand_t).detach().cpu().tolist()
+            rank = sorted(range(len(scores)), key=lambda i: -scores[i]).index(0)
+            hr10 += 1.0 if rank < 10 else 0.0
+            hr20 += 1.0 if rank < 20 else 0.0
+            ndcg10 += (1.0 / math.log2(rank + 2)) if rank < 10 else 0.0
+            ndcg20 += (1.0 / math.log2(rank + 2)) if rank < 20 else 0.0
+    n = float(len(val_users))
+    ### >>> Self_EvolveRec-BLOCK-START: Restore the caller's model mode after local validation
+    model.train(previous_training)
+    ### <<< Self_EvolveRec-BLOCK-END
+    return {
+        "HR@10": hr10 / n,
+        "HR@20": hr20 / n,
+        "NDCG@10": ndcg10 / n,
+        "NDCG@20": ndcg20 / n,
+    }
+
+
+### >>> Self_EvolveRec-BLOCK-START: Terminal CE32 and unchanged pooled interior BPR in one encoder pass
+def bpr_sequence_loss(
+    model: nn.Module,
+    seq: torch.Tensor,
+    pos: torch.Tensor,
+    neg: torch.Tensor,
+    terminal_rows=None,
+    terminal_negatives=None,
+) -> torch.Tensor:
+    valid = pos.ne(0)
+    if not bool(valid.any(1).all()):
+        raise ValueError("Every example requires supervised targets")
+    if not bool(seq[valid].eq(model.mask_token).all()):
+        raise ValueError("Every supervised input position must contain MASK")
+    out = model.encode_sequence(seq)
+    pos_scores = (out * model.item_emb(pos)).sum(-1)
+    neg_scores = (out * model.item_emb(neg)).sum(-1)
+    pair_loss = torch.nn.functional.softplus(neg_scores - pos_scores)
+    if terminal_rows is None:
+        if terminal_negatives is not None:
+            raise ValueError("Candidate negatives require branch metadata")
+        return pair_loss[valid].mean()
+
+    terminal_rows = torch.as_tensor(terminal_rows, dtype=torch.bool, device=seq.device)
+    if terminal_rows.shape != (seq.shape[0],):
+        raise ValueError("Branch metadata must have shape B")
+    n_terminal = int(terminal_rows.sum().item())
+    if n_terminal == 0 or 2 * n_terminal != seq.shape[0]:
+        raise ValueError("Require equal nonempty branches")
+    if terminal_negatives is None:
+        raise ValueError("Terminal CE requires explicitly sampled candidates")
+    negatives = torch.as_tensor(terminal_negatives, dtype=torch.long, device=seq.device)
+    if negatives.shape != (n_terminal, TERMINAL_NEGATIVES):
+        raise ValueError("Unexpected terminal candidate shape")
+    terminal_seq = seq[terminal_rows]
+    terminal_pos = pos[terminal_rows]
+    if not bool(terminal_seq[:, -1].eq(model.mask_token).all()):
+        raise ValueError("Terminal sequences must end in MASK")
+    if not bool(terminal_seq.eq(model.mask_token).sum(1).eq(1).all()):
+        raise ValueError("Terminal sequences require exactly one MASK")
+    if not bool(terminal_pos.ne(0).sum(1).eq(1).all()):
+        raise ValueError("Terminal examples require exactly one target")
+    targets = terminal_pos[:, -1]
+    if not bool(((targets >= 1) & (targets <= model.itemnum)).all()):
+        raise ValueError("Invalid terminal target")
+    if not bool(((negatives >= 0) & (negatives <= model.itemnum)).all()):
+        raise ValueError("Invalid terminal negatives")
+    valid_negative = negatives.ne(0)
+    if not bool(valid_negative.any(1).all()):
+        raise ValueError("Each terminal target requires eligible negatives")
+    if bool((negatives.eq(targets[:, None]) & valid_negative).any()):
+        raise ValueError("Target appeared among negatives")
+    ordered = negatives.sort(1).values
+    if bool((ordered[:, 1:].eq(ordered[:, :-1]) & ordered[:, 1:].ne(0)).any()):
+        raise ValueError("Terminal negatives must be unique")
+    candidates = torch.cat((targets[:, None], negatives), dim=1)
+    # Exact baseline dot-product scorer, no normalization, bias or temperature.
+    # Under left padding the appended MASK is at the final absolute position.
+    features = out[terminal_rows, -1, :]
+    logits = torch.einsum("bd,bkd->bk", features, model.item_emb(candidates)).float()
+    candidate_valid = torch.cat(
+        (torch.ones_like(targets[:, None], dtype=torch.bool), valid_negative), dim=1
+    )
+    if not bool(torch.isfinite(logits[candidate_valid]).all()):
+        raise FloatingPointError("Nonfinite terminal logits")
+    logits = logits.masked_fill(~candidate_valid, float("-inf"))
+    terminal_loss = torch.nn.functional.cross_entropy(
+        logits, torch.zeros(n_terminal, dtype=torch.long, device=seq.device)
+    )
+    # Preserve baseline interior reduction: pool its supervised positions.
+    interior_loss = pair_loss[(~terminal_rows[:, None]) & valid].mean()
+    return TERMINAL_WEIGHT * terminal_loss + (1.0 - TERMINAL_WEIGHT) * interior_loss
+
+
+### <<< Self_EvolveRec-BLOCK-END
+
+
+# Hyper-parameters
+MAXLEN = int(os.environ.get("BERT4REC_MAXLEN", "128"))
+HIDDEN_UNITS = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+NUM_BLOCKS = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+NUM_HEADS = int(os.environ.get("BERT4REC_HEADS", "2"))
+DROPOUT_RATE = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
+LR = float(os.environ.get("BERT4REC_LR", "1e-3"))
+WEIGHT_DECAY = float(os.environ.get("BERT4REC_WD", "0.0"))
+BATCH_SIZE = int(os.environ.get("BERT4REC_BATCH", "128"))
+### >>> Self_EvolveRec-BLOCK-START: Preserve benchmark update limits and environment epoch default
+NUM_BATCHES = 200
+NUM_EPOCHS = max(
+    1,
+    min(
+        200,
+        int(os.environ.get("BERT4REC_EPOCHS", os.environ.get("SASREC_EPOCHS", "200"))),
+    ),
+)
+### <<< Self_EvolveRec-BLOCK-END
+### >>> Self_EvolveRec-BLOCK-START: Reject invalid validation and stopping configuration before training
+EVAL_EVERY = int(os.environ.get("BERT4REC_EVAL_EVERY", "5"))
+PATIENCE = int(os.environ.get("BERT4REC_PATIENCE", "20"))
+if EVAL_EVERY < 1 or PATIENCE < 1:
+    raise ValueError("BERT4REC_EVAL_EVERY and BERT4REC_PATIENCE must be positive")
+if MAXLEN < 2 or BATCH_SIZE < 2 or BATCH_SIZE % 2:
+    raise ValueError("Require maxlen >= 2 and a positive even batch size")
+if HIDDEN_UNITS < 1 or NUM_HEADS < 1 or HIDDEN_UNITS % NUM_HEADS:
+    raise ValueError("Hidden size must be positive and divisible by the head count")
+if NUM_BLOCKS < 1:
+    raise ValueError("BERT4Rec requires at least one encoder block")
+### <<< Self_EvolveRec-BLOCK-END
+
+
+class BERT4RecModel(nn.Module):
+    def __init__(
+        self,
+        itemnum: int,
+        hidden_units: int = 64,
+        num_blocks: int = 2,
+        num_heads: int = 2,
+        dropout_rate: float = 0.2,
+        maxlen: int = 128,
+    ):
+        super().__init__()
+        self.itemnum = itemnum
+        self.hidden_units = hidden_units
+        self.maxlen = maxlen
+        self.mask_token = itemnum + 1
+        self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+        self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_units,
+            nhead=num_heads,
+            dim_feedforward=hidden_units * 4,
+            dropout=dropout_rate,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        ### >>> Self_EvolveRec-BLOCK-START: Preserve dense absolute sequence slots in training and exported inference
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer, num_layers=num_blocks, enable_nested_tensor=False
+        )
+        ### <<< Self_EvolveRec-BLOCK-END
+        self.dropout = nn.Dropout(dropout_rate)
+        self.norm = nn.LayerNorm(hidden_units)
+        with torch.no_grad():
+            nn.init.xavier_uniform_(self.item_emb.weight)
+            self.item_emb.weight[0].zero_()
+            nn.init.xavier_uniform_(self.pos_emb.weight)
+            self.pos_emb.weight[0].zero_()
+
+    def encode_sequence(self, seq: torch.Tensor) -> torch.Tensor:
+        batch, length = seq.shape
+        pos = torch.arange(length, device=seq.device).unsqueeze(0).expand(batch, -1) + 1
+        pos = pos * (seq != 0).long()
+        x = self.item_emb(seq) * (self.hidden_units**0.5) + self.pos_emb(pos)
+        x = self.dropout(x)
+        padding = seq == 0
+        safe_padding = padding.clone()
+        safe_padding[padding.all(dim=1), -1] = False
+        x = self.encoder(x, src_key_padding_mask=safe_padding)
+        return self.norm(x)
+
+    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):
+        out = self.encode_sequence(seq)
+        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)
+        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)
+        return pos_scores, neg_scores
+
+    ### >>> Self_EvolveRec-BLOCK-START: Match singleton and batched appended-mask scoring through the canonical predictor model
+    def score_candidates(
+        self, seq: torch.Tensor, candidates: torch.Tensor
+    ) -> torch.Tensor:
+        if seq.ndim != 2 or seq.shape[0] == 0 or seq.shape[1] != self.maxlen:
+            raise ValueError("seq must have nonempty shape B x configured maxlen")
+        if candidates.ndim not in (1, 2):
+            raise ValueError("candidates must have shape C or B x C")
+        if candidates.ndim == 2 and candidates.shape[0] != seq.shape[0]:
+            raise ValueError("Candidate and sequence batch sizes must match")
+        prediction_seq = torch.zeros_like(seq)
+        prediction_seq[:, :-1] = seq[:, 1:]
+        prediction_seq[:, -1] = self.mask_token
+        # The appended MASK is the greatest nonpadding index under left padding.
+        user_emb = self.encode_sequence(prediction_seq)[:, -1, :]
+        cand_emb = self.item_emb(candidates)
+        if candidates.ndim == 1:
+            scores = user_emb @ cand_emb.transpose(0, 1)
+        else:
+            scores = torch.einsum("bd,bcd->bc", user_emb, cand_emb)
+        return scores[0] if seq.shape[0] == 1 else scores
+
+    ### <<< Self_EvolveRec-BLOCK-END
+
+
+### >>> Self_EvolveRec-BLOCK-START: Independent reproducible category initialization
+def train_one_dataset(dataset_name: str, device: torch.device, data_dir: str) -> float:
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+    sampler_rng = random.Random(SEED)
+    candidate_rng = np.random.default_rng(
+        np.random.SeedSequence([SEED, 32001, DEFAULT_DATASETS.index(dataset_name)])
+    )
+    user_train, user_valid, itemnum = load_dataset(dataset_name, data_dir)
+    ### <<< Self_EvolveRec-BLOCK-END
+    print(f"  [{dataset_name}] users={len(user_train)}  items={itemnum}", flush=True)
+    if itemnum <= 0 or not user_train:
+        raise RuntimeError(f"empty dataset or item vocabulary for {dataset_name}")
+
+    model = BERT4RecModel(
+        itemnum=itemnum,
+        hidden_units=HIDDEN_UNITS,
+        num_blocks=NUM_BLOCKS,
+        num_heads=NUM_HEADS,
+        dropout_rate=DROPOUT_RATE,
+        maxlen=MAXLEN,
+    ).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+
+    working_dir = os.path.join(os.path.dirname(__file__), "working")
+    os.makedirs(working_dir, exist_ok=True)
+    ckpt_path = os.path.join(working_dir, f"{dataset_name}_model.pt")
+
+    ### >>> Self_EvolveRec-BLOCK-START: Record the bundled terminal competition intervention
+    experiment = {
+        "baseline_terminal_branch": False,
+        "baseline_loss": "one-negative BPR pooled over interior supervised positions",
+        "intervention": "balanced terminal-prefix CE32 and original interior BPR",
+        "attribution": "bundled terminal supervision, candidate count, and objective change",
+        "terminal_weight": TERMINAL_WEIGHT,
+        "interior_reduction": "pooled supervised positions",
+        "terminal_reduction": "mean over terminal examples",
+        "negative_policy": "uniform unique real IDs excluding full training history and target",
+        "terminal_sampler": "uniform eligible user then uniform endpoint 1..n-1",
+        "temperature": 1.0,
+        "scorer": "unnormalized tied item-embedding dot product",
+        "seed": SEED,
+        "requested_terminal_negatives": TERMINAL_NEGATIVES,
+        "terminal_examples": 0,
+        "terminal_supervised_targets": 0,
+        "interior_supervised_targets": 0,
+        "eligible_negative_min": None,
+        "realized_negative_histogram": {},
+        "candidate_shortage_examples": 0,
+        "completed_updates": 0,
+        "clipped_updates": 0,
+    }
+    best_hr10 = -1.0
+    best_epoch = 0
+    ### <<< Self_EvolveRec-BLOCK-END
+    for epoch in range(1, NUM_EPOCHS + 1):
+        model.train()
+        total_loss = 0.0
+        for _ in range(NUM_BATCHES):
+            ### >>> Self_EvolveRec-BLOCK-START: Execute terminal CE32 with isolated candidate randomness
+            seq, pos, neg, terminal_rows, candidate_neg, eligible_counts = sample_batch(
+                user_train,
+                itemnum,
+                BATCH_SIZE,
+                MAXLEN,
+                return_training_metadata=True,
+                rng=sampler_rng,
+                candidate_rng=candidate_rng,
+            )
+            realized = np.count_nonzero(candidate_neg, axis=1)
+            experiment["terminal_examples"] += int(realized.size)
+            experiment["terminal_supervised_targets"] += int(
+                np.count_nonzero(pos[terminal_rows])
+            )
+            experiment["interior_supervised_targets"] += int(
+                np.count_nonzero(pos[~terminal_rows])
+            )
+            experiment["candidate_shortage_examples"] += int(
+                np.count_nonzero(realized < TERMINAL_NEGATIVES)
+            )
+            minimum = int(eligible_counts.min())
+            previous = experiment["eligible_negative_min"]
+            experiment["eligible_negative_min"] = (
+                minimum if previous is None else min(previous, minimum)
+            )
+            for count, frequency in zip(*np.unique(realized, return_counts=True)):
+                key = str(int(count))
+                histogram = experiment["realized_negative_histogram"]
+                histogram[key] = histogram.get(key, 0) + int(frequency)
+            seq_t = torch.as_tensor(seq, dtype=torch.long, device=device)
+            pos_t = torch.as_tensor(pos, dtype=torch.long, device=device)
+            neg_t = torch.as_tensor(neg, dtype=torch.long, device=device)
+            loss = bpr_sequence_loss(
+                model, seq_t, pos_t, neg_t, terminal_rows, candidate_neg
+            )
+            loss_value = float(loss.detach().item())
+            if not math.isfinite(loss_value):
+                raise FloatingPointError(
+                    f"Nonfinite loss for {dataset_name} at epoch {epoch}"
+                )
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            gradient_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(), 5.0, error_if_nonfinite=True
+            )
+            experiment["clipped_updates"] += int(float(gradient_norm) > 5.0)
+            optimizer.step()
+            experiment["completed_updates"] += 1
+            total_loss += loss_value
+            ### <<< Self_EvolveRec-BLOCK-END
+
+        avg_loss = total_loss / max(NUM_BATCHES, 1)
+        if epoch % EVAL_EVERY == 0 or epoch == NUM_EPOCHS:
+            val_m = evaluate_val(model, user_train, user_valid, itemnum, device, MAXLEN)
+            hr10 = val_m["HR@10"]
+            print(
+                f"  [{dataset_name}] epoch {epoch:3d}/{NUM_EPOCHS}"
+                f"  loss={avg_loss:.4f}  val_score: {hr10:.4f}"
+                f"  HR@20={val_m['HR@20']:.4f}  NDCG@10={val_m['NDCG@10']:.4f}",
+                flush=True,
+            )
+            if hr10 > best_hr10:
+                best_hr10 = hr10
+                best_epoch = epoch
+                torch.save(model.state_dict(), ckpt_path)
+            if epoch - best_epoch >= PATIENCE:
+                print(f"  [{dataset_name}] Early stopping at epoch {epoch}", flush=True)
+                break
+        elif epoch % 10 == 0:
+            print(
+                f"  [{dataset_name}] epoch {epoch:3d}/{NUM_EPOCHS}  loss={avg_loss:.4f}",
+                flush=True,
+            )
+
+    if not os.path.exists(ckpt_path):
+        torch.save(model.state_dict(), ckpt_path)
+
+    ### >>> Self_EvolveRec-BLOCK-START: Persist actual completed training and selected-checkpoint identity
+    experiment.update(
+        configured_epochs=NUM_EPOCHS,
+        completed_epochs=epoch,
+        early_terminated=epoch < NUM_EPOCHS,
+        selected_epoch=best_epoch,
+        selected_local_validation_hr10=best_hr10,
+    )
+    with open(os.path.join(working_dir, f"{dataset_name}_experiment.json"), "w") as f:
+        json.dump(experiment, f, indent=2)
+    selected_state = torch.load(ckpt_path, map_location=device, weights_only=True)
+    model.load_state_dict(selected_state, strict=True)
+    for name, value in model.state_dict().items():
+        if not torch.equal(value, selected_state[name]):
+            raise RuntimeError(f"Checkpoint reload mismatch: {name}")
+    del selected_state
+    model.dataset_name = dataset_name
+    model.eval()
+    meta_path = os.path.join(working_dir, f"{dataset_name}_meta.pkl")
+    ### <<< Self_EvolveRec-BLOCK-END
+    with open(meta_path, "wb") as f:
+        pickle.dump(
+            {
+                "itemnum": itemnum,
+                "maxlen": MAXLEN,
+                "hidden_units": HIDDEN_UNITS,
+                "num_blocks": NUM_BLOCKS,
+                "num_heads": NUM_HEADS,
+                "dropout_rate": DROPOUT_RATE,
+            },
+            f,
+        )
+    print(
+        f"  [{dataset_name}] Best val HR@10={max(best_hr10, 0.0):.4f}  ckpt={ckpt_path}",
+        flush=True,
+    )
+    return max(best_hr10, 0.0)
+
+
+def write_predict_script(working_dir: str) -> None:
+    script = r'''"""Per-dataset BERT4Rec predict function."""
+from __future__ import annotations
+
+import importlib.util
+import os
+import pickle
+
+import torch
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_DATASETS = [
+    "Movies_and_TV",
+    "Industrial_and_Scientific",
+    "Electronics",
+    "CDs_and_Vinyl",
+]
+DATASETS = [
+    part.strip()
+    for part in os.environ.get("GAGC_DATASETS", ",".join(DEFAULT_DATASETS)).split(",")
+    if part.strip()
+]
+_models = {}
+_metas = {}
+_device = None
+
+
+def _load_model_class():
+    spec = importlib.util.spec_from_file_location(
+        f"bert4rec_perdataset_train_{os.getpid()}", os.path.join(_HERE, "..", "train.py")
+    )
+    ### >>> Self_EvolveRec-BLOCK-START: Register the canonical model module before predictor import
+    import sys
+
+    if spec is None or spec.loader is None:
+        raise ImportError("Cannot import the canonical BERT4Rec training module")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod.BERT4RecModel
+    ### <<< Self_EvolveRec-BLOCK-END
+
+
+def _ensure_loaded():
+    global _device
+    if _models:
+        return
+    _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ModelClass = _load_model_class()
+    for ds in DATASETS:
+        working_dir = _HERE if os.path.basename(_HERE) == "working" else os.path.join(_HERE, "working")
+        meta_path = os.path.join(working_dir, f"{ds}_meta.pkl")
+        ckpt_path = os.path.join(working_dir, f"{ds}_model.pt")
+        ### >>> Self_EvolveRec-BLOCK-START: Reject missing category checkpoints explicitly
+        if not os.path.isfile(meta_path) or not os.path.isfile(ckpt_path):
+            raise FileNotFoundError(f"Missing BERT4Rec artifacts for {ds}")
+        ### <<< Self_EvolveRec-BLOCK-END
+        with open(meta_path, "rb") as f:
+            meta = pickle.load(f)
+        model = ModelClass(
+            itemnum=meta["itemnum"],
+            hidden_units=meta["hidden_units"],
+            num_blocks=meta["num_blocks"],
+            num_heads=meta["num_heads"],
+            ### >>> Self_EvolveRec-BLOCK-START: Reload the trained architecture configuration
+            dropout_rate=meta["dropout_rate"],
+            ### <<< Self_EvolveRec-BLOCK-END
+            maxlen=meta["maxlen"],
+        ).to(_device)
+        ### >>> Self_EvolveRec-BLOCK-START: Strict single-checkpoint loading with category identity
+        model.load_state_dict(
+            torch.load(ckpt_path, map_location=_device, weights_only=True), strict=True
+        )
+        model.dataset_name = ds
+        model.eval()
+        ### <<< Self_EvolveRec-BLOCK-END
+        _models[ds] = model
+        _metas[ds] = meta
+
+
+def predict(user_id: int, history: list[int], candidates: list[int],
+            *, dataset_name: str | None = None) -> list[float]:
+    _ensure_loaded()
+    ### >>> Self_EvolveRec-BLOCK-START: Require unambiguous category routing
+    if dataset_name is None:
+        if len(_models) != 1:
+            raise ValueError("dataset_name is required for four-category prediction")
+        dataset_name = next(iter(_models))
+    if dataset_name not in _models:
+        raise ValueError(f"No trained BERT4Rec checkpoint for {dataset_name!r}")
+    model = _models[dataset_name]
+    meta = _metas[dataset_name]
+    ### <<< Self_EvolveRec-BLOCK-END
+
+    maxlen = int(meta.get("maxlen", 128))
+    seq_arr = [0] * maxlen
+    for i, item in enumerate(reversed(history[-maxlen:])):
+        seq_arr[maxlen - 1 - i] = item
+    seq_t = torch.tensor([seq_arr], dtype=torch.long, device=_device)
+    cand_t = torch.tensor(candidates, dtype=torch.long, device=_device)
+    with torch.no_grad():
+        scores = model.score_candidates(seq_t, cand_t).detach().cpu().tolist()
+    return [float(s) for s in scores]
+'''
+    predict_path = os.path.join(working_dir, "predict.py")
+    with open(predict_path, "w") as f:
+        f.write(script)
+    print(f"predict.py written -> {predict_path}", flush=True)
+
+
+def main() -> None:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Per-dataset BERT4Rec training on {device}", flush=True)
+    scores = []
+    for dataset_name in DATASETS:
+        scores.append(train_one_dataset(dataset_name, device, DATA_DIR))
+    working_dir = os.path.join(os.path.dirname(__file__), "working")
+    write_predict_script(working_dir)
+    avg = sum(scores) / max(len(scores), 1)
+    print(f"\nAll datasets done. Average val HR@10 = {avg:.4f}", flush=True)
+
+
+if __name__ == "__main__":
+    main()
+
+

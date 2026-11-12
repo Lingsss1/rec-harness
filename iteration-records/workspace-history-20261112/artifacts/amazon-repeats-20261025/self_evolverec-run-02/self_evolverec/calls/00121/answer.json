@@ -1,0 +1,128 @@
+{
+  "markdown_report": "At 0% progress, prioritize a reliable diagnostic adapter and one inexpensive model change. No measured improvement is established by the supplied evidence.\n\n**Insights from the starting point.** (1) Training margins depend on score scale and sampled negatives. They cannot establish improved validation HR@10. (2) Existing probes aggregate all valid positions. Final-prefix probes better match next-item inference, but training replay still measures fitted transitions. (3) Feedback distinguishes recent, repeated interests from incidental history. Perturbations measure model dependence, not intent, compatibility, or causal effects.\n\n**Insights from related work.** (1) [Sampling reliability](https://doi.org/10.1145/3705328.3748086) and [sampled metrics](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/) caution that sampled rankings can differ from full-catalog rankings. Freeze candidates and retain the official objective. (2) [Disentangling sequence patterns](https://doi.org/10.1145/3705328.3748042) motivates ordering controls; positional changes remain confounded. (3) [Repetition and Exploration](https://staff.fnwi.uva.nl/m.derijke/wp-content/papercite-data/pdf/li-2023-repetition.pdf) motivates separating repeated targets from repeated-interest evidence. (4) [ReZero](https://proceedings.mlr.press/v161/bachlechner21a/bachlechner21a.pdf) supports zero-initialized residual scaling; it does not establish recommendation gains.\n\n**Framework and directions.** Distinguish observable evidence, diagnostic measurements, and trainable interventions along three axes.\n\n| Direction | Evidence and probe | Minimal intervention |\n|---|---|---|\n| Ranking reliability | Frozen prefix ranks; popularity and repeat-target strata | Mixed training negatives |\n| History dependence | Recent versus matched random deletion; ordering controls | Recency residual |\n| Supported usefulness | Titles/descriptions plus explicit feedback | Evidence-supported pairwise constraints |\n\n**Candidate ideas.** Scores are originality / future potential / implementation difficulty; higher difficulty means harder.\n\n- **Recency residual with paired diagnostics: 3/6/4.** Positive: cheap, testable recent-history path. Negative: established components can amplify incidental purchases; correct controls add work.\n- **Frozen rank audit across negative pools: 5/7/4.** Positive: exposes sampler-dependent conclusions. Negative: diagnostic cost without direct model gains; full-catalog replay is not a proven benchmark surrogate.\n- **Evidence-supported relation constraints: 7/6/7.** Positive: targets specific usefulness failures. Negative: twenty users and incomplete compatibility evidence limit supervision; unknown relationships remain unlabeled.\n\n**Selected idea: recency residual with paired diagnostics.** Add a scalar-gated, recency-weighted embedding pool to SASRec. Replace the near-zero sigmoid gate with an unconstrained scalar initialized exactly to zero, preserving baseline initial scores and avoiding sigmoid saturation. For position t, compute r_t = Σ(j≤t) exp(−(t−j)/5)E[x_j] / Σ(j≤t) exp(−(t−j)/5), excluding padding; use h′_t = h_t + α·LayerNorm(r_t). Keep other training settings fixed; record branch norms and α. Recent pooling supplies no compatibility guarantee.\n\nRetain `DiagnosisProbe(view, device)`, deterministic replay, explicit missing results, and mode restoration. Compare recent-block and matched random deletion, both preserving the last item; add last-item-preserving shuffles. Compare compacted deletion with in-place masking at a fixed prediction position. Preserve official candidates and legitimate repeated positives. Report repeat/novel strata and paired category-stratified bootstrap intervals when per-user hits are exposed. Predeclare bounded trials, checkpoint and tie rules; ordinary intervals exclude training randomness and selection bias. Preserve routing, seeds, splits, artifacts, and predictor parity; select solely by unchanged macro validation HR@10.",
+  "idea": {
+    "description": "Add a zero-initialized scalar recency-pooling residual to each dataset's SASRec model, accompanied by final-prefix rank diagnostics and controlled attribution comparisons.",
+    "motivation": "Qualitative feedback suggests recent, repeated interests sometimes receive insufficient influence. A direct recency path is a feasible initial hypothesis, but feedback does not establish that recency causes benchmark errors. Exact zero initialization preserves the baseline's initial predictions. Paired perturbations and simple pooling controls help distinguish recent-content dependence from ordering effects, additional parameters, or popularity shortcuts. Only the unchanged official macro validation HR@10 determines selection.",
+    "implementation_notes": "Preserve DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, all four category routes, original splits, single-GPU execution, and SASREC_EPOCHS default 200. Write all checkpoints, logs, and generated predictor files beneath the trial directory. Preserve the baseline architecture, embedding initialization, loss, optimizer, sampler, batch size, and learning-rate schedule for the first comparison. Do not assume the baseline matches a modern pre-LN Transformer: integrate at its actual final sequence-feature output. Use raw shared item embeddings for the new pool, without positional embeddings, input dropout, or square-root embedding scaling; apply a separate LayerNorm with the baseline's epsilon before residual addition. Use fixed tau=5 and unconstrained scalar alpha=0, with no final renormalization. These are proposed settings, not validated optima. The pool is causal at every supervised position. Alpha=0 initially blocks task gradients to branch-exclusive LayerNorm parameters, while shared embeddings still receive baseline gradients. Log alpha, pre/post-normalization pool norms, baseline feature norms, and residual-to-baseline norm ratios. Save alpha and residual normalization parameters in every checkpoint and update the predictor writer with the identical architecture and configuration. Keep view.model bound to the actual trained nn.Module; view.log2feats must return residual-adjusted features and view.predict_score must preserve the existing candidate-scoring contract.\n\nBefore observing new results, freeze the baseline's checkpoint schedule, evaluated epochs, and any existing stopping rule, then use the same policy for every variant. If the baseline has no documented checkpoint schedule, use every 20 epochs and the final epoch. Select one common epoch across the four category models by their equal-weight macro validation HR@10; break ties by earlier epoch, then prefer the baseline architecture. Use a bounded attribution ladder: baseline, learned-gate last-item residual, learned-gate uniform-pooling residual, and learned-gate exponential-pooling residual. If budget remains after this preregistered set, separately test exponential pooling alone and a fixed-alpha=0.1 exponential residual; log these as additional comparisons. Raw-versus-scaled pooling and normalization-after-addition are possible later ablations, not requirements for the initial bounded search. Do not infer a learned-gate benefit without a fixed-weight comparison. Record every trial and checkpoint comparison, including failures. Account for all training and diagnostic GPU time within 43,200 GPU-seconds; start no additional trial whose estimated cost exceeds the remaining budget. Keep the baseline as an eligible result if the ladder cannot be completed.\n\nDiagnosisProbe.run_full_diagnosis(train_loader) must return metrics and metric_definitions and restore model mode using try/finally. Preserve embedding-alignment and positive/negative-margin measurements, valid-position counts, and their scale/sampling limitations. Mark unavailable category metadata explicitly rather than producing category evidence. Freeze up to 50 eligible users per category, sorted by user ID and sampled with seed 42 if necessary; derive one replay example per user by withholding their final training interaction and retaining the preceding baseline-length prefix. Skip users without a prefix and report counts. This replay target was used during model fitting and is not a generalization measurement. Freeze replay candidate IDs, order, and tie rules across models and perturbations. For an auxiliary replay audit, choose up to 99 unique non-target items with seed 42, record its sampling policy, and never describe this as the official validation evaluator. Optional uniform, target-popularity-matched, and title/description TF-IDF negative pools require separately recorded deterministic sampling rules and remain hypotheses to validate. A chunked full-catalog replay audit is diagnostic only; exclude prefix-consumed items except the target itself, which must remain eligible even if repeated. These auxiliary policies must never replace host candidates or filtering.\n\nFor each prefix, preserve the final interaction and delete k=min(3, floor((n-1)/2)) preceding interactions. Compare deletion of the k most recent eligible interactions with uniformly sampled deletion of k eligible interactions. Use perturbation seeds 42, 43, and 44 for random deletions and last-item-preserving shuffles; skip deletion when k=0. Run both compact-and-left-pad deletion and in-place masking, keeping the final prediction position fixed. In-place masking must update the actual attention key-padding mask, including internal holes, prevent invalid all-masked attention rows from producing NaNs, and zero padded outputs. Record rank changes, diagnostic HR@10 changes, top-10 overlap, and feature cosine changes as paired per-user quantities. Deletion and masking remain different interventions with different confounds; neither identifies intent or a causal effect.\n\nUse untouched validation transitions and official per-user hits for generalization comparisons only if the existing host interface exposes them. Never reconstruct hidden evaluator state, regenerate host negatives, filter out a legitimate repeated target, or modify candidate order and tie-breaking. Report repeat-target/novel-target and history-length strata when exposed; mark unavailable measurements null with a reason and count. Training-prefix replay, full-catalog unseen-item recommendations for the twenty training users, and official sampled validation answer different questions. Retain the required five users per category for qualitative assessment; do not infer diversity or conformity traits. Titles and descriptions can support explicit evidence, but cannot establish equipment ownership, practical compatibility, unwanted duplication, ratings, or intent. Do not use unavailable review text, ratings, prices, stores, or item categories.\n\nWhen paired per-user official hits are available, use 2,000 user-cluster bootstrap replicates with seed 42, resampling the same 200 user indices for both models independently within each category. Average the four category hit-rate differences equally and report the observed difference, category scores, and percentile 95% interval. One additional hit changes category HR by 0.005 and macro HR by 0.00125. Intervals are conditional on fixed models and candidates; they exclude training-seed variation, candidate resampling, and search-selection bias. Use them as supporting evidence while selecting strictly by official macro validation HR@10. Reserve generalization claims for independent held-out evaluation.",
+    "pseudocode": "class RecencyResidualSASRec(SASRec):\n    initialize alpha = Parameter(0.0)\n    initialize residual_norm = LayerNorm(hidden_dim, eps=baseline_eps)\n\n    log2feats(sequence):\n        h = baseline_log2feats(sequence)\n        e = item_emb(sequence)  # raw shared embeddings\n        numerator = zeros(batch_size, hidden_dim)\n        denominator = zeros(batch_size, 1)\n        outputs = []\n        decay = exp(-1 / 5.0)\n        for t in sequence_positions:\n            valid = (sequence[:, t] != 0)[:, None]\n            numerator = decay * numerator + valid * e[:, t]\n            denominator = decay * denominator + valid\n            recent = numerator / clamp_min(denominator, 1e-8)\n            combined = h[:, t] + alpha * residual_norm(recent)\n            outputs.append(combined * valid)\n        return stack(outputs, dim=1)\n\n# Controls use the same branch normalization and scalar initialization:\n# last-item: recent = e[:, t]\n# uniform: use decay = 1\n# exponential: use decay = exp(-1/5)\n# pooling-only, if budgeted: return residual_norm(recent) at valid positions\n# fixed-weight, if budgeted: replace learned alpha with constant 0.1\n\nclass DiagnosisProbe:\n    run_full_diagnosis(train_loader):\n        prior_mode = view.model.training\n        try:\n            view.model.eval()\n            with no_grad():\n                metrics = existing_embedding_and_margin_probes(train_loader)\n                replay = frozen_training_prefix_examples(seed=42, max_users_per_category=50)\n                candidates = load_or_create_frozen_replay_candidates(replay, seed=42)\n                original = measure_ranks_hits_top10_features(replay, candidates)\n                for perturbation_seed in [42, 43, 44]:\n                    for example in replay:\n                        n = count_nonpadding(example.prefix)\n                        k = min(3, (n - 1) // 2)\n                        if k == 0:\n                            record_skip(example)\n                            continue\n                        eligible = positions_before_last_nonpadding(example.prefix)\n                        recent_positions = eligible[-k:]\n                        random_positions = sample_without_replacement(\n                            eligible, k, seed=(perturbation_seed, example.user_id))\n                        for mode in ['compact_left_pad', 'mask_in_place']:\n                            recent = remove_positions(example, recent_positions, mode)\n                            control = remove_positions(example, random_positions, mode)\n                            preserve_final_prediction_position(recent, control)\n                            measure_paired_changes(original, recent, control, candidates)\n                        shuffled = shuffle_nonpadding_preserving_last(\n                            example, seed=(perturbation_seed, example.user_id))\n                        measure_paired_changes(original, shuffled, candidates)\n                metrics.update(aggregate_by_user_category_length_and_repeat_status())\n                record_missing_measurements_as_null_with_reason_and_count(metrics)\n                return {'metrics': metrics, 'metric_definitions': definitions}\n        finally:\n            view.model.train(prior_mode)\n\nfreeze trial ladder, checkpoint schedule, tie rules, candidate contracts, and budget ledger\nfor variant in preregistered_variants:\n    if estimated_trial_cost > remaining_search_budget:\n        break\n    train all four routed models using the prescribed seeds and matched settings\n    write architecture-matched predictor and checkpoints beneath the trial directory\n    obtain unchanged official macro validation HR@10 at preregistered checkpoints\n    log all comparisons and costs\n    if official per-user hits are exposed:\n        compute paired category-stratified bootstrap with 2000 replicates, seed=42\nselect by official macro validation HR@10; ties prefer earlier epoch, then baseline\nretain full artifact/configuration parity for final host inference",
+    "originality": {
+      "score": 3,
+      "positive": "Connects a minimal recent-history intervention to controlled rank diagnostics and a task-specific distinction between repeated interests and repeated targets.",
+      "negative": "Recency pooling, normalized residual branches, learned scalar gates, and zero initialization are established components; the combination does not constitute a new model class."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "Provides an inexpensive, falsifiable foundation for studying when sequence models benefit from a direct recent-content path across categories.",
+      "negative": "Recency does not establish immediate usefulness, compatibility, or unsatisfied demand, and improvements under fixed sampled candidates may not transfer to full-catalog ranking."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "The model change requires one scalar, one normalization layer, and a linear-time recurrence while preserving existing scoring interfaces.",
+      "negative": "Reliable attribution requires matched controls, correct internal attention masks, repeat-target eligibility, deterministic replay, mode restoration, predictor parity, and disciplined budget accounting."
+    }
+  },
+  "related_work": [
+    {
+      "title": "On the Reliability of Sampling Strategies in Offline Recommender Evaluation",
+      "link": "https://doi.org/10.1145/3705328.3748086",
+      "contributions": [
+        "Examines reliability dimensions of sampled recommendation evaluation, including recovery of model rankings."
+      ],
+      "limitations": [
+        "Does not establish any proposed diagnostic negative pool as a reliable surrogate for this pinned benchmark."
+      ]
+    },
+    {
+      "title": "Disentangling User and Item Sequence Patterns",
+      "link": "https://doi.org/10.1145/3705328.3748042",
+      "contributions": [
+        "Distinguishes user sequence patterns from item availability effects using different shuffling controls."
+      ],
+      "limitations": [
+        "History perturbations alone do not establish intent or causal effects of recent interactions."
+      ]
+    },
+    {
+      "title": "Repetition and Exploration",
+      "link": "https://staff.fnwi.uva.nl/m.derijke/wp-content/papercite-data/pdf/li-2023-repetition.pdf",
+      "contributions": [
+        "Investigates repetition shortcuts and repetitive bias in recommendation."
+      ],
+      "limitations": [
+        "Repeated-item behavior does not directly establish how repeated semantic interests should guide unseen-item recommendations."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Explains why sampled recommendation metrics can disagree with full-catalog metrics and model rankings."
+      ],
+      "limitations": [
+        "Fixed candidates enable controlled comparisons but do not establish robustness across candidate samples or full-catalog quality."
+      ]
+    },
+    {
+      "title": "Statistical Significance Testing for Recommender System Evaluation",
+      "link": "https://arxiv.org/abs/2305.02461",
+      "contributions": [
+        "Studies statistical testing approaches for recommendation evaluation, supporting attention to paired observations and sampling uncertainty."
+      ],
+      "limitations": [
+        "Its evidence emphasizes larger samples; the proposed category-stratified bootstrap is a task-specific adaptation.",
+        "Ordinary paired intervals do not account for training-seed variation or adaptive model selection."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://jmlr.org/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how repeated optimization of finite-sample selection criteria can produce optimistic performance estimates."
+      ],
+      "limitations": [
+        "Does not determine an optimal search allocation or stopping rule for this benchmark."
+      ]
+    },
+    {
+      "title": "ReZero Is All You Need: Fast Convergence at Large Depth",
+      "link": "https://proceedings.mlr.press/v161/bachlechner21a/bachlechner21a.pdf",
+      "contributions": [
+        "Introduces zero-initialized learned residual scaling, motivating exact baseline initialization for the proposed branch."
+      ],
+      "limitations": [
+        "Does not validate this recency branch or establish recommendation gains.",
+        "Zero scaling initially blocks task gradients into parameters exclusive to the residual branch."
+      ]
+    },
+    {
+      "title": "Self-Attentive Sequential Recommendation: Reference Implementation",
+      "link": "https://raw.githubusercontent.com/kang205/SASRec/master/model.py",
+      "contributions": [
+        "Documents causal attention, positional embeddings, embedding scaling, and normalization choices relevant to residual integration and perturbation controls."
+      ],
+      "limitations": [
+        "The actual RecHarness implementation must govern integration; the original implementation cannot be assumed identical."
+      ]
+    },
+    {
+      "title": "SimpleX: A Simple and Strong Baseline for Collaborative Filtering",
+      "link": "https://arxiv.org/abs/2109.12613",
+      "contributions": [
+        "Supports comparing simple history aggregation and carefully matched loss and sampling choices before attributing gains to model complexity."
+      ],
+      "limitations": [
+        "Does not establish that order-insensitive aggregation or its training objective will improve the four target categories."
+      ]
+    },
+    {
+      "title": "On Layer Normalization in the Transformer Architecture",
+      "link": "https://proceedings.mlr.press/v119/xiong20b.html",
+      "contributions": [
+        "Shows that normalization placement affects initialization gradients, motivating explicit specification of the residual normalization."
+      ],
+      "limitations": [
+        "Does not identify the optimal normalization or embedding scale for this recommendation residual."
+      ]
+    }
+  ]
+}

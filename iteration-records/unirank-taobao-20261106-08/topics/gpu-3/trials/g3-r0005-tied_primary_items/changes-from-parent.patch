@@ -1,0 +1,151 @@
+--- g3-r0003-embedding_item_primary/model.py
++++ g3-r0005-tied_primary_items/model.py
+@@ -1,10 +1,13 @@
+-"""Field-group ownership of shared embedding gradients.
+-
+-Prospective 2x2 intervention on auxiliary context and item/action gradients.
+-Forward information, score readout learning, tower capacity and RNG are retained.
+-The item gate covers direct target embeddings and historical pooled values;
+-selector-input gradients are already primary-owned in the inherited parent.
+-Related backward-routing idea: STEM (Su et al., AAAI 2024), not a reproduction.
+-No local performance or novelty claim; host execution is required.
++"""Auxiliary-owned item/action tables under a primary-owned history selector.
++
++The primary click path and shared context tables follow the incumbent. Auxiliary
++heads may learn one private item/action representation shared by cart/fav/buy.
++A four-mode replacement suite separates adaptive private values from a frozen
++initial basis and from tied primary-only/joint embedding updates. All modes have
++identical allocated capacity and initialization, but active capacity and backward
++cost differ. Clones start from the inherited initialization, never a checkpoint.
++Related work: STEM (Su et al., AAAI 2024), arXiv:2308.13537v2, and the local DIN
++adaptation. This is neither a STEM reproduction nor an originality claim.
++Forward uses only the frozen host inputs; current target action is never used.
+ """
+ import copy
+@@ -15,14 +18,14 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'block_aux_item_gradient': True}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'tied_primary'}
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='EmbeddingGradientOwnership', gpu=-1,
++    def __init__(self, feature_map, model_id='PrivateAuxiliaryItemRepresentation', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(128, 32),
+                  tower_hidden_units=(128, 64), routing='task',
+                  feedback_in_score=True, selector_gradient='primary',
+                  auxiliary_selector='none', block_aux_context_gradient=False,
+-                 block_aux_item_gradient=True, num_tasks=None,
++                 auxiliary_item_mode='tied_primary', num_tasks=None,
+                  task='binary_classification', **kwargs):
+         labels = list(feature_map.labels)
+@@ -45,8 +48,12 @@
+         if routing != 'task' or selector_gradient != 'primary' or auxiliary_selector != 'none':
+             raise ValueError('Embedding ownership study requires the incumbent primary selector')
+-        if not isinstance(block_aux_context_gradient, bool) or not isinstance(block_aux_item_gradient, bool):
+-            raise ValueError('Embedding gradient switches must be booleans')
++        if not isinstance(block_aux_context_gradient, bool):
++            raise ValueError('Context gradient switch must be boolean')
++        if auxiliary_item_mode not in ('private', 'fixed', 'tied_primary', 'tied_joint'):
++            raise ValueError('Unknown auxiliary item representation mode')
++        if block_aux_context_gradient:
++            raise ValueError('This study fixes context sharing; auxiliary_item_mode controls item ownership')
++        self.auxiliary_item_mode = auxiliary_item_mode
+         self.block_aux_context_gradient = block_aux_context_gradient
+-        self.block_aux_item_gradient = block_aux_item_gradient
+         self.auxiliary_selector = auxiliary_selector
+         self.selector_gradient = selector_gradient
+@@ -97,4 +104,22 @@
+         self.aux_score_trunk = (copy.deepcopy(self.score_trunk)
+                                 if auxiliary_selector != 'none' else None)
++        # Clone only item/action tables AFTER the full inherited initialization.
++        # deepcopy preserves aliasing within the selected tables and consumes no
++        # random numbers. No new call to reset_parameters is made after cloning.
++        # All four modes allocate the same tables and execute the same lookups.
++        self.aux_item_fields = list(self.item_fields)
++        if self.action_field:
++            self.aux_item_fields.append(self.action_field)
++        for name in self.aux_item_fields:
++            spec = feature_map.features[name]
++            if spec['type'] not in ('categorical', 'sequence'):
++                raise ValueError('Private item path requires categorical inputs')
++        self.aux_item_layers = nn.ModuleDict(copy.deepcopy({
++            name: self.embedding_layer.embedding_layers[name]
++            for name in self.aux_item_fields}))
++        self.aux_item_encoders = nn.ModuleDict(copy.deepcopy({
++            name: self.embedding_layer.feature_encoders[name]
++            for name in self.aux_item_fields
++            if name in self.embedding_layer.feature_encoders}))
+         self.model_to_device()
+ 
+@@ -120,4 +145,15 @@
+         return scores
+ 
++    def _private_item_embeddings(self, item):
++        # Separate target/history tables are NOT introduced: the same private
++        # table is reused for both positions, as in the original item path.
++        result = {}
++        for name in self.aux_item_fields:
++            value = self.aux_item_layers[name](item[name].long())
++            if name in self.aux_item_encoders:
++                value = self.aux_item_encoders[name](value)
++            result[name] = value
++        return result
++
+     def forward(self, inputs):
+         user, item, mask = self.get_inputs(inputs)
+@@ -135,4 +171,26 @@
+             values = torch.cat([keys, action], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
++        # No private representation is supplied to the selector in this study.
++        # Selectors retain the inherited primary-owned input geometry, avoiding
++        # a simultaneous selector rewrite or extra Dice statistics updates.
++        if self.auxiliary_item_mode == 'private':
++            private_emb = self._private_item_embeddings(item)
++        else:
++            with torch.no_grad():
++                private_emb = self._private_item_embeddings(item)
++        private_target = torch.cat([private_emb[name][:, -1]
++                                    for name in self.item_fields], dim=-1)
++        private_values = torch.cat([private_emb[name][:, :-1]
++                                    for name in self.item_fields], dim=-1)
++        private_values = private_values.masked_fill(~valid, 0)
++        if self.action_field:
++            private_action = private_emb[self.action_field][:, :-1].masked_fill(~valid, 0)
++            private_values = torch.cat([private_values, private_action], dim=-1)
++        if self.auxiliary_item_mode in ('private', 'fixed'):
++            auxiliary_target, auxiliary_values = private_target, private_values
++        elif self.auxiliary_item_mode == 'tied_primary':
++            auxiliary_target, auxiliary_values = target.detach(), values.detach()
++        else:
++            auxiliary_target, auxiliary_values = target, values
+         batch, length, _ = keys.shape
+         if length:
+@@ -152,12 +210,10 @@
+             scores = scores.masked_fill(~valid, 0)
+             pooled = torch.bmm(scores.transpose(1, 2), values)
+-            if self.block_aux_item_gradient and torch.is_grad_enabled():
+-                # Detach only values, never the pooled result: auxiliary score
+-                # readout rows must retain their own supervised gradients.
+-                # The inherited primary selector already blocks the other
+-                # auxiliary route to embeddings through score-trunk inputs.
+-                auxiliary_pooled = torch.bmm(scores.transpose(1, 2), values.detach())
+-                pooled = torch.where(self._primary_channel.unsqueeze(-1),
+-                                     pooled, auxiliary_pooled)
++            # Detach the representation, if requested, before pooling; never
++            # detach scores or pooled auxiliary outputs. Every auxiliary score
++            # readout row and prediction tower must continue to learn.
++            auxiliary_pooled = torch.bmm(scores.transpose(1, 2), auxiliary_values)
++            pooled = torch.where(self._primary_channel.unsqueeze(-1),
++                                 pooled, auxiliary_pooled)
+         else:
+             pooled = target.new_zeros((batch, len(self.towers), self.value_width))
+@@ -168,6 +224,5 @@
+                 if self.block_aux_context_gradient:
+                     task_context = context.detach()
+-                if self.block_aux_item_gradient:
+-                    task_target = target.detach()
++                task_target = auxiliary_target
+             features = torch.cat([task_context, task_target, pooled[:, index]], dim=-1)
+             outputs[label + '_pred'] = torch.sigmoid(tower(features))

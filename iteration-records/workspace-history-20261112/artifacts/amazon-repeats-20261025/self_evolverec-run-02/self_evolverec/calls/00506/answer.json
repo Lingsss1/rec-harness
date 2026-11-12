@@ -1,0 +1,86 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting-point insights.** (1) Users reject broad associations lacking a specific current reason; candidate-conditioned attention could select more relevant historical evidence. It cannot infer equipment compatibility. (2) Distant incidental events sometimes overpower recent repeated interests; a short causal window limits their influence while preserving repeated occurrences. It may discard durable interests. (3) Electronics has 10.88% sampled training ranking reversals and a −0.0915 tenth-percentile margin. This motivates improving discrimination, but does not predict validation gains.\n\n**Literature insights.** (1) TransGAT motivates directional representations, although its relation supervision is unavailable here. Purchase order supplies only a behavioral proxy. (2) gSASRec motivates testing negative-sampling objectives before expanding architecture. Better training separation alone cannot establish improved HR@10. (3) R2NS motivates gradual, stochastic hard-negative exposure. Hard unobserved items can nevertheless be relevant.\n\n### Framework\n\n| Direction | Existing mechanism | Task-specific opportunity |\n|---|---|---|\n| Evidence selection | DIN-style candidate attention | Select recent prefix evidence |\n| Relation scoring | FPMC; TransGAT | Separate source/target representations |\n| Discrimination | gSASRec; R2NS | Improve confusing training comparisons |\n\n### Candidate ideas and assessments\n\nScores are 0–10; difficulty increases with implementation burden. Each cell gives a positive and a limitation.\n\n| Idea | Originality | Potential | User alignment | Model alignment | Difficulty |\n|---|---|---|---|---|---|\n| **A. Bounded recent candidate attention** | 3: focused combination; established parts | 7: modular; sparse evidence | 8: targets broad/distant associations; no compatibility guarantee | 6: candidate discrimination; unverified | 5: small branch; scorer adaptation |\n| B. Sixteen-negative gBCE | 2: established; little novelty | 7: reusable; dataset dependence | 4: finer ranking possible; no intent mechanism | 8: targets separation; false negatives | 3: encoder unchanged; sampler work |\n| C. Warm-start stochastic hard negatives | 3: practical adaptation; established curriculum | 6: informative comparisons; noisy supervision | 5: distinguishes alternatives; cannot detect fulfilled needs | 8: targets confusing pairs; instability | 5: bounded mining; additional cost |\n\n### Selected idea: A\n\nAt 10% progress, extend the starting residual with a minimal, bounded implementation. Candidate attention targets **broad associations without specific evidence**; a ten-event causal window targets **distant incidental interactions outweighing recent repeated interests**. Separate directional values and targets aim to improve Electronics’ weak lower-tail separation. These are hypotheses, not demonstrated outcomes; redundant alternatives and completed needs remain unresolved.\n\nFor each prefix, attend over its last ten valid events using a separate attention table and fixed recency bias. Score selected evidence through independently normalized source/target tables; add the bounded residual to SASRec. Retain the baseline objective initially.\n\nCompare baseline, candidate-independent recent pooling, and candidate attention within the remaining shared budget. Select solely by pinned four-category macro validation HR@10. Preserve seeds, routing, splits, environment epochs, and single-GPU execution. Synchronize predictor serialization and diagnosis with the complete scorer; use no unavailable metadata, hidden test information, or pretrained weights.",
+  "idea": {
+    "description": "Add a bounded candidate-conditioned directional residual to each dataset’s SASRec. For each candidate, select evidence from the ten most recent valid prefix events using a dedicated attention embedding table, then score that evidence with separate source-value and candidate-target tables. Keep the baseline encoder and training objective for the first comparison.",
+    "motivation": "The selected idea explicitly targets two observed user failures: broadly associated recommendations without specific current evidence, and distant incidental interactions outweighing recent repeated interests. Candidate-dependent evidence selection addresses the former; a causal recent-event window addresses the latter. Directional scoring also targets the model-facing weakness of Electronics’ sampled training separation: 10.88% ranking reversals and a negative tenth-percentile margin. None of these mechanisms establishes compatibility, task completion, satisfaction, or validation improvement.",
+    "implementation_notes": "Use K=10, branch dimension 32, fixed recency bias log(0.8)*lag, and fixed residual coefficient alpha=1.0 as prespecified engineering choices rather than literature-established optima. Let attention, source, and target tables be independently initialized trainable embeddings with padding index zero. Normalize their retrieved vectors with an epsilon-safe L2 normalization. Compute attention logits as cosine similarity plus the recency bias; compute directional values as source-target cosine similarities. Their attention-weighted average lies in [-1,1], bounding the added score by alpha. Explicitly mask padding after transformations and return zero for empty histories. Repeated events retain separate positions; this does not establish semantic recurrence.\n\nFor each training position t, gather only sequence[max(0,t-K+1):t+1]; the positive target and future suffix never enter its evidence window. Compute candidate-conditioned residuals separately for positive and negative items and retain the baseline loss and sampling. Construct the new branch after baseline initialization within an RNG-preserving context. Initialize all branch tables nonzero; avoid a zero coefficient that prevents branch learning. Build windows once per batch and chunk candidate scoring for full-catalog recommendations, avoiding a B×L×C×K intermediate.\n\nCompare unchanged SASRec, the same directional branch using candidate-independent recency weights, and candidate-conditioned attention. This isolates the evidence-selection change between the latter two, though baseline-versus-branch differences still include extra capacity. Cap total new training, diagnostics, debugging, and failures by the remaining portion of the shared 43,200 GPU-second budget; do not assume earlier search was free. Respect SASREC_EPOCHS with default 200 and freeze comparable training allocations before comparing variants. Select using only host-reported macro validation HR@10, preferring baseline on ties; training margins and simulator feedback remain descriptive.\n\nRetain all four datasets, original routing and splits, preprocessing seed 0, training seed 42, DATA_DIR=os.environ['GAGC_DATA_DIR'], and trial-local artifacts. No reviews, ratings, product categories, prices, stores, pretrained weights, or simulator traits are inputs. Titles and descriptions are unnecessary for this first experiment.\n\nCandidate-conditioned scoring cannot generally be represented by a single candidate-independent dot product. Adapt log2feats to carry encoder features and causal recent item IDs; implement predict_score with explicit aligned-training and candidate-list modes. Preserve view.model as the actual nn.Module and view.item_emb as the baseline embedding table. DiagnosisProbe(view, device).run_full_diagnosis(train_loader) must return metrics and metric_definitions and compute margins using the complete scorer. Base-embedding cosine measurements must remain labeled as base-table alignment, not whole-model collapse. Preserve empty category breakdowns where metadata is unavailable.\n\nUpdate the predictor writer to embed the same architecture and serialize attention/source/target tables, K, dimension, normalization epsilon, recency bias, alpha, baseline configuration, and dataset routing. Verify save/reload score agreement, empty-history behavior, candidate chunking equivalence, and prefix causality using public histories. No improvement is claimed before the pinned host evaluation.",
+    "pseudocode": "initialize baseline SASRec exactly as before\ninside RNG-preserving context:\n    initialize attention A, source V, target T tables independently\n\nfunction features(sequence):\n    h = baseline.log2feats(sequence)\n    windows, mask, lag = causal_recent_windows(sequence, K=10)\n    return h, windows, mask, lag\n\nfunction score(features, candidates, mode):\n    h, windows, mask, lag = features\n    base = baseline_score(h, candidates, mode)\n    a_source = normalize(A(windows))\n    a_candidate = normalize(A(candidates))\n    logits = shape_checked_cosine(a_source, a_candidate, mode)\n    logits += log(0.8) * lag\n    weights = masked_softmax_or_zero(logits, mask)\n    values = shape_checked_cosine(normalize(V(windows)),\n                                  normalize(T(candidates)), mode)\n    residual = sum_over_window(weights * values)\n    return base + 1.0 * residual\n\nfor each original dataset on one GPU:\n    for each baseline training batch:\n        f = features(sequence)\n        positive_scores = score(f, positive, mode='aligned')\n        negative_scores = score(f, negative, mode='aligned')\n        optimize unchanged baseline loss on valid targets\n    save architecture configuration and complete state\nwrite working/predict.py using identical chunked candidate scoring\nrun compatible diagnostics using complete scores\nselect configuration solely by pinned host macro validation HR@10",
+    "originality": {
+      "score": 3,
+      "positive": "Combines candidate-specific recent evidence selection with explicitly bounded asymmetric scoring in a focused SASRec extension.",
+      "negative": "Candidate attention, directional transitions, separate embeddings, and additive residuals are established techniques; this is an incremental combination."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Creates a compact experimental framework for separating evidence selection from directional scoring and later studying public-text evidence.",
+      "negative": "Sparse transitions, false associations, limited history windows, and unavailable compatibility supervision may constrain transfer."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "Retains the encoder, objective, dataset pipeline, and optimizer while adding three small embedding tables.",
+      "negative": "Candidate-dependent attention requires careful causal windows, explicit scoring shapes, chunked full-catalog inference, synchronized predictor generation, and adapted diagnostics."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Deep Interest Network for Click-Through Rate Prediction",
+      "link": "https://arxiv.org/abs/1706.06978",
+      "contributions": [
+        "Uses candidate-conditioned attention to select relevant historical behavior.",
+        "Motivates the proposed evidence-selection mechanism."
+      ],
+      "limitations": [
+        "Its click-through prediction setting differs from sequential next-item ranking.",
+        "Attention weights do not establish compatibility or purchase intent."
+      ]
+    },
+    {
+      "title": "Factorizing Personalized Markov Chains for Next-Basket Recommendation",
+      "link": "https://doi.org/10.1145/1772690.1772773",
+      "contributions": [
+        "Combines personalized preference and directional sequential transition scoring.",
+        "Provides precedent for an additive transition component."
+      ],
+      "limitations": [
+        "Observed transitions do not identify complementarity or fulfilled needs.",
+        "Does not provide the proposed candidate-conditioned recent-window selection."
+      ]
+    },
+    {
+      "title": "Transitivity-Encoded Graph Attention Networks for Complementary Item Recommendations",
+      "link": "https://www.amazon.science/publications/transitivity-encoded-graph-attention-networks-for-complementary-item-recommendations",
+      "contributions": [
+        "Models behavioral direction and complement/substitute relations.",
+        "Motivates separating relation scoring from general item similarity."
+      ],
+      "limitations": [
+        "Required relation supervision cannot be assumed available in this task.",
+        "Reported results do not validate the proposed lightweight adaptation."
+      ]
+    },
+    {
+      "title": "gSASRec",
+      "link": "https://arxiv.org/abs/2308.07192",
+      "contributions": [
+        "Studies overconfidence associated with negative sampling in SASRec.",
+        "Motivates multi-negative generalized BCE as an architecture-preserving alternative."
+      ],
+      "limitations": [
+        "Does not explicitly select recent evidence for each candidate.",
+        "Benefits under the pinned four-category benchmark require measurement."
+      ]
+    },
+    {
+      "title": "R2NS",
+      "link": "https://renzhaochun.github.io/assets/pdf/WWW_2026_Camera_Ready.pdf",
+      "contributions": [
+        "Motivates uniform warm-up and curriculum-controlled hard-negative exposure.",
+        "Supports considering stochastic selection instead of deterministic hardest-only mining."
+      ],
+      "limitations": [
+        "Hard unobserved candidates can be false negatives.",
+        "Additional mining introduces computational cost and implementation complexity."
+      ]
+    }
+  ]
+}

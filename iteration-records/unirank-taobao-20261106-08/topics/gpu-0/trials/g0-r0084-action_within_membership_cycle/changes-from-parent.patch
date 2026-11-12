@@ -1,0 +1,166 @@
+--- g3-r0065-fixed_angle_cycle_source_bit_negative/model.py
++++ g0-r0084-action_within_membership_cycle/model.py
+@@ -1,10 +1,9 @@
+-"""Occupied-cycle auxiliary bit source at fixed forward architecture.
+-
+-Cross a cyclic permutation of occupied auxiliary cotangent triples with
+-native-source bridges and both external signs. Only the Q orientation bit
+-uses donors; native full-task radius, canonical fixed-angle line, support,
+-true-label joint BCE and all private learning are inherited. Every helper
+-runs in every arm. This is a first-order row-space surrogate VJP, not the
+-ordinary gradient of the reported scalar BCE. No novelty claim is made.
++"""Historical action utility controls at the unchanged incumbent architecture.
++
++Only historical action representations change before compression, scoring
++and detail summaries. Frozen item/context fields, order, masks, training
++loss and inherited surrogate context VJP stay unchanged. No novelty or
++new measured performance is claimed. The full-use control is byte-identical
++to the imported incumbent source in action_full.py.
+ """
+ import torch
+@@ -15,5 +14,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'historical_action_mode': 'within_membership_cycle'}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -856,4 +855,40 @@
+ 
+ 
++
++def _membership_donor_indices(mask, task_masks):
++    """Cycle valid positions within each row's EXACT four-mask stratum.
++
++    Membership codes are derived only from supplied historical masks. The
++    unique position suffix makes sorting deterministic without stable-sort
++    assumptions. No event, item, mask, padding or target tensor is changed.
++    A heterogeneous stratum is necessary for a nonidentity intervention.
++    """
++    if mask.ndim != 2 or len(task_masks) != 4:
++        raise ValueError('Expected history mask [B,L] and four task masks')
++    batch, length = mask.shape
++    if length != 100:
++        raise ValueError('Frozen history length must be 100')
++    valid = mask.bool()
++    membership = torch.zeros_like(mask, dtype=torch.long)
++    for index, task_mask in enumerate(task_masks):
++        if task_mask.shape != mask.shape:
++            raise ValueError('Historical membership mask shape mismatch')
++        membership = membership + (task_mask > 0).to(torch.long) * (1 << index)
++    membership = torch.where(valid, membership, 16)
++    positions = torch.arange(length, device=mask.device).view(1, length).expand(batch, -1)
++    order = torch.argsort(membership * length + positions, dim=1)
++    sorted_membership = membership.gather(1, order)
++    previous = torch.cat([sorted_membership[:, :1], sorted_membership[:, :-1]], dim=1)
++    starts = (positions == 0) | (sorted_membership != previous)
++    first = torch.where(starts, positions, 0).cummax(dim=1).values
++    following = (positions + 1).clamp_max(length - 1)
++    same_next = ((positions + 1 < length)
++                 & (sorted_membership == sorted_membership.gather(1, following)))
++    donor_sorted = torch.where(same_next, following, first)
++    donor_original = order.gather(1, donor_sorted)
++    donors = torch.zeros_like(order).scatter(1, order, donor_original)
++    return torch.where(valid, donors, positions)
++
++
+ class Model(MultiTaskModel):
+     def __init__(self, feature_map, model_id='TargetMatchOrderMoment', gpu=-1,
+@@ -886,4 +921,5 @@
+                  click_relative_transfer='orthogonal_native',
+                  orthogonal_assignment='nuisance_line_fixed_angle_occupied_cycle_source_bit',
++                 historical_action_mode='within_membership_cycle',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -897,4 +933,7 @@
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
++        if historical_action_mode not in ('full', 'blind', 'counts_only', 'within_membership_cycle'):
++            raise ValueError('Unknown historical action intervention')
++        self.historical_action_mode = historical_action_mode
+         self.compression_routes = compression_routes
+         if block_aux_scorer_grad is not True:
+@@ -1050,4 +1089,10 @@
+         if self.action_field is None:
+             raise ValueError('Historical action field is required')
++        if historical_action_mode == 'blind':
++            action_spec = feature_map.features[self.action_field]
++            if (action_spec.get('feature_encoder') or action_spec.get('share_embedding')
++                    or 'pretrained_emb' in action_spec
++                    or not isinstance(self.embedding_layer.embedding_layers[self.action_field], nn.Embedding)):
++                raise ValueError('Blind codebook control requires an ordinary unshared action embedding')
+         self.auxiliary_indices = [list(feature_map.labels).index(label)
+                                   for label in ('cart', 'fav', 'buy')]
+@@ -1129,4 +1174,64 @@
+         self.model_to_device()
+ 
++    def _historical_action_values(self, item_emb, mask, task_masks):
++        """Replace only the historical action channel, before ANY summary.
++
++        Counts-only is a learned linear projection of the complete per-row
++        action histogram, divided by valid history length. The existing
++        length/count channels remain available. It contains no binding to
++        item identity, order, block, target match or feedback stratum.
++        Blind is the uniform mean over the existing nonpadding action
++        codebook, independent of the row's action tokens. It retains a
++        learned channel and every original table/module/parameter shape.
++        Optimizer exposure of codebook rows differs, an explicit confound.
++        """
++        history = item_emb[self.action_field][:, :-1]
++        valid = mask.bool().unsqueeze(-1)
++        if self.historical_action_mode == 'full':
++            return history
++        if self.historical_action_mode == 'counts_only':
++            active = torch.where(valid, history.float(), 0.0)
++            count = mask.bool().sum(dim=1, keepdim=True).clamp_min(1).unsqueeze(-1)
++            mean = (active.sum(dim=1, keepdim=True) / count).to(history.dtype)
++            replacement = mean.expand_as(history)
++        elif self.historical_action_mode == 'blind':
++            spec = self.feature_map.features[self.action_field]
++            codes = torch.arange(int(spec['vocab_size']), device=history.device)
++            keep = codes != 0
++            if spec.get('padding_idx') is not None:
++                keep = keep & (codes != int(spec['padding_idx']))
++            codes = codes[keep]
++            if codes.numel() == 0:
++                raise ValueError('Action codebook has no nonpadding rows')
++            codebook = self.embedding_layer({self.action_field: codes})[self.action_field]
++            mean = codebook.float().mean(dim=0).to(history.dtype).view(1, 1, -1)
++            replacement = mean.expand_as(history)
++        elif self.historical_action_mode == 'within_membership_cycle':
++            donors = _membership_donor_indices(mask, task_masks)
++            replacement = history.gather(1, donors.unsqueeze(-1).expand_as(history))
++        else:
++            raise ValueError('Unknown historical action intervention')
++        # Preserve the actual padding representation, and never use target action.
++        return torch.where(valid, replacement, history)
++
++    def action_control_diagnostics(self, inputs):
++        """Optional host-side, label-free preflight; not an automatic collector.
++
++        Across the entire visible training population, changed_rows=0
++        makes the within-membership cycle uninformative. Heterogeneity in
++        different rows alone is insufficient for this within-row control.
++        Aggregate only in the authorized host, with all costs charged.
++        """
++        if len(inputs) != 4:
++            raise ValueError('Released historical masks are required')
++        _, item, mask, task_masks = self.get_inputs(inputs, return_multi_masks=True)
++        donors = _membership_donor_indices(mask, task_masks)
++        actions = item[self.action_field][:, :-1]
++        changed = mask.bool() & (actions != actions.gather(1, donors))
++        return {'valid_events': mask.bool().sum(),
++                'valid_rows': mask.bool().any(dim=1).sum(),
++                'changed_events': changed.sum(),
++                'changed_rows': changed.any(dim=1).sum()}
++
+     def _represent(self, inputs):
+         # Do not allow the framework fallback that treats every event as
+@@ -1157,5 +1262,6 @@
+         keys = torch.cat([item_emb[name][:, :-1] for name in self.item_fields], dim=-1)
+         # Current action is unknown and never enters either summary or scorer.
+-        values = torch.cat([keys, item_emb[self.action_field][:, :-1]], dim=-1)
++        action_values = self._historical_action_values(item_emb, mask, task_masks)
++        values = torch.cat([keys, action_values], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
+         detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._target_match_summary(

@@ -1,0 +1,141 @@
+--- g0-r0052-block_nonlinear_transfer/model.py
++++ g0-r0056-weight_only/model.py
+@@ -1,11 +1,10 @@
+-"""Prospective blockwise nonlinear summary study; validation results unmeasured.
+-
+-Reuse ten frozen compressed blocks and every learned parameter of the incumbent.
+-Compare mean_j tanh(W [M*b_j, global_details]) with tanh(W [sum_j b_j,
+-global_details]), crossed with the existing auxiliary adapter-context gate.
+-Both summary paths execute in every cell for a measured work-matched contrast.
+-The original signed pooled base and five detail paths remain intact. This tests
+-projection/aggregation order, not a new attention mechanism or verified novelty.
+-Native tensor, BF16, autograd and resource checks belong to the host.
++"""Prospective count-measure study; validation quality and cost unmeasured.
++
++Retain the entire frozen incumbent architecture and learned parameter order.
++Compare event-count probabilities with reciprocal input rescaling, cyclic
++count displacement, equal occupied-block pooling and weighting without
++rescaling. All paths execute in all cells; no extra learned tensors or RNG.
++This diagnostic tests mass/content alignment, not a verified novel architecture.
++Native FP32/BF16/autograd/data/bridge checks remain assigned to the host.
+ """
+ import torch
+@@ -16,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'block_measure': 'weight_only'}
+ 
+ 
+@@ -36,4 +35,5 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16, summary_placement='block',
++                 block_measure='weight_only',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -72,4 +72,9 @@
+             raise ValueError('Unknown history projection placement')
+         self.summary_placement = summary_placement
++        if summary_placement != 'block':
++            raise ValueError('Count-measure study retains nonlinear block projection')
++        if block_measure not in ('aligned', 'rotated', 'uniform', 'weight_only'):
++            raise ValueError('Unknown nonlinear block measure')
++        self.block_measure = block_measure
+         if context_fusion != 'product':
+             raise ValueError('This placement study fixes product fusion')
+@@ -681,14 +686,31 @@
+         return weighted if return_blocks else weighted.sum(dim=1)
+ 
++    @staticmethod
++    def _rotate_occupied_counts(counts, occupied):
++        """One-step cyclic count permutation on occupied ordinal ranks.
++
++        Empty entries never enter packed counts. Support, total mass and
++        the positive count multiset are unchanged, including sparse gaps.
++        There is no RNG, learned state, value dependence or label access.
++        """
++        safe_counts = torch.where(occupied, counts.float(), torch.zeros_like(counts).float())
++        ranks = (occupied.long().cumsum(dim=1) - 1).clamp_min(0)
++        number = occupied.long().sum(dim=1, keepdim=True)
++        packed = torch.zeros_like(safe_counts).scatter_add(1, ranks, safe_counts)
++        source = (ranks + 1).remainder(number.clamp_min(1))
++        rotated = packed.gather(1, source)
++        return torch.where(occupied, rotated, torch.zeros_like(rotated))
++
+     def _context_history_correction(self, index, context, history, block_base, block_counts):
+-        """Test tied nonlinear projection before versus after block aggregation.
+-
+-        b_j is the existing signed target-scored contribution of block j;
+-        r contains the original global counts and five detail summaries.
+-        For M occupied blocks, the mean of [M*b_j, r] is [sum(b_j), r].
+-        Only the location of tanh relative to this averaging is changed.
+-        No softmax, new learned matrix, target label or unmasked event enters.
+-        Both paths execute in every cell, including backward via an algebraic
+-        zero. This is a work-matched diagnostic, with actual costs host-measured.
++        """Compare block measures at fixed learned tensors and global details.
++
++        b_j is the signed scored contribution, c_j the valid event count,
++        N=sum c_j and M the number of occupied blocks. For any positive
++        measure p on occupied blocks, sum p_j*[b_j/p_j,r]=[sum b_j,r].
++        Aligned uses p=c/N; rotated uses the same count multiset displaced
++        by one occupied rank. Uniform retains the EXACT inherited local
++        expression. Weight-only omits reciprocal rescaling deliberately.
++        All summaries execute with zero-connected unselected branches.
++        Native precision, autograd, masking and resource tests are host-only.
+         """
+         query = torch.tanh(self.context_queries[index](context).float())
+@@ -697,8 +719,7 @@
+         support = occupied.to(torch.float32)
+         number = support.sum(dim=1, keepdim=True)
+-        # Mask before projection as well as after it: invalid block values
+-        # cannot affect the local input, even in a noncontiguous support case.
+         safe_blocks = torch.where(occupied.unsqueeze(-1), block_base,
+                                   torch.zeros_like(block_base))
++        # Preserve the incumbent's uniform path, including dtype/order.
+         local_base = (safe_blocks.float() * number.unsqueeze(-1)).to(history.dtype)
+         shared_detail = history[:, self.value_width:].unsqueeze(1).expand(
+@@ -709,10 +730,39 @@
+                                    torch.zeros_like(local_hidden))
+         local = local_hidden.sum(dim=1) / number.clamp_min(1.0)
+-        if self.summary_placement == 'block':
++        # Counts come only from the frozen history mask. They are positive
++        # on support and have no gradient; no absolute value of signed
++        # activations or learned routing enters this measure.
++        counts = torch.where(occupied, block_counts.float(),
++                             torch.zeros_like(block_counts).float())
++        total = counts.sum(dim=1, keepdim=True)
++        rotated_counts = self._rotate_occupied_counts(counts, occupied)
++        aligned_weights = counts / total.clamp_min(1.0)
++        rotated_weights = rotated_counts / total.clamp_min(1.0)
++        aligned_base = (safe_blocks.float()
++                        * (total / counts.clamp_min(1.0)).unsqueeze(-1)).to(history.dtype)
++        rotated_base = (safe_blocks.float()
++                        * (total / rotated_counts.clamp_min(1.0)).unsqueeze(-1)).to(history.dtype)
++        aligned_inputs = torch.cat([aligned_base, shared_detail], dim=-1)
++        rotated_inputs = torch.cat([rotated_base, shared_detail], dim=-1)
++        aligned_hidden = torch.tanh(self.history_projections[index](aligned_inputs).float())
++        rotated_hidden = torch.tanh(self.history_projections[index](rotated_inputs).float())
++        aligned_hidden = torch.where(occupied.unsqueeze(-1), aligned_hidden,
++                                     torch.zeros_like(aligned_hidden))
++        rotated_hidden = torch.where(occupied.unsqueeze(-1), rotated_hidden,
++                                     torch.zeros_like(rotated_hidden))
++        aligned = (aligned_weights.unsqueeze(-1) * aligned_hidden).sum(dim=1)
++        rotated = (rotated_weights.unsqueeze(-1) * rotated_hidden).sum(dim=1)
++        weight_only = (aligned_weights.unsqueeze(-1) * local_hidden).sum(dim=1)
++        if self.block_measure == 'aligned':
++            summary = aligned + 0.0 * (local + rotated + weight_only + aggregate)
++        elif self.block_measure == 'rotated':
++            summary = rotated + 0.0 * (local + aligned + weight_only + aggregate)
++        elif self.block_measure == 'weight_only':
++            summary = weight_only + 0.0 * (local + aligned + rotated + aggregate)
++        else:
+             summary = local + 0.0 * aggregate
+-        else:
+-            summary = aggregate + 0.0 * local
+-        # Same product and RMS normalization as the incumbent. Global base,
+-        # residual adapter and all five moment paths outside this branch stay.
++            summary = summary + 0.0 * (aligned + rotated + weight_only)
++        # Original task-context product, RMS norm, output and signed base
++        # remain intact. This is not normalization of the activation scorer.
+         if self.context_fusion == 'product':
+             fused = query * summary

@@ -1,0 +1,155 @@
+{
+  "markdown_report": "At 10% progress, prioritize **baseline-initialized residual gating** as a controlled NextItNet experiment. Keep semi-hard negatives and title encoding as subsequent directions; combining them now would obscure attribution.\n\n**Insights from the supplied evidence.** (1) Broad similarity crowds out specific recent matches; contextual modulation could improve discrimination. (2) Seasonal and already-satisfied purchases are extended into continuing demand; selective residual updates offer a hypothesis, without observing unmet needs or compatibility. (3) Electronics’ 10.04% training wrong-rank rate and margin p10 −0.0106 identify weak separation, not validation accuracy. (4) History deletion generally harms measured rankings, discouraging indiscriminate forgetting; exported-predictor parity remains unverified.\n\n**Related-work insights.** (1) [NextItNet](https://fajieyuan.github.io/papers/nextitnet6.pdf) supplies the retained causal backbone. (2) [Highway Networks](https://arxiv.org/abs/1505.00387) and [TFT](https://doi.org/10.1016/j.ijforecast.2021.03.012) establish contextual residual gating; novelty is narrow. (3) [Residual Gates](https://home.ttic.edu/~savarese/savarese_files/Residual_Gates.pdf) motivates static-scaling controls; [ReZero](https://arxiv.org/abs/2003.04887) motivates initialization discipline. (4) [PSL](https://proceedings.neurips.cc/paper_files/paper/2024/hash/db1d5c63576587fc1d40d33a75190c71-Abstract-Conference.html) cautions against aggressive negative weighting; [TSSR](https://arxiv.org/abs/2403.07623) motivates semantic alignment without establishing from-scratch effectiveness here.\n\n**Framework and candidate assessment.** Directions separate context transformation, ranking supervision, and semantic evidence. Scores are originality/potential/user alignment/model alignment/difficulty; higher difficulty means harder implementation. Each dimension includes a benefit and limitation.\n\n| Candidate | Scores | Assessment by dimension |\n|---|---|---|\n| Residual gate | 2/5/6/5/4 | O: precise adaptation, established mechanism; P: reusable test, may become static; U: targets specificity and stale demand, lacks need labels; M: adapts features, separation unproven; D: small module, initialization/export controls matter. |\n| Stochastic semi-hard negatives | 3/6/5/8/5 | O: controlled combination, established mining; P: stronger learning signal, false negatives remain; U: challenges weak alternatives, lacks recency conditioning; M: targets separation, margins can mislead; D: bounded pools, exclusions add complexity. |\n| Gated title encoder | 4/6/7/5/7 | O: constrained fusion, established alignment; P: specific evidence, sparse text; U: artist/task clues, uncertain compatibility; M: richer features, semantic clustering risk; D: standard layers, expanded deployment. |\n\n**Selected algorithm.** Compute `g=sigmoid(W[h;u]+b)/sigmoid(2)` and return `mask*(h+g*u)`, with W=0 and b=2. This preserves the baseline update initially, permits multipliers in (0,1.1353), and has initial logit derivative approximately 0.1192. The denominator specifies initialization rather than a new function class. Targets are broad-over-specific ranking, stale-demand persistence, and Electronics’ weak separation; benefits remain hypotheses.\n\nPreserve baseline training and initialize gates without advancing backbone RNG. Compare fixed-one, scalar, bias-only, and contextual modulation; prioritize bias-only versus contextual within budget. Exclude gate biases from decay. Preserve seeds, splits, routing, one model/category, causal masks and diagnostic interfaces; verify exported parity. Track magnitude/angular effects and gate activity without interpreting gates as intent.\n\nSelect using pinned macro validation HR@10. [Sampled metrics](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/) do not establish full-catalog gains. Predeclare comparisons and checkpoint rules; paired 10,000-replicate category-stratified bootstrap intervals remain descriptive and do not correct [selection bias](https://www.jmlr.org/papers/v11/cawley10a.html). No gain is claimed.",
+  "idea": {
+    "description": "Add a jointly trained positionwise, channelwise normalized sigmoid gate to each residual block of the corrected NextItNet. Preserve its causal convolutional backbone, dilation schedule, residual skip pathway and single scoring head. Initialize gates to preserve the supplied baseline residual updates, and test contextual gating against static scaling controls before attributing gains to input dependence.",
+    "motivation": "The proposal explicitly targets two reported user-facing failures: broad thematic matches displacing specific recent choices, and past purchases being extended into continuing demand. Conditioning residual modulation on the current hidden state and proposed update may improve contextual discrimination while retaining useful historical information. Electronics’ 10.04% sampled training wrong-rank rate and −0.0106 margin p10 provide a model-facing discrimination target. These observations establish eligibility and motivation, not evidence that gating resolves those failures. Compatibility, ownership sufficiency, quantity requirements and current purchase need remain unobserved; gates cannot directly identify them. At 10% research progress, this localized experiment is preferable to immediately combining architecture, negative mining and text encoding.",
+    "implementation_notes": "Architecture and interpretation: implement Linear(2D,D) per existing residual block, with weight zero and bias 2. For channel-last h and completed baseline residual update u, compute g = sigmoid(W concat(h,u)+b)/sigmoid(2), then mask*(h+g*u). Compute the denominator using the numerator's dtype/device. Apply the gate after the complete baseline residual transformation, including its original dropout, immediately before residual addition. Preserve channel-only normalization, all intermediate padding masks and embedding row zero. Gate inputs at position t must contain only causal features available at t. The multiplier lies in (0, approximately 1.1353), so this is modulation rather than suppression alone. Its initial derivative with respect to its logit is 1−sigmoid(2), approximately 0.1192; positive bias therefore gives less initial gate sensitivity than a zero-logit sigmoid. A fixed denominator can be absorbed into a freely scalable branch, so the proposed normalization mainly specifies initialization and optimization rather than a new function class. Highway Networks and TFT already establish contextual residual gating; do not claim a new general mechanism.\n\nInitialization reproducibility: identical seeds alone do not preserve backbone initialization after inserting nn.Linear modules, because their constructors consume RNG before weights are overwritten. Prefer constructing and initializing the complete original backbone first, then attaching gates. In either case, isolate gate construction with torch.random.fork_rng(devices=[]) for CPU construction; include the relevant CUDA device indices when construction consumes CUDA randomness. CPU RNG is also restored by fork_rng. Exclude gates from subsequent generic random-initialization passes or isolate those passes as well. Gates introduce no forward randomness. For the same category and underlying baseline configuration, verify equality of all shared initial backbone tensors and evaluation-mode outputs before training; compare dropout-enabled outputs only with restored relevant RNG states. Matching initialization and RNG does not imply matching trajectories after optimization. Store initialization policy and actual baseline configuration.\n\nOptimizer: retain the baseline optimizer and all existing parameter-group settings for existing parameters. Include every new gate parameter exactly once. Put gate biases in a no-weight-decay group so a nonzero initialization is not pulled toward zero by regularization. If the baseline uses AdamW, decoupled decay would otherwise reduce b even with zero gradients; parameters with grad=None are skipped. Also check coupled L2 regularization and explicit penalties if present in the supplied baseline. Apply the baseline weight-decay policy to contextual gate weights and disclose the gate-bias exception. Do not silently replace the baseline optimizer or change backbone bias treatment.\n\nControls and search: predeclare the configuration list, checkpoint frequency, stopping rule, deterministic tie rule and GPU-second allocations before execution, retaining the supplied host checkpoint-selection protocol. Conceptual controls are fixed multiplier one, one learned scalar multiplier per block, learned channelwise bias-only sigmoid(b)/sigmoid(2), and the full contextual gate. Use the same normalized sigmoid parameterization initialized at 2 for scalar and bias-only controls to reduce parameterization differences. Bias-only versus contextual is the primary contrast for input dependence; fixed-one establishes the practical reference. Scalar scaling tests whether simple branch rescaling suffices. If affordable, compare h-only, u-only and [h;u] conditioning afterward; do not turn all possible ablations into a mandatory sweep. Allocate runs only from the actual remaining shared budget, which cannot be inferred from the supplied history. Record omitted controls and limit conclusions accordingly. Each evaluated configuration trains independent category models for comparison; predictions are never fused. Preserve baseline loss, optimizer settings apart from the declared gate grouping, batching, negative sampling, dropout probability, regularization and validation schedule. Extra parameters make contextual versus bias-only an imperfect capacity control; a gain alone does not prove the proposed contextual mechanism.\n\nProtocol: use preprocessing seed 0, training seed 42, at most 200 epochs and exactly 200 batches per epoch. Retain Movies_and_TV, Industrial_and_Scientific, Electronics and CDs_and_Vinyl routing; DATA_DIR = os.environ['GAGC_DATA_DIR']; single-GPU execution; and trial-local artifacts. Train exactly one independent network per category per configuration, with no independent auxiliary scorers, score fusion, checkpoint averaging or reuse of other trials' checkpoints. Preserve supplied input splits and the host evaluator. Count training, diagnostics, debugging and failures against the shared 43,200 GPU-second budget. Record all attempted configurations, actual epochs, updates, parameter counts and elapsed GPU time. No complete baseline source was supplied in this prompt, so this remains an integration specification rather than an invented replacement train.py.\n\nInference and serialization: read the maximum position containing a nonzero item ID, never count−1, and preserve the baseline empty-history fallback. Save gate configuration, conditioning mode, architecture version and exact original backbone configuration with each selected checkpoint. Update the embedded predictor writer with identical block definitions and numerical constants. Each deployed category loads exactly one selected independently trained network/checkpoint. Verify evaluation-mode feature and candidate-score parity after reconstruction using explicit category routes, identical eligible prefixes, truncation and candidate IDs. Verify short left-padded histories, intermediate-position causality and padding isolation. The initial baseline-equivalence check and trained export-parity check serve different purposes; neither substitutes for the other. Report export parity as unavailable until actually measured.\n\nDiagnostic compatibility: keep family-specific sample_batch, ModelView, item_emb, log2feats(sequence), and predict_score(features, items). DiagnosisProbe(view, device).run_full_diagnosis(train_loader) must return measured metrics and metric_definitions, and diagnosis_interpreter_prompt(raw_diagnosis) must use both. Preserve the (None, sequence, positive, negative), B×L loader contract and view.model as the actual trained nn.Module. Retain comparable margin and history-sensitivity probes, including original candidate and intervention procedures. Fix manifest serialization by recording explicit configuration and state metadata rather than requiring inspectable dynamic class source. Keep unavailable category, review, ratings, price, store and simulator-trait breakdowns unavailable. Only permitted public histories, titles, descriptions and timestamps may inform auxiliary analyses.\n\nMechanism and shortcut checks: add measured gate quantiles, variation across histories and positions, and saturation rates with explicit thresholds, excluding padding. Variation is descriptive and does not establish useful intent conditioning. Where supported by existing diagnostic hooks and budget, compare score norms, positive-negative angular separation and matched recent/older-history interventions. Larger raw margins may reflect norm changes rather than improved ranking. A positive temperature rescaling alone cannot improve rank. Gates can learn proxies for item frequency, history length or score magnitude rather than recent specificity; inspect these associations using training-only counts and supported probes, without adding separately fitted score components. Near-0.5 embedding alignment does not establish rank collapse or recommendation diversity. History deletions measure in-sample dependence, not preferences; existing evidence that deletions often harm rankings argues against asserting that old context is generally stale. Zero repeated-target coverage leaves already-satisfied-demand behavior untested by those sensitivity strata.\n\nSelection and uncertainty: select exclusively through pinned four-category macro validation HR@10 with 200 validation users/category and 99 unique negatives. Do not rebuild or alter the evaluator to obtain diagnostics. If the host exposes paired per-user hit indicators, use diagnostic seed 42 and 10,000 bootstrap replicates: independently resample 200 users with replacement within each category, use identical indices for both compared models, compute each category's mean hit difference, then average the four differences equally. Report observed macro and category deltas, discordant wins/losses and the percentile 95% interval. If paired outcomes are unavailable, report this analysis unavailable. Intervals condition on trained models, fixed candidates and the represented categories; they omit training-seed variation, candidate-resampling uncertainty and new-dataset generalization. They also do not correct adaptive architecture or checkpoint selection. With this protocol, one changed hit changes category HR by 0.5 percentage points and macro HR by 0.125 percentage points. Fixed sampled candidates improve reproducibility but can yield model rankings different from full-catalog metrics. Describe any gain specifically as sampled-candidate validation improvement, reserve confirmation for untouched host-held evaluation, and never inspect hidden test files.\n\nUser-facing assessment: retain the native full-catalog unseen-item recommendations for the twenty designated training users, five per category. Track supported qualitative reasons for immediate specificity, broad-similarity mismatch and stale-demand rejection; keep unidentified items distinct from explicit rejection. Do not manufacture feedback, intent labels, compatibility facts or unobserved user traits. Treat these findings separately from validation selection and report that the model-facing training diagnostics do not directly measure either proposed user-facing improvement. No execution, validation gain or diagnostic improvement is asserted.",
+    "pseudocode": "import torch\nfrom torch import nn\n\nclass ResidualGate(nn.Module):\n    def __init__(self, width, mode='contextual'):\n        super().__init__()\n        self.mode = mode\n        if mode == 'contextual':\n            # Construct on CPU without advancing the original RNG stream.\n            with torch.random.fork_rng(devices=[]):\n                self.proj = nn.Linear(2 * width, width)\n                nn.init.zeros_(self.proj.weight)\n                nn.init.constant_(self.proj.bias, 2.0)\n        elif mode in ('scalar', 'bias_only'):\n            size = 1 if mode == 'scalar' else width\n            self.bias = nn.Parameter(torch.full((size,), 2.0))\n        elif mode != 'fixed_one':\n            raise ValueError(mode)\n\n    def forward(self, h, completed_update, mask):\n        if self.mode == 'fixed_one':\n            return (h + completed_update) * mask\n        if self.mode == 'contextual':\n            logits = self.proj(torch.cat([h, completed_update], dim=-1))\n        else:\n            logits = self.bias\n        denominator = torch.sigmoid(logits.new_tensor(2.0))\n        gate = torch.sigmoid(logits) / denominator\n        return (h + gate * completed_update) * mask\n\n# Before execution:\n# predeclare affordable configurations, contrasts, checkpoint/tie rules and budget\n# prioritize fixed-one reference and bias-only versus contextual comparison\n# preserve the supplied host checkpoint-selection and evaluator protocols\n\n# For each permitted configuration and required category:\n# set training seed 42\n# construct and initialize the complete original corrected NextItNet first\n# attach gates afterward; exclude them from later generic initialization passes\n# if constructing directly on CUDA, fork the relevant CUDA RNG states too\n# verify shared backbone initial tensors match the reference\n# verify evaluation-mode baseline equivalence at initialization\n# retain original parameter groups; add gate parameters exactly once\n# give gate biases weight_decay=0; retain original backbone regularization\n\n# Inside each original residual block:\n# u = unchanged_baseline_causal_residual_update(h, mask)\n# h = residual_gate(h, u, mask)\n# preserve original block internals, intermediate masks and dropout placement\n\n# Train jointly with unchanged baseline loss, sampling and protocol:\n# preprocessing seed 0; training seed 42; <=200 epochs; 200 batches/epoch\n# retain all four category routes and DATA_DIR = os.environ['GAGC_DATA_DIR']\n# save one selected checkpoint/category and complete architecture configuration\n# regenerate embedded predictor using identical gated definitions\n# verify trained feature/score export parity and causality\n# deploy exactly one selected network/checkpoint per category\n\n# Final-nonpadding readout; use the original fallback for empty rows:\n# positions = torch.arange(sequence.shape[1], device=sequence.device)\n# last = torch.where(sequence.ne(0), positions[None, :], -1).amax(dim=1)\n# rows = torch.arange(sequence.shape[0], device=sequence.device)\n# valid = last.ge(0)\n# nonempty_features = features[rows[valid], last[valid]]\n\n# If paired host validation hit arrays are available:\n# rng = numpy.random.default_rng(42)\n# observed = mean(mean(hits_new[c] - hits_ref[c]) for c in four_categories)\n# for replicate in range(10000):\n#     category_differences = []\n#     for c in four_categories:\n#         indices = rng.integers(0, 200, size=200)\n#         category_differences.append(\n#             mean(hits_new[c][indices] - hits_ref[c][indices]))\n#     bootstrap_delta[replicate] = mean(category_differences)\n# report observed, category deltas, and percentiles [2.5, 97.5]\n# label intervals descriptive and conditional; they do not correct selection bias",
+    "originality": {
+      "score": 2,
+      "positive": "Direct conditioning on [h;u] with a precise baseline-preserving initialization provides a focused task-specific adaptation and controlled experimental question.",
+      "negative": "Highway Networks and TFT already establish contextual residual gating. The constant normalization primarily changes initialization and optimization, while static residual scaling is also established."
+    },
+    "future_potential": {
+      "score": 5,
+      "positive": "Static controls, initialization matching and supported history interventions could identify whether contextual residual transformations warrant further investigation within NextItNet.",
+      "negative": "Gates may learn static scaling or frequency and magnitude shortcuts; the mechanism lacks explicit evidence of unmet need, and sampled validation gains may not transfer to full-catalog relevance."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "The architectural change uses standard projections and broadcasting while preserving the backbone, batching and principal loss.",
+      "negative": "A credible experiment requires RNG-safe integration, optimizer-group handling, static controls, complete configuration serialization, predictor parity and budgeted diagnostics."
+    }
+  },
+  "related_work": [
+    {
+      "title": "NextItNet",
+      "link": "https://fajieyuan.github.io/papers/nextitnet6.pdf",
+      "contributions": [
+        "Provides the causal dilated residual convolutional backbone retained by the proposal."
+      ],
+      "limitations": [
+        "Does not establish benefits for the proposed normalized residual gates on the pinned four-category benchmark."
+      ]
+    },
+    {
+      "title": "ReZero",
+      "link": "https://arxiv.org/abs/2003.04887",
+      "contributions": [
+        "Motivates careful initialization of residual modulation."
+      ],
+      "limitations": [
+        "Its zero-initialized residual scaling differs from preserving an existing baseline residual update with a normalized sigmoid multiplier."
+      ]
+    },
+    {
+      "title": "Highway Networks",
+      "link": "https://arxiv.org/abs/1505.00387",
+      "contributions": [
+        "Introduces input-dependent transform and carry gates.",
+        "Substituting H(h)=h+u into the highway expression yields h+T(h)⊙u, establishing a close precedent for contextual residual gating."
+      ],
+      "limitations": [
+        "Its gate parameterization and usual carry-favoring initialization differ from the proposed normalized multiplier and baseline-preserving initialization.",
+        "Does not establish effectiveness on this NextItNet benchmark."
+      ]
+    },
+    {
+      "title": "Temporal Fusion Transformers for Interpretable Multi-horizon Time Series Forecasting",
+      "link": "https://doi.org/10.1016/j.ijforecast.2021.03.012",
+      "contributions": [
+        "Uses gated residual networks with input-dependent channelwise modulation and optional contextual inputs."
+      ],
+      "limitations": [
+        "Its forecasting architecture, normalization and gating implementation differ from the proposed NextItNet integration.",
+        "Provides architectural precedent rather than evidence of recommendation gains here."
+      ]
+    },
+    {
+      "title": "Residual Gates",
+      "link": "https://home.ttic.edu/~savarese/savarese_files/Residual_Gates.pdf",
+      "contributions": [
+        "Studies learned input-independent scalar modulation of residual updates.",
+        "Motivates testing whether static branch scaling explains improvements attributed to contextual gates."
+      ],
+      "limitations": [
+        "Static scalar modulation does not test history-conditioned channelwise adaptation.",
+        "Reported benefits elsewhere do not establish gains for the pinned recommendation task."
+      ]
+    },
+    {
+      "title": "PSL",
+      "link": "https://proceedings.neurips.cc/paper_files/paper/2024/hash/db1d5c63576587fc1d40d33a75190c71-Abstract-Conference.html",
+      "contributions": [
+        "The supplied search summary identifies false-negative sensitivity from exponential weighting and alternative pairwise activations."
+      ],
+      "limitations": [
+        "Motivates a separate objective experiment rather than demonstrating benefits from residual gating."
+      ]
+    },
+    {
+      "title": "TSSR",
+      "link": "https://arxiv.org/abs/2403.07623",
+      "contributions": [
+        "The supplied search summary describes item-level and user-level textual–collaborative alignment."
+      ],
+      "limitations": [
+        "Does not establish effectiveness for a randomly initialized text encoder integrated into the constrained NextItNet setting."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled recommendation metrics can yield model orderings different from full-catalog metrics, including in expectation."
+      ],
+      "limitations": [
+        "Does not authorize changing the pinned evaluator; results must be described specifically for its sampled-candidate protocol."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how optimizing a noisy model-selection criterion can overfit validation measurements and bias reported performance."
+      ],
+      "limitations": [
+        "Predeclared comparisons and ordinary post-selection bootstrap intervals do not eliminate selection bias or replace independent final evaluation."
+      ]
+    },
+    {
+      "title": "SciPy bootstrap documentation",
+      "link": "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.bootstrap.html",
+      "contributions": [
+        "Documents paired resampling, supporting identical sampled user indices for both compared models."
+      ],
+      "limitations": [
+        "The four-category stratification and equal-weight macro statistic must be implemented explicitly.",
+        "Resampling fixed validation outcomes does not capture training randomness, new candidate sets or adaptive model selection."
+      ]
+    },
+    {
+      "title": "PyTorch Linear implementation and fork_rng documentation",
+      "link": "https://docs.pytorch.org/docs/main/random.html",
+      "contributions": [
+        "Documents RNG-state isolation and restoration.",
+        "The Linear implementation at https://github.com/pytorch/pytorch/blob/main/torch/nn/modules/linear.py initializes parameters during construction, explaining why overwriting them afterward does not restore consumed randomness."
+      ],
+      "limitations": [
+        "Correct isolation requires accounting for the devices that consume randomness and any subsequent initialization passes.",
+        "Matching RNG streams does not guarantee identical optimization trajectories across different architectures."
+      ]
+    },
+    {
+      "title": "PyTorch AdamW documentation",
+      "link": "https://docs.pytorch.org/docs/main/generated/torch.optim.AdamW.html",
+      "contributions": [
+        "Defines decoupled weight decay, motivating exclusion of nonzero gate biases from decayed parameter groups when initialization drift is unwanted."
+      ],
+      "limitations": [
+        "The supplied baseline optimizer must be inspected during integration rather than assumed to be AdamW.",
+        "Coupled regularization and explicit penalties require separate handling if present."
+      ]
+    }
+  ]
+}

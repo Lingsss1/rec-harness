@@ -1,0 +1,60 @@
+{
+  "markdown_report": "At 0% progress, prioritize **random-prefix truncation training for NextItNet**, supported by padding and history-sensitivity diagnostics. This is a proposed experiment; no improvement has been measured.\n\n**Starting-point insights.** (1) Feedback identifies broad relevance and stale interests as recurring problems. This motivates testing recent-context reliance, but does not establish users’ current intent. (2) Existing margins measure sampled training-pair separation. Their scale dependence makes them insufficient evidence of improved ranking. (3) Left padding makes readout and padding propagation critical. Final representations must use the final nonpadding position, never count−1.\n\n**Related-work insights.** (1) NextItNet’s causal dilated convolutions provide a controllable receptive field [1]. Prefix interventions can therefore test which history spans affect predictions. (2) Sequence-shuffling research motivates behavioral controls [2]. Sensitivity becomes useful evidence only when intact histories outperform perturbed histories on validation targets. (3) Sampled ranking metrics can disagree with full-catalog ranking [3]. Preserve the pinned evaluator and interpret simulator recommendations separately.\n\n**Framework and directions.** Organize work along three axes: implementation correctness → padding/readout checks; temporal reliance → prefix interventions and augmentation; ranking usefulness → fixed-candidate validation and popularity/history-length strata. These distinguish implementation defects, learned behavior, and predictive benefit without claiming causal intent.\n\n**Candidate ideas.** Scores are originality/potential/difficulty, each 0–10; higher difficulty means harder implementation.\n\n| Idea | Algorithm and reference | Scores | Positive / negative assessment |\n|---|---|---|---|\n| Padding-safe residual blocks | Mask padded positions after every temporal block; audit leading-padding invariance [1]. | 2/7/2 | Originality: essential adaptation / established technique. Potential: dependable foundation / gains require an actual defect. Difficulty: local edits / embedded predictor must match. |\n| Random-prefix truncation | Occasionally remove an older prefix while retaining observed next-item targets [1,2]. | 4/7/3 | Originality: targeted augmentation / cropping is established. Potential: inexpensive recency robustness / may discard useful long-term context. Difficulty: sampler-only change / supervision masks need care. |\n| Learned dilation gates | Jointly train scalar residual gates for temporal blocks [1]. | 4/6/5 | Originality: adaptive receptive-field combination / residual gating is familiar. Potential: flexible context span / gates may collapse. Difficulty: small network change / requires predictor and checkpoint updates. |\n\n**Selected experiment.** Random-prefix truncation directly tests whether reducing dependence on older context improves generalization while retaining the supplied NextItNet architecture. Start with probability 0.25 and uniformly sample retained lengths from 8–32, clipped to available context; these are hypotheses, not validated settings.\n\n```text\nsample the baseline training batch\nfor each sequence, with probability 0.25:\n    retain its last s nonpadding input positions\n    replace the older prefix with padding without shifting positions\n    disable loss outside the retained suffix\noptimize the baseline next-item objective\n```\n\nRetained positives remain their original observed successors. Use one model/checkpoint per category, seed 42, at most 200 epochs and 200 batches/epoch; preserve preprocessing seed 0, routing, splits, and DATA_DIR. Keep the baseline as the control. Select solely by pinned macro validation HR@10. Retain both diagnostic APIs, report valid counts and unavailable measurements explicitly, and preserve ModelView and embedded-predictor consistency.",
+  "idea": {
+    "description": "Train the supplied NextItNet with occasional random truncation of older input prefixes, preserving positions and original next-item targets. Maintain exactly one independently trained model per category.",
+    "motivation": "Qualitative feedback suggests stale or isolated interactions may distract from coherent recent behavior. Prefix truncation is a low-cost way to test this hypothesis without introducing unavailable compatibility labels, intent labels, pretrained representations, or additional predictors.",
+    "implementation_notes": "Apply augmentation only to training batches after baseline sampling. With probability 0.25 per row, retain a uniformly sampled 8–32-position suffix, clipped to the available nonpadding history. Zero earlier input positions without compaction; mask their positive targets from loss. Preserve retained positive and negative IDs. Do not change validation histories or candidates. Verify padding behavior before interpreting results; augmentation may amplify an existing padding defect. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), diagnosis_interpreter_prompt(raw_diagnosis), and all ModelView interfaces. Report undefined diagnostic quantities as unavailable rather than zero. The architecture and inference procedure remain the corrected baseline, and the embedded predictor must continue loading its exact checkpoint format. Preserve four-category routing, DATA_DIR = os.environ['GAGC_DATA_DIR'], trial-local artifacts, preprocessing seed 0, training seed 42, maximum 200 epochs, and 200 batches per epoch. Use the supplied cold start, without reading other trials or checkpoints. Any gain remains hypothetical until independently evaluated by the host.",
+    "pseudocode": "sequence, positive, negative = baseline_sample_batch()\nfor b in rows(sequence):\n    occupied = nonzero_positions(sequence[b])\n    if len(occupied) > 0 and training_rng.uniform() < 0.25:\n        s = min(training_rng.randint_inclusive(8, 32), len(occupied))\n        cutoff = occupied[-s]\n        sequence[b, :cutoff] = 0\n        positive[b, :cutoff] = 0\nfeatures = model.log2feats(sequence)\nvalid = (positive != 0) & (sequence != 0)\nif valid.any():\n    loss = baseline_next_item_loss(features, positive, negative, valid)\n    optimizer.zero_grad()\n    loss.backward()\n    optimizer.step()\n# Inference uses intact left-padded histories and final nonpadding readout.\n# Host selection uses unchanged macro validation HR@10.",
+    "originality": {
+      "score": 4,
+      "positive": "Connects a specific qualitative failure hypothesis to a minimal training intervention within the required NextItNet family.",
+      "negative": "History cropping is an established augmentation pattern; this proposal does not establish a new general algorithm."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "A controlled result could motivate category-dependent context lengths or jointly learned context selection within one network.",
+      "negative": "Long-range preferences may be valuable, and robustness to cropped histories need not improve intact-history validation ranking."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Requires a small training-batch transformation and no additional inference model or scoring component.",
+      "negative": "Correct supervision masking and padding behavior require care, particularly when residual convolutions propagate activations through padded positions."
+    }
+  },
+  "related_work": [
+    {
+      "title": "NextItNet",
+      "link": "https://fajieyuan.github.io/papers/nextitnet6.pdf",
+      "contributions": [
+        "Uses causal dilated convolutions and residual blocks for sequential recommendation.",
+        "Provides the architectural basis for reasoning about accessible history spans."
+      ],
+      "limitations": [
+        "Does not establish that prefix truncation improves this benchmark.",
+        "A theoretical receptive field does not measure useful reliance on historical interactions."
+      ]
+    },
+    {
+      "title": "Does It Look Sequential?",
+      "link": "https://github.com/Antondfger/Does-It-Look-Sequential/",
+      "contributions": [
+        "Motivates sequence-shuffling controls and examination of ranking quality and recommendation overlap."
+      ],
+      "limitations": [
+        "Perturbation sensitivity alone does not establish beneficial personalization or current user intent.",
+        "Does not validate the proposed augmentation on the four supplied categories."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://ijcai.org/proceedings/2021/651",
+      "contributions": [
+        "Shows that sampled recommendation metrics can differ systematically from full-catalog metrics."
+      ],
+      "limitations": [
+        "Does not justify changing the pinned evaluator.",
+        "Does not determine whether a particular NextItNet modification will improve validation HR@10."
+      ]
+    }
+  ]
+}

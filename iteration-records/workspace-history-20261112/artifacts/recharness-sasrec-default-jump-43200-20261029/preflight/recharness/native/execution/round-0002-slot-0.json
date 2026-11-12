@@ -1,0 +1,326 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "proposal": {
+        "category_edits": [
+          {
+            "category": "interaction_mechanism",
+            "rationale": "Learn rank-16 residual bilinear compatibility jointly with each category's SASRec model. Zero-initialize the item projection so scoring starts at the baseline dot product. Preserve the Transformer, history readout and BCE loss, and load the same scoring architecture through the predictor writer.",
+            "edits": [
+              {
+                "find": "                 num_heads: int = 1, dropout_rate: float = 0.5, maxlen: int = 128):",
+                "replace": "                 num_heads: int = 1, dropout_rate: float = 0.5, maxlen: int = 128,\n                 interaction_rank: int = 16):"
+              },
+              {
+                "find": "        self.last_layernorm = nn.LayerNorm(hidden_units, eps=1e-8)\n\n    def log2feats",
+                "replace": "        self.last_layernorm = nn.LayerNorm(hidden_units, eps=1e-8)\n        self.interaction_rank = interaction_rank\n        self.interest_projection = nn.Linear(hidden_units, interaction_rank, bias=False)\n        self.item_projection = nn.Linear(hidden_units, interaction_rank, bias=False)\n        nn.init.xavier_uniform_(self.interest_projection.weight)\n        nn.init.zeros_(self.item_projection.weight)\n\n    def compatibility(self, interests: torch.Tensor, items: torch.Tensor) -> torch.Tensor:\n        base = (interests * items).sum(dim=-1)\n        residual = (self.interest_projection(interests) * self.item_projection(items)).sum(dim=-1)\n        return base + residual / math.sqrt(self.interaction_rank)\n\n    def log2feats"
+              },
+              {
+                "find": "        pos_logits = (log_feats * pos_embs).sum(dim=-1)\n        neg_logits = (log_feats * neg_embs).sum(dim=-1)",
+                "replace": "        pos_logits = self.compatibility(log_feats, pos_embs)\n        neg_logits = self.compatibility(log_feats, neg_embs)"
+              },
+              {
+                "find": "        return item_embs.matmul(final_feat.unsqueeze(-1)).squeeze(-1)",
+                "replace": "        return self.compatibility(final_feat.unsqueeze(1), item_embs)"
+              },
+              {
+                "find": "            \"dropout_rate\": DROPOUT_RATE,\n            \"maxlen\": MAXLEN,",
+                "replace": "            \"dropout_rate\": DROPOUT_RATE,\n            \"maxlen\": MAXLEN,\n            \"interaction_rank\": model.interaction_rank,"
+              },
+              {
+                "find": "            dropout_rate=0.0,\n            maxlen=meta[\"maxlen\"],",
+                "replace": "            dropout_rate=0.0,\n            maxlen=meta[\"maxlen\"],\n            interaction_rank=meta[\"interaction_rank\"],"
+              }
+            ]
+          },
+          {
+            "category": "training_strategy",
+            "rationale": "Stabilize learning of the new compatibility parameters using the existing Adam optimizer at half the baseline peak learning rate, with 5% linear warmup and cosine decay to 10% of peak. Enforce the 200-epoch cap and required data-directory environment variable.",
+            "edits": [
+              {
+                "find": "NUM_EPOCHS   = int(os.environ.get(\"SASREC_EPOCHS\",    \"300\"))",
+                "replace": "NUM_EPOCHS   = min(200, int(os.environ.get(\"SASREC_EPOCHS\", \"200\")))"
+              },
+              {
+                "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+                "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+              },
+              {
+                "find": "    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.98))\n    bce_criterion = nn.BCEWithLogitsLoss()",
+                "replace": "    optimizer = torch.optim.Adam(model.parameters(), lr=0.5 * LR, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.98))\n    total_steps = max(1, NUM_EPOCHS * NUM_BATCHES)\n    warmup_steps = max(1, int(math.ceil(0.05 * total_steps)))\n\n    def learning_rate_multiplier(step: int) -> float:\n        if step < warmup_steps:\n            return float(step + 1) / warmup_steps\n        progress = min(1.0, max(0.0, (step - warmup_steps) / max(1, total_steps - warmup_steps - 1)))\n        return 0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * progress))\n\n    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, learning_rate_multiplier)\n    bce_criterion = nn.BCEWithLogitsLoss()"
+              },
+              {
+                "find": "            optimizer.step()\n            total_loss += loss.item()",
+                "replace": "            optimizer.step()\n            scheduler.step()\n            total_loss += loss.item()"
+              }
+            ]
+          }
+        ],
+        "change_summary": "Add jointly trained residual bilinear scoring and a lower-peak warmup/cosine learning-rate schedule across all four category models. Preserve one checkpoint per category, routing, causal SASRec backbone, loss, seeds and evaluation.",
+        "edits": [
+          {
+            "find": "                 num_heads: int = 1, dropout_rate: float = 0.5, maxlen: int = 128):",
+            "replace": "                 num_heads: int = 1, dropout_rate: float = 0.5, maxlen: int = 128,\n                 interaction_rank: int = 16):"
+          },
+          {
+            "find": "        self.last_layernorm = nn.LayerNorm(hidden_units, eps=1e-8)\n\n    def log2feats",
+            "replace": "        self.last_layernorm = nn.LayerNorm(hidden_units, eps=1e-8)\n        self.interaction_rank = interaction_rank\n        self.interest_projection = nn.Linear(hidden_units, interaction_rank, bias=False)\n        self.item_projection = nn.Linear(hidden_units, interaction_rank, bias=False)\n        nn.init.xavier_uniform_(self.interest_projection.weight)\n        nn.init.zeros_(self.item_projection.weight)\n\n    def compatibility(self, interests: torch.Tensor, items: torch.Tensor) -> torch.Tensor:\n        base = (interests * items).sum(dim=-1)\n        residual = (self.interest_projection(interests) * self.item_projection(items)).sum(dim=-1)\n        return base + residual / math.sqrt(self.interaction_rank)\n\n    def log2feats"
+          },
+          {
+            "find": "        pos_logits = (log_feats * pos_embs).sum(dim=-1)\n        neg_logits = (log_feats * neg_embs).sum(dim=-1)",
+            "replace": "        pos_logits = self.compatibility(log_feats, pos_embs)\n        neg_logits = self.compatibility(log_feats, neg_embs)"
+          },
+          {
+            "find": "        return item_embs.matmul(final_feat.unsqueeze(-1)).squeeze(-1)",
+            "replace": "        return self.compatibility(final_feat.unsqueeze(1), item_embs)"
+          },
+          {
+            "find": "            \"dropout_rate\": DROPOUT_RATE,\n            \"maxlen\": MAXLEN,",
+            "replace": "            \"dropout_rate\": DROPOUT_RATE,\n            \"maxlen\": MAXLEN,\n            \"interaction_rank\": model.interaction_rank,"
+          },
+          {
+            "find": "            dropout_rate=0.0,\n            maxlen=meta[\"maxlen\"],",
+            "replace": "            dropout_rate=0.0,\n            maxlen=meta[\"maxlen\"],\n            interaction_rank=meta[\"interaction_rank\"],"
+          },
+          {
+            "find": "NUM_EPOCHS   = int(os.environ.get(\"SASREC_EPOCHS\",    \"300\"))",
+            "replace": "NUM_EPOCHS   = min(200, int(os.environ.get(\"SASREC_EPOCHS\", \"200\")))"
+          },
+          {
+            "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+            "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+          },
+          {
+            "find": "    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.98))\n    bce_criterion = nn.BCEWithLogitsLoss()",
+            "replace": "    optimizer = torch.optim.Adam(model.parameters(), lr=0.5 * LR, weight_decay=WEIGHT_DECAY, betas=(0.9, 0.98))\n    total_steps = max(1, NUM_EPOCHS * NUM_BATCHES)\n    warmup_steps = max(1, int(math.ceil(0.05 * total_steps)))\n\n    def learning_rate_multiplier(step: int) -> float:\n        if step < warmup_steps:\n            return float(step + 1) / warmup_steps\n        progress = min(1.0, max(0.0, (step - warmup_steps) / max(1, total_steps - warmup_steps - 1)))\n        return 0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * progress))\n\n    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, learning_rate_multiplier)\n    bce_criterion = nn.BCEWithLogitsLoss()"
+          },
+          {
+            "find": "            optimizer.step()\n            total_loss += loss.item()",
+            "replace": "            optimizer.step()\n            scheduler.step()\n            total_loss += loss.item()"
+          }
+        ],
+        "scope_validation": "exact categories and nontrivial AST changes; semantic labels prompt-enforced"
+      }
+    }
+  ],
+  "receipt": {
+    "id": "round-0002-slot-0-attempt-1",
+    "status": "success",
+    "gpu": 0,
+    "allocated_gpu_seconds": 12.530106708407402,
+    "output": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-sasrec-default-jump-43200-20261029/preflight/recharness/smoke/round-0002-slot-0-attempt-1",
+    "source_sha256": "16a7b76a5f75e061855c7a7d7366b32804c8a5a72d15c8597ba97d073d11bef3",
+    "score": 0.0925,
+    "aggregate": {
+      "HR@5": 0.0488,
+      "HR@10": 0.0925,
+      "HR@20": 0.2012,
+      "NDCG@5": 0.0282,
+      "NDCG@10": 0.0423,
+      "NDCG@20": 0.0694,
+      "Movies_and_TV/HR@5": 0.045,
+      "Movies_and_TV/HR@10": 0.1,
+      "Movies_and_TV/HR@20": 0.205,
+      "Movies_and_TV/NDCG@5": 0.0236,
+      "Movies_and_TV/NDCG@10": 0.0413,
+      "Movies_and_TV/NDCG@20": 0.0671,
+      "Industrial_and_Scientific/HR@5": 0.055,
+      "Industrial_and_Scientific/HR@10": 0.09,
+      "Industrial_and_Scientific/HR@20": 0.21,
+      "Industrial_and_Scientific/NDCG@5": 0.0359,
+      "Industrial_and_Scientific/NDCG@10": 0.047,
+      "Industrial_and_Scientific/NDCG@20": 0.0773,
+      "Electronics/HR@5": 0.045,
+      "Electronics/HR@10": 0.09,
+      "Electronics/HR@20": 0.185,
+      "Electronics/NDCG@5": 0.0239,
+      "Electronics/NDCG@10": 0.0385,
+      "Electronics/NDCG@20": 0.0617,
+      "CDs_and_Vinyl/HR@5": 0.05,
+      "CDs_and_Vinyl/HR@10": 0.09,
+      "CDs_and_Vinyl/HR@20": 0.205,
+      "CDs_and_Vinyl/NDCG@5": 0.0294,
+      "CDs_and_Vinyl/NDCG@10": 0.0424,
+      "CDs_and_Vinyl/NDCG@20": 0.0716
+    },
+    "per_dataset": {
+      "Movies_and_TV": {
+        "metrics": {
+          "HR@5": 0.045,
+          "HR@10": 0.1,
+          "HR@20": 0.205,
+          "NDCG@5": 0.0236,
+          "NDCG@10": 0.0413,
+          "NDCG@20": 0.0671
+        },
+        "n_users": 200
+      },
+      "Industrial_and_Scientific": {
+        "metrics": {
+          "HR@5": 0.055,
+          "HR@10": 0.09,
+          "HR@20": 0.21,
+          "NDCG@5": 0.0359,
+          "NDCG@10": 0.047,
+          "NDCG@20": 0.0773
+        },
+        "n_users": 200
+      },
+      "Electronics": {
+        "metrics": {
+          "HR@5": 0.045,
+          "HR@10": 0.09,
+          "HR@20": 0.185,
+          "NDCG@5": 0.0239,
+          "NDCG@10": 0.0385,
+          "NDCG@20": 0.0617
+        },
+        "n_users": 200
+      },
+      "CDs_and_Vinyl": {
+        "metrics": {
+          "HR@5": 0.05,
+          "HR@10": 0.09,
+          "HR@20": 0.205,
+          "NDCG@5": 0.0294,
+          "NDCG@10": 0.0424,
+          "NDCG@20": 0.0716
+        },
+        "n_users": 200
+      }
+    },
+    "evaluation_seconds": 3.1327475160360336,
+    "predictor_sha256": "8a71e13c43fa82f387cd09c7c34157702daa61e7b5a03619d551db50dc72a03f"
+  },
+  "native_result": {
+    "spec": {
+      "dimension": "combination_jump",
+      "delta": 1.0,
+      "estimated_cost_secs": 305.0,
+      "code_diff": "",
+      "code_edits": [],
+      "code_content": "",
+      "arm": "combination_jump",
+      "composite_dims": [
+        "combination_jump"
+      ],
+      "strategy_arm": null,
+      "round_role": "lowlevel_routing",
+      "parallel_group_estimated_wall_secs": 305.0,
+      "budget_safe_if_global_budget_gte": 305.0,
+      "budget_accounting": "Parallel group cost is sum(estimated_cost_secs) across the selected candidates.",
+      "code_hint": "COMBINATION JUMP: make a substantive, coordinated change in EACH selected direction. 交互机制: Jointly trained user-interest/item interaction or scoring mechanisms, such as gated or bilinear compatibility. Preserve the causal Transformer backbone topology, input features, history readout, loss and optimizer. No independently trained score fusion.\n训练策略: Optimizer, learning rate, batch size, scheduler, dropout and weight decay. Preserve model structure, features, scoring/readout and loss definition. Keep seed 42, epoch cap 200, data splits, evaluation and GPU/CPU allocation fixed.\nOnly minimal shape/checkpoint/predictor consistency edits outside the chosen directions are allowed; they must not introduce another modeling or training change.",
+      "hypothesis": "Memory available in state; agent should write a short arm-specific hypothesis; Agent hypothesis: For all four categories, replace dot-product scoring with jointly trained residual bilinear compatibility s(h,e)=h·e+(Uh)·(Ve)/sqrt(16), using rank-16 projections, random U and zero-initialized V. Pair this with the existing optimizer at half the baseline learning rate, 5% linear warmup and cosine decay to 10% of peak. The residual starts at baseline scoring; gradual optimization should stabilize learning of cross-dimension compatibility and improve validation HR@10. Preserve the causal Transformer, features, embeddings, history readout, loss, seeds and 200-epoch cap. Train and load one model per category, updating the predictor writer for identical scoring.",
+      "is_jumping": true,
+      "implementation_backend": "claude_code",
+      "implementation_prompt": "COMBINATION JUMP: make a substantive, coordinated change in EACH selected direction. 交互机制: Jointly trained user-interest/item interaction or scoring mechanisms, such as gated or bilinear compatibility. Preserve the causal Transformer backbone topology, input features, history readout, loss and optimizer. No independently trained score fusion.\n训练策略: Optimizer, learning rate, batch size, scheduler, dropout and weight decay. Preserve model structure, features, scoring/readout and loss definition. Keep seed 42, epoch cap 200, data splits, evaluation and GPU/CPU allocation fixed.\nOnly minimal shape/checkpoint/predictor consistency edits outside the chosen directions are allowed; they must not introduce another modeling or training change.",
+      "allowed_files": [
+        "train.py",
+        "predict.py"
+      ],
+      "claude_attempts": 3,
+      "arm_design": "eight_directions_v3",
+      "selected_categories": [
+        "interaction_mechanism",
+        "training_strategy"
+      ],
+      "hypothesis_key": "slot-0",
+      "sampling_draw": {
+        "slot": 0,
+        "arm": "combination_jump",
+        "selected_directions": [
+          "interaction_mechanism",
+          "training_strategy"
+        ],
+        "sampled_values": {
+          "feature_construction": 0.09181046231053773,
+          "embedding_representation": 0.0039623364922636755,
+          "interaction_mechanism": 0.74226997250504,
+          "network_architecture": 0.6472154998650553,
+          "sequence_modeling": 0.15022711230968339,
+          "interest_aggregation": 0.3599816754641781,
+          "learning_objective": 0.6300084904424694,
+          "training_strategy": 0.7065145743983446
+        },
+        "selection": "highest draw plus highest compatible cross-category draw"
+      },
+      "max_trial_gpu_seconds": 305.0,
+      "protected_gpu_seconds": 15119.999999999998,
+      "jump_trigger": "plateau",
+      "jump_budget_plan": {
+        "trial_cap_secs": 305.0,
+        "retune_group_size": 4,
+        "retune_rounds": 4,
+        "retune_reserved_secs": 4880.0,
+        "total_reserved_secs": 5185.0,
+        "protected_envelope_secs": 15119.999999999998,
+        "cost_source": "p75 measured trial cost * safety + teardown margin"
+      },
+      "predict_code_edits": [],
+      "predict_code_content": "",
+      "agent_hypothesis": "For all four categories, replace dot-product scoring with jointly trained residual bilinear compatibility s(h,e)=h·e+(Uh)·(Ve)/sqrt(16), using rank-16 projections, random U and zero-initialized V. Pair this with the existing optimizer at half the baseline learning rate, 5% linear warmup and cosine decay to 10% of peak. The residual starts at baseline scoring; gradual optimization should stabilize learning of cross-dimension compatibility and improve validation HR@10. Preserve the causal Transformer, features, embeddings, history readout, loss, seeds and 200-epoch cap. Train and load one model per category, updating the predictor writer for identical scoring.",
+      "gagc_memory_context": {
+        "experiment_skill": "# RecHarness Experiment Skill\n\n## Objective\nUse benchmark val_score as the search and winner criterion.\nDo not use held-out test metrics during search.\nThompson Sampling chooses arms; this skill only guides how to edit code within selected arms.\n\n## Recent Patch Lessons\n- Round 1 winner established the benchmark reference using baseline/baseline ↓.\n- Round 2 winner improved validation score by +0.0038 using network_architecture/network_architecture ↑. Val score also improved — high confidence direction.\n\n## Concrete Avoids\nNo concrete patch-level avoids yet.\n",
+        "recent_text_gradients": [
+          "Round 1 winner established the benchmark reference using baseline/baseline ↓.",
+          "Round 2 winner improved validation score by +0.0038 using network_architecture/network_architecture ↑. Val score also improved — high confidence direction."
+        ],
+        "failure_memory": [],
+        "skill_notes": "Round 2: best_ever=0.0963, recent=0.0963, trend=improving. Top arms: network_architecture, feature_construction, sequence_modeling."
+      },
+      "trial_group_id": "trialgrp_1793245726061_1637871",
+      "trial_id": 0
+    },
+    "wall_time_secs": 12.530106708407402,
+    "timed_out": false,
+    "oom": false,
+    "val_score": 0.0925,
+    "val_metrics": {
+      "Movies_and_TV": {
+        "HR@5": 0.045,
+        "HR@10": 0.1,
+        "HR@20": 0.205,
+        "NDCG@5": 0.0236,
+        "NDCG@10": 0.0413,
+        "NDCG@20": 0.0671
+      },
+      "Industrial_and_Scientific": {
+        "HR@5": 0.055,
+        "HR@10": 0.09,
+        "HR@20": 0.21,
+        "NDCG@5": 0.0359,
+        "NDCG@10": 0.047,
+        "NDCG@20": 0.0773
+      },
+      "Electronics": {
+        "HR@5": 0.045,
+        "HR@10": 0.09,
+        "HR@20": 0.185,
+        "NDCG@5": 0.0239,
+        "NDCG@10": 0.0385,
+        "NDCG@20": 0.0617
+      },
+      "CDs_and_Vinyl": {
+        "HR@5": 0.05,
+        "HR@10": 0.09,
+        "HR@20": 0.205,
+        "NDCG@5": 0.0294,
+        "NDCG@10": 0.0424,
+        "NDCG@20": 0.0716
+      }
+    },
+    "test_score": null,
+    "test_metrics": null,
+    "convergence_trace": [
+      0.08,
+      0.1,
+      0.065,
+      0.09
+    ],
+    "error_message": null,
+    "stdout_tail": "Using device: cuda\n\n=======================================================\nTraining Movies_and_TV\n=======================================================\n  [Movies_and_TV] users=11947  items=17490\n  [Movies_and_TV] epoch   5/5  loss=6.4217  val_score: 0.0800  HR@20=0.1650  NDCG@10=0.0428\n  [Movies_and_TV] Best val HR@10=0.0800  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-sasrec-default-jump-43200-20261029/preflight/recharness/smoke/round-0002-slot-0-attempt-1/working/Movies_and_TV_model.pt\n\n=======================================================\nTraining Industrial_and_Scientific\n=======================================================\n  [Industrial_and_Scientific] users=23627  items=25764\n  [Industrial_and_Scientific] epoch   5/5  loss=6.2242  val_score: 0.1000  HR@20=0.1900  NDCG@10=0.0475\n  [Industrial_and_Scientific] Best val HR@10=0.1000  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-sasrec-default-jump-43200-20261029/preflight/recharness/smoke/round-0002-slot-0-attempt-1/working/Industrial_and_Scientific_model.pt\n\n=======================================================\nTraining Electronics\n=======================================================\n  [Electronics] users=27601  items=31533\n  [Electronics] epoch   5/5  loss=6.8991  val_score: 0.0650  HR@20=0.1750  NDCG@10=0.0396\n  [Electronics] Best val HR@10=0.0650  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-sasrec-default-jump-43200-20261029/preflight/recharness/smoke/round-0002-slot-0-attempt-1/working/Electronics_model.pt\n\n=======================================================\nTraining CDs_and_Vinyl\n=======================================================\n  [CDs_and_Vinyl] users=18481  items=30951\n  [CDs_and_Vinyl] epoch   5/5  loss=6.6869  val_score: 0.0900  HR@20=0.2000  NDCG@10=0.0420\n  [CDs_and_Vinyl] Best val HR@10=0.0900  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-sasrec-default-jump-43200-20261029/preflight/recharness/smoke/round-0002-slot-0-attempt-1/working/CDs_and_Vinyl_model.pt\npredict.py written → /home/liuzhishan/lhr/rec-harness/artifacts/recharness-sasrec-default-jump-43200-20261029/preflight/recharness/smoke/round-0002-slot-0-attempt-1/working/predict.py\n\nAll datasets done. Average val HR@10 = 0.0837\n",
+    "stderr_tail": ""
+  },
+  "gpu_seconds_all_attempts": 12.530106708407402
+}

@@ -1,0 +1,174 @@
+--- g0-r0052-block_nonlinear_transfer/model.py
++++ g1-r0063-lexical_duplicate/model.py
+@@ -1,11 +1,7 @@
+-"""Prospective blockwise nonlinear summary study; validation results unmeasured.
+-
+-Reuse ten frozen compressed blocks and every learned parameter of the incumbent.
+-Compare mean_j tanh(W [M*b_j, global_details]) with tanh(W [sum_j b_j,
+-global_details]), crossed with the existing auxiliary adapter-context gate.
+-Both summary paths execute in every cell for a measured work-matched contrast.
+-The original signed pooled base and five detail paths remain intact. This tests
+-projection/aggregation order, not a new attention mechanism or verified novelty.
+-Native tensor, BF16, autograd and resource checks belong to the host.
++"""Prospective shared-weight two-view history-order diagnostic.
++
++One internal 2B-view network call returns B probability averages. Learned
++components, external batch and default loss are inherited. Native checks
++and measured quality/cost belong to the host; no novelty/result claimed.
+ """
+ import torch
+@@ -16,5 +12,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'pair_treatment': 'lexical'}
+ 
+ 
+@@ -36,5 +32,5 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16, summary_placement='block',
+-                 task='binary_classification', **kwargs):
++                 pair_treatment='lexical', task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+@@ -47,4 +43,7 @@
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
++        if pair_treatment not in ('reversal', 'supplied', 'path', 'lexical'):
++            raise ValueError('Unknown two-view history treatment')
++        self.pair_treatment = pair_treatment
+         self.compression_routes = compression_routes
+         if block_aux_scorer_grad is not True:
+@@ -228,4 +227,125 @@
+         self.model_to_device()
+ 
++    @staticmethod
++    def _path_sources(ranks, packed, count, positions):
++        """Exact minimum of forward/reverse valid-event tuple sequences.
++
++        Ranks preserve complete-tuple lexical order, including historical
++        action and every eligibility bit. The first unequal valid rank
++        selects orientation. Palindromes (including length zero/one) select
++        forward, but their tuple sequence is identical in either direction.
++        No event crosses the original endpoint cut except by full reversal.
++        """
++        length = positions.shape[1]
++        active = positions < count
++        reverse_index = (count - 1 - positions).clamp_min(0)
++        reversed_ranks = ranks.gather(1, reverse_index)
++        different = active & (ranks != reversed_ranks)
++        first = torch.where(different, positions,
++                            torch.full_like(positions, length)).min(
++                                dim=1, keepdim=True).values
++        safe_first = first.clamp_max(length - 1)
++        choose_reverse = ((first < length)
++                          & (reversed_ranks.gather(1, safe_first)
++                             < ranks.gather(1, safe_first)))
++        return torch.where(choose_reverse, packed.gather(1, reverse_index), packed)
++
++    def _view_sources(self, item, mask, task_masks):
++        """Compute complete-event lexical, open-path and reversed layouts.
++
++        Destinations are always the original valid positions. Every field,
++        historical action and eligibility bit travels together. Padding and
++        the current target never participate in sorting or reversal.
++        """
++        batch, length = mask.shape
++        if length != 100 or len(task_masks) != self.num_tasks:
++            raise ValueError('Frozen history and four eligibility masks required')
++        for eligibility in task_masks:
++            if eligibility.shape != mask.shape:
++                raise ValueError('Historical task mask shape mismatch')
++        names = self.item_fields + [self.action_field]
++        if set(item) != set(names):
++            raise ValueError('Every supplied event field must enter the tuple key')
++        for field in item.values():
++            if field.ndim != 2 or field.shape != (batch, length + 1):
++                raise ValueError('Expected event fields with unchanged target')
++        valid = mask.bool()
++        positions = torch.arange(length, device=mask.device, dtype=torch.long)
++        positions = positions.unsqueeze(0).expand(batch, -1)
++        raw_keys = [item[name][:, :-1] for name in names] + list(task_masks)
++        keys = [torch.where(valid, key, torch.zeros_like(key)) for key in raw_keys]
++        lexical = positions
++        for key in reversed(keys):
++            lexical = lexical.gather(1, torch.argsort(
++                key.gather(1, lexical), dim=1, stable=True))
++        lexical = lexical.gather(1, torch.argsort(
++            (~valid).long().gather(1, lexical), dim=1, stable=True))
++        different = torch.zeros_like(valid[:, 1:])
++        for key in keys:
++            ordered_key = key.gather(1, lexical)
++            different = different | (ordered_key[:, 1:] != ordered_key[:, :-1])
++        changes = torch.cat([torch.ones_like(positions[:, :1]), different.long()], dim=1)
++        lexical_ranks = changes.cumsum(dim=1) - 1
++        original_ranks = torch.zeros_like(lexical_ranks).scatter(1, lexical, lexical_ranks)
++        packed = positions.gather(1, torch.argsort((~valid).long(), dim=1, stable=True))
++        ranks = original_ranks.gather(1, packed)
++        count = valid.long().sum(dim=1, keepdim=True)
++        path = self._path_sources(ranks, packed, count, positions)
++        reversed_packed = packed.gather(1, (count - 1 - positions).clamp_min(0))
++        destinations = (valid.long().cumsum(dim=1) - 1).clamp_min(0)
++        path, lexical, reverse = [
++            torch.where(valid, order.gather(1, destinations), positions)
++            for order in (path, lexical, reversed_packed)]
++        return positions, reverse, path, lexical
++
++    def _paired_inputs(self, inputs):
++        if len(inputs) != 4:
++            raise ValueError('Released historical task masks are required')
++        supplied = inputs[3]
++        if isinstance(supplied, (list, tuple)):
++            if len(supplied) != self.num_tasks:
++                raise ValueError('Wrong number of historical task masks')
++        elif torch.is_tensor(supplied):
++            if supplied.ndim != 3 or supplied.shape[0] != self.num_tasks:
++                raise ValueError('Expected historical masks with shape [4,B,100]')
++        else:
++            raise ValueError('Released historical task masks are required')
++        # Upstream get_inputs assigns device copies into item_dict. Give it
++        # a fresh mapping so no caller-owned dictionary is mutated.
++        copied = (inputs[0], dict(inputs[1]), inputs[2], supplied)
++        user, item, mask, task_masks = self.get_inputs(copied, return_multi_masks=True)
++        if mask.ndim != 2 or mask.shape[1] != 100:
++            raise ValueError('Frozen protocol requires 100 history positions')
++        identity, reverse, path, lexical = self._view_sources(item, mask, task_masks)
++        if self.pair_treatment == 'reversal':
++            first, second = identity, reverse
++        elif self.pair_treatment == 'path':
++            first, second = path, path
++        elif self.pair_treatment == 'lexical':
++            first, second = lexical, lexical
++        else:
++            first, second = identity, identity
++        paired_item = {}
++        for name, field in item.items():
++            a = torch.cat([field[:, :-1].gather(1, first), field[:, -1:]], dim=1)
++            b = torch.cat([field[:, :-1].gather(1, second), field[:, -1:]], dim=1)
++            paired_item[name] = torch.cat([a, b], dim=0)
++        paired_masks = [torch.cat([eligibility.gather(1, first),
++                                  eligibility.gather(1, second)], dim=0)
++                        for eligibility in task_masks]
++        paired_user = {name: torch.cat([value, value], dim=0)
++                       for name, value in user.items()}
++        return (paired_user, paired_item, torch.cat([mask, mask], dim=0), paired_masks)
++
++    def forward(self, inputs):
++        # One call gives both views the SAME learned functions and one joint
++        # native Dice population/state update. Swapping views is a row
++        # permutation, including when only a subset of examples is reversed.
++        # Host loss/labels still have B rows and use the returned predictor.
++        batch = inputs[2].shape[0]
++        probabilities = self._single_orientation(self._paired_inputs(inputs))
++        return {name: (value[:batch].float() + value[batch:].float()) * 0.5
++                for name, value in probabilities.items()}
++
+     def _represent(self, inputs):
+         # Do not allow the framework fallback that treats every event as
+@@ -722,5 +842,5 @@
+         return self.interaction_outputs[index](fused.to(history.dtype))
+ 
+-    def forward(self, inputs):
++    def _single_orientation(self, inputs):
+         context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._represent(inputs)
+         batch = values.shape[0]

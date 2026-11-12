@@ -1,0 +1,60 @@
+{
+  "request_sha256": "f4ad7eb7e4e553d42269f4c3401437928fd56d3dad47c5f39f7b2ef912cff9ab",
+  "response": {
+    "markdown_report": "At 10% progress, prioritize a sparse transition residual with frozen score scales and a popularity control. No validation improvement has been established.\n\n**Insights from the starting point.** (1) Electronics has substantial sampled training errors. These do not establish validation HR@10. (2) Recent deletion sometimes changes ranks more than older deletion. The small, shifted training samples support a recency hypothesis, without establishing intent. (3) Embedding alignment varies independently of sampled separation across attempts. Geometry alone cannot select the intervention.\n\n**Insights from related work.** (1) Spotify’s [transition study](https://research.atspotify.com/2026/10/do-sequential-recommendation-benchmarks-require-higher-order-sequence-modelling) motivates testing simple transition models. It does not establish incremental benefit over this SASRec baseline. (2) [Disentangling sequence patterns](https://doi.org/10.1145/3705328.3748042) motivates order controls. Observed transitions can reflect availability alongside behavior. (3) [Krichene and Rendle](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/) show limitations of sampled ranking metrics. Training margins therefore cannot replace the pinned validation objective.\n\nThree directions follow: add explicit local evidence, distinguish that evidence from popularity, and preserve comparable measurement.\n\n| Framework component | Evidence | Main limitation |\n|---|---|---|\n| SASRec | Contextual interaction history | Local evidence may be difficult to isolate |\n| Popularity residual | Training item frequency | No user-specific connection |\n| Transition residual | Directed training adjacency | Sparse support and popularity confounding |\n\n**Candidate ideas.** Scores are originality/potential/difficulty; higher difficulty means harder implementation.\n\n- **Frozen-scale transition residual: 3/7/3.** Originality: explicit calibration is useful, but additive sequence models are established. Potential: cheap incremental evidence; sparse edges limit coverage. Difficulty: sparse lookup is simple; predictor parity needs care.\n- **Support-gated transition residual: 4/7/4.** Originality: combines reliability and fusion, but shrinkage is familiar. Potential: could suppress unreliable edges; thresholds introduce tuning. Difficulty: few extra operations; support calibration complicates validation.\n- **Title-neighbor backoff: 3/6/5.** Originality: connects transitions with lexical similarity, but content hybrids are established. Potential: covers unsupported items; shared wording cannot establish compatibility. Difficulty: TF–IDF requires no pretrained weights; sparse retrieval and serialization add work.\n\n**Selected algorithm.** Count adjacent directed pairs exclusively within training histories. Shrink each row using `T[a,i]=count[a,i]/(out_count[a]+10)` and retain its top 100 entries. Pool five recent source rows with normalized weights `0.8**lag`; absent edges contribute zero. Normalize this branch and neural scores using frozen training-derived scales, then add a small residual.\n\nReuse one unchanged SASRec training run. Predeclare baseline, popularity, and transition configurations with residual weights `{0.1,0.3}`, identical neural artifacts, and ties favoring baseline. Select exclusively by pinned four-category macro validation HR@10. Report category outcomes and transition coverage; use component removal only as sensitivity analysis. Preserve routing, seeds, diagnostic interfaces, predictor reconstruction, and budget accounting. Compatibility, ownership, and simulator traits remain unobserved.",
+    "idea": {
+      "description": "Fuse each unchanged per-dataset SASRec predictor with a sparse, recency-weighted directed-transition score, normalized using frozen training-derived scales. Compare against baseline and an equally tuned popularity residual.",
+      "motivation": "The supplied feedback motivates testing whether explicit recent item associations improve ranking. Existing diagnostics establish neither validation gains nor compatibility failures. A frozen encoder and matched popularity control provide a feasible early experiment that isolates the added scoring branch.",
+      "implementation_notes": "Use only adjacent pairs wholly inside each category's training histories, with separate item mappings and sparse matrices. Exclude padding; break top-edge ties deterministically by item ID. Set shrinkage=10, row_topk=100, history_window=5, decay=0.8. Define the transition scale as the 95th percentile of positive retained matrix entries; clip normalized edge scores to [0,1]. Define popularity as log1p(training interaction count), divided by its positive-item 95th percentile and clipped to [0,1]. Define the neural scale as RMS candidate-score differences from a fixed seed-42 sample of training prefixes and uniformly sampled distinct nonpadding item pairs. Freeze this strictly positive scale; use 1 if unavailable or degenerate. Never normalize using the evaluation candidate set. Reuse the same baseline checkpoint and its unchanged checkpoint-selection protocol across all residual configurations. Compare baseline and each branch at weights 0.1 and 0.3; ties favor baseline, then smaller weight, then popularity. All four categories contribute equally to selection. Preserve DATA_DIR=os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, SASREC_EPOCHS environment behavior with host default 200, single-GPU execution, and trial-local artifacts. Serialize scales, sparse matrices, item mappings, and fusion configuration; update the predictor writer so working/predict.py reconstructs identical scoring for arbitrary candidate sets and chunked full-catalog recommendations. Retain DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). Keep the actual nn.Module in view.model and the SASRec compatibility hooks. Report neural margins separately from explicitly computed fused margins because features alone do not encode the sparse residual. Add measured transition support and component contributions with definitions; restore model mode in finally and mark unavailable evidence null. Keep unsupported metadata unused. Preserve twenty-user full-catalog unseen-item recommendations. Account for training, verification, diagnostics, and failed attempts within 43,200 GPU-seconds. No hidden test access, evaluator changes, or claimed results.",
+      "pseudocode": "for category in FOUR_CATEGORIES:\n    model = train_unchanged_sasrec(category, preprocessing_seed=0, training_seed=42)\n    C = directed_adjacent_counts(training_histories[category])\n    T = keep_topk_per_row(C / (row_sum(C) + 10), k=100)\n    q = percentile(positive_entries(T), 95) if T.nnz else 1\n    T = clip(T / max(q, epsilon), 0, 1)\n    P = normalized_clipped_log_training_popularity()\n    a = frozen_training_pair_difference_rms(model, seed=42)\n    save_trial_local(model, T, P, a, mappings, config)\n\nfunction fused_score(history, candidates, branch, weight):\n    neural = sasrec_score(history, candidates) / a\n    recent = last_nonpadding_items(history, 5)\n    transition = normalized_weighted_sum(\n        [T[item, candidates] for item in reverse(recent)],\n        weights=[0.8**lag for lag in range(len(recent))],\n        empty_value=0)\n    residual = transition if branch == 'transition' else P[candidates]\n    return neural + weight * residual\n\nwrite_matching_predictor()\n# Host supplies unchanged pinned validation outcomes.\ncompare_predeclared_configs_using_macro_validation_hr10()\nfreeze_selected_artifacts_without_accessing_test_labels()",
+      "originality": {
+        "score": 3,
+        "positive": "Combines explicit recent transition evidence with frozen calibration and a matched popularity comparison.",
+        "negative": "Sparse transition models, shrinkage, recency weighting, and additive fusion are established techniques."
+      },
+      "future_potential": {
+        "score": 7,
+        "positive": "Provides a cheap foundation for testing support-dependent fusion and whether local structure adds information across four datasets.",
+        "negative": "Sparse coverage and popularity confounding may limit gains; interactions cannot establish compatibility or immediate user intent."
+      },
+      "code_difficulty": {
+        "score": 3,
+        "positive": "Reuses the trained SASRec architecture and requires sparse preprocessing plus an inference scoring branch.",
+        "negative": "Correct routing, frozen calibration, fused diagnostics, and identical predictor serialization require coordinated implementation."
+      }
+    },
+    "related_work": [
+      {
+        "title": "Do Sequential Recommendation Benchmarks Require Higher-Order Sequence Modelling?",
+        "link": "https://research.atspotify.com/2026/10/do-sequential-recommendation-benchmarks-require-higher-order-sequence-modelling",
+        "contributions": [
+          "The supplied search summary reports strong recency-weighted pairwise transition baselines, motivating a simple transition comparison."
+        ],
+        "limitations": [
+          "Does not establish that this residual improves the four-category RecHarness SASRec baseline or adds information beyond popularity."
+        ]
+      },
+      {
+        "title": "Disentangling User and Item Sequence Patterns",
+        "link": "https://doi.org/10.1145/3705328.3748042",
+        "contributions": [
+          "The supplied summary describes shuffle comparisons that distinguish behavioral sequence patterns from item-availability effects."
+        ],
+        "limitations": [
+          "Does not directly validate the proposed residual; degree-preserving shuffled transitions remain a follow-up control."
+        ]
+      },
+      {
+        "title": "On Sampled Metrics for Item Recommendation",
+        "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+        "contributions": [
+          "Shows that sampled ranking evaluations can disagree with full-catalog comparisons."
+        ],
+        "limitations": [
+          "Does not supply a correction that makes training margins equivalent to the pinned benchmark; the mandated evaluator remains the selection rule."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/self-evorec-resilient-20261027/run-01/self_evolverec/calls/00744"
+}

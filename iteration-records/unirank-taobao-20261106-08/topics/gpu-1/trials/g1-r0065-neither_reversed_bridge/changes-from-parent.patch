@@ -1,0 +1,102 @@
+--- g1-r0064-reversal_per_view/model.py
++++ g1-r0065-neither_reversed_bridge/model.py
+@@ -1,8 +1,10 @@
+-"""Prospective supervision contrast for the history reversal penalty.
+-
+-Inherited shared-weight2B predictor and probability average are unchanged.
+-The loss hook compares BCE of the average with average BCE of each view.
+-A supplied/supplied pair is the objective-null control. No result is claimed.
+-Native tensor checks and measured quality/cost belong to the host.
++"""Prospective factorial attribution of the history reversal penalty.
++
++Always compute supplied/reversed raw representations at 2B. Two nonlearned
++selectors independently route the second view's compression inputs and five
++explicit detail summaries before learned scoring. Preserve every inherited
++learned module, Dice update, per-view objective and probability-average readout.
++Hybrids are authorized-input path interventions, not arbitrary-order invariant
++models. Native checks and measured quality/cost belong to the host.
+ """
+ import torch
+@@ -13,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'pair_treatment': 'reversal', 'view_objective': 'per_view'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'pair_treatment': 'reversal', 'view_objective': 'per_view', 'reverse_compression': False, 'reverse_details': False}
+ 
+ 
+@@ -34,4 +36,5 @@
+                  context_fusion='product', interaction_rank=16, summary_placement='block',
+                  pair_treatment='reversal', view_objective='per_view',
++                 reverse_compression=False, reverse_details=False,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -53,4 +56,11 @@
+             raise ValueError('Unknown view supervision objective')
+         self.view_objective = view_objective
++        if pair_treatment != 'reversal' or view_objective != 'per_view':
++            raise ValueError('Route factorial fixes supplied/reversed preparation and per-view BCE')
++        if (not isinstance(reverse_compression, bool)
++                or not isinstance(reverse_details, bool)):
++            raise ValueError('Route selectors must be booleans')
++        self.reverse_compression = reverse_compression
++        self.reverse_details = reverse_details
+         self._loss_views = None
+         self.compression_routes = compression_routes
+@@ -347,7 +357,9 @@
+ 
+     def forward(self, inputs):
+-        # One call gives both views the SAME learned functions and one joint
+-        # native Dice population/state update. Swapping views is a row
+-        # permutation, including when only a subset of examples is reversed.
++        # One call gives both routed views the SAME learned functions and
++        # one joint native Dice population/state update. Only the both-on
++        # cell has the inherited full-reversal averaging symmetry; hybrids
++        # retain information from their supplied route and are not claimed
++        # to be reversal invariant.
+         # Host loss/labels still have B rows and use the returned predictor.
+         batch = inputs[2].shape[0]
+@@ -396,5 +408,44 @@
+             return mean_loss + 0.0 * view_loss
+ 
++    @staticmethod
++    def _route_second_view(value, use_reversed):
++        """Retain view one; choose view two without detaching either route.
++
++        Inputs are already concatenated as [supplied B, reversed B]. Both
++        choices execute a same-shaped cat; the selected graph naturally
++        sums gradients when the supplied representation is duplicated.
++        """
++        if value.shape[0] % 2:
++            raise ValueError('Expected paired 2B representation')
++        half = value.shape[0] // 2
++        first, second = value[:half], value[half:]
++        return torch.cat([first, second if use_reversed else first], dim=0)
++
+     def _represent(self, inputs):
++        """Cross two existing order routes before any learned normalization.
++
++        Compression owns values, feedback eligibility and match membership;
++        keeping all three on the same event layout preserves alignment.
++        Explicit details own all five global summaries. Raw mask positions
++        are unchanged by valid-rank reversal, and target/context/counts are
++        invariant. No partial statistics, buffer, parameter, RNG or label
++        is introduced. Both raw representations execute in every cell.
++        """
++        raw = self._unrouted_represent(inputs)
++        (context, target, values, mask, auxiliary, detail, position_detail,
++         block_detail, curvature_detail, joint_detail,
++         match_counts, match_union) = raw
++        values, auxiliary, match_union = [
++            self._route_second_view(value, self.reverse_compression)
++            for value in (values, auxiliary, match_union)]
++        detail, position_detail, block_detail, curvature_detail, joint_detail = [
++            self._route_second_view(value, self.reverse_details)
++            for value in (detail, position_detail, block_detail,
++                          curvature_detail, joint_detail)]
++        return (context, target, values, mask, auxiliary, detail, position_detail,
++                block_detail, curvature_detail, joint_detail,
++                match_counts, match_union)
++
++    def _unrouted_represent(self, inputs):
+         # Do not allow the framework fallback that treats every event as
+         # positive for every task when historical masks are missing.

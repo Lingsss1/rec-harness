@@ -1,0 +1,35 @@
+{
+  "request_sha256": "ac72f44a40b3d1933bdb0710c9ea7adf1a9c77b86d4ad35a0c7e5bfb35bb84fd",
+  "response": {
+    "category_edits": [
+      {
+        "category": "network_architecture",
+        "rationale": "Normalize each GRU gate's combined preactivation to stabilize recurrent activation scales while preserving hidden width, depth, embeddings, readout, scoring, loss and optimizer. Precompute input projections across timesteps to reduce recurrent-loop overhead. The predictor imports the modified architecture and checks its checkpoint metadata.",
+        "edits": [
+          {
+            "find": "class GRU4RecModel(nn.Module):",
+            "replace": "class GateLayerNormGRU(nn.Module):\n    def __init__(self, input_size: int, hidden_size: int, num_layers: int,\n                 batch_first: bool = True, dropout: float = 0.0):\n        super().__init__()\n        self.hidden_size = hidden_size\n        self.num_layers = num_layers\n        self.batch_first = batch_first\n        self.cells = nn.ModuleList([\n            nn.GRUCell(input_size if layer == 0 else hidden_size, hidden_size)\n            for layer in range(num_layers)\n        ])\n        self.gate_norms = nn.ModuleList([\n            nn.ModuleList([nn.LayerNorm(hidden_size) for _ in range(3)])\n            for _ in range(num_layers)\n        ])\n        self.interlayer_dropout = nn.Dropout(dropout)\n\n    def forward(self, inputs: torch.Tensor, hx: torch.Tensor | None = None):\n        x = inputs if self.batch_first else inputs.transpose(0, 1)\n        if hx is None:\n            hx = x.new_zeros(self.num_layers, x.size(0), self.hidden_size)\n        final_states = []\n        for layer, (cell, norms) in enumerate(zip(self.cells, self.gate_norms)):\n            projected = torch.nn.functional.linear(x, cell.weight_ih, cell.bias_ih)\n            hidden = hx[layer]\n            states = []\n            for input_gates in projected.unbind(dim=1):\n                hidden_gates = torch.nn.functional.linear(\n                    hidden, cell.weight_hh, cell.bias_hh\n                )\n                input_r, input_z, input_n = input_gates.chunk(3, dim=-1)\n                hidden_r, hidden_z, hidden_n = hidden_gates.chunk(3, dim=-1)\n                reset = torch.sigmoid(norms[0](input_r + hidden_r))\n                update = torch.sigmoid(norms[1](input_z + hidden_z))\n                candidate = torch.tanh(norms[2](input_n + reset * hidden_n))\n                hidden = (1.0 - update) * candidate + update * hidden\n                states.append(hidden)\n            x = torch.stack(states, dim=1)\n            final_states.append(hidden)\n            if layer + 1 < self.num_layers:\n                x = self.interlayer_dropout(x)\n        output = x if self.batch_first else x.transpose(0, 1)\n        return output, torch.stack(final_states, dim=0)\n\n\nclass GRU4RecModel(nn.Module):"
+          },
+          {
+            "find": "        self.gru = nn.GRU(hidden_units, hidden_units, num_layers=num_layers,\n                          batch_first=True, dropout=dropout)",
+            "replace": "        self.gru = GateLayerNormGRU(hidden_units, hidden_units, num_layers=num_layers,\n                                       batch_first=True, dropout=dropout)"
+          },
+          {
+            "find": "            \"dropout_rate\": DROPOUT_RATE,\n        }, f)",
+            "replace": "            \"dropout_rate\": DROPOUT_RATE,\n            \"recurrent_core\": \"gate_layernorm_gru\",\n        }, f)"
+          },
+          {
+            "find": "        with open(meta_path, \"rb\") as f:\n            meta = pickle.load(f)\n        model = ModelClass(",
+            "replace": "        with open(meta_path, \"rb\") as f:\n            meta = pickle.load(f)\n        if meta.get(\"recurrent_core\") != \"gate_layernorm_gru\":\n            raise RuntimeError(f\"Incompatible GRU architecture metadata for {ds}\")\n        model = ModelClass("
+          },
+          {
+            "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+            "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Apply gate preactivation layer normalization within the existing GRU backbone, retaining one model per dataset and matching predictor checkpoint loading."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/run-01/experiment/recharness/calls/00111"
+}

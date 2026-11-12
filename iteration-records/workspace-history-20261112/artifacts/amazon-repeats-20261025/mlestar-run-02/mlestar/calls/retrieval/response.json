@@ -1,0 +1,41 @@
+{
+  "directions": [
+    {
+      "description": "gSASRec: retain SASRec and replace single-negative BCE with multiple negatives and calibrated gBCE. This directly targets overconfidence from negative sampling. [Paper](https://arxiv.org/abs/2308.07192), [official PyTorch implementation](https://github.com/asash/gSASRec-pytorch).",
+      "urls": [
+        "https://arxiv.org/abs/2308.07192",
+        "https://github.com/asash/gSASRec-pytorch",
+        "https://github.com/asash/gSASRec-pytorch/blob/main/train_gsasrec.py"
+      ],
+      "implementation": "Shared contract for all four directions: start independently from the supplied baseline; retain Movies_and_TV, Industrial_and_Scientific, Electronics, and CDs_and_Vinyl with dataset_name routing. Set DATA_DIR = os.environ['GAGC_DATA_DIR'] and NUM_EPOCHS = int(os.environ.get('SASREC_EPOCHS', '200')). Preserve supplied splits and preprocessing seed 0; seed training with 42. Save artifacts beneath each trial's working directory. Use the pinned validation protocol and select by macro-average validation HR@10. Keep validation RNG independent of training RNG. Update write_predict_script and checkpoint metadata for every architecture change. Allocate at most 7,200 GPU-seconds per initial direction, including diagnostics and failures, leaving 14,400 shared GPU-seconds for refinement; each trial uses one GPU. These are proposed experiments, not measured improvements.\n\nFor this direction, initially keep baseline architecture and optimizer settings. Sample K=32 uniform training negatives per positive, excluding the user's training interactions. Compute logits only for nonpadding positions and chunk negative embedding calculations if necessary. With positive logits p shaped [N] and negative logits n shaped [N,K], implement:\nimport torch.nn.functional as F\nalpha = K / max(itemnum - 1, 1)\nbeta = 1.0 - 0.75 * (1.0 - alpha)\nloss = (beta * F.softplus(-p.float()) + F.softplus(n.float()).sum(-1)).mean() / (K + 1)\nThis is the gBCE objective expressed directly without transformed logits. Candidate inference remains the baseline dot product. If validation supports refinement, compare K=64 or calibration t=0.5, changing one factor at a time."
+    },
+    {
+      "description": "DuoRec: regularize SASRec representations using dropout views and training prefixes sharing the same next item. The authors propose contrastive learning to address representation degeneration. [Paper](https://arxiv.org/abs/2110.05730), [author implementation](https://github.com/RuihongQiu/DuoRec).",
+      "urls": [
+        "https://arxiv.org/abs/2110.05730",
+        "https://github.com/RuihongQiu/DuoRec",
+        "https://github.com/RuihongQiu/DuoRec/blob/master/recbole/model/sequential_recommender/duorec.py"
+      ],
+      "implementation": "Apply the shared contract in direction 1. Preserve the causal SASRec encoder and baseline recommendation loss to isolate the contrastive addition. Construct (history[:t], history[t]) examples exclusively from each user's training sequence. Build a target-item-to-prefix index for semantic positives; exclude the same example when alternatives exist. Encode sampled prefixes twice with independent dropout, producing z1 and z2, and encode an alternative prefix with the same target when available. Add symmetric InfoNCE between dropout views and between semantic pairs. Use a 2B-by-2B similarity matrix with self similarities masked; the paired view supplies the positive. Exclude other examples with the same target from negative denominators. Skip semantic loss when no alternative prefix exists. Proposed starting settings are batch=128, temperature=0.2, dropout=0.3, and loss = recommendation_loss + 0.1 * dropout_InfoNCE + 0.1 * semantic_InfoNCE; these are adaptation choices, not claimed paper defaults. Keep recommendation supervision at all valid causal positions, while contrastive supervision uses the last prefix state. If promising, refine contrastive weights over 0.05 and 0.2. Inference needs only one encoder pass with dropout disabled; save the trained encoder configuration and have the predictor writer reconstruct it exactly."
+    },
+    {
+      "description": "FMLP-Rec: replace self-attention with learnable frequency filters and residual feed-forward blocks. This tests frequency-domain sequence denoising as a distinct architecture. [Paper](https://arxiv.org/abs/2202.13556), [author implementation](https://github.com/RUCAIBox/FMLP-Rec).",
+      "urls": [
+        "https://arxiv.org/abs/2202.13556",
+        "https://github.com/RUCAIBox/FMLP-Rec",
+        "https://github.com/RUCAIBox/FMLP-Rec/blob/master/modules.py"
+      ],
+      "implementation": "Apply the shared contract in direction 1. Replace attention blocks with the author's FilterLayer and Intermediate design: orthonormal rFFT across sequence positions, multiplication by learned complex weights, inverse rFFT, dropout, residual normalization, then a 4H GELU feed-forward block. Initialize complex weights with standard deviation 0.02. Start with H=64, two blocks, maxlen=128, dropout=0.3, Adam lr=1e-3, and batch=128. Crucially, frequency filtering mixes the entire input: do not reuse SASRec's shifted all-position supervision, which would expose future targets. Instead sample a cutoff t from a training sequence, encode only history[:t], and predict history[t] from the final position. Train with positive BCE plus the mean BCE over 32 uniform negatives excluded from the training history. No held-out interaction enters any prefix. Keep fixed-length left padding identical during training and inference, with zero padding embeddings. Perform FFT operations in float32 if mixed precision is enabled. Score candidates through tied item embeddings. Store architecture='fmlp', sequence length, width, block count, and dropout in metadata; update both model reconstruction and predictor generation. If promising, compare maxlen=64 or four blocks within the remaining budget."
+    },
+    {
+      "description": "BERT4Rec: replace causal next-item supervision with bidirectional masked-item training, then score an appended mask at inference. This tests a different sequence-learning objective. [Paper](https://arxiv.org/abs/1904.06690), [author implementation](https://github.com/FeiSun/BERT4Rec).",
+      "urls": [
+        "https://arxiv.org/abs/1904.06690",
+        "https://github.com/FeiSun/BERT4Rec",
+        "https://github.com/FeiSun/BERT4Rec/blob/master/modeling.py",
+        "https://github.com/FeiSun/BERT4Rec/blob/master/gen_data_fin.py"
+      ],
+      "implementation": "Apply the shared contract in direction 1. Implement a PyTorch adaptation with bidirectional attention, padding-key masking, H=64, two blocks, two heads, 4H GELU feed-forward layers, dropout=0.2, maxlen=128, and embedding initialization std=0.02. Reserve itemnum+1 for MASK while retaining 0 for padding. Use only training sequences; dynamically select 20% of nonpadding positions, guaranteeing at least one selected position. Apply the standard 80% MASK, 10% random-item, 10% unchanged corruption scheme and supervise only selected positions. As an explicit adaptation for next-item prediction, make half the minibatches training-prefix examples whose next training item is replaced with a terminal MASK. Start AdamW at lr=1e-3 with weight_decay=0.01 and batch=128. Use exact item softmax over IDs 1..itemnum, computing cross-entropy in chunks of masked positions to bound activation memory. Never train unmasked shifted targets with bidirectional attention. In predict(), truncate history to maxlen-1, append MASK, left-pad, and score candidate embeddings from the MASK state through the same trained output head. Persist MASK ID, architecture configuration, and output-head parameters, and update write_predict_script accordingly. If promising, refine masking rate or learning rate using validation only."
+    }
+  ]
+}

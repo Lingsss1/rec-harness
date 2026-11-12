@@ -1,0 +1,158 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting-point insights.** (1) Users favor coherent recent activity; controlled retention could reduce stale-interest revival and unrelated-purpose recommendations displacing current-intent matches. Neither timestamps nor recency alone establish compatibility, redundancy, or purpose. (2) Electronics has the weakest sampled separation: 9.7% wrong-rank positions and a 0.0265 tenth-percentile margin. These motivate stronger competitor discrimination, but do not establish validation ranking quality. (3) Collapse scores near 0.5 imply mean item cosine similarities near zero. Global embedding diversification lacks diagnostic support.\n\n**Related-work insights.** (1) [GRU4Rec BPR-max](https://hidasi.eu/assets/pdf/gru4rec_v2_cikm18.pdf) emphasizes high-scoring negatives. Its weighted negative-score regularizer belongs outside the logarithm, and gradients flow through the weights. (2) [Hard-BPR](https://arxiv.org/abs/2403.19276) motivates caution about false negatives: plausible future choices can become harmful negatives. (3) [2Gated-TimeGRU](https://aisel.aisnet.org/hicss-57/da/data_science/10/) supports interval-conditioned recurrence, but does not establish fixed exponential decay or gains here. Occurrence-aligned timestamps are essential; an item-to-timestamp lookup cannot recover repeated-event timing.\n\n### Framework and candidate assessment\n\nThree directions organize the evidence: intent retention acts on recurrent state; candidate discrimination acts on loss and sampling; item identity acts on representation. The main implementation gap is that sequence-only inference exposes event order but does not guarantee elapsed-time inputs.\n\nScores are originality / future potential / user alignment / model alignment / implementation difficulty; higher difficulty means harder implementation. Each assessment states its main positive and negative.\n\n| Idea | Scores | Positive assessment | Negative assessment |\n|---|---|---|---|\n| BPR-max with moderate negative pools | 2/7/4/9/3 | Directly targets confusing comparisons | Does not explicitly distinguish current from stale intent |\n| Learned elapsed-time decay inside GRU | 3/6/8/5/7 | Can discount temporally distant interests | Requires occurrence-aligned inference timestamps; gaps do not establish purpose |\n| Joint title-token and ID embeddings | 4/7/7/6/6 | Shares artist/product identity signals | Lexical similarity can reinforce broad matches |\n| Time-decayed GRU with BPR-max | 3/6/8/8/8 | Combines retention with discrimination | Timestamp availability blocks reproducibility; separate ablations remain necessary |\n| **Event-decayed GRU with BPR-max** | **3/6/7/8/5** | Uses available event order and difficult competitors | GRU already learns retention; extra decay may erase durable preferences |\n\n### Selected experiment\n\nAt 0% progress, replace the proposed elapsed-time mechanism with a small, jointly trained **event-decay** extension of corrected GRU4Rec. Before each real interaction, multiply the previous hidden state by a learned retention factor, then apply the GRU update. This measures distance in interactions, not elapsed time. Retain the elapsed-time variant as a deferred direction, eligible only after confirming aligned prediction-time timestamps.\n\nThe selected model explicitly targets two observed user failures: stale interests resurfacing and unrelated-purpose items displacing recent coherent activity. These are hypotheses, not demonstrated improvements; compatibility, redundancy, quantity and mood remain unobserved. BPR-max targets Electronics' weak separation.\n\n```text\nfor each real historical event:\n    retained = hidden * exp(-softplus(rate))\n    hidden = GRU(item_embedding(event), retained)\nscore positive and eligible sampled negatives\nminimize BPR-max plus weighted negative-score regularization\n```\n\nInitialize retention near one; skip updates and decay on padding. Use unique uniform negative candidates, excluding every occurrence of the row's positive and its permitted training-history items. Preserve repeated positives as supervised events. This deliberately differs from official frequency-based sampling with replacement. Normalize negative weights after masking; omit empty rows from both loss and denominator. Average over valid positions without dividing again by negative count.\n\nPredeclare baseline, BPR-max-only, decay-only and combined comparisons, with comparable resources and stopping rules. Keep seeds 0/42, all four routes, DATA_DIR, one checkpoint per category, maximum 200 epochs and 200 batches/epoch. Preserve final-nonpadding readout, predictor writing and diagnostic interfaces. Record every configuration, failure and GPU-second within 43,200 GPU-seconds.\n\nSelect exclusively through pinned macro validation HR@10. Report category deltas, discordant hits and paired user-bootstrap intervals if evaluator outputs permit; one changed hit changes macro HR by 0.125 percentage points. Repeated selection can overfit these 800 users, and sampled ranking need not predict full-catalog quality. Neither bootstrap intervals nor improved training margins resolve those limitations; reserve confirmation for the host's untouched final evaluation.",
+  "idea": {
+    "description": "One GRU4Rec network per category with jointly learned per-event hidden-state retention and BPR-max over moderately sized, unique uniform negative pools. Elapsed-time decay remains a deferred alternative requiring occurrence-aligned timestamps at inference.",
+    "motivation": "Per-event retention explicitly targets stale-interest revival and unrelated-purpose recommendations displacing recent coherent activity. BPR-max targets weak positive-negative discrimination, particularly Electronics' measured 9.7% wrong-rank rate, 14.82% small-margin rate and 0.0265 tenth-percentile margin. These mechanisms do not directly observe compatibility, redundant functions, quantities, mood or user traits, and their validation benefits remain unmeasured.",
+    "implementation_notes": "Retain the corrected baseline's loading, splits, category routing, preprocessing seed 0 and training seed 42. DATA_DIR remains os.environ['GAGC_DATA_DIR']; save artifacts beneath the trial directory. Use one independently trained checkpoint per category, with no averaging or separate scoring models. Preserve baseline hidden size, optimizer, dropout, score activation and other settings for initial controlled comparisons; record their resolved values from the supplied baseline rather than inventing them. Add a scalar trainable retention rho=exp(-softplus(a)), initialized to 0.99 using a=log(expm1(-log(0.99))). Decay and recurrent updates occur only at nonpadding positions; padding preserves hidden state. Maintain causal per-position features, log2feats(sequence), item_emb and predict_score(features, items). Read the final nonpadding index using position indices and a validity mask, never count-1; retain the baseline empty-history policy. Use the identical architecture, initialization-independent configuration and score activation in the checkpoint loader and predictor writer. Start with K=64 unique uniform negatives per valid supervised position and lambda=1.0, explicitly borrowing only the official regularization default rather than claiming an official sampling reproduction. Exclude padding, every occurrence of the row's positive ID and all items in its permitted training history, without consulting validation or test labels. Preserve repeated target events as supervision. Sample without replacement from eligible IDs; use all eligible IDs if fewer than K remain. Omit rows with no eligible negatives from loss and denominator, record their count, and skip an update if no valid rows remain. Compute log weights using masked log-softmax with gradients through weights; evaluate regularization on finite scores and explicitly zero masked terms to avoid zero-times-infinity NaNs. Average over valid supervised positions, with no additional division by negative count. Keep DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis); retain the actual trained view.model and return measured metrics and definitions. Do not fabricate unavailable metadata, ratings, review text or category breakdowns. Predeclare baseline, BPR-max-only, event-decay-only and combined configurations; retain the baseline checkpoint-selection schedule, compare at equivalent epoch and batch limits, and log GPU-seconds including diagnostics and failures. Keep at most 200 epochs and exactly the supplied 200 batches per epoch. Select exclusively by the pinned four-category macro validation HR@10. If per-user hits are already exposed, use 2,000 paired bootstrap replicates with analysis seed 42, resampling users within each category and taking percentile intervals of equally weighted category differences; report category deltas and discordant hits. Do not alter the host evaluator to obtain these outputs. Intervals condition on fitted models and candidate sets and omit training-seed, negative-resampling and adaptive-selection uncertainty. The original elapsed-time idea is deferred: any later implementation must align ordered item/timestamp occurrences, truncate and pad them together, and checkpoint timestamp units, scaling, missing-gap policies, boundary handling and initialization. Unknown gaps must not silently become observed zero gaps; no held-out target timestamp or item-to-timestamp shortcut is permissible. The original proposed first-event zero-gap convention would be an explicit initialization convention, not a measurement. Fit temporal normalization on training histories only. A future temporal extension must preserve the sequence-only compatibility contract or establish an unambiguous supported occurrence interface before training.",
+    "pseudocode": "Predeclare four configurations: baseline, BPR-max only, event-decay only, combined.\nRetain baseline settings except the declared component changes.\nFor each category independently, initialize and train one GRU model using seed 42.\nFor the decay configurations:\n  a = log(expm1(-log(0.99)))\n  rho = exp(-softplus(a))\nFor each batch from the unchanged family-specific sample_batch:\n  h = zeros\n  For each input position t:\n    retained = rho * h if decay enabled else h\n    proposed = GRUCell(item_emb(sequence[t]), retained)\n    h = where(sequence[t] != 0, proposed, h)\n    Save h as the causal position feature.\n  For every valid supervised position:\n    Keep its positive event, including repeated-item events.\n    eligible = catalog minus padding, its positive, and its permitted training-history IDs\n    negatives = uniform_sample_without_replacement(eligible, min(64, len(eligible)))\n    Omit the position if negatives is empty.\n  If BPR-max enabled and at least one position remains:\n    p = predict_score(features, positive)\n    n = predict_score(features, negatives)\n    log_w = masked_log_softmax(n, negative_axis)\n    ranking = -logaddexp(logsumexp(log_w + logsigmoid(p - n)), log(1e-24))\n    penalty = sum(exp(log_w) * finite_negative_scores.square(), negative_axis)\n    loss = mean_over_valid_positions(ranking + 1.0 * penalty)\n  Otherwise use the unchanged baseline objective for its declared ablation.\n  Update all parameters jointly; skip an all-empty BPR-max batch.\nEvaluate with the unchanged schedule and pinned validation protocol.\nSave one selected checkpoint per category and write its matching predictor.\nCompare macro HR@10, category deltas and available paired hit outcomes.\nReport sampled diagnostic margins separately from validation ranking results.",
+    "originality": {
+      "score": 3,
+      "positive": "Combines explicit event-based retention with established GRU4Rec competitor weighting in a compact, controlled experiment that preserves sequence-only inference.",
+      "negative": "GRU already learns forgetting, and BPR-max is established; the added decay is an incremental inductive bias rather than a new modeling principle."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "Provides a reproducible route to testing whether explicit retention and competitor discrimination interact, with a later path to occurrence-aligned temporal conditioning.",
+      "negative": "Extra decay may suppress durable interests, and false negatives or validation selection noise may explain apparent improvements. Neither sampled HR@10 nor training margins establishes full-catalog user benefit."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "A scalar retention parameter preserves the existing sequence interface and avoids timestamp plumbing; BPR-max has a stable vectorized formulation.",
+      "negative": "Per-row history exclusion, unique sampling, empty-row handling, recurrent padding behavior and exact predictor consistency require careful implementation. The deferred timestamp variant would be substantially harder."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Recurrent Neural Networks with Top-k Gains for Session-based Recommendations",
+      "link": "https://hidasi.eu/assets/pdf/gru4rec_v2_cikm18.pdf",
+      "contributions": [
+        "Introduces ranking objectives including BPR-max that emphasize high-scoring negative competitors.",
+        "Provides the family-specific foundation for the proposed loss change."
+      ],
+      "limitations": [
+        "Does not establish gains for this pinned four-category Amazon evaluation or explicitly resolve stale intent.",
+        "The proposed unique, history-filtered uniform sampling differs from native GRU4Rec sampling."
+      ]
+    },
+    {
+      "title": "Official GRU4Rec Theano implementation",
+      "link": "https://raw.githubusercontent.com/hidasib/GRU4Rec/master/gru4rec.py",
+      "contributions": [
+        "Specifies softmax-weighted BPR-max with a weighted squared-negative-score penalty outside the logarithm, gradients through weights and bpreg default 1.0.",
+        "Documents loss reduction by configured batch size rather than an additional negative-count divisor."
+      ],
+      "limitations": [
+        "Averaging valid sequential positions is an explicit adaptation rather than exact native reduction.",
+        "Configured score activation affects the scores entering the objective and must be recorded."
+      ]
+    },
+    {
+      "title": "Official GRU4Rec PyTorch implementation",
+      "link": "https://raw.githubusercontent.com/hidasib/GRU4Rec_PyTorch_Official/master/gru4rec_pytorch.py",
+      "contributions": [
+        "Documents shared batch-target candidates and additional frequency-based draws with replacement.",
+        "Clarifies native duplicate multiplicity and diagonal-only positive exclusion."
+      ],
+      "limitations": [
+        "Native sampling does not exclude complete user histories or all duplicate occurrences of the positive.",
+        "Its sampling defaults should not be silently attributed to the proposed unique uniform sampler."
+      ]
+    },
+    {
+      "title": "Hard-BPR",
+      "link": "https://arxiv.org/abs/2403.19276",
+      "contributions": [
+        "Studies robust pairwise optimization under dynamic negative sampling and false-negative risk."
+      ],
+      "limitations": [
+        "Does not establish the proposed recurrent-retention combination or benchmark-specific improvements.",
+        "Excluding known training positives does not eliminate unobserved-positive false negatives."
+      ]
+    },
+    {
+      "title": "2Gated-TimeGRU",
+      "link": "https://aisel.aisnet.org/hicss-57/da/data_science/10/",
+      "contributions": [
+        "Incorporates elapsed-time information into a GRU recommendation architecture."
+      ],
+      "limitations": [
+        "Motivates temporal conditioning but does not validate the proposed exponential-decay equation on this task.",
+        "Does not justify interpreting event-distance retention as elapsed-time modeling."
+      ]
+    },
+    {
+      "title": "Related 2TGRU formulation",
+      "link": "https://doi.org/10.21203/rs.3.rs-3713146/v1",
+      "contributions": [
+        "Describes learned transformations of consecutive and future interaction gaps followed by sigmoid gates."
+      ],
+      "limitations": [
+        "Its future-gap gate requires a prediction-time timestamp unavailable through item sequences alone.",
+        "Does not supply all timestamp-unit, missing-gap, normalization and initialization choices required here."
+      ]
+    },
+    {
+      "title": "TiSASRec sampler and evaluator",
+      "link": "https://github.com/JiachengLi1995/TiSASRec/blob/master/util.py",
+      "contributions": [
+        "Illustrates aligned item/timestamp occurrence construction and temporal normalization conventions."
+      ],
+      "limitations": [
+        "Its Transformer backbone is outside the permitted model family.",
+        "Its normalization conventions are not defaults of 2Gated-TimeGRU and require explicit adoption."
+      ]
+    },
+    {
+      "title": "Recformer",
+      "link": "https://arxiv.org/abs/2305.13731",
+      "contributions": [
+        "Explores text-based item representations for sequential recommendation."
+      ],
+      "limitations": [
+        "Its Transformer backbone and pretraining procedure are outside this experiment's constraints.",
+        "Corpus-only GRU text integration remains a separate hypothesis and can reinforce superficial lexical matches."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how repeated model selection can overfit a finite validation criterion."
+      ],
+      "limitations": [
+        "Does not quantify selection bias for these particular 800 validation users."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Examines limitations of sampled-candidate recommendation metrics."
+      ],
+      "limitations": [
+        "Does not invalidate the mandated benchmark; it limits extrapolation to full-catalog ranking."
+      ]
+    },
+    {
+      "title": "A Comparison of Statistical Significance Tests for Information Retrieval Evaluation",
+      "link": "https://ciir-publications.cs.umass.edu/getabs.php?id=885",
+      "contributions": [
+        "Supports paired statistical comparisons of retrieval systems."
+      ],
+      "limitations": [
+        "Paired user resampling does not account for training randomness, candidate resampling or adaptive model selection."
+      ]
+    },
+    {
+      "title": "Hyperband: A Novel Bandit-Based Approach to Hyperparameter Optimization",
+      "link": "https://research.google/pubs/hyperband-a-novel-bandit-based-approach-to-hyperparameter-optimization/",
+      "contributions": [
+        "Motivates explicit resource allocation and cautious screening under a finite search budget."
+      ],
+      "limitations": [
+        "Short-run rankings can differ from fully trained rankings.",
+        "Concurrent trial slots reduce elapsed time but do not increase the aggregate 43,200 GPU-second allowance."
+      ]
+    }
+  ]
+}

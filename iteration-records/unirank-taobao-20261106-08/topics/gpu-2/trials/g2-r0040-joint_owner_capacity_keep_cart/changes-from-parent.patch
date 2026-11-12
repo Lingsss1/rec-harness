@@ -1,0 +1,64 @@
+--- g2-r0039-joint_context_capacity_small_buy/model.py
++++ g2-r0040-joint_owner_capacity_keep_cart/model.py
+@@ -1,8 +1,10 @@
+-"""Task-selective auxiliary context gradients at reduced head capacity.
+-
+-Only the named auxiliary task may update shared context embeddings. All four
+-heads and losses remain active. Forward values, module initialization, input
+-masks, item/scorer gradient ownership and evaluation operators are inherited.
+-This is a local attribution experiment, with no architectural priority claim.
++"""Equal-budget auxiliary head allocation under fixed buy-only context ownership.
++
++Retain all four outputs/losses and the parent's forward/masking implementation.
++Initialize the complete parent template before slicing independently chosen
++auxiliary towers. Parameters outside the chosen heads and global RNG draws
++are unchanged at construction. Dense global gradient clipping can still
++couple heads during training; detached inputs do not prove optimization
++independence. No architectural originality or measured speedup is asserted.
+ """
+ import torch
+@@ -13,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy']}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'fav': [48, 32], 'buy': [48, 32]}}
+ 
+ 
+@@ -32,4 +34,5 @@
+                  click_tower_hidden_units=(128, 64),
+                  auxiliary_tower_hidden_units=(112, 64),
++                 auxiliary_tower_overrides=None,
+                  auxiliary_context_tasks=('buy',),
+                  task='binary_classification', **kwargs):
+@@ -49,5 +52,13 @@
+         if tuple(tower_hidden_units) != (128, 64):
+             raise ValueError('The initialization template must remain (128, 64)')
+-        for widths in (click_tower_hidden_units, auxiliary_tower_hidden_units):
++        if auxiliary_tower_overrides is None:
++            auxiliary_tower_overrides = {}
++        if not isinstance(auxiliary_tower_overrides, dict):
++            raise ValueError('Auxiliary tower overrides must be a task-to-widths dict')
++        if any(label not in ('cart', 'fav', 'buy')
++               for label in auxiliary_tower_overrides):
++            raise ValueError('Only auxiliary task head dimensions may be overridden')
++        for widths in (click_tower_hidden_units, auxiliary_tower_hidden_units,
++                       *auxiliary_tower_overrides.values()):
+             if not isinstance(widths, (list, tuple)) or len(widths) != 2:
+                 raise ValueError('Each task tower requires two hidden widths')
+@@ -55,4 +66,9 @@
+                 if isinstance(width, bool) or not isinstance(width, int) or not 1 <= width <= maximum:
+                     raise ValueError('Effective widths must be positive integers within the template')
++        # Copy only validated immutable dimensions. This mapping creates no
++        # Parameters, buffers or RNG draws and is never consulted in forward.
++        auxiliary_tower_overrides = {
++            label: tuple(widths) for label, widths in auxiliary_tower_overrides.items()
++        }
+         if evaluation_projection not in ('split_repeat', 'split_hoist', 'merged_hoist'):
+             raise ValueError('Unknown evaluation affine factoring control')
+@@ -196,5 +212,5 @@
+         for label, tower in zip(feature_map.labels, self.towers):
+             widths = (click_tower_hidden_units if label == 'is_click'
+-                      else auxiliary_tower_hidden_units)
++                      else auxiliary_tower_overrides.get(label, auxiliary_tower_hidden_units))
+             self._reduce_tower(tower, widths)
+         self.model_to_device()

@@ -1,0 +1,124 @@
+--- g0-r0052-block_nonlinear_transfer/model.py
++++ g0-r0055-pair_ordered/model.py
+@@ -1,11 +1,12 @@
+-"""Prospective blockwise nonlinear summary study; validation results unmeasured.
+-
+-Reuse ten frozen compressed blocks and every learned parameter of the incumbent.
+-Compare mean_j tanh(W [M*b_j, global_details]) with tanh(W [sum_j b_j,
+-global_details]), crossed with the existing auxiliary adapter-context gate.
+-Both summary paths execute in every cell for a measured work-matched contrast.
+-The original signed pooled base and five detail paths remain intact. This tests
+-projection/aggregation order, not a new attention mechanism or verified novelty.
+-Native tensor, BF16, autograd and resource checks belong to the host.
++"""Prospective centered block-pair dependence study; quality unmeasured.
++
++Retain every learned tensor of g0-r0052-block_nonlinear_transfer. Append a
++bounded diagonal pair statistic to its mean of projected occupied blocks.
++Compare chronological pairs, endpoint/degree-matched scrambled pairs, marginal
++endpoint squares and a zero-statistic source bridge. All paths execute in each
++cell, including unused zero-gradient edges; actual cost is host-measured.
++Chronology is ordinal order of occupied blocks, not elapsed time. Products are
++symmetric and cannot establish time direction. No verified novelty is claimed.
++Native tensor, BF16, autograd, masking and resource checks belong to the host.
+ """
+ import torch
+@@ -16,5 +17,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'pair_statistic': 'ordered'}
+ 
+ 
+@@ -36,4 +37,5 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16, summary_placement='block',
++                 pair_statistic='ordered',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -72,4 +74,9 @@
+             raise ValueError('Unknown history projection placement')
+         self.summary_placement = summary_placement
++        if summary_placement != 'block':
++            raise ValueError('Pair study retains the incumbent block projection')
++        if pair_statistic not in ('ordered', 'scrambled', 'marginal', 'none'):
++            raise ValueError('Unknown block-pair statistic')
++        self.pair_statistic = pair_statistic
+         if context_fusion != 'product':
+             raise ValueError('This placement study fixes product fusion')
+@@ -681,14 +688,57 @@
+         return weighted if return_blocks else weighted.sum(dim=1)
+ 
++    @staticmethod
++    def _block_pair_statistics(hidden, occupied):
++        """Centered diagonal products on paths with equal node degrees.
++
++        Compact valid blocks in their original order, then permute interior
++        ranks even-first/odd-second for the scrambled path. Both paths retain
++        the original endpoints, all M nodes and exactly M-1 edges. This
++        excludes padding and matches degree-weighted marginal second moments.
++        A common M>=4 gate excludes cases with no distinct interior ordering.
++        All arithmetic on bounded tanh outputs is FP32, without variance
++        division, random draws, new parameters or mutation of native buffers.
++        """
++        batch, length, width = hidden.shape
++        ranks = torch.arange(length, device=hidden.device).view(1, length).expand(batch, -1)
++        count = occupied.sum(dim=1, keepdim=True)
++        # Unique integer keys put occupied blocks first in original order;
++        # no stable-sort assumption and no ordering of hidden values is used.
++        compact_indices = torch.argsort(ranks + (~occupied).long() * length, dim=1)
++        safe_hidden = torch.where(occupied.unsqueeze(-1), hidden.float(),
++                                  torch.zeros_like(hidden, dtype=torch.float32))
++        compact = torch.gather(safe_hidden, 1, compact_indices.unsqueeze(-1).expand(-1, -1, width))
++        active = ranks < count
++        mean = compact.sum(dim=1, keepdim=True) / count.clamp_min(1).unsqueeze(-1).float()
++        centered = torch.where(active.unsqueeze(-1), compact - mean,
++                               torch.zeros_like(compact))
++        interior_key = ranks.remainder(2) * length + ranks
++        keys = torch.where(ranks == 0, torch.full_like(ranks, -1), interior_key)
++        keys = torch.where(ranks == count - 1, torch.full_like(ranks, 2 * length), keys)
++        keys = torch.where(active, keys, 3 * length + ranks)
++        permutation = torch.argsort(keys, dim=1)
++        scrambled = torch.gather(centered, 1, permutation.unsqueeze(-1).expand(-1, -1, width))
++        edge_mask = ((ranks[:, :-1] < count - 1) & (count >= 4)).unsqueeze(-1).float()
++        divisor = (count - 1).clamp_min(1).float()
++        left, right = centered[:, :-1], centered[:, 1:]
++        ordered = (left * right * edge_mask).sum(dim=1) / divisor
++        shuffled = (scrambled[:, :-1] * scrambled[:, 1:] * edge_mask).sum(dim=1) / divisor
++        marginal = (0.5 * (left.square() + right.square()) * edge_mask).sum(dim=1) / divisor
++        # |centered|<=2, so this prospectively fixed scale bounds each
++        # statistic by one. No data-dependent rescaling or hyperparameter fit.
++        return 0.25 * ordered, 0.25 * shuffled, 0.25 * marginal
++
+     def _context_history_correction(self, index, context, history, block_base, block_counts):
+-        """Test tied nonlinear projection before versus after block aggregation.
++        """Retain the incumbent projections; append the selected pair statistic.
+ 
+         b_j is the existing signed target-scored contribution of block j;
+         r contains the original global counts and five detail summaries.
+         For M occupied blocks, the mean of [M*b_j, r] is [sum(b_j), r].
+-        Only the location of tanh relative to this averaging is changed.
++        The inherited block and aggregate paths execute as before. The pair
++        helper adds centered second-order dependence only in the selected
++        cell; its zero bridge recovers the inherited block summary.
+         No softmax, new learned matrix, target label or unmasked event enters.
+-        Both paths execute in every cell, including backward via an algebraic
+-        zero. This is a work-matched diagnostic, with actual costs host-measured.
++        All alternatives execute, including backward via algebraic zeros.
++        This is a work-matched diagnostic; actual costs are host-measured.
+         """
+         query = torch.tanh(self.context_queries[index](context).float())
+@@ -713,4 +763,14 @@
+         else:
+             summary = aggregate + 0.0 * local
++        ordered, scrambled, marginal = self._block_pair_statistics(local_hidden, occupied)
++        if self.pair_statistic == 'ordered':
++            addition = ordered + 0.0 * scrambled + 0.0 * marginal
++        elif self.pair_statistic == 'scrambled':
++            addition = scrambled + 0.0 * ordered + 0.0 * marginal
++        elif self.pair_statistic == 'marginal':
++            addition = marginal + 0.0 * ordered + 0.0 * scrambled
++        else:
++            addition = 0.0 * ordered + 0.0 * scrambled + 0.0 * marginal
++        summary = summary + addition
+         # Same product and RMS normalization as the incumbent. Global base,
+         # residual adapter and all five moment paths outside this branch stay.

@@ -1,0 +1,36 @@
+{
+  "directions": [
+    {
+      "description": "Replace single-negative BPR with multi-negative BPR-max. The authors introduce this loss to concentrate gradients on competitive negatives; its benefit on these Amazon splits remains an experimental hypothesis. [Paper](https://arxiv.org/abs/1706.03847), [official implementation](https://github.com/hidasib/GRU4Rec_PyTorch_Official).",
+      "urls": [
+        "https://arxiv.org/abs/1706.03847",
+        "https://github.com/hidasib/GRU4Rec_PyTorch_Official/blob/master/gru4rec_pytorch.py"
+      ],
+      "implementation": "Retain the supplied GRU backbone and shifted next-item targets. At each valid position, score the positive and K=64 sampled negatives with the same item_emb. For positive scores p shaped [N] and negative scores n shaped [N,K], implement:\n\ndef bpr_max(p, n, reg=0.1):\n    w = torch.softmax(n, dim=-1)\n    log_win = torch.logsumexp(torch.log_softmax(n, dim=-1) + torch.nn.functional.logsigmoid(p[:, None] - n), dim=-1)\n    return (-log_win + reg * (w * n.square()).sum(-1)).mean()\n\nExclude padding, positive collisions and training-history items from negatives; use bounded sampling for users with few eligible items. Initial settings: hidden=128, one GRU layer, dropout=0.1, Adam lr=0.001, reg=0.1. Shared contract for all four directions: DATA_DIR=os.environ['GAGC_DATA_DIR']; preserve all four categories, preprocessing seed 0, training seed 42, supplied splits, 200 batches/epoch and at most 200 epochs. Train and retain exactly one model/checkpoint per category, without score fusion. Write artifacts beneath the trial directory. Preserve sample_batch and ModelView compatibility through log2feats(sequence), item_emb and predict_score(features, items). Use the final nonpadding index for LEFT-padded readout. Update checkpoint metadata and the predictor writer whenever architecture or scoring changes; select using pinned validation macro HR@10 only."
+    },
+    {
+      "description": "Test categorical cross-entropy instead of pairwise BPR. The official GRU4Rec code supports cross-entropy and sampling-probability correction. [Author documentation](https://github.com/hidasib/GRU4Rec), [reference code](https://github.com/hidasib/GRU4Rec_PyTorch_Official/blob/master/gru4rec_pytorch.py).",
+      "urls": [
+        "https://github.com/hidasib/GRU4Rec",
+        "https://github.com/hidasib/GRU4Rec_PyTorch_Official/blob/master/gru4rec_pytorch.py"
+      ],
+      "implementation": "Apply the shared contract from direction 1. Keep the baseline architecture and train every valid shifted target with full-catalogue cross-entropy:\n\nh = model.log2feats(seq)[pos.ne(0)]\ny = pos[pos.ne(0)] - 1\nlogits = h @ model.item_emb.weight[1:].T\nloss = torch.nn.functional.cross_entropy(logits, y)\n\nChunk valid positions and backpropagate each chunk weighted by its fraction of all valid positions before one optimizer step, avoiding a full [batch,length,itemnum] allocation. Start with hidden=128, dropout=0.2 and Adam lr=0.001. If catalogue cost requires sampled softmax, use an explicitly defined proposal with positive support for every item and subtract log(K*q(item)) from sampled-negative logits; mask target collisions. Do not apply proposal correction at inference. Rank candidates using the trained network's raw logits. Preserve the causal, shifted training contract and final-nonpadding readout."
+    },
+    {
+      "description": "Improve negative coverage with training-frequency sampling and a cached negative pool. The authors provide additional sampling controlled by a frequency exponent. [Sampling documentation](https://github.com/hidasib/GRU4Rec/blob/master/README.md), [SampleCache reference](https://github.com/hidasib/GRU4Rec_PyTorch_Official/blob/master/gru4rec_pytorch.py).",
+      "urls": [
+        "https://github.com/hidasib/GRU4Rec/blob/master/README.md",
+        "https://github.com/hidasib/GRU4Rec_PyTorch_Official/blob/master/gru4rec_pytorch.py"
+      ],
+      "implementation": "Apply the shared contract from direction 1. Isolate sampling as an experiment by retaining pairwise BPR and averaging it over K=64 negatives per valid target. Construct counts exclusively from each category's training split. Define q(i)=0.5/itemnum + 0.5*count(i)^0.5/sum_j(count(j)^0.5), for item IDs 1..itemnum. Draw a GPU cache with torch.multinomial(q, cache_size, replacement=True), using seed 42, and consume it across updates. Reject each row's positive and training-history items; use a bounded rejection path and an eligible-item fallback. Compute loss as torch.nn.functional.softplus(negative_scores-positive_scores[:,None]).mean(). Retain baseline optimizer and architecture to measure the sampling change. Frequency is used only to draw training negatives; never add frequency scores or a separately fitted predictor during inference."
+    },
+    {
+      "description": "Add a jointly learned item output bias and independently controlled output dropout. Both appear in the authors' GRU4Rec implementation and can be tested while retaining its recurrent backbone. [Original paper](https://arxiv.org/abs/1511.06939), [official model code](https://github.com/hidasib/GRU4Rec_PyTorch_Official/blob/master/gru4rec_pytorch.py).",
+      "urls": [
+        "https://arxiv.org/abs/1511.06939",
+        "https://github.com/hidasib/GRU4Rec_PyTorch_Official/blob/master/gru4rec_pytorch.py"
+      ],
+      "implementation": "Apply the shared contract from direction 1. Keep tied item embeddings and one GRU layer. Add self.item_bias=nn.Embedding(itemnum+1,1,padding_idx=0), initialize it to zero, and add self.output_dropout=nn.Dropout(0.2). Apply output dropout to GRU features during training before scoring. Define all training and candidate scores through the same function: score(h,i)=(h*self.item_emb(i)).sum(-1)+self.item_bias(i).squeeze(-1), with broadcasting for candidate matrices. Optimize bias, embeddings and GRU jointly using the baseline BPR objective and Adam lr=0.001. The bias is a parameter of this single network, never a separately fitted popularity component. Save output_dropout and bias architecture metadata, update the predictor writer to instantiate matching modules, and load the checkpoint strictly. At inference call model.eval(), select the final nonpadding GRU feature, and return scores through the same predict_score implementation."
+    }
+  ]
+}

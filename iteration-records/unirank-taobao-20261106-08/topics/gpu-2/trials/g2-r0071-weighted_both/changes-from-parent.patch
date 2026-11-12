@@ -1,0 +1,156 @@
+--- g2-r0069-summary_global/model.py
++++ g2-r0071-weighted_both/model.py
+@@ -1,9 +1,9 @@
+-"""Prospective prediction-only summary workspace and dead-work factorial.
+-
+-Training and learned capacity are inherited unchanged from native96. Global
+-contraction removes block-summary materialization; live coefficient work omits
+-only discarded normalizations while retaining all support-gate calculations.
+-Real-arithmetic equivalence does not imply identical BF16 predictions or speed.
+-No local training or tensor execution has been performed.
++"""Prospective count-weighted coarse-coefficient projection factorial.
++
++Training, capacity, inputs, normalization gates and evaluation contractions
++remain inherited. Evaluation alone replaces repeated block-constant residual
++arithmetic with count-weighted [B,10,1] projections. Exact-real equivalence
++allows FP32/BF16 discrepancies and does not establish measured speed.
++No local tensor execution, training or scoring has been performed.
+ """
+ import torch
+@@ -14,5 +14,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'budgeted_factor', 'owner_context_rank': 96, 'owner_context_scale': 'inherited', 'owner_context_balance': 'balanced', 'owner_context_evaluation': 'native', 'evaluation_summary_contraction': 'global', 'evaluation_coefficient_work': 'all'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'budgeted_factor', 'owner_context_rank': 96, 'owner_context_scale': 'inherited', 'owner_context_balance': 'balanced', 'owner_context_evaluation': 'native', 'evaluation_summary_contraction': 'global', 'evaluation_coefficient_work': 'all', 'evaluation_coarse_projection': 'both'}
+ 
+ 
+@@ -352,4 +352,5 @@
+                  evaluation_summary_contraction='block',
+                  evaluation_coefficient_work='all',
++                 evaluation_coarse_projection='event',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -374,4 +375,7 @@
+         self.evaluation_summary_contraction = evaluation_summary_contraction
+         self.evaluation_coefficient_work = evaluation_coefficient_work
++        if evaluation_coarse_projection not in ('event', 'quadratic', 'cubic', 'both'):
++            raise ValueError('Unknown evaluation coarse projection')
++        self.evaluation_coarse_projection = evaluation_coarse_projection
+         if owner_context_evaluation not in ('native', 'folded', 'fused'):
+             raise ValueError('Unknown prediction-time context implementation')
+@@ -890,8 +894,20 @@
+             device=values.device, dtype=torch.float32).view(1, 10, 1) / 9.0
+         scrambled_raw = scrambled_rank.square()
+-        quadratic, quadratic_norm2 = self._orthogonal_block_residual(
+-            quadratic_raw, linear, linear_norm2, valid, total)
+-        scrambled, scrambled_norm2 = self._orthogonal_block_residual(
+-            scrambled_raw, linear, linear_norm2, valid, total)
++        if not self.training and self.evaluation_coarse_projection in ('quadratic', 'both'):
++            # A coarse coefficient is constant on valid events in each block.
++            # Count-weighted block arithmetic preserves the real-valued sums;
++            # FP32 reduction order and gate decisions still require checking.
++            compact_linear = (block_rank - block_mean) * (counts > 0).to(valid.dtype)
++            quadratic, quadratic_norm2 = self._weighted_orthogonal_block_residual(
++                quadratic_raw, compact_linear, linear_norm2, counts, total)
++            scrambled, scrambled_norm2 = self._weighted_orthogonal_block_residual(
++                scrambled_raw, compact_linear, linear_norm2, counts, total)
++            quadratic = valid * quadratic
++            scrambled = valid * scrambled
++        else:
++            quadratic, quadratic_norm2 = self._orthogonal_block_residual(
++                quadratic_raw, linear, linear_norm2, valid, total)
++            scrambled, scrambled_norm2 = self._orthogonal_block_residual(
++                scrambled_raw, linear, linear_norm2, valid, total)
+         occupied = (counts > 0).sum(dim=1, keepdim=True)
+         support = ((occupied >= 3) & (quadratic_norm2 > 1e-10)
+@@ -949,11 +965,29 @@
+         gate can itself carry information; the duplicate isolates that.
+         """
+-        cubic = self._coarse_residual(
+-            rank * rank * rank, linear, quadratic, valid, total)
+-        scrambled = self._coarse_residual(
+-            scrambled_rank * scrambled_rank * scrambled_rank,
+-            linear, quadratic, valid, total)
+-        cubic_norm2 = cubic.square().sum(dim=(1, 2), keepdim=True)
+-        scrambled_norm2 = scrambled.square().sum(dim=(1, 2), keepdim=True)
++        if not self.training and self.evaluation_coarse_projection in ('cubic', 'both'):
++            # Gather a valid event's coefficient, rather than average it again.
++            # Every basis is constant within a block's valid events; empty
++            # blocks gather zero and have zero weight. No prefix assumption.
++            first_valid = valid.argmax(dim=-1, keepdim=True)
++            compact_linear = linear.gather(-1, first_valid)
++            compact_quadratic = quadratic.gather(-1, first_valid)
++            cubic, cubic_norm2 = self._weighted_coarse_residual(
++                rank * rank * rank, compact_linear, compact_quadratic, counts, total)
++            scrambled, scrambled_norm2 = self._weighted_coarse_residual(
++                scrambled_rank * scrambled_rank * scrambled_rank,
++                compact_linear, compact_quadratic, counts, total)
++            # Keep inherited full-shape normalization work, including unused
++            # alternatives and both support norms. Only projection workspace
++            # and its reductions are changed by this factor.
++            cubic = valid * cubic
++            scrambled = valid * scrambled
++        else:
++            cubic = self._coarse_residual(
++                rank * rank * rank, linear, quadratic, valid, total)
++            scrambled = self._coarse_residual(
++                scrambled_rank * scrambled_rank * scrambled_rank,
++                linear, quadratic, valid, total)
++            cubic_norm2 = cubic.square().sum(dim=(1, 2), keepdim=True)
++            scrambled_norm2 = scrambled.square().sum(dim=(1, 2), keepdim=True)
+         incumbent_norm2 = incumbent.square().sum(dim=(1, 2), keepdim=True)
+         target_norm2 = position.square().sum(dim=(1, 2), keepdim=True)
+@@ -982,4 +1016,53 @@
+             return duplicate
+         return incumbent
++
++    @staticmethod
++    def _weighted_orthogonal_block_residual(raw, linear, linear_norm2, counts, total):
++        """Evaluation-only coarse residual on [B,10,1] with event-count weights.
++
++        All operands are FP32 coefficient tensors. Preserve clamp thresholds,
++        the two centerings and the projection sequence of the event version.
++        Return the compact residual and its event-weighted squared norm.
++        This does not assert identical floating-point residuals or support.
++        """
++        present = (counts > 0).to(counts.dtype)
++        denominator = total.unsqueeze(-1)
++        mean = (raw * counts).sum(dim=(1, 2), keepdim=True) / denominator
++        residual = present * (raw - mean)
++        slope = ((residual * linear * counts).sum(dim=(1, 2), keepdim=True)
++                 / linear_norm2.clamp_min(1e-12))
++        residual = present * (residual - slope * linear)
++        residual_mean = ((residual * counts).sum(dim=(1, 2), keepdim=True)
++                         / denominator)
++        residual = present * (residual - residual_mean)
++        norm2 = (residual.square() * counts).sum(dim=(1, 2), keepdim=True)
++        return residual, norm2
++
++    @staticmethod
++    def _weighted_coarse_residual(raw, linear, quadratic, counts, total):
++        """Same two ordered projection sweeps over ten weighted block values.
++
++        Zero-count blocks contribute neither means nor inner products. Both
++        residuals, their norms, and every inherited gate are still evaluated.
++        No state, learned weight, cache, input or random draw is added.
++        """
++        present = (counts > 0).to(counts.dtype)
++        denominator = total.unsqueeze(-1)
++        residual = present * raw
++        linear_norm2 = (linear.square() * counts).sum(dim=(1, 2), keepdim=True)
++        quadratic_norm2 = (quadratic.square() * counts).sum(dim=(1, 2), keepdim=True)
++        for _ in range(2):
++            mean = (residual * counts).sum(dim=(1, 2), keepdim=True) / denominator
++            residual = present * (residual - mean)
++            slope = ((residual * linear * counts).sum(dim=(1, 2), keepdim=True)
++                     / linear_norm2.clamp_min(1e-12))
++            residual = present * (residual - slope * linear)
++            slope = ((residual * quadratic * counts).sum(dim=(1, 2), keepdim=True)
++                     / quadratic_norm2.clamp_min(1e-12))
++            residual = present * (residual - slope * quadratic)
++        mean = (residual * counts).sum(dim=(1, 2), keepdim=True) / denominator
++        residual = present * (residual - mean)
++        norm2 = (residual.square() * counts).sum(dim=(1, 2), keepdim=True)
++        return residual, norm2
+ 
+     @staticmethod

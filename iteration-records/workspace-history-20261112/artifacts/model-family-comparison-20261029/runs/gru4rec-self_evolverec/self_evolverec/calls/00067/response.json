@@ -1,0 +1,72 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting point.** (1) Users report stale-interest revival and weak connections to current intent. This motivates emphasizing recent next-item decisions during training. (2) Electronics has the weakest measured separation: 9.7% wrong-order comparisons and a 0.0265 tenth-percentile margin. Improving competition against informative negatives is therefore a targeted hypothesis. (3) Collapse scores around 0.5 imply mean cosine similarity near zero. They do not justify embedding-diversity regularization, and sampled margins do not establish validation gains.\n\n**Related work.** (1) [GRU4Rec’s ranking-loss study](https://hidasi.eu/assets/pdf/gru4rec_v2_cikm18.pdf) motivates BPR-max because easy negatives dilute ranking gradients. It provides a directly compatible objective for this backbone. (2) [TiCoSeRec](https://ojs.aaai.org/index.php/AAAI/article/view/25540) connects interaction intervals with preference drift. This motivates studying recency, although positional recency is only a proxy for elapsed time. (3) [UFNRec](https://arxiv.org/abs/2208.04116) identifies false-negative risks in sequential recommendation. Negative mining should consequently remain conservative.\n\n### Framework and candidates\n\nThe framework has three directions: **intent emphasis** changes which training positions matter; **ranking discrimination** changes which competitors matter; **semantic specificity** changes item representations.\n\nScores are originality/potential/user alignment/model alignment/implementation difficulty, each 0–10; higher difficulty means harder.\n\n| Idea | Scores | Positive assessment | Negative assessment |\n|---|---|---|---|\n| A. Recency-weighted BPR-max | 4/7/7/9/3 | Simple integration targets current-intent errors and weak margins | Established components; temporal weighting may hurt persistent tastes |\n| B. Prefix-gap-conditioned GRU retention, inspired by TiCoSeRec | 6/7/8/5/6 | Directly models possible intent drift | Gaps can reflect purchase frequency rather than preference change |\n| C. Joint title-token and ID embeddings, inspired by [Recformer](https://cseweb.ucsd.edu/~jmcauley/pdfs/kdd23b.pdf) | 4/6/7/6/6 | Shares specific textual evidence across sparse items | Broad lexical similarity may reproduce observed errors |\n\n### Selected experiment: recency-weighted BPR-max\n\nAt 0% progress, select **A** for its implementation simplicity. It explicitly targets **revived older interests** by emphasizing recent decisions and **weakly connected items displacing immediate matches** by contrasting positives against competitive negatives. These are hypotheses, not demonstrated improvements or compatibility guarantees.\n\nFor each valid position, sample 32 negatives excluding training-observed items. Compute softmax competitor weights and BPR-max loss with negative-score regularization. Weight positions by `0.5 + 0.5*exp(-distance_from_last_valid/10)` and normalize over valid positions. This directly targets Electronics’ weak lower-tail margins.\n\nKeep the corrected GRU architecture, seed 42, at most 200 epochs and 200 batches/epoch. Preserve all four routes, preprocessing seed 0, `os.environ['GAGC_DATA_DIR']`, trial-local artifacts, and fixed evaluation. Select using macro validation HR@10; retain one checkpoint/category. Preserve diagnostic interfaces and final-nonpadding readout for left padding. The predictor writer must reproduce the checkpoint architecture exactly.",
+  "idea": {
+    "description": "Train the corrected GRU4Rec with recency-weighted BPR-max, using a modest negative pool and one jointly trained model per category.",
+    "motivation": "Target stale-interest revival and weakly connected recommendations while improving the weak positive-negative separation measured especially in Electronics. Neither improved margins nor positional recency alone guarantees better recommendations; the fixed macro validation HR@10 determines acceptance.",
+    "implementation_notes": "Keep the supplied architecture and prediction function unchanged. For each valid training position, draw 32 item IDs, excluding padding, the target, and all items observed in that user's training history. Do not consult validation or test labels for exclusions. Use uniform sampling without additional hardest-item filtering. Apply a fixed positional recency weight with floor 0.5 and decay scale 10; start with BPR-max negative-score regularization coefficient 0.001. Preserve the existing family-specific sample_batch and ModelView contract, including item_emb, log2feats(sequence), and predict_score(features, items). DiagnosisProbe(view, device).run_full_diagnosis(train_loader) must return measured metrics and metric_definitions; diagnosis_interpreter_prompt must retain those definitions and avoid unavailable metadata. Maintain preprocessing seed 0, training seed 42, maximum 200 epochs and 200 batches per epoch. Keep DATA_DIR as os.environ['GAGC_DATA_DIR'], all artifacts trial-local, all four category routes, single-GPU execution, and exactly one checkpoint per category. If any architecture detail changes during implementation, update the embedded predictor writer in the same change.",
+    "pseudocode": "for category in four_categories:\n    model = corrected_GRU4Rec(seed=42)\n    for epoch in range(max_epochs_at_most_200):\n        for step in range(200):\n            users, sequence, positive, _ = family_sample_batch()\n            features = model.log2feats(sequence)\n            valid = (sequence != 0) & (positive != 0)\n            negatives = sample_uniform_training_unseen(users, K=32)\n            pos_score = model.predict_score(features, positive)\n            neg_score = score_each_negative_with_same_model(features, negatives)\n            competitor_weight = softmax(neg_score, dim=-1)\n            log_preference = logsigmoid(pos_score[..., None] - neg_score)\n            rank_loss = -logsumexp(log_softmax(neg_score, dim=-1) + log_preference, dim=-1)\n            regularizer = 0.001 * sum(competitor_weight * neg_score.square(), dim=-1)\n            distance = last_valid_position(valid)[:, None] - position_indices\n            recency_weight = 0.5 + 0.5 * exp(-clamp_min(distance, 0) / 10)\n            weight = recency_weight * valid\n            loss = sum(weight * (rank_loss + regularizer)) / sum(weight)\n            optimizer_step(loss)\n        evaluate_with_fixed_validation_protocol()\n    retain_one_validation_selected_checkpoint(category)\nwrite_predictor_matching_corrected_GRU_architecture()\n# For every left-padded inference row, gather the final nonpadding index;\n# never use nonpadding_count - 1.",
+    "originality": {
+      "score": 4,
+      "positive": "Combines established GRU ranking optimization with a minimal recency emphasis tied to the supplied user diagnosis.",
+      "negative": "Both ingredients are established; the contribution is a constrained empirical adaptation."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Offers a simple foundation for testing when temporal emphasis and competitive negatives improve current-intent ranking.",
+      "negative": "Benefits may depend strongly on category, sequence length, and the relationship between positional and chronological recency."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Primarily changes training loss and sampling while preserving the GRU architecture and inference contract.",
+      "negative": "Efficient user-specific exclusions and batched negative scoring require care; larger negative pools increase training cost."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Recurrent Neural Networks with Top-k Gains for Session-based Recommendations",
+      "link": "https://hidasi.eu/assets/pdf/gru4rec_v2_cikm18.pdf",
+      "contributions": [
+        "Introduces ranking objectives including BPR-max that emphasize competitive negatives.",
+        "Provides an objective directly compatible with a GRU4Rec backbone."
+      ],
+      "limitations": [
+        "Does not establish improvements on the pinned four-category RecHarness benchmark.",
+        "Does not directly resolve current-intent drift or product compatibility."
+      ]
+    },
+    {
+      "title": "TiCoSeRec",
+      "link": "https://ojs.aaai.org/index.php/AAAI/article/view/25540",
+      "contributions": [
+        "Uses interaction intervals to motivate time-aware sequence augmentation and preference modeling."
+      ],
+      "limitations": [
+        "Does not validate the proposed positional recency weighting.",
+        "Its temporal augmentation is distinct from a GRU retention mechanism."
+      ]
+    },
+    {
+      "title": "UFNRec",
+      "link": "https://arxiv.org/abs/2208.04116",
+      "contributions": [
+        "Studies false negatives in sequential recommendation, motivating caution with aggressive negative mining."
+      ],
+      "limitations": [
+        "Observed-history exclusion cannot eliminate all false negatives.",
+        "Does not determine the best negative-pool size for this benchmark."
+      ]
+    },
+    {
+      "title": "Recformer",
+      "link": "https://cseweb.ucsd.edu/~jmcauley/pdfs/kdd23b.pdf",
+      "contributions": [
+        "Combines textual item understanding with recommendation learning.",
+        "Motivates semantic representations as a possible direction for sparse items."
+      ],
+      "limitations": [
+        "Its language-model architecture and training setting do not establish benefits for a randomly initialized GRU text encoder.",
+        "Textual similarity alone does not establish complementarity or compatibility."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,131 @@
+--- g2-r0004-context_only/model.py
++++ g2-r0010-equal10/model.py
+@@ -1,17 +1,14 @@
+-"""Prospective source-path attribution under fixed compressed UF histories.
+-
+-Auxiliary gradients into the shared scorer are always blocked. Independent
+-switches control auxiliary gradients through supplied context embeddings and
+-through target/history item-and-action embeddings. Four cells keep identical
+-modules, initialization order, 30 summaries, forward values and inference.
+-Neither/both endpoints correspond to the earlier both_blocked/scorer_only
+-operators. Same-seed endpoint replays are consistency checks, not repetition.
+-
+-These are computational path gates: tied target/history tables remain tied,
+-and cross-source aliases must be audited by the host before ownership claims.
+-Persistent Dice state updates only in the primary scorer call. Preparation
+-performs no numerical execution or training; torch.func support and the
+-forward/backward/masking gates in proposal.json remain host prerequisites.
+-No architecture novelty or new predictive improvement is claimed.
++"""Prospective temporal resolution allocation under fixed 100-event visibility.
++
++Recent, early and equal partitions use ten blocks and three count-weighted
++slots per block. Recent and early have reversed block-width schedules; both
++preserve every valid event. Full history scores each event once, then splits
++its weighted value by the same feedback masks. No learned router is added.
++
++All variants inherit the incumbent scorer, heads, initialization order, and
++context-open/item-and-scorer-blocked auxiliary gradient paths. The full-history
++control changes Dice population and training cost as well as compression.
++Padding values are sanitized before scoring. Numerical checks and training
++remain host-only. This is a controlled adaptation, with no novelty claim.
+ """
+ import torch
+@@ -31,13 +28,15 @@
+     'block_aux_context_grad': False,
+     'block_aux_item_grad': True,
++    'history_partition': 'equal',
+ }
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='SourcePathCompression', gpu=-1,
++    def __init__(self, feature_map, model_id='TemporalResolutionCompression', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+                  compression_routes='uf', block_aux_scorer_grad=True,
+-                 block_aux_context_grad=False, block_aux_item_grad=True, num_tasks=None,
++                 block_aux_context_grad=False, block_aux_item_grad=True,
++                 history_partition='equal', num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -59,4 +58,23 @@
+         self.block_aux_context_grad = block_aux_context_grad
+         self.block_aux_item_grad = block_aux_item_grad
++        if block_aux_context_grad or not block_aux_item_grad:
++            raise ValueError('Incumbent auxiliary source gates are fixed')
++        if history_partition not in ('recent', 'early', 'equal', 'full'):
++            raise ValueError('Unknown temporal partition')
++        self.history_partition = history_partition
++        widths = (20, 20, 20, 20, 10, 5, 2, 1, 1, 1)
++        if history_partition == 'early':
++            widths = tuple(reversed(widths))
++        elif history_partition == 'equal':
++            widths = (10,) * 10
++        # Constants consume no RNG and add no trainable parameters. This
++        # nonpersistent buffer follows device moves but is derived from CONFIG.
++        boundaries = [0]
++        for width in widths:
++            boundaries.append(boundaries[-1] + width)
++        positions = torch.arange(100)
++        partition = torch.stack([(positions >= left) & (positions < right)
++                                 for left, right in zip(boundaries[:-1], boundaries[1:])])
++        self.register_buffer('partition', partition, persistent=False)
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -132,16 +150,23 @@
+         if length != 100:
+             raise ValueError('Frozen protocol requires 100 history positions')
+-        groups, block_size = 10, 10
+-        valid = mask.bool().reshape(batch, groups, block_size)
+-        membership = auxiliary.reshape(batch, groups, block_size) & valid
+-        # Per temporal block: one uniform slot and two feedback strata.
+-        # Each branch independently covers every valid event exactly once.
+-        assignment = torch.stack((valid, valid & ~membership, membership), dim=-2)
+-        assignment = assignment.to(values.dtype).reshape(batch * groups, 3, block_size)
+-        counts = assignment.sum(-1)
+-        grouped = values.reshape(batch * groups, block_size, width)
+-        sums = torch.bmm(assignment, grouped)
++        valid = mask.bool()
++        auxiliary = auxiliary & valid
++        clean = torch.where(valid.unsqueeze(-1), values, torch.zeros_like(values))
++        if self.history_partition == 'full':
++            # Score each actual event once. Feedback strata are applied AFTER
++            # nonlinear scoring, so their sum equals the all-history readout.
++            membership = torch.stack((valid, valid & ~auxiliary, auxiliary), dim=-1)
++            return clean, membership
++        valid_blocks = self.partition.unsqueeze(0) & valid.unsqueeze(1)
++        member = auxiliary.unsqueeze(1) & valid_blocks
++        assignment = torch.stack((valid_blocks, valid_blocks & ~member, member), dim=2)
++        assignment = assignment.reshape(batch, 30, 100).to(clean.dtype)
++        counts = assignment.sum(dim=-1)
++        # Identical dense operator shapes for recent/early/equal, including
++        # the uniform control. Measured cost includes this general assignment
++        # implementation; it may exceed the original reshape/block kernel.
++        sums = torch.bmm(assignment, clean)
+         means = sums / counts.clamp_min(1).unsqueeze(-1)
+-        return means.reshape(batch, groups * 3, width), counts.reshape(batch, groups * 3)
++        return means, counts
+ 
+     def _interactions(self, target, values):
+@@ -170,5 +195,9 @@
+     def _pool(self, weights, values, counts):
+         batch, slots, _ = values.shape
+-        weights = weights.reshape(batch, slots) * counts.to(weights.dtype)
++        weights = weights.reshape(batch, slots)
++        if self.history_partition == 'full':
++            weighted = weights.unsqueeze(-1) * values
++            return torch.bmm(counts.transpose(1, 2).to(weighted.dtype), weighted)
++        weights = weights * counts.to(weights.dtype)
+         weighted = (weights.unsqueeze(-1) * values).reshape(batch, 10, 3, self.value_width)
+         return weighted.sum(dim=1)
+@@ -177,7 +206,7 @@
+         context, target, values, mask, auxiliary = self._represent(inputs)
+         values, counts = self._compress_both(values, mask, auxiliary)
+-        # Both calls include all 30 slots: each BatchNorm sees the identical
+-        # population. Selecting ten versus twenty slots BEFORE scoring would
+-        # change the forward operator and invalidate the gradient-only claim.
++        # Compressed variants score all 30 slots. Full history scores 100
++        # positions. These Dice populations differ, so full versus compressed
++        # is an architectural replacement control, not pure information loss.
+         primary_weights = self.local_activation(self._interactions(target, values))
+         primary_strata = self._pool(primary_weights, values, counts)

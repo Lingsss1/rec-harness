@@ -37,10 +37,10 @@ def evaluate_study(root, output, *, config_path=None, check_only=False, keep_goi
             raise ProtocolError("Config differs from this study; use a new root, never overwrite a registered experiment")
         errors = check_config(config, root, check_images=True)
         summary = {"ready": not errors, "errors": errors, "backend": config.get("execution", {"backend": "docker"}),
-                   "trajectories": 60, "validation_calls": 6000, "check_only": check_only}
+                   "trajectories": len(matrix(config)), "validation_calls": len(matrix(config)) * 100, "check_only": check_only}
         if errors or check_only:
             return summary
-        if not os.environ.get("ANTHROPIC_API_KEY"):
+        if config["agent"].get("provider", "claude") == "claude" and not os.environ.get("ANTHROPIC_API_KEY"):
             raise ProtocolError("Export ANTHROPIC_API_KEY before evaluation; --check-only does not require a key")
         if registration is None:
             registration = freeze(root)
@@ -55,7 +55,7 @@ def evaluate_study(root, output, *, config_path=None, check_only=False, keep_goi
             try:
                 for index, cell in enumerate(matrix(config), 1):
                     label = "%s/%s/%d" % (cell["task"], cell["arm"], cell["replicate"])
-                    progress("[%d/60] %s" % (index, label))
+                    progress("[%d/%d] %s" % (index, len(matrix(config)), label))
                     try:
                         state = Trajectory(root, registration, cell["task"], cell["arm"], cell["replicate"], runtime).run()
                         if state.get("test", {}).get("status") != "completed":

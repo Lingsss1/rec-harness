@@ -1,0 +1,119 @@
+--- g1-r0050-match_pairrms_click_task/model.py
++++ g1-r0051-match_nomean_shift_shared/model.py
+@@ -1,12 +1,15 @@
+-"""Norm-preserving direction collapse of history-wide action centroids.
+-
+-Two history groups retain their original counts and weighted action mean.
+-Their centroid difference is replaced by its norm times one prespecified
+-alternating dense unit vector. Only stopped match-action summary rows 0/4
+-consume these synthetic values; all original pools, ordinal summaries, item
+-paths, masks, learned modules and gradient ownership remain inherited.
+-Original-direction mode is an exact r0047 source bridge. No RNG or state is
+-added. The intervention removes direction, not all personalized feedback:
+-contrast magnitude, common mean and other action consumers are retained.
++"""Common-centroid removal at a stopped match-action summary consumer.
++
++The r0050 shared symmetric-RMS radius and alternating unit axis stay fixed.
++For group membership g and history fraction p, removed mode uses (g-p) R u
++instead of M+(g-p) R u. Empty or one-group histories use zero synthetic
++action values. Block-centered match coefficients annihilate M in exact
++arithmetic; this study measures robustness to its low-precision leakage.
++Only residual match-action rows 0/4 consume the new stream. Observed pools,
++ordinal summaries, item paths, original masks, learned modules and gradient
++ownership are inherited. Retained mode is the exact r0050 arithmetic bridge.
++No state, calibration, learned scale, token assumption or RNG is added.
++This does not remove all action information: membership, radius and other
++observed action consumers remain available under the frozen host protocol.
+ """
+ import torch
+@@ -17,5 +20,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'match', 'match_action_availability': 'both', 'match_action_content': 'observed', 'match_replacement_gradient': 'blocked', 'match_observed_gradient': 'blocked', 'match_action_basis': 'identity', 'match_basis_initialization': 'unchanged', 'summary_rotation_partition': 'click', 'summary_stratum_operator': 'mean', 'summary_projection_scope': 'history', 'summary_contrast_direction': 'fixed', 'summary_contrast_radius': 'symmetric_rms'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'shared', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'match', 'match_action_availability': 'both', 'match_action_content': 'observed', 'match_replacement_gradient': 'blocked', 'match_observed_gradient': 'blocked', 'match_action_basis': 'identity', 'match_basis_initialization': 'unchanged', 'summary_rotation_partition': 'rotated_click', 'summary_stratum_operator': 'mean', 'summary_projection_scope': 'history', 'summary_contrast_direction': 'fixed', 'summary_contrast_radius': 'symmetric_rms', 'summary_common_mean': 'removed'}
+ 
+ 
+@@ -26,5 +29,5 @@
+                  compression_routes='uf', block_aux_scorer_grad=True,
+                  block_aux_context_grad=False, block_aux_item_grad=True, num_tasks=None,
+-                 residual_input='match_detail', residual_routing='task', residual_hidden=16,
++                 residual_input='match_detail', residual_routing='shared', residual_hidden=16,
+                  temporal_detail='position', block_detail='ordinal',
+                  curvature_detail='quadratic', joint_detail='duplicate_match',
+@@ -38,9 +41,10 @@
+                  match_action_basis='identity',
+                  match_basis_initialization='unchanged',
+-                 summary_rotation_partition='click',
++                 summary_rotation_partition='rotated_click',
+                  summary_stratum_operator='mean',
+                  summary_projection_scope='history',
+                  summary_contrast_direction='fixed',
+                  summary_contrast_radius='symmetric_rms',
++                 summary_common_mean='removed',
+                  match_replacement_gradient='blocked',
+                  match_observed_gradient='blocked',
+@@ -179,4 +183,13 @@
+                 raise ValueError('Paired radius requires fixed-direction history means')
+         self.summary_contrast_radius = summary_contrast_radius
++        if summary_common_mean not in ('retained', 'removed'):
++            raise ValueError('Unknown common action-centroid control')
++        if summary_common_mean == 'removed':
++            if (summary_contrast_radius != 'symmetric_rms'
++                    or summary_contrast_direction != 'fixed'
++                    or summary_projection_scope != 'history'
++                    or summary_rotation_partition not in ('click', 'rotated_click')):
++                raise ValueError('Centroid removal requires the paired-RMS stopped history consumer')
++        self.summary_common_mean = summary_common_mean
+         self.click_index = list(feature_map.labels).index('is_click')
+         self.residual_input = residual_input
+@@ -406,21 +419,17 @@
+ 
+     def _history_stratified_summary_values(self, values, mask, membership, radius_membership=None):
+-        """Place canonical means using a count-matched opposite radius.
+-
+-        For placement P, M=sum(n_g*mu_g)/N and p=n_1/N are inherited.
+-        Use nu_g=M+(g-p)*R(Q)*u, where Q is the same or the opposite
+-        membership of this same masked history. Rotation preserves each
+-        block's membership count, so P and Q have identical group counts.
+-        The new radius is zero if donor means coincide; there is no epsilon
+-        division or learned/calibrated scale. Both occupied groups preserve
+-        the whole-history total action vector. Centroid distance, projected
+-        energy and downstream summary norms intentionally follow the donor.
+-        Empty/single occupied placement groups keep original means exactly.
+-
+-        With no radius_membership, every tensor operation is the exact
+-        r0048 bridge. Only the new branch adds a second FP32 group reduction.
+-        Original item values/masks, observed pools, ordinal action summaries
+-        and all local gradient owners remain inherited. BF16 common-mean
+-        cancellation leakage requires host certification before attribution.
++        """Build inherited means, then optionally omit their common centroid.
++
++        The paired RMS is identical for real/rotated placement at a fixed
++        parameter state. Removed means have zero count-weighted sum, the
++        same occupied-group distance R, and energy N*p*(1-p)*R**2 when both
++        groups exist. One/zero occupied groups return zero at valid slots.
++        Invalid slots are restored and cannot be reduction sources. No
++        membership, radius, original action pool or ordinal consumer changes.
++
++        In exact arithmetic block-centered raw/scaled match coefficients
++        eliminate the retained common mean. In BF16 the two modes need not
++        agree; that numerical discrepancy is the intervention under study.
++        Retained mode executes the exact ancestor helper operations.
+         """
+         batch, length, width = values.shape
+@@ -483,4 +492,15 @@
+                 both32 = (counts32 > 0).all(dim=1, keepdim=True)
+                 means32 = torch.where(both32, canonical32, means32)
++                if self.summary_common_mean == 'removed':
++                    # Do not subtract two rounded synthetic centroids. Build
++                    # the contrast directly in FP32, before the original cast.
++                    # Both original group means and the click-first paired
++                    # radius were computed above in the inherited order.
++                    # A one-group history has no within-history contrast;
++                    # its constant fallback must also lose the common mean.
++                    contrast_only32 = ((group32 - click_fraction32) * radius32
++                                       * axis32.view(1, 1, -1))
++                    means32 = torch.where(both32, contrast_only32,
++                                          torch.zeros_like(means32))
+             projected32 = torch.bmm(weights32.transpose(1, 2), means32)
+         projected = projected32.to(values.dtype)

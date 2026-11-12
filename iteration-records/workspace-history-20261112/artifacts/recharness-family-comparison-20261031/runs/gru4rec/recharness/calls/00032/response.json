@@ -1,0 +1,31 @@
+{
+  "category_edits": [
+    {
+      "category": "sequence_interest",
+      "rationale": "Blend each GRU state with a causal exponential mean of observed, nonpadding states: 75% current state and 25% pooled state, with half-life three interactions. Apply the same readout during training and inference across all four categories. Preserve recurrent topology, embeddings, scoring, loss, optimizer and history length; checkpoint the readout settings and restore them through the predictor writer.",
+      "edits": [
+        {
+          "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+          "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+        },
+        {
+          "find": "    def __init__(self, itemnum: int, hidden_units: int = 128, num_layers: int = 1,\n                 dropout_rate: float = 0.1):\n        super().__init__()\n        self.itemnum = itemnum",
+          "replace": "    def __init__(self, itemnum: int, hidden_units: int = 128, num_layers: int = 1,\n                 dropout_rate: float = 0.1, readout_mix: float = 0.25,\n                 readout_half_life: float = 3.0):\n        super().__init__()\n        self.readout_mix = readout_mix\n        self.readout_half_life = readout_half_life\n        self.itemnum = itemnum"
+        },
+        {
+          "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        # Histories are LEFT padded; count-1 indexes padding on short histories.\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        pos_scores = (out * self.output_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.output_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores",
+          "replace": "    def _readout_states(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        positions = torch.arange(seq.size(1), device=seq.device)\n        ages = positions[:, None] - positions[None, :]\n        weights = torch.exp2(\n            -ages.clamp(min=0).to(out.dtype) / self.readout_half_life\n        ).masked_fill(ages < 0, 0.0)\n        valid = seq.ne(0).unsqueeze(-1).to(out.dtype)\n        numerator = torch.matmul(weights, out * valid)\n        denominator = torch.matmul(weights, valid).clamp(min=1e-12)\n        pooled = numerator / denominator\n        return ((1.0 - self.readout_mix) * out + self.readout_mix * pooled) * valid\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        out = self._readout_states(seq)\n        # Histories are LEFT padded; select the final observed position.\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        out = self._readout_states(seq)\n        pos_scores = (out * self.output_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.output_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores"
+        },
+        {
+          "find": "            \"dropout_rate\": DROPOUT_RATE,\n        }, f)",
+          "replace": "            \"dropout_rate\": DROPOUT_RATE,\n            \"readout_mix\": model.readout_mix,\n            \"readout_half_life\": model.readout_half_life,\n        }, f)"
+        },
+        {
+          "find": "            num_layers=meta[\"num_layers\"],\n            dropout_rate=0.0,\n        ).to(_device)",
+          "replace": "            num_layers=meta[\"num_layers\"],\n            dropout_rate=0.0,\n            readout_mix=meta[\"readout_mix\"],\n            readout_half_life=meta[\"readout_half_life\"],\n        ).to(_device)"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Implement causal recency-blended GRU readout consistently for training and generated inference, saving readout settings in category metadata. Preserve one model per category and enforce the required GAGC_DATA_DIR lookup."
+}

@@ -1,0 +1,396 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "proposal": {
+        "category_edits": [
+          {
+            "category": "architecture_interaction",
+            "rationale": "Add a jointly trained residual feed-forward block of width 2H after every GRU state: LayerNorm(h + W2 GELU(W1 h)). Apply it consistently to supervised positions and candidate inference across all four datasets. Preserve tied embeddings, final-real-position readout and BPR. The generated predictor imports the updated architecture and restores its parameters from each category's single checkpoint.",
+            "edits": [
+              {
+                "find": "        self.dropout = nn.Dropout(dropout_rate)\n        with torch.no_grad():",
+                "replace": "        self.dropout = nn.Dropout(dropout_rate)\n        self.state_ffn = nn.Sequential(\n            nn.Linear(hidden_units, 2 * hidden_units),\n            nn.GELU(),\n            nn.Linear(2 * hidden_units, hidden_units),\n        )\n        self.state_norm = nn.LayerNorm(hidden_units)\n        with torch.no_grad():"
+              },
+              {
+                "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        # Histories are LEFT padded; count-1 indexes padding on short histories.",
+                "replace": "    def _sequence_states(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        return self.state_norm(out + self.state_ffn(out))\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        out = self._sequence_states(seq)\n        # Histories are LEFT padded; count-1 indexes padding on short histories."
+              },
+              {
+                "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)",
+                "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        out = self._sequence_states(seq)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)"
+              },
+              {
+                "find": "            num_layers=meta[\"num_layers\"],\n            dropout_rate=0.0,",
+                "replace": "            num_layers=meta[\"num_layers\"],\n            dropout_rate=meta[\"dropout_rate\"],"
+              }
+            ]
+          },
+          {
+            "category": "hyperparameter_tuning",
+            "rationale": "Jointly set dropout to 0.2, Adam learning rate to 0.0005, weight decay to 0.00001 and batch size to 256. Lower learning rate and stronger regularization control the residual block's added capacity, while larger batches stabilize updates. Preserve history length, dimensions, epoch cap and batches per epoch. Enforce the required environment-only data path.",
+            "edits": [
+              {
+                "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+                "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+              },
+              {
+                "find": "DROPOUT_RATE  = float(os.environ.get(\"GRU4REC_DROPOUT\", \"0.1\"))\nLR            = float(os.environ.get(\"GRU4REC_LR\", \"1e-3\"))\nWEIGHT_DECAY  = float(os.environ.get(\"GRU4REC_WD\", \"0.0\"))\nBATCH_SIZE    = int(os.environ.get(\"GRU4REC_BATCH\", \"128\"))",
+                "replace": "DROPOUT_RATE  = float(os.environ.get(\"GRU4REC_DROPOUT\", \"0.2\"))\nLR            = float(os.environ.get(\"GRU4REC_LR\", \"0.0005\"))\nWEIGHT_DECAY  = float(os.environ.get(\"GRU4REC_WD\", \"0.00001\"))\nBATCH_SIZE    = int(os.environ.get(\"GRU4REC_BATCH\", \"256\"))"
+              }
+            ]
+          }
+        ],
+        "change_summary": "Add residual feed-forward refinement to GRU states and jointly tune dropout, learning rate, weight decay and batch size across all four category models. Keep training and generated inference consistent, with one checkpoint per category.",
+        "edits": [
+          {
+            "find": "        self.dropout = nn.Dropout(dropout_rate)\n        with torch.no_grad():",
+            "replace": "        self.dropout = nn.Dropout(dropout_rate)\n        self.state_ffn = nn.Sequential(\n            nn.Linear(hidden_units, 2 * hidden_units),\n            nn.GELU(),\n            nn.Linear(2 * hidden_units, hidden_units),\n        )\n        self.state_norm = nn.LayerNorm(hidden_units)\n        with torch.no_grad():"
+          },
+          {
+            "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        # Histories are LEFT padded; count-1 indexes padding on short histories.",
+            "replace": "    def _sequence_states(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        return self.state_norm(out + self.state_ffn(out))\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        out = self._sequence_states(seq)\n        # Histories are LEFT padded; count-1 indexes padding on short histories."
+          },
+          {
+            "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)",
+            "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        out = self._sequence_states(seq)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)"
+          },
+          {
+            "find": "            num_layers=meta[\"num_layers\"],\n            dropout_rate=0.0,",
+            "replace": "            num_layers=meta[\"num_layers\"],\n            dropout_rate=meta[\"dropout_rate\"],"
+          },
+          {
+            "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+            "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+          },
+          {
+            "find": "DROPOUT_RATE  = float(os.environ.get(\"GRU4REC_DROPOUT\", \"0.1\"))\nLR            = float(os.environ.get(\"GRU4REC_LR\", \"1e-3\"))\nWEIGHT_DECAY  = float(os.environ.get(\"GRU4REC_WD\", \"0.0\"))\nBATCH_SIZE    = int(os.environ.get(\"GRU4REC_BATCH\", \"128\"))",
+            "replace": "DROPOUT_RATE  = float(os.environ.get(\"GRU4REC_DROPOUT\", \"0.2\"))\nLR            = float(os.environ.get(\"GRU4REC_LR\", \"0.0005\"))\nWEIGHT_DECAY  = float(os.environ.get(\"GRU4REC_WD\", \"0.00001\"))\nBATCH_SIZE    = int(os.environ.get(\"GRU4REC_BATCH\", \"256\"))"
+          }
+        ],
+        "scope_validation": "exact categories and nontrivial AST changes; semantic labels prompt-enforced"
+      }
+    }
+  ],
+  "receipt": {
+    "id": "round-0002-slot-0-attempt-1",
+    "status": "success",
+    "gpu": 4,
+    "allocated_gpu_seconds": 10.277036488056183,
+    "output": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/preflight/gru4rec/recharness/smoke/round-0002-slot-0-attempt-1",
+    "source_sha256": "f9f1d6dbb7859bec1b01aaa2d73bce5758a3eb0199473350a0186f51a5e2f92f",
+    "score": 0.1825,
+    "aggregate": {
+      "HR@5": 0.1237,
+      "HR@10": 0.1825,
+      "HR@20": 0.2937,
+      "NDCG@5": 0.0847,
+      "NDCG@10": 0.1037,
+      "NDCG@20": 0.1319,
+      "Movies_and_TV/HR@5": 0.17,
+      "Movies_and_TV/HR@10": 0.23,
+      "Movies_and_TV/HR@20": 0.32,
+      "Movies_and_TV/NDCG@5": 0.1238,
+      "Movies_and_TV/NDCG@10": 0.1431,
+      "Movies_and_TV/NDCG@20": 0.1663,
+      "Industrial_and_Scientific/HR@5": 0.145,
+      "Industrial_and_Scientific/HR@10": 0.2,
+      "Industrial_and_Scientific/HR@20": 0.305,
+      "Industrial_and_Scientific/NDCG@5": 0.0969,
+      "Industrial_and_Scientific/NDCG@10": 0.1147,
+      "Industrial_and_Scientific/NDCG@20": 0.141,
+      "Electronics/HR@5": 0.11,
+      "Electronics/HR@10": 0.17,
+      "Electronics/HR@20": 0.315,
+      "Electronics/NDCG@5": 0.074,
+      "Electronics/NDCG@10": 0.0933,
+      "Electronics/NDCG@20": 0.1301,
+      "CDs_and_Vinyl/HR@5": 0.07,
+      "CDs_and_Vinyl/HR@10": 0.13,
+      "CDs_and_Vinyl/HR@20": 0.235,
+      "CDs_and_Vinyl/NDCG@5": 0.0439,
+      "CDs_and_Vinyl/NDCG@10": 0.0636,
+      "CDs_and_Vinyl/NDCG@20": 0.0901
+    },
+    "per_dataset": {
+      "Movies_and_TV": {
+        "metrics": {
+          "HR@5": 0.17,
+          "HR@10": 0.23,
+          "HR@20": 0.32,
+          "NDCG@5": 0.1238,
+          "NDCG@10": 0.1431,
+          "NDCG@20": 0.1663
+        },
+        "n_users": 200
+      },
+      "Industrial_and_Scientific": {
+        "metrics": {
+          "HR@5": 0.145,
+          "HR@10": 0.2,
+          "HR@20": 0.305,
+          "NDCG@5": 0.0969,
+          "NDCG@10": 0.1147,
+          "NDCG@20": 0.141
+        },
+        "n_users": 200
+      },
+      "Electronics": {
+        "metrics": {
+          "HR@5": 0.11,
+          "HR@10": 0.17,
+          "HR@20": 0.315,
+          "NDCG@5": 0.074,
+          "NDCG@10": 0.0933,
+          "NDCG@20": 0.1301
+        },
+        "n_users": 200
+      },
+      "CDs_and_Vinyl": {
+        "metrics": {
+          "HR@5": 0.07,
+          "HR@10": 0.13,
+          "HR@20": 0.235,
+          "NDCG@5": 0.0439,
+          "NDCG@10": 0.0636,
+          "NDCG@20": 0.0901
+        },
+        "n_users": 200
+      }
+    },
+    "evaluation_seconds": 2.119278237223625,
+    "predictor_sha256": "b8da0117c6d08dcc9c65b46a3372b417e7bccb6194f14a892e431b8c69254c3a"
+  },
+  "native_result": {
+    "spec": {
+      "dimension": "combination_jump",
+      "delta": 1.0,
+      "estimated_cost_secs": 305.0,
+      "code_diff": "",
+      "code_edits": [],
+      "code_content": "",
+      "arm": "combination_jump",
+      "composite_dims": [
+        "combination_jump"
+      ],
+      "strategy_arm": null,
+      "round_role": "lowlevel_routing",
+      "parallel_group_estimated_wall_secs": 1220.0,
+      "budget_safe_if_global_budget_gte": 1220.0,
+      "budget_accounting": "Parallel group cost is sum(estimated_cost_secs) across the selected candidates.",
+      "code_hint": "COMBINATION JUMP: make a substantive, coordinated change in EACH selected direction. 架构与交互: Coordinate backbone-appropriate blocks (GRU recurrence, NextItNet causal convolution, BERT4Rec masked bidirectional attention, or HSTU gated attention), feed-forward structure, residual paths and jointly trained interaction/scoring formulas such as bilinear compatibility.\n联合调参: Jointly tune multiple numeric/categorical hyperparameters of the existing program: embedding/hidden dimensions, backbone depth, attention heads where applicable, convolution kernel size where applicable, feed-forward width, max history length, learning rate, dropout, weight decay, batch size, optimizer choice and scheduler settings. A candidate may change any compatible subset together; explain their coupling.\nFor a jump, preservation rules apply to UNSELECTED directions. Shared changes must have one owner; do not claim the same edit for multiple directions. Keep observed-history data, registered model family, seed 42, epoch cap 200 and batches per epoch 200 fixed.\nMaintain shape, checkpoint and predictor consistency for changes in the selected directions; preserve the registered direction boundaries.",
+      "hypothesis": "Memory available in state; agent should write a short arm-specific hypothesis; Agent hypothesis: Across all four datasets, retain existing embeddings and final-real-position readout. Add a residual feed-forward block h'=LayerNorm(h+W2 GELU(W1 h)), with width 2H, after the GRU at every supervised position. Jointly set dropout=0.2, Adam LR=0.0005, weight_decay=0.00001 and batch_size=256. The residual block adds nonlinear compatibility while the lower learning rate and stronger regularization control its added capacity. Preserve history handling, sampling and BPR.",
+      "is_jumping": true,
+      "implementation_backend": "claude_code",
+      "implementation_prompt": "COMBINATION JUMP: make a substantive, coordinated change in EACH selected direction. 架构与交互: Coordinate backbone-appropriate blocks (GRU recurrence, NextItNet causal convolution, BERT4Rec masked bidirectional attention, or HSTU gated attention), feed-forward structure, residual paths and jointly trained interaction/scoring formulas such as bilinear compatibility.\n联合调参: Jointly tune multiple numeric/categorical hyperparameters of the existing program: embedding/hidden dimensions, backbone depth, attention heads where applicable, convolution kernel size where applicable, feed-forward width, max history length, learning rate, dropout, weight decay, batch size, optimizer choice and scheduler settings. A candidate may change any compatible subset together; explain their coupling.\nFor a jump, preservation rules apply to UNSELECTED directions. Shared changes must have one owner; do not claim the same edit for multiple directions. Keep observed-history data, registered model family, seed 42, epoch cap 200 and batches per epoch 200 fixed.\nMaintain shape, checkpoint and predictor consistency for changes in the selected directions; preserve the registered direction boundaries.",
+      "allowed_files": [
+        "train.py",
+        "predict.py"
+      ],
+      "claude_attempts": 3,
+      "arm_design": "semantic_v4",
+      "selected_categories": [
+        "architecture_interaction",
+        "hyperparameter_tuning"
+      ],
+      "hypothesis_key": "slot-0",
+      "sampling_draw": {
+        "slot": 0,
+        "arm": "combination_jump",
+        "selected_directions": [
+          "architecture_interaction",
+          "hyperparameter_tuning"
+        ],
+        "sampled_values": {
+          "feature_construction": 0.02918720097686488,
+          "embedding_representation": 0.4494224448687488,
+          "architecture_interaction": 0.9960823572376835,
+          "sequence_interest": 0.3355557119305672,
+          "learning_objective": 0.23968573609053745,
+          "hyperparameter_tuning": 0.6701416832099646
+        },
+        "direction_count": 2,
+        "selection": "best unused TS-ranked combination at sizes 2,3,4,2"
+      },
+      "max_trial_gpu_seconds": 305.0,
+      "protected_gpu_seconds": 15119.999999999998,
+      "jump_trigger": "plateau",
+      "jump_budget_plan": {
+        "trial_cap_secs": 305.0,
+        "jump_group_size": 4,
+        "jump_reserved_secs": 1220.0,
+        "retune_group_size": 4,
+        "retune_rounds": 4,
+        "retune_reserved_secs": 4880.0,
+        "total_reserved_secs": 6100.0,
+        "protected_envelope_secs": 15119.999999999998,
+        "cost_source": "p75 measured trial cost * safety + teardown margin"
+      },
+      "predict_code_edits": [],
+      "predict_code_content": "",
+      "agent_hypothesis": "Across all four datasets, retain existing embeddings and final-real-position readout. Add a residual feed-forward block h'=LayerNorm(h+W2 GELU(W1 h)), with width 2H, after the GRU at every supervised position. Jointly set dropout=0.2, Adam LR=0.0005, weight_decay=0.00001 and batch_size=256. The residual block adds nonlinear compatibility while the lower learning rate and stronger regularization control its added capacity. Preserve history handling, sampling and BPR.",
+      "gagc_memory_context": {
+        "experiment_skill": "# RecHarness Experiment Skill\n\n## Objective\nUse benchmark val_score as the search and winner criterion.\nDo not use held-out test metrics during search.\nThompson Sampling chooses arms; this skill only guides how to edit code within selected arms.\n\n## Recent Patch Lessons\n- Round 2, sequence_interest: Exclude left padding from recurrent computation and restore aligned training states. Shared model loading keeps generated inference consistent; checkpoint shapes and all training settings remain unchanged.; validation=0.2025, delta_vs_input=-0.0025, outcome=regressed, promoted=False, GPU seconds=11.4. An observation of this exact configuration, not a rule against the whole direction.\n- Round 2, learning_objective: Use masked positive-plus-negative logistic loss for all four category models. Model shapes and predictor behavior remain unchanged.; validation=0.205, delta_vs_input=0.0, outcome=tied, promoted=False, GPU seconds=10.2. An observation of this exact configuration, not a rule against the whole direction.\n- Round 2, embedding_representation: Apply epsilon-protected row-wise L2 normalization to tied item embeddings across training and inference, with padding embeddings fixed at zero. All four dataset models retain the existing architecture, routing and training configuration.; validation=0.1837, delta_vs_input=-0.0213, outcome=regressed, promoted=False, GPU seconds=10.8. An observation of this exact configuration, not a rule against the whole direction.\n\n## Concrete Avoids\nNo concrete patch-level avoids yet.\n",
+        "recent_text_gradients": [
+          "Round 2, sequence_interest: Exclude left padding from recurrent computation and restore aligned training states. Shared model loading keeps generated inference consistent; checkpoint shapes and all training settings remain unchanged.; validation=0.2025, delta_vs_input=-0.0025, outcome=regressed, promoted=False, GPU seconds=11.4. An observation of this exact configuration, not a rule against the whole direction.",
+          "Round 2, learning_objective: Use masked positive-plus-negative logistic loss for all four category models. Model shapes and predictor behavior remain unchanged.; validation=0.205, delta_vs_input=0.0, outcome=tied, promoted=False, GPU seconds=10.2. An observation of this exact configuration, not a rule against the whole direction.",
+          "Round 2, embedding_representation: Apply epsilon-protected row-wise L2 normalization to tied item embeddings across training and inference, with padding embeddings fixed at zero. All four dataset models retain the existing architecture, routing and training configuration.; validation=0.1837, delta_vs_input=-0.0213, outcome=regressed, promoted=False, GPU seconds=10.8. An observation of this exact configuration, not a rule against the whole direction."
+        ],
+        "failure_memory": [],
+        "skill_notes": "Round 2: best_ever=0.2050, recent=0.2050, trend=plateau. Top arms: feature_construction, embedding_representation, sequence_interest."
+      },
+      "trial_group_id": "trialgrp_1793440287271_2861855",
+      "trial_id": 0
+    },
+    "wall_time_secs": 10.277036488056183,
+    "timed_out": false,
+    "oom": false,
+    "val_score": 0.1825,
+    "val_metrics": {
+      "Movies_and_TV": {
+        "HR@5": 0.17,
+        "HR@10": 0.23,
+        "HR@20": 0.32,
+        "NDCG@5": 0.1238,
+        "NDCG@10": 0.1431,
+        "NDCG@20": 0.1663
+      },
+      "Industrial_and_Scientific": {
+        "HR@5": 0.145,
+        "HR@10": 0.2,
+        "HR@20": 0.305,
+        "NDCG@5": 0.0969,
+        "NDCG@10": 0.1147,
+        "NDCG@20": 0.141
+      },
+      "Electronics": {
+        "HR@5": 0.11,
+        "HR@10": 0.17,
+        "HR@20": 0.315,
+        "NDCG@5": 0.074,
+        "NDCG@10": 0.0933,
+        "NDCG@20": 0.1301
+      },
+      "CDs_and_Vinyl": {
+        "HR@5": 0.07,
+        "HR@10": 0.13,
+        "HR@20": 0.235,
+        "NDCG@5": 0.0439,
+        "NDCG@10": 0.0636,
+        "NDCG@20": 0.0901
+      }
+    },
+    "test_score": null,
+    "test_metrics": null,
+    "convergence_trace": [
+      0.22,
+      0.18,
+      0.17,
+      0.14
+    ],
+    "error_message": null,
+    "stdout_tail": "Per-dataset GRU4Rec training on cuda\n  [Movies_and_TV] users=11947  items=17490\n/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/preflight/gru4rec/recharness/smoke/round-0002-slot-0-attempt-1/train.py:117: UserWarning: Creating a tensor from a list of numpy.ndarrays is extremely slow. Please consider converting the list to a single numpy.ndarray with numpy.array() before converting to a tensor. (Triggered internally at ../torch/csrc/utils/tensor_new.cpp:278.)\n  return torch.tensor([seq_arr], dtype=torch.long, device=device)\n  [Movies_and_TV] epoch   5/5  loss=0.6812  val_score: 0.2200  HR@20=0.3400  NDCG@10=0.1401\n  [Movies_and_TV] Best val HR@10=0.2200  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/preflight/gru4rec/recharness/smoke/round-0002-slot-0-attempt-1/working/Movies_and_TV_model.pt\n  [Industrial_and_Scientific] users=23627  items=25764\n  [Industrial_and_Scientific] epoch   5/5  loss=0.6896  val_score: 0.1800  HR@20=0.2900  NDCG@10=0.1061\n  [Industrial_and_Scientific] Best val HR@10=0.1800  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/preflight/gru4rec/recharness/smoke/round-0002-slot-0-attempt-1/working/Industrial_and_Scientific_model.pt\n  [Electronics] users=27601  items=31533\n  [Electronics] epoch   5/5  loss=0.6814  val_score: 0.1700  HR@20=0.3150  NDCG@10=0.0918\n  [Electronics] Best val HR@10=0.1700  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/preflight/gru4rec/recharness/smoke/round-0002-slot-0-attempt-1/working/Electronics_model.pt\n  [CDs_and_Vinyl] users=18481  items=30951\n  [CDs_and_Vinyl] epoch   5/5  loss=0.6880  val_score: 0.1400  HR@20=0.2150  NDCG@10=0.0654\n  [CDs_and_Vinyl] Best val HR@10=0.1400  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/preflight/gru4rec/recharness/smoke/round-0002-slot-0-attempt-1/working/CDs_and_Vinyl_model.pt\npredict.py written -> /home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/preflight/gru4rec/recharness/smoke/round-0002-slot-0-attempt-1/working/predict.py\n\nAll datasets done. Average val HR@10 = 0.1775\n",
+    "stderr_tail": "",
+    "memory_evidence": {
+      "parameter_changes": [
+        {
+          "name": "BATCH_SIZE",
+          "before_expression": "int(os.environ.get('GRU4REC_BATCH', '128'))",
+          "after_expression": "int(os.environ.get('GRU4REC_BATCH', '256'))"
+        },
+        {
+          "name": "DATA_DIR",
+          "before_expression": "os.environ.get('GAGC_DATA_DIR', './input/trainval')",
+          "after_expression": "os.environ['GAGC_DATA_DIR']"
+        },
+        {
+          "name": "DROPOUT_RATE",
+          "before_expression": "float(os.environ.get('GRU4REC_DROPOUT', '0.1'))",
+          "after_expression": "float(os.environ.get('GRU4REC_DROPOUT', '0.2'))"
+        },
+        {
+          "name": "LR",
+          "before_expression": "float(os.environ.get('GRU4REC_LR', '1e-3'))",
+          "after_expression": "float(os.environ.get('GRU4REC_LR', '0.0005'))"
+        },
+        {
+          "name": "WEIGHT_DECAY",
+          "before_expression": "float(os.environ.get('GRU4REC_WD', '0.0'))",
+          "after_expression": "float(os.environ.get('GRU4REC_WD', '0.00001'))"
+        }
+      ],
+      "changed_definitions": [
+        "GRU4RecModel",
+        "GRU4RecModel.__init__",
+        "GRU4RecModel._sequence_states",
+        "GRU4RecModel.encode",
+        "GRU4RecModel.forward",
+        "write_predict_script"
+      ],
+      "summary": "Add residual feed-forward refinement to GRU states and jointly tune dropout, learning rate, weight decay and batch size across all four category models. Keep training and generated inference consistent, with one checkpoint per category.",
+      "proposal_history": [
+        {
+          "attempt": 1,
+          "summary": "Add residual feed-forward refinement to GRU states and jointly tune dropout, learning rate, weight decay and batch size across all four category models. Keep training and generated inference consistent, with one checkpoint per category."
+        }
+      ],
+      "hypothesis": "Across all four datasets, retain existing embeddings and final-real-position readout. Add a residual feed-forward block h'=LayerNorm(h+W2 GELU(W1 h)), with width 2H, after the GRU at every supervised position. Jointly set dropout=0.2, Adam LR=0.0005, weight_decay=0.00001 and batch_size=256. The residual block adds nonlinear compatibility while the lower learning rate and stronger regularization control its added capacity. Preserve history handling, sampling and BPR.",
+      "input_source_sha256": "b7361f620a4a8be0c520992ec8ba68f47b7b5f0e6c8cfdd5c16e129ca41eae20",
+      "candidate_source_sha256": "f9f1d6dbb7859bec1b01aaa2d73bce5758a3eb0199473350a0186f51a5e2f92f",
+      "input_normalized_sha256": "5e85648d7615fc7700ebd89e8ed7e4988ebf536f1b86e96355295eeed9cca2ec",
+      "candidate_normalized_sha256": "c02d17d401fc86be0634189b8fb1a53fc09e2e42b2ea5131c2e4a1f97761e5d0",
+      "patch_sha256": "88a4665089823bee899f4e0c52dae8f909143e1112ae4be6b3bc1b65ed33fc91",
+      "diff_excerpt": "--- \n+++ \n@@ -30,5 +30,5 @@\n ]\n \n-DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")\n+DATA_DIR = os.environ['GAGC_DATA_DIR']\n \n SEED = int(os.environ.get(\"GAGC_SEED\", \"42\"))\n@@ -164,8 +164,8 @@\n HIDDEN_UNITS  = int(os.environ.get(\"GRU4REC_HIDDEN\", \"128\"))\n NUM_LAYERS    = int(os.environ.get(\"GRU4REC_LAYERS\", \"1\"))\n-DROPOUT_RATE  = float(os.environ.get(\"GRU4REC_DROPOUT\", \"0.1\"))\n-LR            = float(os.environ.get(\"GRU4REC_LR\", \"1e-3\"))\n-WEIGHT_DECAY  = float(os.environ.get(\"GRU4REC_WD\", \"0.0\"))\n-BATCH_SIZE    = int(os.environ.get(\"GRU4REC_BATCH\", \"128\"))\n+DROPOUT_RATE  = float(os.environ.get(\"GRU4REC_DROPOUT\", \"0.2\"))\n+LR            = float(os.environ.get(\"GRU4REC_LR\", \"0.0005\"))\n+WEIGHT_DECAY  = float(os.environ.get(\"GRU4REC_WD\", \"0.00001\"))\n+BATCH_SIZE    = int(os.environ.get(\"GRU4REC_BATCH\", \"256\"))\n NUM_BATCHES   = int(os.environ.get(\"GRU4REC_BATCHES\", \"200\"))\n NUM_EPOCHS    = int(os.environ.get(\"GRU4REC_EPOCHS\", \"200\"))\n@@ -185,11 +185,21 @@\n                           batch_first=True, dropout=dropout)\n         self.dropout = nn.Dropout(dropout_rate)\n+        self.state_ffn = nn.Sequential(\n+            nn.Linear(hidden_units, 2 * hidden_units),\n+            nn.GELU(),\n+            nn.Linear(2 * hidden_units, hidden_units),\n+        )\n+        self.state_norm = nn.LayerNorm(hidden_units)\n         with torch.no_grad():\n             nn.init.xavier_uniform_(self.item_emb.weight)\n             self.item_emb.weight[0].zero_()\n \n-    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n+    def _sequence_states(self, seq: torch.Tensor) -> torch.Tensor:\n         emb = self.dropout(self.item_emb(seq))\n         out, _ = self.gru(emb)\n+        return self.state_norm(out + self.state_ffn(out))\n+\n+    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n+        out = self._sequence_states(seq)\n         # Histories are LEFT padded; count-1 indexes padding on short histories.\n         positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n@@ -198,6 +208,5 @@\n \n     def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n-        emb = self.dropout(self.item_emb(seq))\n-        out, _ = self.gru(emb)\n+        out = self._sequence_states(seq)\n         pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n         neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n@@ -336,5 +345,5 @@\n             hidden_units=meta[\"hidden_units\"],\n             num_layers=meta[\"num_layers\"],\n-            dropout_rate=0.0,\n+            dropout_rate=meta[\"dropout_rate\"],\n         ).to(_device)\n         model.load_state_dict(torch.load(ckpt_path, map_location=_device, weights_only=True))\n",
+      "category_rationales": [
+        {
+          "category": "architecture_interaction",
+          "rationale": "Add a jointly trained residual feed-forward block of width 2H after every GRU state: LayerNorm(h + W2 GELU(W1 h)). Apply it consistently to supervised positions and candidate inference across all four datasets. Preserve tied embeddings, final-real-position readout and BPR. The generated predictor imports the updated architecture and restores its parameters from each category's single checkpoint."
+        },
+        {
+          "category": "hyperparameter_tuning",
+          "rationale": "Jointly set dropout to 0.2, Adam learning rate to 0.0005, weight decay to 0.00001 and batch size to 256. Lower learning rate and stronger regularization control the residual block's added capacity, while larger batches stabilize updates. Preserve history length, dimensions, epoch cap and batches per epoch. Enforce the required environment-only data path."
+        }
+      ],
+      "baseline_validation": 0.205,
+      "basin_id": "default",
+      "execution_status": "success",
+      "attempt_count": 1,
+      "training_attempt_count": 1,
+      "training_attempts": [
+        {
+          "id": "round-0002-slot-0-attempt-1",
+          "status": "success",
+          "source_sha256": "f9f1d6dbb7859bec1b01aaa2d73bce5758a3eb0199473350a0186f51a5e2f92f",
+          "allocated_gpu_seconds": 10.277036488056183,
+          "error": "",
+          "score": 0.1825
+        }
+      ],
+      "checkpoint_fingerprints": {
+        "Movies_and_TV_model.pt": "d5deedc7dfdc04b4b51c878a43c2463db1aa17eb1838f7b2395e6d3de5b1278d",
+        "Industrial_and_Scientific_model.pt": "700b17ebf5b39181a19626d63d297b8f37d2048845081b60cdeb178a1d638bab",
+        "Electronics_model.pt": "c9747ff3c6d39af930cf8e3e5ad908f14d797df2d9e551567d07c330bc7a9c35",
+        "CDs_and_Vinyl_model.pt": "320671fa2439f04e05806ac317fffb77044f6123d71c71508352f2be9069bf0e"
+      },
+      "repair_errors": [],
+      "phase": "jump"
+    }
+  },
+  "gpu_seconds_all_attempts": 10.277036488056183,
+  "training_attempts": [
+    {
+      "id": "round-0002-slot-0-attempt-1",
+      "status": "success",
+      "source_sha256": "f9f1d6dbb7859bec1b01aaa2d73bce5758a3eb0199473350a0186f51a5e2f92f",
+      "allocated_gpu_seconds": 10.277036488056183,
+      "error": "",
+      "score": 0.1825
+    }
+  ],
+  "checkpoint_fingerprints": {
+    "Movies_and_TV_model.pt": "d5deedc7dfdc04b4b51c878a43c2463db1aa17eb1838f7b2395e6d3de5b1278d",
+    "Industrial_and_Scientific_model.pt": "700b17ebf5b39181a19626d63d297b8f37d2048845081b60cdeb178a1d638bab",
+    "Electronics_model.pt": "c9747ff3c6d39af930cf8e3e5ad908f14d797df2d9e551567d07c330bc7a9c35",
+    "CDs_and_Vinyl_model.pt": "320671fa2439f04e05806ac317fffb77044f6123d71c71508352f2be9069bf0e"
+  }
+}

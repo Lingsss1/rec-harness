@@ -1,0 +1,134 @@
+{
+  "markdown_report": "**Proposed direction: strengthen competition within one GRU4Rec model using a multi-negative ranking objective.** At 0% research progress, candidate-set cross-entropy is a feasible first experiment; improvements and the best negative count remain unmeasured.\n\n**Insights from the starting point.**\n\n1. Module checks pass across four categories. Generated-predictor parity remains unverified; serialization alone cannot establish routing consistency.\n2. Electronics has weaker sampled training separation than CDs_and_Vinyl: negative-beats-positive rates are 0.0768 versus 0.0058. These motivate discrimination experiments without establishing validation performance.\n3. Latest-item deletion increases sampled target rank by 3.64–6.98 positions, versus 0.48–0.70 for oldest-item deletion. Temporal reliance does not identify current intent or justify stronger recency bias.\n\n**Insights from related work.**\n\n1. Sampled evaluation can change model comparisons [1]; diagnostic margins cannot replace the pinned benchmark.\n2. Uniform training negatives can favor head items [2]. HR@10 gains alone therefore cannot establish stronger personalization.\n3. ExUA motivates historical attribution [3], without supplying compatibility labels. GRU4Rec directly supports comparing cross-entropy and regularized BPR-max [4,5]; neither establishes an optimal Amazon configuration.\n\nThese organize deployment correctness, training competition, and temporal attribution:\n\n| Direction | Observable evidence | Minimal intervention | Unresolved question |\n|---|---|---|---|\n| Correctness | Module checks pass | Check generated predictor | Does routing preserve scores? |\n| Competition | Weak sampled margins | Multi-negative objective | Does validation HR@10 improve? |\n| Temporal reliance | Matched perturbations | Lag-matched attribution tests | Which dependencies generalize? |\n\n**Candidate ideas.** Scores are originality / future potential / code difficulty; higher difficulty means harder implementation.\n\n| Idea | Scores | Positive assessment | Negative assessment |\n|---|---|---|---|\n| Uniform multi-negative objective [1,2,5] | 2 / 6 / 4 | Feasible, controlled competition experiment | Established; false negatives and sampling overhead |\n| Popularity-balanced sampling [2,5] | 3 / 6 / 4 | Tests head/tail discrimination | May sacrifice aggregate accuracy |\n| Lag-matched attribution interventions [3] | 4 / 6 / 6 | Tests explanations within one network | Diagnostic value need not yield gains |\n| Regularized BPR-max [4] | 2 / 7 / 4 | Direct GRU4Rec precedent emphasizes competitive negatives | Adds regularization choice and false-negative sensitivity |\n\n**Selected experiment.** Preserve corrected GRU4Rec and first test cross-entropy with up to 64 unique uniform negatives. Exclude reserved IDs, observed-prefix items and all known training positives for that user; include the target once. Use all eligible negatives when fewer remain; skip empty pools. No held-out labels enter exclusions.\n\n```text\nfeatures = model.log2feats(sequence)\nfor each valid aligned prefix and target:\n    negatives = unique_uniform(eligible_training_items, 64)\n    logits = predict_score(features_at_position, [target] + negatives)\n    loss_for_position = logsumexp(FP32(logits)) - FP32(logits[0])\nbackpropagate(mean_per_sequence(loss_for_position))\n```\n\nThis minimizes candidate-generation-specific loss, without claiming unbiased full-catalog softmax [6,7]. Sequence weighting is a separate change if baseline reduction differs; first retain baseline reduction to isolate the objective. Keep temperature 1, architecture, optimizer and other hyperparameters fixed. Measure GPU time before budget-permitted, predeclared comparisons at 256/1,024 negatives and matched-sampling BPR-max. Preserve seeds 0/42, all routing, diagnostic interfaces, final-nonpadding readout, 200 batches/epoch, maximum 200 epochs and one checkpoint/category. Verify generated-predictor parity. Select solely by unchanged macro validation HR@10; report popularity strata, false-negative limitations and repeated-selection risk within the shared budget.",
+  "idea": {
+    "description": "Test candidate-set cross-entropy with one positive and up to 64 unique uniformly sampled negatives at each valid supervised position of the corrected GRU4Rec baseline. Preserve baseline loss reduction for the primary comparison; evaluate sequence-balanced reduction separately if it differs. Conditional on measured runtime and remaining budget, compare larger negative counts and regularized BPR-max through separate single-model trials, never combining their predictions.",
+    "motivation": "Electronics shows weaker sampled training separation, while perturbation diagnostics demonstrate existing temporal reliance. Increasing simultaneous competition is a focused initial hypothesis that does not assume stronger recency bias is desirable. Direct GRU4Rec literature supports investigating loss and sampling together, but neither that literature nor the supplied diagnostics establishes that 64 negatives, cross-entropy, or increased training separation improves this benchmark.",
+    "implementation_notes": "Use the supplied corrected GRU4Rec architecture and only supplied training interactions. At every supervised position, exclude reserved IDs, observed-prefix items, the target and all known training positives of that user from negative eligibility. Obtain user identity internally from the family-specific sampler; preserve the public loader yield (None, sequence, positive, negative). If identity is unavailable, implement sampler bookkeeping before claiming user-positive exclusion. Full training-history exclusions are permitted training information; they must never enter the prefix features or include held-out interactions. This extends the earlier prefix-only exclusion protocol and must be recorded explicitly. Use the same exclusion policy in controlled objective comparisons.\n\nDraw min(K, eligible_pool_size) distinct negatives uniformly without replacement from real training-catalog IDs, initially K=64. Include the positive exactly once, including repeated targets. Exclude invalid input/target positions. Skip positions with no eligible negatives and report counts and actual candidate-count strata. Unobserved items remain potential false negatives, even after excluding known positives.\n\nCompute candidate-set cross-entropy as logsumexp(logits.float()) minus the positive logit in FP32, with temperature 1 and no auxiliary objective. This objective is expected classification loss under the declared candidate-generation process; it is not an unbiased approximation to full-catalog softmax. Do not add logQ correction implicitly. A separate corrected estimator would require context-specific sampling probabilities, treatment of the always-included positive, and a clearly declared denominator restricted to items with nonzero inclusion probability. A common constant subtracted from every candidate logit cancels and provides no correction.\n\nPreserve the supplied baseline's loss reduction in the primary objective comparison. The earlier proposal averaged valid positions within each sequence, then averaged sequences with supervision; retain that as a separately declared weighting ablation if baseline reduction differs. Do not call a comparison objective-only when weighting or exclusion policy also changes. Record the baseline loss, reduction and negative-generation policy before interpreting differences; no baseline source or runtime is available in this report to verify them.\n\nKeep architecture, optimizer, regularization and other hyperparameters fixed for the primary experiment. Vectorize or buffer candidate generation and chunk scoring to bound memory. Avoid constructing a full catalog mask independently for every position. Verify sampling uniqueness, exclusions and the resulting eligible distribution on a small deterministic training fixture. Use a dedicated training-sampling RNG seeded 42; diagnostic RNG consumption must not alter training draws. Preserve preprocessing seed 0 and training seed 42.\n\nMeasure end-to-end GPU time, peak memory, sampling overhead and valid supervised positions processed. Official GRU4Rec guidance concerning hundreds or thousands of additional negatives describes its optimized implementation and does not establish throughput here. Before launching follow-up trials, record a fixed, budget-feasible comparison order: K=64 cross-entropy, K=256 cross-entropy, K=1024 cross-entropy, then regularized BPR-max at K=256, subject to measured affordability. Do not alter this order to chase validation noise. Each trial independently trains one model per category with seed 42; never reuse other-trial checkpoints. A trial remains incomplete until all four categories are evaluated. Charge training, runtime probes, diagnostics and failures to the shared 43,200 GPU-second budget.\n\nFor the optional BPR-max comparison, use the identical K=256 sampling and reduction protocol. With negative weights w=softmax(r_negative), compute -log(sum_j w_j*sigmoid(r_positive-r_j)) + lambda*sum_j w_j*r_j^2. Use log_softmax, logsigmoid and logsumexp for numerical stability. Predeclare lambda=0.1 as an experimental setting, not an established optimum; retain other baseline regularization and report it. Its comparison introduces both a different objective and its associated score penalty.\n\nRetain Movies_and_TV, Industrial_and_Scientific, Electronics and CDs_and_Vinyl routing; DATA_DIR remains os.environ['GAGC_DATA_DIR']; all artifacts remain beneath the trial directory. Keep single-GPU execution, 200 batches per epoch and at most 200 epochs. Preserve the baseline checkpoint-selection procedure using only allowed validation information; record the selected epoch. Retain exactly one selected checkpoint per category, without averaging, fusion, auxiliary fitted predictors or independent experts.\n\nPreserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), diagnosis_interpreter_prompt(raw_diagnosis), and all ModelView hooks. view.model remains the actual trained nn.Module; log2feats retains B x L alignment, item_emb and predict_score remain compatible. Preserve user_train, meta_data and review_data interfaces without inventing unavailable values. Unavailable category breakdowns remain empty with explanations; undefined metrics return null with reasons. Preserve fresh recurrent state per history and gather the maximum nonzero sequence index for inference, never count minus one. Define empty-history behavior consistently with the corrected baseline.\n\nArchitecture and inference score semantics are unchanged by candidate-set cross-entropy. Nevertheless, verify actual generated working/predict.py against the saved checkpoint and trained module for each routed category, covering empty/single-item histories, padding widths and candidate scores at FP32 rtol=1e-5 and atol=1e-6. If a callable generated predictor is unavailable, explicitly retain the parity limitation rather than declaring success. Any later architecture change must update the embedded predictor writer together with training.\n\nUse the unchanged host macro validation HR@10 as the only selection metric. Retain descriptive head/middle/tail and history-length diagnostics with training-derived frequency definitions, without interpreting them as selection metrics or evidence of personalization. Training margins measure separability, embedding concentration does not measure recommendation diversity, and perturbation sensitivity does not establish current intent. Anonymous prefixes do not support user-bootstrap intervals. Repeated validation selection can overfit; keep the declared search small, report every completed comparison, and make no hidden-test claims. No external data, pretrained weights, hidden files, split changes or evaluator changes are allowed.",
+    "pseudocode": "def position_losses(view, sequence, positive, user_ids, rng, K=64):\n    features = view.log2feats(sequence)  # corrected GRU4Rec, B x L alignment\n    losses = []\n    for b in range(sequence.shape[0]):\n        prefix = set()\n        known_positives = training_positive_ids[user_ids[b]]\n        for t in range(sequence.shape[1]):\n            item = int(sequence[b, t])\n            if item == 0:\n                continue\n            prefix.add(item)\n            target = int(positive[b, t])\n            if target == 0:\n                continue\n            excluded = prefix | known_positives | {target} | reserved_ids\n            negatives = sample_unique_uniform(\n                training_catalog_ids, excluded, max_count=K, rng=rng)\n            if len(negatives) == 0:\n                record_skip('no_eligible_negatives')\n                continue\n            candidates = tensor([target] + negatives, device=features.device)\n            logits = view.predict_score(features[b, t], candidates).float()\n            losses.append((b, t, logsumexp(logits, dim=-1) - logits[0]))\n    return losses\n\nlosses = position_losses(view, sequence, positive, sampler_user_ids, rng_42)\nif losses:\n    loss = supplied_baseline_reduction(losses)\n    optimizer.zero_grad()\n    loss.backward()\n    optimizer.step()\n# Optional separate ablation: mean positions per sequence, then mean sequences.\n# Production implementation vectorizes/buffers sampling and chunks scoring.\n\n# Optional matched-sampling BPR-max trial, K=256, lambda=0.1:\nlog_weights = log_softmax(negative_scores.float(), dim=-1)\nlog_win = logsigmoid(positive_score.float() - negative_scores.float())\nranking_loss = -logsumexp(log_weights + log_win, dim=-1)\npenalty = 0.1 * sum(exp(log_weights) * negative_scores.float().square(), dim=-1)\nbpr_max_loss = ranking_loss + penalty\n\n# Before launching comparisons, measure cost and record budget-feasible order:\n# CE K=64; CE K=256; CE K=1024; BPR-max K=256.\n# Independently train one model/category/trial; never fuse or reuse checkpoints.\n# Preserve baseline optimizer, seeds 0/42, 200 batches/epoch, <=200 epochs.\n# Preserve diagnostic APIs and trial-local artifacts.\n# Inference: gather max index where sequence != 0, with baseline empty handling.\n# Verify actual generated predictor routing and checkpoint score parity.\n# Select only through unchanged host macro validation HR@10; record all trials.",
+    "originality": {
+      "score": 2,
+      "positive": "The experiment connects measured separation limitations to a precise, reproducible GRU4Rec competition protocol with explicit exclusions and controlled reduction.",
+      "negative": "Candidate-set cross-entropy, larger negative pools and BPR-max already have substantial precedent; this is an empirical adaptation rather than a new algorithm."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "A controlled loss-and-sampling comparison can identify useful settings and clarify category and popularity differences within the required recurrent family.",
+      "negative": "The scope is incremental, and gains against uniformly sampled evaluation candidates may reflect popularity effects or benchmark alignment rather than stronger personalization."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "The primary intervention retains architecture, inference scoring and checkpoint format, while stable cross-entropy and BPR-max use standard tensor operations.",
+      "negative": "Efficient unique sampling, user-positive exclusions, exact baseline reduction, budget measurement and actual generated-predictor parity require additional engineering."
+    }
+  },
+  "related_work": [
+    {
+      "title": "[1] On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Analyzes differences between sampled recommendation metrics and full-catalog metrics, including changes in model comparisons.",
+        "Supports keeping training diagnostics distinct from the fixed host validation selection metric."
+      ],
+      "limitations": [
+        "Does not establish that increasing training negatives improves this GRU4Rec benchmark.",
+        "Does not justify changing the pinned evaluator or treating its HR@10 as full-catalog performance."
+      ]
+    },
+    {
+      "title": "[2] Prakash et al. — supplied study on negative sampling and popularity disparities in sequential recommendation",
+      "link": "https://arxiv.org/abs/2410.17276",
+      "contributions": [
+        "The supplied summary reports head/middle/tail disparities across negative sampling strategies.",
+        "Motivates checking popularity effects because uniform training sampling can favor head items."
+      ],
+      "limitations": [
+        "Balance improvements can involve aggregate accuracy costs.",
+        "Does not establish an optimal negative count or validate this objective on the four supplied Amazon categories."
+      ]
+    },
+    {
+      "title": "[3] Explainable Uncertainty Attribution for Sequential Recommendation",
+      "link": "https://www.amazon.science/publications/explainable-uncertainty-attribution-for-sequential-recommendation",
+      "contributions": [
+        "Uses gradient saliency to attribute recommendation uncertainty to historical interactions.",
+        "Motivates temporal attribution as a separate diagnostic research direction."
+      ],
+      "limitations": [
+        "Attribution does not establish causal user intent or supply unavailable compatibility, ownership or mood labels.",
+        "Does not directly support validation gains from the proposed objective."
+      ]
+    },
+    {
+      "title": "[4] Recurrent Neural Networks with Top-k Gains for Session-based Recommendations",
+      "link": "https://hidasi.eu/assets/pdf/gru4rec_v2_cikm18.pdf",
+      "contributions": [
+        "Provides direct GRU4Rec precedent for changing ranking losses and negative sampling.",
+        "Introduces objectives including regularized BPR-max that emphasize competitive negatives through softmax weighting."
+      ],
+      "limitations": [
+        "Reported session-based improvements are not results on this pinned Amazon benchmark.",
+        "Does not establish the best loss, regularization coefficient or negative count for the present task."
+      ]
+    },
+    {
+      "title": "[5] Official GRU4Rec implementation and guidance",
+      "link": "https://github.com/hidasib/GRU4Rec",
+      "contributions": [
+        "Documents cross-entropy, BPR-max, frequency-based sampling, additional negatives and sampling buffers.",
+        "Provides implementation-specific guidance for large negative pools and documents later logQ support."
+      ],
+      "limitations": [
+        "Its optimized throughput does not establish the cost of this harness's prefix-specific unique sampling.",
+        "Its recommended configurations do not establish that 64, 256, 1024 or 2048 negatives are optimal here."
+      ]
+    },
+    {
+      "title": "[6] TensorFlow candidate-sampling reference",
+      "link": "https://www.tensorflow.org/extras/candidate_sampling.pdf",
+      "contributions": [
+        "Describes candidate sampling and expected-count corrections used in sampled objectives.",
+        "Helps distinguish candidate-set classification from approximations targeting a larger softmax denominator."
+      ],
+      "limitations": [
+        "Corrections must match the actual sampling scheme and eligibility constraints.",
+        "Does not make uncorrected candidate-set cross-entropy invalid for its declared objective."
+      ]
+    },
+    {
+      "title": "[7] Adaptive Sampled Softmax with Kernel Based Sampling",
+      "link": "https://proceedings.mlr.press/v80/blanc18a/blanc18a.pdf",
+      "contributions": [
+        "Analyzes sampled-softmax gradient bias and the role of the sampling distribution.",
+        "Supports avoiding claims that a finite sampled loss automatically gives unbiased full-softmax optimization."
+      ],
+      "limitations": [
+        "Does not directly evaluate this uniform-without-replacement, context-excluded GRU4Rec objective.",
+        "Does not establish that adding a correction would improve the pinned validation metric."
+      ]
+    },
+    {
+      "title": "Revisiting Negative Sampling — supplied reference",
+      "link": "https://doi.org/10.1145/3522672",
+      "contributions": [
+        "The supplied summary highlights false negatives among unobserved items and the dependence of their effects on sampling and weighting.",
+        "Motivates excluding known training positives and treating high-scoring unobserved items as uncertain competitors."
+      ],
+      "limitations": [
+        "Training-positive exclusion cannot identify all relevant unobserved items.",
+        "Does not establish an optimal negative count for these datasets."
+      ]
+    },
+    {
+      "title": "Khrylchenko et al. — supplied reference on sampled negatives and the always-present positive",
+      "link": "https://arxiv.org/abs/2507.09331",
+      "contributions": [
+        "The supplied summary emphasizes different inclusion mechanisms for sampled negatives and the deterministically included positive.",
+        "Motivates explicit sampling probabilities when designing denominator corrections."
+      ],
+      "limitations": [
+        "An unbiased partition-function estimator does not imply an unbiased log loss or gradient.",
+        "Context-excluded items have zero inclusion probability and cannot be recovered by reweighting the remaining samples."
+      ]
+    }
+  ]
+}

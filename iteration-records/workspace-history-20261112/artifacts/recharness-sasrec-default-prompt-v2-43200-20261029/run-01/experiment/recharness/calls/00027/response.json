@@ -1,0 +1,15 @@
+{
+  "category_edits": [
+    {
+      "category": "interest_aggregation",
+      "rationale": "For all four datasets, replace the existing blended readout with a masked mean of the three most recent causal encoder states, weighted 1, 2, 4 from oldest to newest and renormalized for shorter histories. Supplied histories have contiguous nonpadding items. Training and prediction share log2feats; the embedded predictor imports this same SASRec class, preserving checkpoint compatibility and one model per category.",
+      "edits": [
+        {
+          "find": "        states = self.last_layernorm(seq_emb)\n        positions = torch.arange(M, device=seq.device)\n        lag = positions[:, None] - positions[None, :]\n        recency = torch.exp2(-lag.clamp_min(0).to(states.dtype) / 4.0)\n        recency = recency * (lag >= 0).to(states.dtype)\n        weights = recency.unsqueeze(0) * (~timeline_mask).unsqueeze(1).to(states.dtype)\n        weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-8)\n        recent_mean = torch.bmm(weights, states)\n        return 0.8 * states + 0.2 * recent_mean",
+          "replace": "        states = self.last_layernorm(seq_emb)\n        valid = (~timeline_mask).unsqueeze(-1).to(states.dtype)\n        weighted_sum = torch.zeros_like(states)\n        weight_sum = torch.zeros_like(valid)\n        for offset, weight in enumerate((4.0, 2.0, 1.0)):\n            if offset >= M:\n                break\n            source_states = states[:, :M - offset, :]\n            source_valid = valid[:, :M - offset, :]\n            shifted_states = torch.nn.functional.pad(\n                source_states * source_valid, (0, 0, offset, 0)\n            )\n            shifted_valid = torch.nn.functional.pad(\n                source_valid, (0, 0, offset, 0)\n            )\n            weighted_sum = weighted_sum + weight * shifted_states\n            weight_sum = weight_sum + weight * shifted_valid\n        return (weighted_sum / weight_sum.clamp_min(1.0)) * valid"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Replace interest aggregation with causal three-state recency pooling in the shared training and inference model. Preserve embeddings, Transformer backbone, scoring, loss, optimizer, routing, seeds, and epoch cap."
+}

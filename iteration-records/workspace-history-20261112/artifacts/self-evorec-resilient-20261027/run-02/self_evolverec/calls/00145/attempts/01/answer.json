@@ -1,0 +1,186 @@
+{
+  "markdown_report": "The strongest first step is a controlled temporal diagnostic adapter: characterize SASRec’s sensitivity before changing its architecture. Progress is 0%; qualitative feedback supplies hypotheses, not measured ranking improvements.\n\n**Insights from the starting point.** (1) Training margins measure sampled separation, not next-choice relevance or catalog quality. (2) Feedback favors recent, specific, repeated evidence; stronger recency is not automatically beneficial. (3) Missing prerequisites, satisfied demand, and uncertain matches remain unknown rather than negative labels.\n\n**Insights from related work.** (1) SASRec’s absolute positions and final-position scoring confound deletion effects with positional shifts and query changes [6]. Recency and order therefore need separate controls [1–2]. (2) Sampled and catalog evaluation can disagree [3]. (3) Demand timing discourages blanket duplicate penalties [4]; evidence grounding requires explicit support [5].\n\n**Directions and framework.** Organize research around temporal sensitivity, ranking measurement, and evidence reliability.\n\n| Question | Observable | Limitation |\n|---|---|---|\n| Recent versus older reliance | Matched removal effects | Deletion changes context and positions |\n| Order reliance | Final-item-preserving local shuffles | Causal context still changes |\n| Specific support | Repeats or title similarity | Similarity is not compatibility |\n| Ranking quality | Fixed-candidate and catalog ranks | Settings differ; training targets are in-sample |\n\n**Candidate ideas.** Scores are originality/potential/difficulty, each out of 10; higher difficulty means harder implementation.\n\n1. **Controlled temporal probes — 4/7/5.** Originality: useful integration, established components. Potential: guides ablations, cannot identify intent. Difficulty: scoring hooks suffice for repacking, but position-preserving masking needs encoder support [1–3,6].\n2. **Learned recent-history residual — 3/7/4.** Originality: practical, familiar mixture. Potential: may recover recent interests, may amplify recency shortcuts. Difficulty: compact gate, but predictor serialization must match training [1–2].\n3. **Evidence-status ledger — 5/6/6.** Originality: useful adaptation of grounding. Potential: improves accountability, unproven ranking benefit. Difficulty: accessible text, demanding reliable extraction [5].\n\n**Selected algorithm.** Build deterministic chronological prefix targets exclusively from training histories; label them in-sample diagnostics. Compare identical candidates under original sequences, equal-count recent/older/random removals, separate last-item removal, and local shuffles preserving the last item and occupied positions. Match removal-frequency distributions where feasible; report unmatched cases. Compare repacking against explicit position-preserving masking only when supported; otherwise report that control unavailable.\n\nFreeze original seen-item exclusions. Report paired target-rank and target-versus-negative margin changes, top-10 overlap, history-length/popularity slices, counts, and category-stratified user-bootstrap intervals. Sensitivity is not preference causality or generalization [7].\n\nRetain all adapter signatures, existing embedding/margin probes, metrics and definitions; use null with reasons for missing measurements. Isolate RNGs and restore model flags in `finally` [10]. Produce exact chunked catalog top-k for twenty training users, five/category, with deterministic ties. Preserve four routes, seeds, splits, `GAGC_DATA_DIR`, and pinned macro validation HR@10 selection. Log and cap trials: bootstrap intervals do not correct adaptive validation reuse [8–9]. Confirm one predeclared training ablation through unchanged validation; final generalization remains the host’s held-out evaluation. No predictor change is required for diagnostics alone.",
+  "idea": {
+    "description": "Extend the compatibility-preserving diagnostic adapter with controlled, paired temporal interventions. Separate deletion/repacking sensitivity, last-query dependence, order sensitivity, and—when the encoder supports explicit masks and position IDs—position-preserving evidence removal.",
+    "motivation": "Existing embedding and training-margin probes cannot establish whether SASRec uses recent, repeated, specific evidence effectively. At 0% research progress, diagnostics are a feasible first step, but they must acknowledge positional confounding, in-sample targets, unrealistic perturbations, and the absence of observed current intent. A recent-history residual remains a subsequent training hypothesis rather than an assumed improvement.",
+    "implementation_notes": "Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). Use view.model as the actual module. Retain embedding alignment and sampled-margin probes, explicitly documenting their limited interpretation and reporting valid counts; unavailable category metadata must produce an unavailable status rather than invented category breakdowns. Return metrics and metric_definitions, with null values and missing-data reasons instead of zero-valued empty summaries.\n\nSpecify a deterministic diagnostic configuration: seed 42; at most 50 eligible users per category selected using a dedicated generator; one latest eligible training-prefix target per user; at least eight nonpadding prefix items after truncation to the model's sequence limit. Use r=min(3,floor((n-1)/3)) removals. The recent pool contains the newest 2r positions before the final item; the older pool contains the earliest 2r positions; the random pool contains all nonfinal positions. Derive item-frequency tertiles from category training counts, with item ID breaking frequency ties. Enumerate recent/older r-position subsets and select a pair minimizing L1 distance between their tertile-count vectors, breaking ties lexicographically. Select a random r-subset with the same vector when feasible using the dedicated generator; otherwise minimize the same discrepancy and record it. Report realized positions, removed-frequency distributions, and matching discrepancies. Handle last-item removal separately and do not interpret it as an equal-count temporal comparison.\n\nFor each case, cache the target plus up to 99 unique negatives sampled without replacement from its category, excluding padding, the target, and the user's complete original training history. If fewer negatives exist, use all eligible items and report the candidate count. These auxiliary candidates are separate from the host's evaluator: matching seed 42 does not reproduce its sampling implementation. Freeze candidate IDs and original seen-item exclusions across all perturbations, including catalog comparisons. Establish a baseline eligible catalog by excluding all original training-history items except the diagnostic target; targets also appearing in the prefix must be flagged and reported separately.\n\nOrdinary removals compact survivors and restore baseline right-aligned padding. For the position-preserving control, retain original position IDs, mask removed positions as attention keys/values at every encoder layer, and suppress their query outputs. Keep the final item intact. Zeroing an embedding alone is insufficient. Implement this through an optional architecture-specific diagnostic hook; the baseline log2feats(sequence) contract alone does not guarantee support. If unsupported, return an explicit missing-control reason and restrict interpretation. This control still changes attention context and does not isolate user-preference causality.\n\nFor local shuffling, permute the last min(5,n-1) nonfinal items within their original occupied positions while retaining the final item and item multiset. Use a deterministic nonidentity permutation. Check item-availability constraints only when usable public timestamps exist; otherwise label plausibility unverified. Repeated-interest slices may use exact repeats or an explicitly specified title/description similarity proxy; do not infer ownership, fulfilled demand, compatibility, dislike, or simulator traits.\n\nScore the final valid representation through compatibility hooks. Define rank as one plus the number of candidates preceding the target under score descending/item ID ascending. Define margin as target score minus mean fixed-negative score; rank and margin deltas are intervention minus baseline. Define top-10 overlap as intersection size divided by min(10,candidate_count). Report paired per-user results, per-category means, equal-weight macro means, history-length slices of 8–15, 16–31, and at least 32 items, training-frequency tertiles, and slice counts. Use 1,000 paired bootstrap replicates, resampling users within each category and averaging category differences equally; report percentile 95% intervals. These intervals condition on fitted models and fixed candidates and do not cover training variability, candidate variability, or adaptive selection.\n\nSave every module's training flag, use eval() with torch.inference_mode(), and restore flags in finally. Use dedicated NumPy and PyTorch generators; protect any unavoidable global PyTorch RNG consumption with torch.random.fork_rng, including the active CUDA device. Do not consume a stateful training loader without preserving its sampler state; use a separate deterministic diagnostic loader for the existing margin probe. Gradient probes, if later added, need a separate gradient-enabled context.\n\nFor the required twenty training users, retain any externally specified user identities; otherwise choose five/category deterministically and log them. Encode each history once, score the entire category catalog in chunks, exclude padding and all seen items, and merge exact running top-k results. Use score descending/item ID ascending consistently at chunk pruning and merging; return fewer than k items if necessary. Also compare sampled and catalog target ranks on the diagnostic cases, labeling these settings separately and treating model-order agreement as unavailable until multiple fitted models exist.\n\nLog configurations, user IDs, prefix cutoffs, perturbation indices, candidate IDs, matching discrepancies, measured runtime, and all trial outcomes beneath the trial directory. Keep DATA_DIR=os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, four dataset routes, single-GPU execution, and SASREC_EPOCHS default 200. Charge all diagnostics and training to the shared 43,200 GPU-second budget. Predeclare one subsequent ablation, such as a scalar-gated recent-history residual, before inspecting its validation result. Architecture changes must update the predictor writer. Selection remains the host's unchanged 200-user/category, 99-negative, evaluation-seed-42 macro validation HR@10. Do not claim generalization from training-prefix perturbations or correct adaptive validation bias using ordinary bootstrap intervals.",
+    "pseudocode": "run_full_diagnosis(train_loader):\n    save all module training flags\n    initialize independent diagnostic RNGs and fixed configuration\n    try:\n        view.model.eval()\n        with protected RNG state and inference_mode():\n            measure existing embedding and margin probes using isolated loader state\n            build deterministic eligible training-prefix cases in each category\n            cache candidates and original seen-item exclusions\n            for case:\n                construct frequency-matched recent, older, and random removals\n                construct separate last-item removal\n                construct local shuffle preserving final item and occupied positions\n                score baseline and repacked interventions\n                if explicit position/mask hook is supported:\n                    score position-preserving removals\n                else:\n                    record unavailable-control reason\n                record ranks, margins, overlaps, slices, and matching discrepancies\n                score baseline and interventions against fixed eligible catalog in chunks\n            aggregate paired observations per user and category\n            compute equal-weight macro summaries and paired user-bootstrap intervals\n            generate exact unseen-catalog recommendations for five users/category\n            return {metrics, metric_definitions}\n    finally:\n        restore each module's saved training flag\n\ndiagnosis_interpreter_prompt(raw_diagnosis):\n    include measured metrics, definitions, counts, configuration, and missing controls\n    request evidence-linked findings with in-sample and perturbation caveats\n    distinguish score sensitivity, ranking quality, and unobserved preference intent\n    forbid unsupported compatibility, ownership, dislike, or simulator-trait claims\n    return prompt",
+    "originality": {
+      "score": 4,
+      "positive": "Combines matched removals, query-preserving order probes, optional position controls, explicit missingness, and paired category reporting within the required adapter.",
+      "negative": "The components are established diagnostic techniques; their combination is a task-specific engineering contribution rather than a new learning principle."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Can guide a small, reproducible sequence-model ablation and support comparisons across future architectures.",
+      "negative": "In-sample sensitivity can reflect memorization or positional shortcuts and does not guarantee validation gains, user relevance, or generalization."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "Basic ranking probes reuse existing hooks and require no additional trained model.",
+      "negative": "Valid position-preserving masking, frequency matching, RNG and mode restoration, exact catalog ranking, and reproducible paired aggregation exceed the earlier difficulty estimate."
+    }
+  },
+  "related_work": [
+    {
+      "title": "[1] Measuring Recency Bias (2024)",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "The supplied research summary reports that excessive emphasis on recent interactions can hurt recommendation accuracy."
+      ],
+      "limitations": [
+        "Does not establish the appropriate recency strength for these four datasets."
+      ]
+    },
+    {
+      "title": "[2] CETRec (2025)",
+      "link": "https://arxiv.org/abs/2507.03047",
+      "contributions": [
+        "The supplied summary distinguishes absolute-order recency effects from relative-order transition effects."
+      ],
+      "limitations": [
+        "Its LLM recommendation setting does not directly validate a SASRec intervention."
+      ]
+    },
+    {
+      "title": "[3] Dallmann et al.: sampled recommendation evaluation",
+      "link": "https://arxiv.org/abs/2107.13045",
+      "contributions": [
+        "Shows that sampled and full-catalog evaluation can produce different model rankings."
+      ],
+      "limitations": [
+        "Does not justify changing the pinned RecHarness selection protocol."
+      ]
+    },
+    {
+      "title": "[4] Scalable Demand-Aware Recommendation",
+      "link": "https://arxiv.org/abs/1702.06347",
+      "contributions": [
+        "Models demand timing and distinguishes durable from nondurable purchasing patterns."
+      ],
+      "limitations": [
+        "Observed histories do not establish ownership or whether a need remains satisfied."
+      ]
+    },
+    {
+      "title": "[5] CLUE",
+      "link": "https://aclanthology.org/2026.acl-long.2110/",
+      "contributions": [
+        "The supplied summary describes grounding uncertainty explanations in agreeing or conflicting text spans."
+      ],
+      "limitations": [
+        "Recommendation evidence grounding is a proposed adaptation rather than a validated finding here."
+      ]
+    },
+    {
+      "title": "[6] Original SASRec implementation",
+      "link": "https://github.com/kang205/SASRec/blob/master/model.py",
+      "contributions": [
+        "Provides the architectural basis for absolute-position and final-query confounds in sequence perturbations."
+      ],
+      "limitations": [
+        "The actual trained RecHarness implementation must be checked before assuming identical masking or positional behavior."
+      ]
+    },
+    {
+      "title": "[7] Chronological recommendation evaluation study (Gusak et al., 2025)",
+      "link": "https://arxiv.org/abs/2507.16289",
+      "contributions": [
+        "The supplied summary highlights that per-user chronology need not guarantee global temporal separation and that split choices can change model rankings."
+      ],
+      "limitations": [
+        "Does not authorize modifying the benchmark's fixed splits."
+      ]
+    },
+    {
+      "title": "[8] Dwork et al.: adaptive data analysis and reusable holdouts (2015)",
+      "link": "https://papers.neurips.cc/paper_files/paper/2015/hash/bad5f33780c42f2588878a9d07405083-Abstract.html",
+      "contributions": [
+        "Explains why adaptive reuse of validation information can undermine ordinary generalization estimates."
+      ],
+      "limitations": [
+        "Logging and limiting trials do not provide reusable-holdout guarantees."
+      ]
+    },
+    {
+      "title": "[9] Koehn: Statistical Significance Tests for Machine Translation Evaluation (2004)",
+      "link": "https://aclanthology.org/W04-3250/",
+      "contributions": [
+        "Provides a paired-bootstrap foundation that can be adapted to paired user-level recommendation outcomes."
+      ],
+      "limitations": [
+        "The category-stratified recommendation application is an adaptation; its intervals do not correct adaptive model selection."
+      ]
+    },
+    {
+      "title": "[10] PyTorch inference-mode documentation",
+      "link": "https://docs.pytorch.org/docs/stable/generated/torch.autograd_mode.inference_mode.html",
+      "contributions": [
+        "Documents inference-mode behavior and its distinction from evaluation mode."
+      ],
+      "limitations": [
+        "Inference mode does not disable dropout or restore model flags and RNG state automatically."
+      ]
+    },
+    {
+      "title": "PyTorch RNG isolation",
+      "link": "https://docs.pytorch.org/docs/main/random.html",
+      "contributions": [
+        "Documents fork_rng for restoring CPU and specified device RNG states."
+      ],
+      "limitations": [
+        "Independent NumPy generators, loader sampling, and other randomness require separate handling."
+      ]
+    },
+    {
+      "title": "CETD",
+      "link": "https://www.mdpi.com/2076-3417/13/20/11176",
+      "contributions": [
+        "The supplied summary motivates preserving plausible temporal dependencies in counterfactual explanations."
+      ],
+      "limitations": [
+        "Plausibility controls do not turn fitted-model perturbations into causal evidence about preferences."
+      ]
+    },
+    {
+      "title": "Revisiting SASRec",
+      "link": "https://arxiv.org/html/2504.09596v1",
+      "contributions": [
+        "Raises padding and positional-alignment concerns relevant to perturbation design."
+      ],
+      "limitations": [
+        "Its proposed corrections are hypotheses rather than demonstrated explanations for this task."
+      ]
+    },
+    {
+      "title": "NumPy Generator.choice documentation",
+      "link": "https://numpy.org/doc/1.25/reference/random/generated/numpy.random.Generator.choice.html",
+      "contributions": [
+        "Supports dedicated-generator sampling without replacement for unique diagnostic negatives."
+      ],
+      "limitations": [
+        "An identical seed alone does not reproduce another evaluator's sampling order or implementation."
+      ]
+    },
+    {
+      "title": "PyTorch sorting documentation",
+      "link": "https://docs.pytorch.org/docs/stable/generated/torch.sort.html",
+      "contributions": [
+        "Stable sorting can preserve a predetermined item-ID secondary ordering for exact chunked top-k."
+      ],
+      "limitations": [
+        "Tie ordering must be applied consistently during both chunk pruning and merging."
+      ]
+    },
+    {
+      "title": "PyTorch topk documentation",
+      "link": "https://docs.pytorch.org/docs/stable/generated/torch.topk.html",
+      "contributions": [
+        "Documents that tied top-k indices are not guaranteed to be stable."
+      ],
+      "limitations": [
+        "Unqualified topk calls do not implement the proposed deterministic secondary tie rule."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,157 @@
+{
+  "request_sha256": "7b32becadc662c4d802cac09fd359c757c58494c17b6a56c79f3033ceb53987b",
+  "response": {
+    "markdown_report": "At 0% progress, prioritize **recency-gated GRU4Rec trained with regularized multi-negative BPR-max**. This remains an untested hypothesis. First isolate the loss change; retain the learned gate only if it improves four-category macro validation HR@10 within the shared budget.\n\n**Insights from the starting point.** (1) Users reject revived interests and recommendations weakly connected to current activity. A latest-item branch could strengthen immediate context, but recent purchases can also be incidental. (2) Electronics shows 9.7% negative-over-positive comparisons and a 0.0265 lower-decile margin. These identify sampled ranking confusion, not validation improvement. (3) Reported embedding scores imply near-zero mean cosine similarity. This statistic alone cannot establish whether representations collapse; opposing directions can conceal low dimensionality.\n\n**Insights from related work.** (1) [GRU4Rec](https://hidasi.eu/assets/pdf/gru4rec_v2_cikm18.pdf) motivates BPR-max with multiple negatives; one negative removes its hardness-weighting mechanism. (2) [TIEN](https://www.sciencedirect.com/science/article/abs/pii/S095741742301905X) motivates adaptive interest updates, while [NARM](https://arxiv.org/abs/1711.04725) and an [existing session-representation patent](https://patents.google.com/patent/US20210366025A1/en) establish related recurrent/context combinations. They do not establish novelty or effectiveness of this exact gate. (3) [Ask the GRU](https://arxiv.org/html/1609.02116) motivates jointly learned text features. Titles may improve identifiable connections, but shared words can reproduce broad-relevance errors.\n\n**Framework and candidate ideas.** Organize interventions into ranking supervision, current-intent representation, and item grounding. O/P/U/M/D denote originality, potential, user alignment, model alignment, and implementation difficulty; higher D means harder. These are judgments, not measured results. Each cell gives a score and positive/negative assessment.\n\n| Idea | O | P | U | M | D |\n|---|---|---|---|---|---|\n| BPR-max alone | 2: established / little novelty | 7: reusable objective / benchmark-dependent | 5: discriminates alternatives / no explicit intent mechanism | 8: targets confusion / margins can mislead | 3: local loss change / multi-negative masking required |\n| Recency gate + BPR-max **(selected)** | 3: diagnostic-driven combination / close precedents | 7: compact intent experiment / shortcut risk | 8: targets stale and weakly connected recommendations / cannot verify compatibility | 8: targets confusing negatives / no proven HR gain | 5: small modules / sampling, ablations and predictor consistency add work |\n| Joint title encoder | 4: eligible adaptation / established text learning | 7: shares sparse-item evidence / limited text supervision | 7: identifiable connections / lexical shortcuts | 6: richer features / indirect separation benefit | 6: pooled embeddings feasible / vocabulary and serialization overhead |\n\n**Selected algorithm.** Keep the corrected GRU backbone and combine each recurrent state with a projected current-item embedding through one learned vector gate. Both branches belong to one jointly trained network. This explicitly targets revived older interests and weak connections to recent activity; multi-negative BPR-max targets measured ranking confusion. It does not establish compatibility, quantities, mood, or redundancy avoidance.\n\n```text\nh_t = masked_GRU(e_t, h_previous)\ng_t = sigmoid(W [h_t; e_t] + b)\nf_t = g_t * h_t + (1-g_t) * P(e_t)\nr = dot(f_t, candidate_embedding)\nw = softmax(negative_scores)\nloss = -log(sum(w * sigmoid(positive_score-negative_scores)))\n       + lambda * sum(w * negative_scores²)\n```\n\nStart with K=32 independent uniform negative draws per valid position and lambda=0.001, explicitly experimental settings. Exclude padding, the current positive and observed training-history positives; retain duplicate negative draws. This filtering deliberately differs from official GRU4Rec sampling. Backpropagate through weights in both loss terms; compute the ranking term with logsumexp. Negative-score regularization is separate from optimizer weight decay.\n\nCompare corrected baseline, BPR-max alone, and gated BPR-max sequentially; keep other baseline settings fixed. Initialize gate weights to zero and bias to 2, favoring recurrence. Gate saturation and branch contribution norms expose shortcuts. If budget permits, retrain an ungated residual or fixed-gate GRU variant. Probe the selected network with shorter histories and earlier-history permutations preserving the final item; separately permute all items. Branch interventions are dependency probes, not independently fitted predictors or proof of causal improvement.\n\nSelect exclusively by pinned macro validation HR@10; report category deltas and paired hit changes when exposed by the host. Positive ranks and the margin against the tenth-highest negative better track the top-ten boundary than mean training margins. Paired bootstrap intervals, if available, are conditional on fitted models and candidates and exclude adaptive-search uncertainty. Inspect centered/uncentered embedding and final-state spectra before claiming collapse; [RankMe](https://arxiv.org/abs/2210.02885) supplies one effective-rank definition. No improvement is assumed.\n\nPreserve all four categories, routing, DATA_DIR, preprocessing seed 0, training seed 42, maximum 200 epochs, 200 batches/epoch, single-GPU execution, supplied splits and evaluator. Save one selected checkpoint/category beneath the trial directory; perform no averaging or score fusion. Mask padding updates, read the final nonpadding position, preserve diagnostic interfaces, and embed the identical architecture in the predictor writer. Report unavailable metadata breakdowns explicitly.",
+    "idea": {
+      "description": "One GRU4Rec network per category with a conservative learned vector gate combining recurrent state and projected current-item embedding, trained using regularized BPR-max with multiple negatives. Evaluate the loss-only change before accepting the gate.",
+      "motivation": "The gate tests two observed user-facing failures: reviving older interests and recommending items weakly connected to recent activity. Multi-negative BPR-max targets the measured positive-negative confusion, strongest in Electronics. Neither mechanism guarantees improved HR@10, compatibility, appropriate quantities, or avoidance of redundant functions. Near-zero mean embedding cosine does not rule out low-dimensional collapse.",
+      "implementation_notes": "Extend the supplied corrected baseline; preserve its GRU backbone, optimizer, dimensions, dropout, batch size, validation cadence and other settings unless explicitly changed here. Keep DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, maximum 200 epochs and exactly 200 batches per epoch. Retain all four categories, supplied splits, host evaluator and routing. Execute training on one GPU and write artifacts beneath the trial directory. Each category's deployed predictor loads exactly one independently trained checkpoint; no fusion, averaging, additional fitted scorer or pretrained weights.\n\nIntroduce recent_projection: Linear(D,D,bias=False) and gate_linear: Linear(2D,D,bias=True), adapting dimensions to the baseline if input and hidden widths differ. Initialize recent_projection to identity when square, gate weights to zero and gate bias to 2, initially giving recurrence approximately 88% weight. Keep baseline item embeddings and score conventions unchanged. Both branches train jointly from the same recommendation objective. Apply padding masks to recurrent updates and returned features. For left-padded histories, obtain the final nonpadding index using the maximum valid position, never count-1; preserve the supplied empty-history policy.\n\nUse K=32 independent uniform draws per valid training position, sampled with replacement after excluding padding, the current target and all observed training-history positives for that user. Preserve multiplicity among eligible draws. If a user has fewer than one eligible item, omit that position from the loss and report the count. Implement rejection sampling or an equivalent sampler without materializing a dense user-by-catalog mask. This is a declared departure from official minibatch-plus-popularity sampling and its accidental-positive treatment. Never use held-out interactions for filtering. K=32 and lambda_score=0.001 are starting experimental settings, not literature-validated optima. With K=1 the loss becomes pairwise BPR plus negative-score regularization and has no hardness-weighting effect.\n\nCompute log_weights = log_softmax(negative_scores); ranking = -logsumexp(log_weights + logsigmoid(positive_score-negative_scores)). Add lambda_score times the softmax-weighted squared negative scores. Keep gradients through log_weights in both terms. Average over valid positions. This reduction and filtering are explicit adaptations rather than a claim to reproduce official training exactly. Score regularization is separate from existing optimizer weight decay; do not silently add ELU, logQ correction or cosine normalization.\n\nPreserve item_emb, log2feats(sequence) returning B x L x D, and predict_score(features, items) with the host's existing broadcasting behavior. Use a private helper for multi-negative training scores if needed rather than breaking this interface. Update the embedded predictor writer with identical class definitions, parameter names, configuration and scoring behavior. Save architecture configuration with each checkpoint and verify save/load score agreement on fixed synthetic padded sequences.\n\nKeep DiagnosisProbe(view, device), run_full_diagnosis(train_loader) returning metrics and metric_definitions, and diagnosis_interpreter_prompt(raw_diagnosis). The loader continues yielding (None, sequence, positive, negative), each tensor B x L; K-negative sampling stays inside training and does not change that contract. Compute diagnostic margins through the actual model scorer. Do not interpret single-negative diagnostic margins as the training objective or as HR@10. Do not fabricate category, price, review, rating or user-trait information. Existing category breakdowns should explicitly report unavailable metadata rather than infer categories from titles.\n\nCompare baseline, loss-only and gated-loss configurations within the shared 43,200 GPU-second budget, including failures and diagnostics. These are sequential alternative trials, never fused predictors. Prioritize this three-way comparison over expanding a hyperparameter grid. Optional fixed-gate and residual ablations retain the GRU family and require separate budget accounting. Do not train an independent last-item-only model; inspect latest-item dependence through interventions on the trained GRU network. Track gate saturation and the norms of g*h and (1-g)*P(e), since gate values alone do not establish branch reliance. Shorten histories to 1, 2, 5, 10 and full length, permute earlier items while keeping the last item fixed, and separately permute all valid items. These interventions cannot alone establish that the mechanism resolves user intent or redundancy.\n\nSelect exclusively by host-reported macro validation HR@10 over all four categories. If the host exposes pinned per-user results, retain paired hits, category deltas and discordant counts; optionally compute a stratified paired bootstrap interval without changing candidates or the evaluator. Such intervals omit training-seed variation, candidate resampling and adaptive-selection bias. Do not claim these diagnostics are available if the host returns only aggregate scores. Where exposed, positive ranks and margins against the tenth-highest negative diagnose the top-ten boundary, subject to evaluator ties. Embedding/state spectra and effective rank are optional diagnostics, not selection objectives; distinguish singular-value entropy rank from covariance entropy rank and flag zero energy. No gains, validation outcomes or causal conclusions are presumed.",
+      "pseudocode": "class GatedGRU4Rec(CorrectedBaseline):\n    # Keep the baseline GRU, item embeddings and scorer.\n    # recent_projection: Linear(input_dim, hidden_dim, bias=False)\n    # gate_linear: Linear(hidden_dim + input_dim, hidden_dim)\n    # gate weights = 0; gate bias = 2; projection = identity if square.\n    def log2feats(sequence):\n        valid = sequence != 0\n        e = item_emb(sequence)\n        h = baseline_masked_gru(e, valid)\n        gate = sigmoid(gate_linear(concat(h, e, dim=-1)))\n        features = gate * h + (1 - gate) * recent_projection(e)\n        return features * valid.unsqueeze(-1)\n\n    def predict_score(features, items):\n        return baseline_compatible_dot_product(features, item_emb(items))\n\nfor configuration in [baseline, bpr_max_only, gated_bpr_max]:\n    # Run configurations only while budget remains; never combine their scores.\n    for category in four_categories:\n        initialize_one_GRU_model(seed=42)\n        for epoch in range(min(configured_epochs, 200)):\n            for batch in range(200):\n                sequence, positive, user_ids = baseline_sample_batch()\n                valid = (sequence != 0) & (positive != 0)\n                if configuration == baseline:\n                    optimize_unchanged_baseline_objective()\n                    continue\n                negatives, eligible = sample_K_uniform_with_replacement(\n                    K=32, user_ids=user_ids, positive=positive,\n                    exclude_padding=True,\n                    exclude_observed_training_history=True)\n                valid = valid & eligible\n                if not any(valid):\n                    continue\n                features = model.log2feats(sequence)[valid]\n                positive_scores = score_positive(features, positive[valid])\n                negative_scores = score_K_items(features, negatives[valid])\n                log_weights = log_softmax(negative_scores, dim=-1)\n                log_prob = logsigmoid(positive_scores[:, None] - negative_scores)\n                ranking = -logsumexp(log_weights + log_prob, dim=-1)\n                score_penalty = 0.001 * sum(\n                    exp(log_weights) * negative_scores.square(), dim=-1)\n                optimize(mean(ranking + score_penalty))\n                # No detach on weights; preserve baseline optimizer settings.\n            validate_at_baseline_cadence_with_unchanged_host_protocol()\n        save_one_selected_checkpoint_and_matching_predictor_for_category()\n    compare_configuration_using_four_category_macro_validation_HR10()\n\n# Left-padded inference; preserve baseline behavior for empty histories.\npositions = arange(sequence_length, device=sequence.device)\nlast = where(sequence != 0, positions, -1).amax(dim=-1)\nnonempty = last >= 0\nfeatures = model.log2feats(sequence)[nonempty_indices, last[nonempty]]\n# Score with this category's one selected checkpoint.\n# Verify checkpoint reload and embedded predictor produce matching scores.\n\n# Diagnostic loader contract remains unchanged:\n# (None, sequence, positive, negative), each tensor B x L.\n# Branch suppression and history permutations probe this same fitted model.\n# Select only by actual host validation results; never fabricate outcomes.",
+      "originality": {
+        "score": 3,
+        "positive": "The specific gate and multi-negative objective form a compact, diagnosis-driven adaptation within the required GRU4Rec family.",
+        "negative": "Recurrent/context combinations, latest-item shortcuts, gates and BPR-max have substantial precedent; the exact combination does not justify a strong novelty claim."
+      },
+      "future_potential": {
+        "score": 7,
+        "positive": "A controlled comparison can clarify when immediate context improves a recurrent recommender and provide a small foundation for studying changing intent.",
+        "negative": "Benefits may reduce to latest-item shortcut learning or benchmark-specific negative discrimination, without resolving compatibility, ownership redundancy or user choice."
+      },
+      "code_difficulty": {
+        "score": 5,
+        "positive": "The architecture adds only a projection and gate while preserving a sequence-only GRU interface and one jointly trained scorer.",
+        "negative": "Correct multi-negative filtering, stable gradients, padding behavior, diagnostic compatibility, ablations and embedded predictor consistency require more work than the module size suggests."
+      }
+    },
+    "related_work": [
+      {
+        "title": "Recurrent Neural Networks with Top-k Gains for Session-based Recommendations",
+        "link": "https://hidasi.eu/assets/pdf/gru4rec_v2_cikm18.pdf",
+        "contributions": [
+          "Defines BPR-max as the negative logarithm of a softmax-weighted sum of pairwise sigmoid probabilities.",
+          "Adds softmax-weighted negative-score regularization, distinct from parameter weight decay.",
+          "Provides the direct objective precedent; with one negative the hardness-weighting mechanism disappears."
+        ],
+        "limitations": [
+          "Does not establish gains on the pinned four-category Amazon benchmark.",
+          "Hard-negative emphasis can penalize unobserved items that users would like.",
+          "The proposed training-history filtering and valid-position reduction differ from official training."
+        ]
+      },
+      {
+        "title": "Official GRU4Rec PyTorch implementation",
+        "link": "https://github.com/hidasib/GRU4Rec_PyTorch_Official/blob/master/gru4rec_pytorch.py",
+        "contributions": [
+          "Provides executable reference behavior for BPR-max weighting, score regularization and gradients.",
+          "Uses minibatch and additional sampled negative slots, retaining duplicate occurrences and masking designated positive positions.",
+          "Documents optional score activation and cross-entropy-specific sampling correction behavior."
+        ],
+        "limitations": [
+          "Its sampling semantics differ from the proposed filtered uniform sampler.",
+          "Optional official settings should not be silently introduced into the corrected baseline.",
+          "Implementation fidelity alone does not establish benchmark improvement."
+        ]
+      },
+      {
+        "title": "TIEN: interest-evolution modeling with modified recurrent updates",
+        "link": "https://www.sciencedirect.com/science/article/abs/pii/S095741742301905X",
+        "contributions": [
+          "The supplied search summary describes recurrent updates incorporating item information, time intervals and hidden states.",
+          "Motivates adaptive treatment of changing interest."
+        ],
+        "limitations": [
+          "The proposed output gate is an adaptation rather than a reproduction of TIEN.",
+          "The sequence-only proposal does not consume timestamps.",
+          "Architectural motivation does not establish RecHarness improvements."
+        ]
+      },
+      {
+        "title": "Neural Attentive Session-based Recommendation",
+        "link": "https://arxiv.org/abs/1711.04725",
+        "contributions": [
+          "Combines a final recurrent state with attention-pooled recurrent states.",
+          "Provides a precedent for jointly trained recurrent and local-context representations."
+        ],
+        "limitations": [
+          "Its local component is not the raw latest-item embedding.",
+          "It does not establish the novelty or effectiveness of the proposed sigmoid output gate."
+        ]
+      },
+      {
+        "title": "US20210366025A1: session-representation precedent",
+        "link": "https://patents.google.com/patent/US20210366025A1/en",
+        "contributions": [
+          "Projects concatenated recurrent state and latest-item embedding into a session representation.",
+          "Establishes related prior art for combining recurrent context with a latest-item shortcut."
+        ],
+        "limitations": [
+          "Its described gate combines current-session and neighbor-session representations rather than directly gating recurrent state against latest-item embedding.",
+          "A patent disclosure does not establish performance under this benchmark."
+        ]
+      },
+      {
+        "title": "Ask the GRU: Multi-task Learning for Deep Text Recommendations",
+        "link": "https://arxiv.org/html/1609.02116",
+        "contributions": [
+          "Jointly learns text representations with recommendation.",
+          "Motivates the alternative of randomly initialized, pooled title-token embeddings."
+        ],
+        "limitations": [
+          "Its recommendation setup does not directly validate a sequential GRU4Rec backbone.",
+          "Text similarity cannot establish compatibility, current need or avoidance of redundant purchases.",
+          "Unavailable tags, genres and review attributes cannot be imported into this task."
+        ]
+      },
+      {
+        "title": "On Sampled Metrics for Item Recommendation",
+        "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+        "contributions": [
+          "Explains that sampled recommendation metrics can differ from full-catalog metrics and reverse model comparisons.",
+          "Supports interpreting results within the fixed candidate protocol."
+        ],
+        "limitations": [
+          "Does not authorize changing the pinned evaluator.",
+          "Sampled validation improvements cannot establish full-catalog user satisfaction."
+        ]
+      },
+      {
+        "title": "SciPy bootstrap documentation",
+        "link": "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.bootstrap.html",
+        "contributions": [
+          "Provides methods for paired bootstrap resampling.",
+          "Supports estimating user-sampling uncertainty by preserving paired model outcomes within categories."
+        ],
+        "limitations": [
+          "Requires host-exposed per-user outcomes; aggregate HR alone is insufficient.",
+          "Conditional intervals omit training-seed variation, candidate-sampling variation and adaptive-search selection bias."
+        ]
+      },
+      {
+        "title": "RankMe",
+        "link": "https://arxiv.org/abs/2210.02885",
+        "contributions": [
+          "Uses entropy of normalized singular values to quantify effective representation rank.",
+          "Motivates inspecting dimensional concentration beyond mean pairwise cosine."
+        ],
+        "limitations": [
+          "Effective rank does not establish recommendation quality.",
+          "Centered and uncentered spectra answer different questions; singular-value entropy rank differs from covariance entropy rank.",
+          "Zero-energy representations require explicit handling."
+        ]
+      },
+      {
+        "title": "Residual Dominance",
+        "link": "https://arxiv.org/abs/2608.14021",
+        "contributions": [
+          "The supplied search summary describes partial and full history shuffling, GRU4Rec comparisons and residual-scaling probes.",
+          "Motivates testing whether improvements rely on earlier sequence context or mainly on the final item."
+        ],
+        "limitations": [
+          "Its main mechanism concerns SASRec and must not replace the required GRU4Rec backbone.",
+          "History interventions create altered inputs and do not independently establish causal user benefit."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/model-family-comparison-20261029/runs/gru4rec-self_evolverec/self_evolverec/calls/00090"
+}

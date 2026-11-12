@@ -1,0 +1,117 @@
+--- g3-r0010-gate_self_live/model.py
++++ g3-r0011-gate_redistribute_only/model.py
+@@ -1,16 +1,16 @@
+-"""Cross-task transfer through deterministic event-relevance gates.
+-
+-Inherits the round9 event-match gate, private auxiliary item tables, additive
+-match evidence and primary-owned selector. Only click's gate preactivation is
+-changed: z_click + 0.5 * donor, where donor is the mean of the three auxiliary
+-preactivations or click's own preactivation. Donor gradients are detached or
+-live in a 2x2 contrast; auxiliary forward gates are unchanged. All gate features
+-are deterministic functions of frozen history masks and category/brand matches.
+-
+-No new parameters, initialization draws, losses, information or host settings.
+-All four variants exactly start at the incumbent function because gate weights
+-start at zero. Self transfer controls forward gate scaling; live self transfer
+-also changes its effective gradient scale. A win over the incumbent alone does
+-not establish cross-task complementarity. Detailed originality is unverified.
++"""Separate click's event-weight redistribution from coefficient-mass changes.
++
++Inherits g3-r0010-gate_self_live, including private auxiliary embeddings,
++primary-owned retrieval, all auxiliary forward gates, and additive evidence.
++For masked signed scores s and nonnegative event gains g, define b=sum|s|
++and m=sum|s*g|. Four cells use s*g (full), (s*g/m)*b (redistribute),
++(s/b)*m (scale), or s (none) ONLY for click. Normalization is in FP32;
++zero gated mass falls back to s for redistribution and zero for scale.
++
++Redistribution preserves coefficient L1 mass, not the norm of the pooled
++vector: cancellation and value geometry can still change the latter. All
++normalizers remain differentiable. This is an attribution experiment, not
++a claim of new attention normalization or cross-task complementarity.
++No new parameters, RNG draws, losses, information, or host settings.
+ """
+ import copy
+@@ -22,9 +22,9 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute'}
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='TaskGateTransfer', gpu=-1,
++    def __init__(self, feature_map, model_id='TaskGateComponents', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(128, 32),
+                  tower_hidden_units=(128, 64), routing='task',
+@@ -34,5 +34,6 @@
+                  feedback_identity=True, gate_scope='event',
+                  gate_feedback_identity=True, gate_transfer_source='self',
+-                 gate_transfer_gradient='live', num_tasks=None,
++                 gate_transfer_gradient='live', primary_gate_component='redistribute',
++                 num_tasks=None,
+                  task='binary_classification', **kwargs):
+         labels = list(feature_map.labels)
+@@ -81,4 +82,9 @@
+         if gate_transfer_gradient not in ('detached', 'live'):
+             raise ValueError('Gate donor gradient must be detached or live')
++        if gate_transfer_source != 'self' or gate_transfer_gradient != 'live':
++            raise ValueError('Component attribution fixes the incumbent live self gate')
++        if primary_gate_component not in ('full', 'redistribute', 'scale', 'none'):
++            raise ValueError('Unknown primary gate component')
++        self.primary_gate_component = primary_gate_component
+         self.gate_transfer_source = gate_transfer_source
+         self.gate_transfer_gradient = gate_transfer_gradient
+@@ -249,4 +255,38 @@
+             return (1.0 + applied).expand_as(modulation).masked_fill(~valid, 1.0)
+ 
++    def _apply_gate_components(self, scores, gain, mask):
++        """Factor coefficient L1 mass and event redistribution for click.
++
++        All four cells compute the same intermediates without additional RNG
++        or state. Auxiliaries always use the inherited full gate. No detach:
++        each intervention includes its induced optimization geometry.
++        """
++        with torch.autocast(device_type=mask.device.type, enabled=False):
++            base = scores.float().masked_fill(~mask.bool().unsqueeze(-1), 0)
++            gated = base * gain
++            base_mass = base.abs().sum(dim=1, keepdim=True)
++            gated_mass = gated.abs().sum(dim=1, keepdim=True)
++            # Normalize coefficients before restoring mass, avoiding an
++            # unbounded gain ratio at zero-weight positions. Never divide by
++            # zero even in an unselected torch.where branch.
++            safe_base = torch.where(base_mass > 0, base_mass,
++                                    torch.ones_like(base_mass))
++            safe_gated = torch.where(gated_mass > 0, gated_mass,
++                                     torch.ones_like(gated_mass))
++            redistributed = torch.where(gated_mass > 0,
++                                        (gated / safe_gated) * base_mass, base)
++            scaled = (base / safe_base) * gated_mass
++            if self.primary_gate_component == 'full':
++                primary_scores = gated
++            elif self.primary_gate_component == 'redistribute':
++                primary_scores = redistributed
++            elif self.primary_gate_component == 'scale':
++                primary_scores = scaled
++            else:
++                primary_scores = base
++            result = torch.where(self._primary_channel, primary_scores, gated)
++            # BF16 rounding may slightly perturb FP32 mass conservation.
++            return result.to(dtype=scores.dtype)
++
+     def _history_scores(self, hidden, interactions):
+         scores = self.score_readout(hidden)
+@@ -339,10 +379,8 @@
+             scores = scores.masked_fill(~valid, 0)
+             gain = self._event_route_gain(channels, matches, mask)
+-            # Compute the product in FP32, then restore the score dtype for
+-            # inherited BF16 bmm. Gate-transfer donor gradients follow the
+-            # declared contrast; they touch only the small gate matrix through
+-            # this path. Private item tables and primary selector ownership
+-            # are unchanged. Shared context still couples the four losses.
+-            scores = (scores.float() * gain).to(dtype=scores.dtype)
++            # Factor only click's gate. Private item tables, auxiliary gates,
++            # additive evidence and primary selector ownership stay inherited.
++            # Shared context and host clipping still couple the four losses.
++            scores = self._apply_gate_components(scores, gain, mask)
+             pooled = torch.bmm(scores.transpose(1, 2), values)
+             # Detach the representation, if requested, before pooling; never

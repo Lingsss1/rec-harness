@@ -1,0 +1,102 @@
+--- g3-r0072-native_positive_label_bit_positive_bridge/model.py
++++ g3-r0073-native_positive_label_bit_positive_bridge/model.py
+@@ -1,11 +1,13 @@
+-"""Positive-label assignment crossed with external transfer orientation.
+-
+-Change only the labels used in BCE(y_source)-BCE(0) for the auxiliary
+-orientation-bit VJP. A fixed whole-batch cycle preserves the joint label
+-histogram while breaking recipient assignment. Native true-label geometry,
+-four private task losses, forward model, initialization and RNG are inherited.
+-Both source-label BCE graphs execute in every arm. This is a first-order
+-surrogate VJP, not the ordinary gradient of the reported joint BCE.
+-No new effectiveness or novelty claim is made before host evaluation.
++"""Batch-prevalence positive-label source at a fixed forward architecture.
++
++Cross native versus batch-mean auxiliary labels in the positive-label-only
++source VJP with both external orientations. The source objective is
++BCE(y_source)-BCE(0), differentiated through recipient probabilities.
++Only its detached cotangents determine the inherited one-bit orientation;
++true-label joint BCE, private learning, native transfer line/radius/support,
++forward computation and initialization stay fixed. Native, cycled, mean
++and zero source graphs execute in every cell. This is a first-order
++surrogate VJP, not the ordinary gradient of the reported scalar BCE.
++No effectiveness or novelty claim is established by these modules.
+ """
+ import torch
+@@ -730,4 +732,21 @@
+     shift = 4097 if truth.shape[0] == 8192 else 1
+     return torch.roll(truth.detach(), shifts=shift, dims=0)
++
++
++def _mean_source_targets(truth):
++    """Use each task's batch prevalence as a soft label on EVERY row.
++
++    Training only. Reduce detached FP32 labels over all rows, including
++    empty histories because Dice couples examples. For the frozen binary
++    B=8192 batch, positive counts divided by 8192 are exactly representable
++    in FP32. This removes example assignment and joint label tuples from
++    this source while retaining per-task prevalence and recipient graphs.
++    It does not remove true labels from private updates or native geometry.
++    No persistent statistics, sample IDs, RNG or additional forward pass.
++    """
++    if truth.ndim != 2 or truth.shape[0] < 2:
++        raise ValueError('Expected training label matrix [B,4] with B>=2')
++    labels = truth.detach().to(dtype=torch.float32)
++    return labels.mean(dim=0, keepdim=True).expand_as(labels)
+ 
+ 
+@@ -1071,6 +1090,6 @@
+         if source_component != 'positive_label':
+             raise ValueError('Assignment study freezes the positive-label-only source')
+-        if source_label_assignment not in ('native', 'batch_cycle'):
+-            raise ValueError('Expected native or batch_cycle source label assignment')
++        if source_label_assignment not in ('native', 'batch_cycle', 'batch_mean'):
++            raise ValueError('Expected native, batch_cycle or batch_mean source label assignment')
+         self.source_label_assignment = source_label_assignment
+         self.source_component = source_component
+@@ -1903,6 +1922,6 @@
+ 
+         The source is BCE(y_assignment)-BCE(0). Native assignment uses the
+-        true labels; batch_cycle moves entire label tuples across all rows.
+-        Both source BCE graphs and the zero-target graph run in all cells.
++        true labels; batch_mean broadcasts each task's batch prevalence.
++        Native, cycle, mean and zero source BCE graphs run in all cells.
+         Away from inherited probability-BCE saturation/clamps, their logit
+         derivatives are exactly -y_assignment. No new probability/logit
+@@ -1930,8 +1949,10 @@
+             source_targets = _zero_source_targets(probabilities)
+             cycle_targets = _cycle_source_targets(truth)
++            mean_targets = _mean_source_targets(truth)
+             losses = []
+             zero_source_losses = []
+             source_true_losses = []
+             cycle_source_losses = []
++            mean_source_losses = []
+             for index, label in enumerate(self.feature_map.labels):
+                 task_loss = nn.functional.binary_cross_entropy(
+@@ -1942,4 +1963,6 @@
+                     cycle_source_losses.append(nn.functional.binary_cross_entropy(
+                         probabilities[:, index].float(), cycle_targets[:, index], reduction='mean'))
++                    mean_source_losses.append(nn.functional.binary_cross_entropy(
++                        probabilities[:, index].float(), mean_targets[:, index], reduction='mean'))
+                     zero_source_losses.append(nn.functional.binary_cross_entropy(
+                         probabilities[:, index].float(), source_targets[:, index], reduction='mean'))
+@@ -1947,12 +1970,15 @@
+             zero_auxiliary_loss = torch.stack(zero_source_losses).sum()
+             cycle_auxiliary_loss = torch.stack(cycle_source_losses).sum()
++            mean_auxiliary_loss = torch.stack(mean_source_losses).sum()
+             # Match graph work, including zero-coefficient graphs. These
+             # labels never train private parameters or alter native geometry.
+-            native_weight, cycle_weight = {
+-                'native': (1.0, 0.0),
+-                'batch_cycle': (0.0, 1.0),
++            native_weight, cycle_weight, mean_weight = {
++                'native': (1.0, 0.0, 0.0),
++                'batch_cycle': (0.0, 1.0, 0.0),
++                'batch_mean': (0.0, 0.0, 1.0),
+             }[self.source_label_assignment]
+             source_loss = (native_weight * true_auxiliary_loss
+                            + cycle_weight * cycle_auxiliary_loss
++                           + mean_weight * mean_auxiliary_loss
+                            - zero_auxiliary_loss)
+             source_gradients = torch.autograd.grad(

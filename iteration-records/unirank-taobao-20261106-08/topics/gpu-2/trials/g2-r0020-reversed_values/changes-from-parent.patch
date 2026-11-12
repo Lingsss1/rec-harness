@@ -1,0 +1,156 @@
+--- g2-r0019-equal_retained/model.py
++++ g2-r0020-reversed_values/model.py
+@@ -1,21 +1,16 @@
+-"""Prospective direction-weighting x concentration contrast after compression.
+-
+-Local provenance: g2-r0018-event_first reproduced the reported validation
+-metrics of g2-r0017-aligned_centroid; slot_first traded click AUC for cost.
+-These single-seed observations do not establish a compression mechanism.
+-
+-For each field and occupied age/behavior slot, let x_i be masked event keys,
+-l_i=max(||x_i||,1e-8), and q the unit target field. Equal-event descriptors
+-pool x_i/l_i. Norm-weighted descriptors pool x_i then divide by pooled l_i.
+-Retained concentration leaves that bounded resultant unchanged; unit controls
+-normalize its direction, removing its length (outside the epsilon regime).
+-Aligned and coordinate-rotated dot products, plus squared aligned product,
+-replace only the inherited correction's three similarity channel groups.
+-
+-Equal/retained is algebraically the event-first mean cosine with contraction
+-moved after pooling. Norm-weighted/unit has the old slot-first cosine. No
+-exact trained-trajectory equality or runtime saving is assumed. Raw values,
+-counts, partition, learned state, source gates and Dice ownership are fixed.
+-No method-priority claim is made; spherical means are elementary statistics.
++"""Bounded within-slot value transport, prospective study g2-r0020.
++
++Inherits g2-r0019-equal_retained unchanged outside value readouts. Event
++similarity is equal-field cosine to the target. Within each original slot,
++C=mean(score*value)-mean(score)*mean(value). Only pooled value readouts
++receive mean(value)+0.5*C, equivalent in exact arithmetic to nonnegative
++weights 1+0.5*(score-mean(score)) with unchanged total count. The scorer,
++angular correction and union identity readout retain original means.
++
++Reversed controls reverse score/value association inside each exact slot;
++rotated controls rotate query coordinates; null exposes zero covariance.
++All cells compute reversal and both paired/reversed cross-moments. Learned
++state, initialization, CPU RNG, Dice ownership and auxiliary gradient gates
++are inherited. No empirical success, originality or cost saving is claimed.
+ """
+ import torch
+@@ -48,4 +43,5 @@
+     'angular_population': 'equal',
+     'concentration_readout': 'retained',
++    'transport_mode': 'reversed',
+ }
+ 
+@@ -90,5 +86,5 @@
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='ConcentrationCompression', gpu=-1,
++    def __init__(self, feature_map, model_id='BoundedValueTransport', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+@@ -101,5 +97,6 @@
+                  moment_timing='centroid', moment_query='aligned',
+                  moment_hidden_units=32, angular_population='equal',
+-                 concentration_readout='retained', num_tasks=None,
++                 concentration_readout='retained', transport_mode='aligned',
++                 num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -159,4 +156,9 @@
+         if concentration_readout not in ('retained', 'unit'):
+             raise ValueError('Unknown concentration readout')
++        if angular_population != 'equal' or concentration_readout != 'retained':
++            raise ValueError('Freeze the equal-event retained angular reference')
++        if transport_mode not in ('aligned', 'reversed', 'rotated', 'null'):
++            raise ValueError('Unknown within-slot value transport')
++        self.transport_mode = transport_mode
+         self.angular_population = angular_population
+         self.concentration_readout = concentration_readout
+@@ -339,4 +341,65 @@
+         return means, counts
+ 
++    def _transport_values(self, target, raw_values, mask, auxiliary, values):
++        """Bounded value tilt; original scorer/identity values stay unchanged.
++
++        No [B,slot,event,value] tensor is materialized. Score reversal is a
++        deterministic within-slot bijection including arbitrary mask holes.
++        Sort/gather indices have no trainable state and consume no RNG.
++        FP32 statistics are local architecture operations; host precision,
++        optimizers, loss and input visibility remain unchanged.
++        """
++        batch, length, _ = raw_values.shape
++        valid = mask.bool()
++        valid_blocks = self.partition[None, :, :] & valid[:, None, :]
++        member = auxiliary[:, None, :] & valid_blocks
++        assignment = torch.stack((valid_blocks, valid_blocks & ~member, member), dim=2)
++        assignment = assignment.reshape(batch, 30, length)
++        # All cells build the same reversal map, preserving slot membership.
++        positions = torch.arange(length, device=raw_values.device).view(1, 1, length)
++        ordered = torch.where(assignment, positions, torch.full_like(positions, length))
++        ordered = ordered.sort(dim=-1).values
++        rank = assignment.long().cumsum(dim=-1) - 1
++        count_int = assignment.long().sum(dim=-1, keepdim=True)
++        reverse_rank = (count_int - 1 - rank).clamp(min=0, max=length - 1)
++        reverse_positions = ordered.gather(2, reverse_rank).clamp(max=length - 1)
++        fields = len(self.item_fields)
++        with torch.autocast(device_type=raw_values.device.type, enabled=False):
++            clean = torch.where(valid[:, :, None], raw_values.float(),
++                                torch.zeros_like(raw_values, dtype=torch.float32))
++            keys = clean[:, :, :self.key_width].reshape(
++                batch, length, fields, self.moment_embedding_dim)
++            keys = torch.nn.functional.normalize(keys, p=2, dim=-1, eps=1e-8)
++            query = target.float().reshape(batch, fields, self.moment_embedding_dim)
++            query = torch.nn.functional.normalize(query, p=2, dim=-1, eps=1e-8)
++            rotated = torch.roll(query, shifts=1, dims=-1)
++            query = rotated if self.transport_mode == 'rotated' else query
++            # Action values are transported but never used as a target query.
++            score = (keys * query[:, None, :, :]).sum(dim=-1).mean(dim=-1)
++            score = score.clamp(min=-1.0, max=1.0)
++            score = torch.where(valid, score, torch.zeros_like(score))
++            slot_score = score[:, None, :].expand(-1, 30, -1)
++            reversed_score = slot_score.gather(2, reverse_positions)
++            a = assignment.float()
++            n = count_int.float().clamp_min(1.0)
++            mean_value = torch.bmm(a, clean) / n
++            paired_weight = a * slot_score
++            reversed_weight = a * reversed_score
++            paired_mean = paired_weight.sum(dim=-1, keepdim=True) / n
++            reversed_mean = reversed_weight.sum(dim=-1, keepdim=True) / n
++            # Computing both cross-moments in every mode matches forward work;
++            # selected and unused backward paths intentionally differ.
++            paired = torch.bmm(paired_weight, clean) / n - paired_mean * mean_value
++            reversed_cov = (torch.bmm(reversed_weight, clean) / n
++                            - reversed_mean * mean_value)
++            covariance = reversed_cov if self.transport_mode == 'reversed' else paired
++            covariance = torch.where(count_int > 1, covariance, torch.zeros_like(covariance))
++            if self.transport_mode == 'null':
++                covariance = covariance * 0.0
++            tilted = values.float() + 0.5 * covariance
++        # Original compression may be BF16 under the frozen autocast recipe.
++        # Explicitly restore its dtype; singleton/empty slots stay exact.
++        return tilted.to(values.dtype)
++
+     def _interactions(self, target, values):
+         keys = values[:, :, :self.key_width]
+@@ -482,4 +545,5 @@
+         context, target, raw_values, mask, auxiliary, task_members = self._represent(inputs)
+         values, counts = self._compress_both(raw_values, mask, auxiliary)
++        transported = self._transport_values(target, raw_values, mask, auxiliary, values)
+         identity_sums, identity_counts = self._identity_statistics(
+             raw_values, mask, task_members, values, counts)
+@@ -491,5 +555,5 @@
+         primary_weights = (self.local_activation(self._interactions(target, values), active)
+                            + correction)
+-        primary_strata, primary_readout = self._pool(primary_weights, values, counts)
++        primary_strata, primary_readout = self._pool(primary_weights, transported, counts)
+         identity = self._identity_readout(primary_weights, identity_sums, identity_counts)
+         # Scorer and both item/action sources are frozen to auxiliary losses.
+@@ -515,5 +579,6 @@
+             aux_weights = (self._auxiliary_activation(self._interactions(aux_target, aux_values), active)
+                            + correction.detach())
+-            aux_strata, aux_readout = self._pool(aux_weights, aux_values, counts)
++            aux_transported = transported.detach() if self.block_aux_item_grad else transported
++            aux_strata, aux_readout = self._pool(aux_weights, aux_transported, counts)
+         else:
+             # Identical values/parameters and no state update: inference needs

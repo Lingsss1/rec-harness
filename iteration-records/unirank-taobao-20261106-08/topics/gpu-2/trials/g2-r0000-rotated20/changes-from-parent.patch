@@ -1,0 +1,102 @@
+--- baseline-din/model.py
++++ g2-r0000-rotated20/model.py
+@@ -1,7 +1,7 @@
+-"""DIN local-activation pooling adapted to UniRank's four-task Taobao schema.
++"""Count-preserving block compression before DIN local activation.
+ 
+-Mechanism references: Zhou et al. DIN (KDD 2018), arXiv:1706.06978;
+-DeepCTR-Torch AttentionSequencePoolingLayer/LocalActivationUnit.
+-This is a field and task adaptation, not a claim of exact paper reproduction.
++All learned modules and widths are inherited from baseline-din. Routing uses
++only visible historical and target category/brand IDs; no current action.
++Novelty and predictive/cost benefit are unverified prospective hypotheses.
+ """
+ import torch
+@@ -12,5 +12,5 @@
+ 
+ CONFIG={'embedding_dim':16,'attention_hidden_units':[64,32],
+-        'tower_hidden_units':[128,64],'attention_normalization':'none'}
++        'tower_hidden_units':[128,64],'attention_normalization':'none','compression_mode':'rotated20'}
+ 
+ 
+@@ -19,9 +19,12 @@
+                  embedding_dim=16,attention_hidden_units=(64,32),
+                  tower_hidden_units=(128,64),attention_normalization='none',num_tasks=None,
+-                 task='binary_classification',**kwargs):
++                 task='binary_classification',compression_mode='rotated20',**kwargs):
+         if num_tasks is not None and num_tasks!=len(feature_map.labels):raise ValueError('Task count mismatch')
+         super().__init__(feature_map,model_id=model_id,gpu=gpu,
+                          num_tasks=len(feature_map.labels),task=task,**kwargs)
+         if attention_normalization!='none':raise ValueError('DIN baseline uses unnormalized local activation weights')
++        if compression_mode not in ('match20','rotated20','uniform20','uniform10'):
++            raise ValueError('Unknown compression mode')
++        self.compression_mode=compression_mode
+         self.embedding_dim=embedding_dim
+         self.embedding_layer=FeatureEmbeddingDict(feature_map,embedding_dim)
+@@ -55,16 +58,57 @@
+         if self.action_field:values=torch.cat([values,item_emb[self.action_field][:,:-1]],dim=-1)
+         context=torch.cat([user_emb[name] for name in self.user_fields],dim=-1)
+-        return context,target,keys,values,mask
++        return context,target,keys,values,mask,item
++
++    def _compress(self, values, mask, item):
++        batch,length,width=values.shape
++        # Fixed released history input, with pre-padding; no history truncation.
++        if length != 100:
++            raise ValueError('Frozen protocol requires 100 history positions')
++        block_size=5 if self.compression_mode=='uniform20' else 10
++        groups=length//block_size
++        valid=mask.bool().reshape(batch,groups,block_size)
++        grouped=values.reshape(batch,groups,block_size,width)
++        if self.compression_mode.startswith('uniform'):
++            assignment=valid.unsqueeze(-2).to(values.dtype)
++        else:
++            match=torch.zeros_like(mask,dtype=torch.bool)
++            for field in ('cate_id','brand'):
++                ids=item[field]
++                historical=ids[:,:-1]
++                target=ids[:,-1:]
++                # Zero is missing/padding, not positive evidence of a match.
++                match=match | ((historical==target) & (historical!=0) & (target!=0))
++            match=match.reshape(batch,groups,block_size) & valid
++            if self.compression_mode=='rotated20':
++                # Rotate membership among VALID events only, keeping each slot's
++                # occupancy exactly equal to match20, including partial blocks.
++                n=valid.long().sum(-1,keepdim=True)
++                rank=valid.long().cumsum(-1)-1
++                start=block_size-n
++                source=start+(rank+n//2).remainder(n.clamp_min(1))
++                source=source.clamp(0,block_size-1)
++                match=match.gather(-1,source) & valid
++            assignment=torch.stack((valid & ~match,match),dim=-2).to(values.dtype)
++        slots=assignment.shape[-2]
++        assignment=assignment.reshape(batch*groups,slots,block_size)
++        counts=assignment.sum(-1)
++        sums=torch.bmm(assignment,grouped.reshape(batch*groups,block_size,width))
++        means=sums/counts.clamp_min(1).unsqueeze(-1)
++        return means.reshape(batch,groups*slots,width),counts.reshape(batch,groups*slots)
+ 
+     def forward(self,inputs):
+-        context,target,keys,values,mask=self._represent(inputs)
++        context,target,keys,values,mask,item=self._represent(inputs)
++        # Values contain every key field plus historical action. Compress them
++        # together so item/action alignment is preserved within each summary.
++        values,counts=self._compress(values,mask,item)
++        keys=values[:,:,:self.key_width]
+         batch,length,_=keys.shape
+-        if length:
+-            query=target[:,None,:].expand(-1,length,-1)
+-            interactions=torch.cat([query,keys,query-keys,query*keys],dim=-1)
+-            weights=self.local_activation(interactions.reshape(batch*length,-1)).reshape(batch,length)
+-            weights=weights*mask.to(weights.dtype)
+-            pooled=torch.bmm(weights[:,None,:],values).squeeze(1)
+-        else:pooled=target.new_zeros((batch,self.value_width))
++        query=target[:,None,:].expand(-1,length,-1)
++        interactions=torch.cat([query,keys,query-keys,query*keys],dim=-1)
++        weights=self.local_activation(interactions.reshape(batch*length,-1)).reshape(batch,length)
++        # Retain event multiplicity under unnormalized DIN weights. Constant
++        # activation recovers the original masked sum exactly in real arithmetic.
++        weights=weights*counts.to(weights.dtype)
++        pooled=torch.bmm(weights[:,None,:],values).squeeze(1)
+         features=torch.cat([context,target,pooled],dim=-1)
+         return {label+'_pred':torch.sigmoid(tower(features)) for label,tower in zip(self.feature_map.labels,self.towers)}

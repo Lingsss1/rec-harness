@@ -1,0 +1,56 @@
+{
+  "markdown_report": "### Insights\n\n**Starting point.** (1) The compatibility interface permits architecture changes while preserving diagnostic access. Probes must score the actual trained model. (2) Loader-negative margins measure training discrimination. They cannot establish improvement in the pinned validation ranking task. (3) Feedback favors repeated recent interests over isolated associations. This motivates a testable history-pooling mechanism, without treating purchases as ownership or satisfied needs.\n\n**Related work.** (1) Negative-sampling research [1] reports accuracy and popularity-group sensitivity. Diagnostics should therefore distinguish easy negatives from stronger competitors. (2) Sampled-metric analysis [2] shows that sampled and full-catalog evaluations can rank models differently. Official macro validation HR@10 must remain the selection criterion. (3) CoDeR [3] studies demand shifts obscured by noise. It motivates testing whether an additional history summary helps, but does not establish that recency pooling will improve this benchmark.\n\n### Directions and framework\n\n| Direction | Existing capability | Proposed extension | Evidence boundary |\n|---|---|---|---|\n| Representation | SASRec sequence features | Gated recent-history pooling | Interaction evidence only |\n| Diagnosis | Training-negative margins | Fixed training-prefix retrieval audit | Separate from official validation |\n| Robustness | Unperturbed histories | Matched history masking | Sensitivity, not causal preference |\n\n### Candidate ideas\n\nScores are originality / future potential / code difficulty; higher difficulty means harder implementation.\n\n1. **Gated recency pooling: 4/7/3.** Originality: combines established components simply, but offers limited conceptual novelty. Potential: directly tests sustained-interest aggregation, although repeated interactions can still reflect noise. Difficulty: requires one pooling path and gate; predictor serialization must change.\n2. **Training-prefix retrieval audit: 3/7/3.** Originality: combines known evaluation controls, but adds no new estimator [1,2]. Potential: exposes misleading margins, although diagnostic improvement may not track validation. Difficulty: uses existing scoring hooks, but catalog scoring needs explicit caps.\n3. **Matched masking consistency: 5/6/6.** Originality: connects controlled perturbations with representation regularization [3], although consistency objectives are established. Potential: may reduce isolated-event dependence, but can suppress genuine demand shifts. Difficulty: masking is simple, while valid controls and extra forward passes increase implementation cost.\n\n### Selected idea: gated recency pooling\n\nAt 0% progress, prioritize a small, falsifiable model change. At every valid sequence position, combine SASRec features with an exponentially weighted mean of preceding item embeddings. Repeated recent items contribute multiple times. A learned scalar gate controls the residual contribution; initialize it near zero and retain the baseline loss, optimizer, and schedule initially.\n\nTrain causally at every position and compare against the unchanged baseline using the pinned four-category macro validation HR@10. Pooling alone cannot establish compatibility, ownership, or redundancy.\n\nKeep preprocessing seed 0, training seed 42, dataset routing, and `DATA_DIR = os.environ['GAGC_DATA_DIR']`. Save architecture configuration and weights beneath the trial directory, and update the predictor writer together. Preserve `DiagnosisProbe(view, device)` and report unavailable evidence explicitly. Bound training-only audits and charge their runtime to the shared budget.",
+  "idea": {
+    "description": "Add a learned, weakly initialized residual from a causal exponentially weighted history-embedding mean to SASRec features, preserving all four dataset-specific models and the diagnostic compatibility interface.",
+    "motivation": "The qualitative feedback suggests that sustained recent interests are underused. Pooling offers a minimal way to test this hypothesis without introducing unavailable attributes or pretrained representations; validation gains remain unestablished.",
+    "implementation_notes": "For each position t, compute the normalized exponentially weighted mean over nonpadding embeddings at positions j <= t. Normalize the pooled vector before combining it with SASRec features through a learned sigmoid scalar initialized at logit -4. Use the same combined features for training, inference, and diagnostic scoring. Begin with a fixed decay of 0.9 as a proposed hyperparameter, not an empirically established optimum. Preserve baseline sampling, splits, loss, optimizer, and epoch environment handling, including SASREC_EPOCHS default 200. Save the decay, gate parameter, model configuration, and state dictionary beneath the trial directory. Update the predictor writer to reconstruct the identical architecture. Restore the model's original training mode after diagnosis; return null plus an availability indicator when a diagnostic has no valid observations. Do not use metadata categories or reviews. Use official macro validation HR@10 alone for checkpoint and trial selection.",
+    "pseudocode": "class RecencyResidualSASRec(BaseSASRec):\n    def log2feats(self, sequence):\n        h = super().log2feats(sequence)\n        e = self.item_emb(sequence)\n        numerator = zeros_like(e[:, 0])\n        denominator = zeros_like(sequence[:, 0], dtype=float)\n        pooled = []\n        for t in range(sequence.shape[1]):\n            valid = (sequence[:, t] != 0).float()\n            numerator = decay * numerator + e[:, t] * valid[:, None]\n            denominator = decay * denominator + valid\n            pooled.append(numerator / denominator.clamp_min(1)[:, None])\n        p = stack(pooled, dim=1)\n        features = h + sigmoid(self.gate_logit) * self.pool_norm(p)\n        return features * (sequence != 0)[..., None]\n\n# Retain baseline causal training and scoring.\n# Serialize this architecture in the predictor writer.\n# Select using pinned four-category macro validation HR@10 only.",
+    "originality": {
+      "score": 4,
+      "positive": "A compact, diagnosis-motivated combination makes the sustained-interest hypothesis directly testable.",
+      "negative": "Residual pooling, exponential weighting, and learned gates are established techniques."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides a low-cost foundation for studying when sequence encoders benefit from explicit history aggregation.",
+      "negative": "Pooling may amplify repeated noise and cannot infer current intent or product compatibility."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Adds one causal pooling path and a scalar parameter while retaining baseline training.",
+      "negative": "Training, diagnostic features, checkpoint loading, and generated inference code must stay consistent."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Sequential recommendation negative-sampling study (2024; supplied reference)",
+      "link": "https://arxiv.org/abs/2410.17276",
+      "contributions": [
+        "Reports that negative-sampling choices affect accuracy and head, middle, and tail performance."
+      ],
+      "limitations": [
+        "Does not establish that the proposed recency residual improves this benchmark."
+      ]
+    },
+    {
+      "title": "On the Bias of Offline Evaluation Methods for Recommender Systems",
+      "link": "https://arxiv.org/abs/1912.02263",
+      "contributions": [
+        "Explains inconsistencies between sampled recommendation metrics and full-catalog evaluation."
+      ],
+      "limitations": [
+        "Supports careful interpretation of diagnostics rather than replacing the pinned task evaluator."
+      ]
+    },
+    {
+      "title": "CoDeR (2025; supplied reference)",
+      "link": "https://ojs.aaai.org/index.php/AAAI/article/view/33379",
+      "contributions": [
+        "Studies demand shifts obscured by noisy interaction histories."
+      ],
+      "limitations": [
+        "Does not establish that isolated purchases are noise or that exponential history pooling is beneficial here."
+      ]
+    }
+  ]
+}

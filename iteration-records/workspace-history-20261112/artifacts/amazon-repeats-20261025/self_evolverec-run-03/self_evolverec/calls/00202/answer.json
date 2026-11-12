@@ -1,0 +1,149 @@
+{
+  "markdown_report": "Starting-point insights: (1) SASRec already adaptively combines historical interactions; an explicit recent branch tests whether a simpler local signal improves prediction, without establishing disentangled interests. User feedback identifies both current intent and sustained narrow preferences as useful signals. (2) Electronics has 14.95% negative-over-positive rankings and a −0.4812 lower-decile margin, motivating stronger ranking supervision. These training diagnostics do not establish validation performance. (3) Similar embedding-similarity scores across categories weaken the case for prioritizing collapse regularization. None establishes equipment ownership or compatibility.\n\nRelated-work insights: (1) [HGN](https://arxiv.org/abs/1906.09217) and [TLSRec](https://arxiv.org/abs/2208.04760) provide strong gating precedents, making this a lightweight fusion variant rather than a new long/short-term model. Their results do not establish gains here. (2) [gSASRec](https://www.ijcai.org/proceedings/2024/939) motivates more negatives and calibrated objectives; its gBCE is independent binary classification, distinct from candidate softmax. (3) [UFNRec](https://arxiv.org/abs/2208.04116) highlights false-negative uncertainty, supporting conservative sampling. (4) [ReZero](https://arxiv.org/abs/2003.04887) motivates zero-initialized residual scaling; a new post-addition LayerNorm would prevent exact baseline preservation.\n\nThe framework organizes research into representation timescale, ranking supervision, and behavioral evidence:\n\n| Direction | Existing approach | Proposed experiment | Remaining gap |\n|---|---|---|---|\n| Timescale | SASRec; HGN; TLSRec | Recent-window residual gate | Sparse prefixes; redundant branches |\n| Supervision | gSASRec; UFNRec | Uniform multi-negative softmax | Unobserved relevant negatives |\n| Association | Directed transition models | Sparse ordered-transition residual | Compatibility remains unknown |\n\nThree candidate ideas follow. Scores are 0–10; higher difficulty means harder. Each cell gives a score and positive/negative assessment.\n\n| Idea | Originality | Potential | User alignment | Model alignment | Difficulty |\n|---|---|---|---|---|---|---|\n| A: gated recent residual with multi-negative ranking | 3: useful integration / strong gating precedent | 7: portable / uncertain sparse-data benefit | 8: recent plus sustained intent / no compatibility evidence | 8: stronger separation objective / margins may mislead | 5: small branch / causal sampling and serving integration |\n| B: calibrated multi-negative gBCE | 3: established method / little novelty | 7: scalable / tuning dependent | 5: sharper ranking / no explicit intent mechanism | 8: targets separation / false negatives remain | 3: local loss change / exact weighting required |\n| C: directed transition residual | 5: explicit order / familiar association model | 6: interpretable / sparse transitions | 6: plausible next actions / no proof of utility | 6: extra ranking evidence / head-item bias | 5: sparse counts / serving integration |\n\nSelect **A** at 0% progress as a controlled experiment. The recent branch targets broad associations displacing current mood or task; the retained SASRec branch preserves evidence of repeated narrow preferences against isolated recent interactions. Multi-negative supervision targets Electronics’ weak-separation tail. These mechanisms address two user-facing failures and one model-facing failure as hypotheses; neither guarantees improvement or resolves unsupported equipment assumptions and already-satisfied needs. B remains the essential simpler alternative if fusion adds no validation benefit.\n\n```python\nh = sasrec(prefix)\nr = masked_mean(item_embedding(prefix[-window:]))\ng = sigmoid(linear(concat(h, r, log1p(prefix_length))))\nz = h + alpha * g * layer_norm(project(r))  # alpha initialized to 0\nloss = cross_entropy(scores(z, [target] + uniform_negatives), target_index=0)\n```\n\nConstruct every feature from its causal prefix. Use a scalar gate, window=5, K=16 negatives, temperature=1, and trainable scalar alpha initialized to zero; initialize gate weights and bias to zero. The gate initially equals 0.5, while alpha makes z=h exactly. Keep baseline embedding initialization, optimizer, learning rate, dropout and regularization, documenting their resolved values. Normalize only the residual branch; log branch norms because alpha and embedding norms can change score scale.\n\nDraw negatives independently with replacement, uniformly excluding padding, the current target and the user’s entire training history, matching original SASRec’s history exclusion. Preserve repeated positive targets. Duplicate negatives remain and contribute repeatedly to the softmax denominator; evaluation uniqueness does not require training uniqueness. Use this same exclusion policy across loss comparisons and explicitly disclose that it differs from the official gSASRec sampler. Skip positions with no eligible negative. Unobserved false negatives remain unresolved. For gBCE controls, implement [β·softplus(−s_pos)+Σ softplus(s_neg)]/(K+1), β=1−t+tK/(N−1); history exclusion changes its original calibration assumptions.\n\nPredeclare four primary variants: unchanged baseline, loss-only, residual-only and combined. Within the shared 43,200 GPU-second budget, prioritize recent-mean-only, last-item-only, and a learned global residual coefficient as controls; compare input-dependent gating with fixed coefficients only if budget remains. Windows 1 and full history, recency weighting, and norm-controlled convex mixing are secondary ablations, not an exhaustive search. Log every attempted configuration and checkpoint rule. Select solely by pinned four-category macro validation HR@10; break exact ties toward the simpler variant. Retain seeds, splits, routing, the 200-epoch environment default and single-GPU execution. Update the predictor writer and diagnostic adapter to use identical fused features.\n\nTrack raw logits, original sampled margins, hardest-negative margins, feature/item norms, gate saturation and variation, alpha, duplicate/collision rates, and repeated-versus-novel target performance. Report validation results by category and history length where supported. Temperature or norm growth can enlarge margins without improving rankings. Categories, ratings and reviews are unavailable; omit unsupported breakdowns rather than inventing them.\n\n[Krichene and Rendle](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/) show that sampled metrics can change model ordering relative to full-catalog evaluation; interpret gains only under the pinned 99-negative benchmark. If host outputs expose per-user hits, compute a paired, within-category bootstrap of macro differences using identical resampled indices, 10,000 replicates and seed 42. Its interval is conditional on fixed models and candidates, excludes training variability, and does not correct adaptive selection. Limit tuning around tiny gains and retain final held-out evaluation exclusively for the selected model, following [Cawley and Talbot](https://www.jmlr.org/papers/v11/cawley10a.html). No implementation or performance result is claimed.",
+  "idea": {
+    "description": "Add a zero-initialized, gated recent-window residual to SASRec and train with uniform multi-negative candidate softmax. Treat this as a lightweight fusion variant and compare against loss-only and simpler pooling controls.",
+    "motivation": "Targets two observed user failures: broad associations outranking current intent, and incidental associations displacing sustained narrow preferences. Stronger ranking supervision addresses Electronics’ observed weak separation. These are testable hypotheses; interaction histories cannot establish equipment compatibility, ownership, purchase satisfaction or unobserved user traits.",
+    "implementation_notes": "Use scalar g=sigmoid(Wg[h;r;log1p(prefix_length)]+bg), z=h+alpha*g*LayerNorm(Wr*r), alpha=0 initially, Wg=0 and bg=0. Normalize only the residual branch so disabling it preserves SASRec exactly. Start with window=5, K=16 and temperature=1; retain and record baseline optimizer, learning rate, dropout, initialization and regularization. Compute causal, padding-masked rolling means at every valid training position; use the identical final-prefix computation at inference. Prefix length counts nonpadding positions available to the encoder. Sample independently with replacement from item IDs excluding padding, the current target and the user's entire training-history set; retain repeated positive targets and duplicate negatives. Skip positions with no eligible negative, and average loss over valid positions. This exclusion policy matches original SASRec rather than the unrestricted official gSASRec sampler; using history exclusion changes gBCE's original calibration assumptions. No popularity correction is proposed. Preserve DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, all four dataset routes, unchanged splits, single-GPU execution and SASREC_EPOCHS default 200. Store checkpoints, resolved configuration, sampler policy and trial logs beneath the trial directory. Update the predictor writer to reconstruct and load every branch and buffer; check training-view and predictor score agreement in evaluation mode on identical prefixes and candidates. Retain DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions; view.model must be the actual trained module, log2feats must return fused features, and predict_score must use the same scoring function. Preserve original diagnostic definitions and add raw logits, hardest-negative margins, norms, gate statistics and duplicate/collision rates. Use only histories, titles, descriptions and timestamps; unavailable category breakdowns must be explicitly marked unavailable. Evaluate twenty real training users, five per category, with full-catalog unseen-item recommendations for qualitative diagnosis; select exclusively through the unchanged pinned macro validation HR@10. Predeclare baseline, loss-only, residual-only and combined trials, their checkpoint rule and the shared 43,200 GPU-second cap; all failures and diagnostics count toward it. Use remaining budget for pooling and global-scalar controls before further tuning. Conditional paired bootstrap intervals, if per-user host outputs are available, are descriptive and do not correct validation selection bias. No gains are claimed.",
+    "pseudocode": "Predeclare four variants, checkpoint-selection rule, tie-breaking and GPU budget.\nFor each category independently, retain the baseline preprocessing and dataset route:\n  Set training seed 42 and retain baseline SASRec hyperparameters.\n  Initialize residual projection normally, alpha=0, gate weights=0, gate bias=0.\n  For each batch of shifted sequence targets:\n    h = SASRec.log2feats(sequence)\n    r = padding_masked_causal_rolling_mean(item_embeddings(sequence), window=5)\n    length = cumulative_nonpadding_count(sequence)\n    g = sigmoid(Wg(concat(h, r, log1p(length))))\n    z = h + alpha * g * LayerNorm(Wr(r))\n    For each valid position:\n      eligible = catalog minus padding, current target and user's full training history\n      if eligible is empty: skip position\n      negatives = 16 independent uniform draws from eligible, with replacement\n      logits = dot(z, embedding([target] + negatives)) / 1.0\n      loss_position = cross_entropy(logits, target_index=0)\n    Optimize the mean loss over valid positions; preserve repeated positive targets.\n  Save all parameters, architecture configuration and sampler settings under trial directory.\n  Emit working/predict.py with identical final-prefix features and item scoring.\n  Verify predictor and diagnostic-view scores agree in evaluation mode.\nCompare unchanged baseline, loss-only, residual-only and combined using pinned macro validation HR@10.\nUse remaining budget for recent-mean-only, last-item-only and global-scalar controls.\nRecord every attempt; break exact validation ties toward simpler variants.\nIf per-user host hits are exposed, report paired category-stratified bootstrap differences descriptively.\nReserve hidden held-out evaluation for the final selected model.",
+    "originality": {
+      "score": 3,
+      "positive": "A compact integration of explicit recent-context control and multi-negative supervision yields a useful, falsifiable experiment.",
+      "negative": "SASRec already adapts to historical context, while HGN, TLSRec and residual-initialization literature provide close precedents; distinct preference disentanglement is not established."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Controlled pooling, scalar and gate comparisons can identify when recent context improves sequential prediction across categories.",
+      "negative": "The branch may duplicate SASRec, sparse histories may make gating unreliable, and training-margin gains may reflect score scaling or fail to improve validation HR@10."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "The architecture adds only rolling pooling, a projection, a scalar gate and a residual coefficient using existing embeddings.",
+      "negative": "Efficient history-excluded sampling, causal per-position pooling, exact baseline preservation, predictor serialization and comparable diagnostics require careful integration."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Introduces causal self-attention for sequential recommendation and supplies the starting architecture.",
+        "Already adaptively combines historical interactions, motivating controls before attributing gains to separate preference timescales."
+      ],
+      "limitations": [
+        "Does not establish current practical needs, compatibility or purchase satisfaction from interaction histories."
+      ]
+    },
+    {
+      "title": "Hierarchical Gating Networks for Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1906.09217",
+      "contributions": [
+        "Combines longer-term interests, gated recent-item representations and explicit item–item interactions.",
+        "Provides a close architectural precedent that reduces the proposed variant's novelty."
+      ],
+      "limitations": [
+        "Does not establish improvement under the pinned four-category RecHarness protocol."
+      ]
+    },
+    {
+      "title": "TLSRec: Time-Lag Sensitive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/2208.04760",
+      "contributions": [
+        "Provides precedent for hierarchical long- and short-term preference modeling and dimension-wise fusion."
+      ],
+      "limitations": [
+        "The proposed scalar recent-mean residual does not reproduce its architecture or demonstrate preference disentanglement.",
+        "Its results do not establish improvement under this benchmark."
+      ]
+    },
+    {
+      "title": "gSASRec",
+      "link": "https://www.ijcai.org/proceedings/2024/939",
+      "contributions": [
+        "Motivates additional negatives and calibrated generalized binary cross-entropy for sampling-related overconfidence.",
+        "Supplies an alternative loss control distinct from candidate softmax."
+      ],
+      "limitations": [
+        "Official unrestricted negative sampling differs from original SASRec history exclusion.",
+        "Calibration assumptions require scrutiny when changing exclusion policy; its results do not establish benefits for the proposed fusion."
+      ]
+    },
+    {
+      "title": "UFNRec",
+      "link": "https://arxiv.org/abs/2208.04116",
+      "contributions": [
+        "Addresses false-negative uncertainty using teacher-generated soft labels and consistency regularization."
+      ],
+      "limitations": [
+        "Uniform sampling and observed-positive masking do not resolve unobserved false negatives.",
+        "Teacher-based uncertainty handling is not implemented in the selected minimal variant."
+      ]
+    },
+    {
+      "title": "ReZero is All You Need: Fast Convergence at Large Depth",
+      "link": "https://arxiv.org/abs/2003.04887",
+      "contributions": [
+        "Provides precedent for zero-initialized trainable residual coefficients that preserve the starting function."
+      ],
+      "limitations": [
+        "Does not establish recommendation-specific gains or the best initialization for this benchmark.",
+        "At alpha=0, residual-branch and gate parameters initially receive no task gradient until alpha changes."
+      ]
+    },
+    {
+      "title": "Original SASRec negative sampler",
+      "link": "https://github.com/kang205/SASRec/blob/master/sampler.py",
+      "contributions": [
+        "Documents uniform negative sampling excluding the user's entire training-history item set.",
+        "Retains shifted repeated positive targets and permits repeated negative draws."
+      ],
+      "limitations": [
+        "Excluding observed history does not identify unobserved relevant items.",
+        "Its policy differs from unrestricted gSASRec sampling."
+      ]
+    },
+    {
+      "title": "Official gSASRec PyTorch dataset utilities",
+      "link": "https://github.com/asash/gSASRec-pytorch/blob/main/dataset_utils.py",
+      "contributions": [
+        "Documents unrestricted uniform sampling with replacement, including possible history and positive-target collisions."
+      ],
+      "limitations": [
+        "Changing its sampling policy changes the experiment and must be disclosed."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled recommendation metrics can produce different model rankings from full-catalog metrics."
+      ],
+      "limitations": [
+        "Does not provide permission to alter the pinned evaluator; conclusions remain specific to its candidate protocol."
+      ]
+    },
+    {
+      "title": "Statistical Significance Tests for Machine Translation Evaluation",
+      "link": "https://aclanthology.org/W04-3250/",
+      "contributions": [
+        "Provides paired-bootstrap methodology adaptable to paired per-user hit indicators.",
+        "Motivates resampling identical user indices within each category while preserving equal macro weights."
+      ],
+      "limitations": [
+        "This adaptation is conditional on trained models and fixed candidates.",
+        "It excludes training-seed variability and does not correct adaptive model selection."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how repeated optimization of finite validation estimates can overfit model selection.",
+        "Supports predeclared budgets, complete trial logs and restrained tuning around small gains."
+      ],
+      "limitations": [
+        "Ordinary paired bootstrap intervals do not eliminate adaptive selection bias.",
+        "Fixed required splits and seeds constrain independent uncertainty assessment."
+      ]
+    }
+  ]
+}

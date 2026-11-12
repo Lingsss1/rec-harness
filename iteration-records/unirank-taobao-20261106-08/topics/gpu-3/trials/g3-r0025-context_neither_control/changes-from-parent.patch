@@ -1,0 +1,153 @@
+--- g3-r0024-context_all_control/model.py
++++ g3-r0025-context_neither_control/model.py
+@@ -1,17 +1,25 @@
+-"""Prospective task-group ownership of shared context derivatives.
+-
+-Parent: g3-r0023-context_shared_live. The forward representation and all four
+-unweighted BCE objectives remain inherited. Two independent static switches
+-control whether cart/fav and buy towers may update shared context parameters.
+-The primary tower always keeps live context; disabled auxiliary tasks receive
+-context.detach(), which keeps values and trains all other task components.
+-
+-A full 2x2 retains every inherited module, including the unused copied context
+-modules and their lookups. No extra parameters, RNG draws, loss weights, labels,
+-identifiers, or forward messages are introduced. Equal allocated capacity does
+-not imply equal active gradients or backward cost. All-enabled and none-enabled
+-are same-seed endpoint reproduction controls, not independent repetitions.
+-This is a mechanism attribution study with no prior claim of improvement,
+-originality, or applicability beyond the frozen offline benchmark.
++"""Prospective positive/negative auxiliary ownership of shared context gradients.
++
++Parent: g3-r0024-context_all_control. All four task towers, input values,
++private item representations and inherited history routing are retained.
++Two switches allow positive and negative auxiliary examples, respectively,
++to update shared context through their own tower input. The primary path
++always stays live. All task losses and all tower gradients remain active.
++
++Forward never reads labels. Each auxiliary task receives its own value-equal
++clone of shared context. Only training_loss receives current training labels
++and computes a blocked loss-to-context partial VJP. A zero-valued surrogate
++subtracts only this derivative, preserving logits, BCE values and tower
++parameter gradients, including with cross-example Dice/BatchNorm coupling. The gate is not a gradient of a reweighted scalar
++objective: it is an explicit partial-derivative intervention. Dense clipping
++and adaptive embedding accumulators can still mediate indirect effects.
++
++All four cells allocate identical state and use the same FP32 BCE hook,
++including a fixed [1e-7, 1-1e-7] probability clamp. Existing references lack
++this declared loss hook, so historical endpoint reproduction is a host gate,
++not assumed bitwise equivalence. Each minibatch has exactly one forward/loss
++pair; ephemeral graph references are cleared by training_loss and on forward.
++No labels enter prediction, no parameters are added, and no training has been
++performed in the coding workspace. No originality or improvement is claimed.
+ """
+ import copy
+@@ -23,5 +31,5 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary', 'rank_evidence_scope': 'event', 'rank_evidence_location': 'route', 'rank_feedback_identity': False, 'retain_position_route': False, 'rank_primary_gain': 2.0, 'rank_aux_gradient': 'primary', 'selector_input_space': 'private', 'selector_input_gradient': 'detached', 'selector_transfer_source': 'none', 'selector_transfer_gradient': 'detached', 'aux_context_space': 'shared', 'aux_context_gradient': 'live', 'context_cart_fav_live': True, 'context_buy_live': True}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary', 'rank_evidence_scope': 'event', 'rank_evidence_location': 'route', 'rank_feedback_identity': False, 'retain_position_route': False, 'rank_primary_gain': 2.0, 'rank_aux_gradient': 'primary', 'selector_input_space': 'private', 'selector_input_gradient': 'detached', 'selector_transfer_source': 'none', 'selector_transfer_gradient': 'detached', 'aux_context_space': 'shared', 'aux_context_gradient': 'live', 'context_cart_fav_live': True, 'context_buy_live': True, 'context_positive_live': False, 'context_negative_live': False}
+ 
+ 
+@@ -47,4 +55,5 @@
+                  aux_context_space='shared', aux_context_gradient='live',
+                  context_cart_fav_live=True, context_buy_live=True,
++                 context_positive_live=False, context_negative_live=False,
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+@@ -158,4 +167,12 @@
+         if not isinstance(context_cart_fav_live, bool) or not isinstance(context_buy_live, bool):
+             raise ValueError('Task-group context derivative switches must be boolean')
++        if not context_cart_fav_live or not context_buy_live:
++            raise ValueError('Outcome study requires all auxiliary task groups live')
++        if not isinstance(context_positive_live, bool) or not isinstance(context_negative_live, bool):
++            raise ValueError('Outcome context derivative switches must be boolean')
++        self.context_positive_live = context_positive_live
++        self.context_negative_live = context_negative_live
++        # Plain ephemeral graph state, never a parameter or persistent buffer.
++        self._context_loss_inputs = None
+         self.context_cart_fav_live = context_cart_fav_live
+         self.context_buy_live = context_buy_live
+@@ -657,4 +674,6 @@
+ 
+     def forward(self, inputs):
++        # Discard a prior unused graph, including after failed diagnostics.
++        self._context_loss_inputs = None
+         if len(inputs) != 4 or inputs[3] is None:
+             raise ValueError('Historical feedback masks must be supplied by the host')
+@@ -743,14 +762,14 @@
+             pooled = target.new_zeros((batch, len(self.towers), self.value_width))
+         outputs = {}
++        context_loss_inputs = []
+         for index, (label, tower) in enumerate(zip(self.feature_map.labels, self.towers)):
+             task_context, task_target = context, target
+             if label != 'is_click':
+-                # Branch on the contracted task name, never its current label.
+-                # Forward values are unchanged; only this loss-to-context
+-                # derivative is stopped. Other task components still train.
+-                context_live = (self.context_buy_live if label == 'buy'
+-                                else self.context_cart_fav_live)
+-                task_context = (auxiliary_context if context_live
+-                                else auxiliary_context.detach())
++                # Isolate this task's backward edge before concatenation.
++                # Clone keeps exact forward values and avoids gating click or
++                # another task when a loss-source VJP is removed at training loss.
++                task_context = auxiliary_context.clone()
++                if self.training and torch.is_grad_enabled():
++                    context_loss_inputs.append((index, task_context))
+                 task_target = auxiliary_target
+             features = torch.cat([task_context, task_target, pooled[:, index]], dim=-1)
+@@ -758,3 +777,54 @@
+             outputs[label + '_pred'] = torch.sigmoid(
+                 logits + correction[:, index:index + 1].to(dtype=logits.dtype))
++        if self.training and torch.is_grad_enabled():
++            self._context_loss_inputs = tuple(context_loss_inputs)
+         return outputs
++
++    def training_loss(self, inputs, probabilities, train_labels):
++        """Gate loss-source contributions to context, including through Dice BN.
++
++        The host invokes this once after the matching training forward. A
++        partial VJP computes the blocked auxiliary loss contribution to its
++        context edge without accumulating parameter .grad values. Subtracting
++        a zero-valued, stopped-gradient surrogate removes exactly that edge
++        contribution on the final backward. The complete BCE still updates
++        every tower and every other live path. This also handles cross-example
++        coupling inside the inherited Dice/BatchNorm tower correctly.
++        """
++        context_inputs = self._context_loss_inputs
++        self._context_loss_inputs = None
++        if not self.training or not torch.is_grad_enabled() or context_inputs is None:
++            raise RuntimeError('training_loss requires one matching gradient-enabled training forward')
++        if (probabilities.ndim != 2 or probabilities.shape != train_labels.shape
++                or probabilities.shape[1] != len(self.towers)):
++            raise ValueError('Expected aligned [B,4] probabilities and training labels')
++        if len(context_inputs) != len(self.towers) - 1:
++            raise RuntimeError('Every auxiliary context edge must be recorded')
++        targets = train_labels.detach()
++        with torch.autocast(device_type=probabilities.device.type, enabled=False):
++            prediction = probabilities.float().clamp(1e-7, 1.0 - 1e-7)
++            losses = torch.nn.functional.binary_cross_entropy(
++                prediction, targets.float(), reduction='none')
++            objective = losses.mean(dim=0).sum()
++            surrogate = objective.new_zeros(())
++            for index, context_input in context_inputs:
++                if not context_input.requires_grad:
++                    raise RuntimeError('Shared context must be differentiable during training')
++                # Mask the originating loss, not its destination input row:
++                # Dice batch statistics can mix samples before this VJP.
++                positive = targets[:, index].gt(0.5)
++                allowed = torch.where(positive,
++                                      1.0 if self.context_positive_live else 0.0,
++                                      1.0 if self.context_negative_live else 0.0)
++                blocked_loss = (losses[:, index] * (1.0 - allowed)).mean()
++                blocked_gradient, = torch.autograd.grad(
++                    blocked_loss, context_input, retain_graph=True,
++                    create_graph=False, allow_unused=False)
++                # Exactly zero value at finite states; its derivative w.r.t.
++                # context equals the detached blocked loss-to-context VJP.
++                # Stopping the VJP prevents second derivatives and therefore
++                # prevents this correction from changing tower gradients.
++                displacement = context_input.float() - context_input.detach().float()
++                surrogate = surrogate + (
++                    displacement * blocked_gradient.detach().float()).sum()
++            return objective - surrogate

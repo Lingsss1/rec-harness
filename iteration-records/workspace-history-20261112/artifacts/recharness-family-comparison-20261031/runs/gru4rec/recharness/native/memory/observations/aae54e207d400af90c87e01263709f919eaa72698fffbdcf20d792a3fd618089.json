@@ -1,0 +1,89 @@
+{
+  "schema_version": 2,
+  "protocol_id": "63d884e335450b4c7d4c05470c02cfbc484d52d6b839640f603abc93a1b33219",
+  "record": {
+    "round_idx": 23,
+    "trial_group_id": "trialgrp_1793452865506_2865811",
+    "trial_id": 2,
+    "arm": "feature_construction",
+    "selected_categories": [
+      "feature_construction"
+    ],
+    "patch_summary": "Add sparse, checkpointed training-transition count features to history inputs and synchronize the embedded predictor loader. Retain one GRU4Rec checkpoint per category and all existing training settings.",
+    "benchmark_score": 0.6025,
+    "val_score": 0.6025,
+    "is_winner": true,
+    "is_group_winner": true,
+    "valid": true,
+    "failure_type": null,
+    "delta_vs_prev_best": -0.0037,
+    "delta_vs_input": -0.0037,
+    "outcome": "regressed",
+    "val_support": "regressed",
+    "gpu_seconds": 406.6196875423193,
+    "trial_cap_seconds": 3113.9100338108838,
+    "per_dataset_hr10": {
+      "Movies_and_TV": 0.665,
+      "Industrial_and_Scientific": 0.625,
+      "Electronics": 0.45,
+      "CDs_and_Vinyl": 0.67
+    },
+    "error": "",
+    "parameter_changes": [],
+    "changed_definitions": [
+      "GRU4RecModel",
+      "GRU4RecModel.__init__",
+      "GRU4RecModel._interest_states",
+      "train_one_dataset",
+      "write_predict_script"
+    ],
+    "summary": "Add sparse, checkpointed training-transition count features to history inputs and synchronize the embedded predictor loader. Retain one GRU4Rec checkpoint per category and all existing training settings.",
+    "proposal_history": [
+      {
+        "attempt": 1,
+        "summary": "Add sparse, checkpointed training-transition count features to history inputs and synchronize the embedded predictor loader. Retain one GRU4Rec checkpoint per category and all existing training settings."
+      }
+    ],
+    "hypothesis": "Across all four datasets, derive adjacent-item transition counts solely from training histories. For each observed history item with a real predecessor, multiply its input embedding by 1+0.05*c/(c+5), where c is that ordered pair's training count; use scale 1 otherwise. Recurrent inputs may benefit from distinguishing supported transitions. This fixed input feature adds no prediction score or learned module. Preserve embedding design, GRU topology, readout, loss and optimizer; checkpoint the count table and reproduce preprocessing in the predictor writer.",
+    "input_source_sha256": "b5d6ac2ae54cf18e03e67777c6b1ae3ba7d56c657009b1b1c6b07656aefc6f4e",
+    "candidate_source_sha256": "a4501a0430a99d72359ddfae3e7e35bb835118b0a59f652852dd85bbffcab5be",
+    "input_normalized_sha256": "b9e6da406acd309f2e850bfd4807c7a496a218a1e5c8910b6e8142948f71229c",
+    "candidate_normalized_sha256": "203c7064cc6c0962bf579d4be70e3c5ed285098734ecc5388341045655e01f51",
+    "patch_sha256": "36485c28b4a3fcdd3d54ff719fa9ea2caab2f173c1569ed75afec6a774d495e7",
+    "diff_excerpt": "--- \n+++ \n@@ -188,8 +188,16 @@\n class GRU4RecModel(nn.Module):\n     def __init__(self, itemnum: int, hidden_units: int = 128, num_layers: int = 1,\n-                 dropout_rate: float = 0.1):\n+                 dropout_rate: float = 0.1, transition_keys=None, transition_counts=None):\n         super().__init__()\n         self.itemnum = itemnum\n         self.hidden_units = hidden_units\n+        self.register_buffer(\n+            \"transition_keys\",\n+            torch.as_tensor([] if transition_keys is None else transition_keys, dtype=torch.long),\n+        )\n+        self.register_buffer(\n+            \"transition_counts\",\n+            torch.as_tensor([] if transition_counts is None else transition_counts, dtype=torch.float32),\n+        )\n         self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)\n         dropout = dropout_rate if num_layers > 1 else 0.0\n@@ -202,5 +210,24 @@\n \n     def _interest_states(self, seq: torch.Tensor) -> torch.Tensor:\n-        emb = self.dropout(self.item_emb(seq))\n+        emb = self.item_emb(seq)\n+        if self.transition_keys.numel() > 0:\n+            previous = torch.cat((torch.zeros_like(seq[:, :1]), seq[:, :-1]), dim=1)\n+            pair_keys = previous * (self.itemnum + 1) + seq\n+            indices = torch.searchsorted(self.transition_keys, pair_keys.contiguous())\n+            safe_indices = indices.clamp(max=self.transition_keys.numel() - 1)\n+            matched = (\n+                previous.ne(0)\n+                & seq.ne(0)\n+                & indices.lt(self.transition_keys.numel())\n+                & self.transition_keys[safe_indices].eq(pair_keys)\n+            )\n+            counts = torch.where(\n+                matched,\n+                self.transition_counts[safe_indices],\n+                torch.zeros_like(seq, dtype=self.transition_counts.dtype),\n+            )\n+            scale = 1.0 + 0.05 * counts / (counts + 5.0)\n+            emb = emb * scale.to(emb.dtype).unsqueeze(-1)\n+        emb = self.dropout(emb)\n         out, _ = self.gru(emb)\n         positions = torch.arange(seq.size(1), device=seq.device)\n@@ -240,4 +267,11 @@\n         raise RuntimeError(f\"empty dataset or item vocabulary for {dataset_name}\")\n \n+    transition_counter = defaultdict(int)\n+    for history in user_train.values():\n+        for previous, current in zip(history, history[1:]):\n+            if previous > 0 and current > 0:\n+                transition_counter[previous * (itemnum + 1) + current] += 1\n+    transition_keys = sorted(transition_counter)\n+    transition_counts = [transition_counter[key] for key in transition_keys]\n     model = GRU4RecModel(\n         itemnum=itemnum,\n@@ -245,4 +279,6 @@\n         num_layers=NUM_LAYERS,\n         dropout_rate=DROPOUT_RATE,\n+        transition_keys=transition_keys,\n+        transition_counts=transition_counts,\n     ).to(device)\n     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)\n@@ -301,4 +337,5 @@\n             \"dropout_rate\": DRO",
+    "category_rationales": [
+      {
+        "category": "feature_construction",
+        "rationale": "Use training-only adjacent-item counts to scale each history input embedding by 1+0.05*c/(c+5). Positions without a real predecessor retain scale 1. This fixed feature preserves the learned embeddings, GRU, readout, loss and optimizer across all four category models."
+      }
+    ],
+    "baseline_validation": 0.6062,
+    "basin_id": "default",
+    "execution_status": "success",
+    "attempt_count": 1,
+    "training_attempt_count": 1,
+    "training_attempts": [
+      {
+        "id": "round-0022-slot-2-attempt-1",
+        "status": "success",
+        "source_sha256": "a4501a0430a99d72359ddfae3e7e35bb835118b0a59f652852dd85bbffcab5be",
+        "allocated_gpu_seconds": 406.6196875423193,
+        "error": "",
+        "score": 0.6025
+      }
+    ],
+    "checkpoint_fingerprints": {
+      "Movies_and_TV_model.pt": "e9659cf846225498f47f755def53ffab5eadb6bb69cca6d34e59230f3e50541e",
+      "Industrial_and_Scientific_model.pt": "1fe95155fb19ff6ea430a579e7ed72efd8add1f36a1533f4caa89b267590f92f",
+      "Electronics_model.pt": "0ccbdead9eb047c87dcca87c8c69e94249aa25671cba41c01f07140de9f8d1e7",
+      "CDs_and_Vinyl_model.pt": "99dc0d79976d8cb65c8a4708c5e9f1b1109429b3aaf3871ada7f043c220dcba9"
+    },
+    "repair_errors": [],
+    "phase": "regular",
+    "promoted": false,
+    "provisional": false,
+    "protocol_id": "63d884e335450b4c7d4c05470c02cfbc484d52d6b839640f603abc93a1b33219",
+    "evidence_id": "aae54e207d400af90c87e01263709f919eaa72698fffbdcf20d792a3fd618089"
+  },
+  "record_sha256": "caef9e7fa420d59891e45c3c560b1d8fabc103ea9a29318e12628f4e8a915ef6"
+}

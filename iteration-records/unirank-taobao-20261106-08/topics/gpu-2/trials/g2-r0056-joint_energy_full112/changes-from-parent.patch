@@ -1,0 +1,105 @@
+--- g2-r0055-joint_context_rank_separate/model.py
++++ g2-r0056-joint_energy_full112/model.py
+@@ -1,7 +1,8 @@
+-"""Context-only rank reduction in the sparse buy head.
+-
+-Prospective host study: fused reference, separated dense arithmetic control,
+-and two context ranks. Retain local semantic branches, all nonlinear channels,
+-full-input residual and all source-gradient/masking contracts. No result claim.
++"""Attributing context-rank loss to truncation versus initialization energy.
++
++Prospective host study: separate dense and raw-rank35 bridges, exact full-rank
++factor control, and energy-restored rank35 candidate. Keep every inherited
++forward/masking/gradient path; all new work is fresh-weight construction only.
++No training, checkpoint pruning, measured speedup or quality claim is made.
+ """
+ import torch
+@@ -12,5 +13,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'separate', 'owner_context_rank': 0}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'full_rank_control', 'owner_context_rank': 112, 'owner_context_scale': 'inherited'}
+ 
+ 
+@@ -153,10 +154,14 @@
+     affine, checkpoint, data, spectral tensor or derived cache persists.
+     """
+-    def __init__(self, source, context_width, projection, rank):
++    def __init__(self, source, context_width, projection, rank, scale):
+         super().__init__()
+         if not isinstance(source, _PartitionedAffine):
+             raise ValueError('Expected a packed semantic affine')
+-        if projection not in ('separate', 'rank'):
+-            raise ValueError('Expected separate dense or rank context projection')
++        if projection not in ('separate', 'rank', 'full_rank_control'):
++            raise ValueError('Expected separate, reduced-rank or full-rank context')
++        if scale not in ('inherited', 'frobenius'):
++            raise ValueError('Unknown context initialization scale')
++        if projection != 'rank' and scale != 'inherited':
++            raise ValueError('Only reduced rank accepts energy restoration')
+         if projection == 'separate' and rank != 0:
+             raise ValueError('Separate dense context must have rank zero')
+@@ -165,4 +170,6 @@
+         if projection == 'rank' and rank * (context_width + source.out_features) >= context_width * source.out_features:
+             raise ValueError('Context factors must reduce parameter storage')
++        if projection == 'full_rank_control' and rank != min(context_width, source.out_features):
++            raise ValueError('Full-rank diagnostic must retain every singular direction')
+         self.in_features = source.in_features
+         self.out_features = source.out_features
+@@ -192,8 +199,22 @@
+                     requires_grad=source.first_weight.requires_grad)
+             else:
+-                # CPU FP32 SVD only at construction; balanced top-r factors.
++                # CPU FP32 SVD only at construction. Full-rank mode is an
++                # attribution control, not a reduction. It retains all
++                # singular directions; rank mode retains only the top r.
+                 left, singular, right = torch.linalg.svd(
+                     context.to(device='cpu', dtype=torch.float32), full_matrices=False)
++                if scale == 'frobenius':
++                    total_energy = singular.square().sum()
++                    retained_energy = singular[:rank].square().sum()
++                    if (not torch.isfinite(total_energy) or not torch.isfinite(retained_energy)
++                            or total_energy <= 0 or retained_energy <= 0):
++                        raise ValueError('Cannot normalize degenerate context energy')
++                    energy_gain = (total_energy / retained_energy).sqrt()
+                 left, singular, right = left[:, :rank], singular[:rank], right[:rank, :]
++                if scale == 'frobenius':
++                    # Restores ||U_r diag(s_r) V_r||_F to ||W||_F.
++                    # Following sqrt splits the gain across both factors.
++                    # No persistent scalar or forward-time scale operation.
++                    singular = singular * energy_gain
+                 pivots = left.abs().argmax(dim=0, keepdim=True)
+                 signs = left.gather(0, pivots).squeeze(0).sign()
+@@ -253,4 +274,5 @@
+                  owner_input_partition='dense',
+                  owner_context_projection='fused', owner_context_rank=0,
++                 owner_context_scale='inherited',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -265,11 +287,15 @@
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         self.compression_routes = compression_routes
+-        if owner_context_projection not in ('fused', 'separate', 'rank'):
++        if owner_context_projection not in ('fused', 'separate', 'rank', 'full_rank_control'):
+             raise ValueError('Unknown context projection')
++        if owner_context_scale not in ('inherited', 'frobenius'):
++            raise ValueError('Unknown context initialization scale')
++        if owner_context_projection != 'rank' and owner_context_scale != 'inherited':
++            raise ValueError('Energy restoration requires reduced context rank')
+         if isinstance(owner_context_rank, bool) or not isinstance(owner_context_rank, int) or owner_context_rank < 0:
+             raise ValueError('Context rank must be a nonnegative integer')
+-        if owner_context_projection != 'rank' and owner_context_rank != 0:
++        if owner_context_projection in ('fused', 'separate') and owner_context_rank != 0:
+             raise ValueError('Only rank context projection accepts positive rank')
+-        if owner_context_projection == 'rank' and owner_context_rank == 0:
++        if owner_context_projection in ('rank', 'full_rank_control') and owner_context_rank == 0:
+             raise ValueError('Rank context projection requires positive rank')
+         if owner_context_projection != 'fused' and owner_input_partition != 'semantic':
+@@ -592,5 +618,6 @@
+                     tower[0] = _ContextAffine(
+                         tower[0], len(self.user_fields) * embedding_dim,
+-                        owner_context_projection, owner_context_rank)
++                        owner_context_projection, owner_context_rank,
++                        owner_context_scale)
+         self.model_to_device()
+ 

@@ -30,6 +30,7 @@ class Trajectory:
         self.registration = registration
         self.task_name, self.arm, self.replicate = task, arm, replicate
         self.task = registration["config"]["tasks"][task]
+        self.budget = registration["config"]["protocol"]["trial_budget"]
         self.policy = ARMS[arm]
         self.root = self.study_root / "trajectories" / task / arm / str(replicate)
         self.runtime = runtime
@@ -46,7 +47,7 @@ class Trajectory:
         copy_tree(Path(self.task["public_source"]), self.root / "artifacts" / "t000")
         state = {"registration_id": self.registration["registration_id"], "task": self.task_name,
                  "arm": self.arm, "replicate": self.replicate, "created_at": now(),
-                 "records": [], "plans": {}, "pre_reviews": {}, "final_reviews": {},
+                 "trial_budget": self.budget, "records": [], "plans": {}, "pre_reviews": {}, "final_reviews": {},
                  "directions": {}, "best_trial": 0, "best_metric": self.task["baseline_validation"],
                  "session": None, "resume": False, "pending": None, "event_count": 0,
                  "event_head": None, "agent_calls": 0, "status": "searching", "test": None}
@@ -124,7 +125,7 @@ class Trajectory:
         task = {k: self.task[k] for k in ("description", "metric", "direction", "editable", "baseline_validation")}
         task["editable"] = [p for p in task["editable"] if p != "split_config.json"]
         task["fixed_split"] = True
-        packet = {"task": task, "budget_remaining": 100 - len(state["records"]),
+        packet = {"task": task, "budget_remaining": self.budget - len(state["records"]),
                   "best_trial": state["best_trial"], "best_metric": state["best_metric"],
                   "experiments": state["records"], "request": extra}
         if self.policy["planning"]:
@@ -169,7 +170,7 @@ class Trajectory:
             copy_tree(self.artifact(state["best_trial"]), work)
         packet = self.build_packet(state, role, extra)
         evidence = self.materialize_evidence(state, packet)
-        prompt = (Path(__file__).parent / "resources" / "protocol.md").read_text()
+        prompt = (Path(__file__).parent / "resources" / "protocol.md").read_text().replace("100-call budget", str(self.budget) + "-call budget")
         if not self.policy["planning"]:
             # Do not teach the baseline the treatment's planning/review strategy.
             prompt = prompt.split("## Prospective plans", 1)[0]
@@ -234,7 +235,7 @@ class Trajectory:
 
     def trial(self, state):
         count = len(state["records"])
-        if count >= 100 or state["pending"]:
+        if count >= self.budget or state["pending"]:
             raise ProtocolError("No available trial slot")
         stage, slot, trial = count // 10 + 1, count % 10 + 1, count + 1
         plan = state["plans"].get(str(stage), [None])[-1]
@@ -292,8 +293,12 @@ class Trajectory:
         payload_path = self.root / "validation" / ("t%03d" % pending["trial"]) / "metrics.json"
         score, payload, error, checkpoint_hash = None, None, None, None
         try:
-            if transport["returncode"] != 0 or transport["timed_out"]:
-                raise ProtocolError("Timeout or execution failure")
+            if transport["timed_out"]:
+                raise ProtocolError("Evaluation timed out: " + (transport.get("stderr") or "")[-4000:])
+            if transport["returncode"] != 0:
+                details = transport.get("stderr") or "No worker diagnostic returned; inspect visible trial logs"
+                raise ProtocolError("Evaluation failed (exit %s): %s" %
+                                    (transport["returncode"], details[-4000:]))
             payload = read(payload_path)
             score = score_result(payload, self.task)
             files = inventory(self.checkpoint(pending["trial"]))
@@ -336,9 +341,9 @@ class Trajectory:
         self.finish_trial(state, transport)
 
     def finalize(self, state):
-        if len(state["records"]) != 100 or state["pending"]:
-            raise ProtocolError("Hidden test is only allowed after 100 accounted calls")
-        if self.policy["planning"] and "10" not in state["final_reviews"]:
+        if len(state["records"]) != self.budget or state["pending"]:
+            raise ProtocolError("Hidden test is only allowed after the registered budget is exhausted")
+        if self.policy["planning"] and str((self.budget + 9) // 10) not in state["final_reviews"]:
             raise ProtocolError("Final direction review is missing")
         if state["test"] is not None:
             if state["test"]["status"] == "started":
@@ -372,7 +377,11 @@ class Trajectory:
                 if self.policy["planning"] and n and n % 10 == 0 and str(n // 10) not in state["final_reviews"]:
                     self.review(state, n // 10, final=True)
                     continue
-                if n == 100:
+                if n == self.budget:
+                    final_stage = (self.budget + 9) // 10
+                    if self.policy["planning"] and str(final_stage) not in state["final_reviews"]:
+                        self.review(state, final_stage, final=True)
+                        continue
                     self.finalize(state)
                     return state
                 stage = n // 10 + 1

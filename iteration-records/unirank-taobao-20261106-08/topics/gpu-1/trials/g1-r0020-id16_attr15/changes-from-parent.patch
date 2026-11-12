@@ -1,0 +1,211 @@
+--- g1-r0019-drop15_replay/model.py
++++ g1-r0020-id16_attr15/model.py
+@@ -1,14 +1,14 @@
+-"""Prospective endpoint-coordinate deletion factorial.
+-
+-All cells inherit the native-width compressed UF model and source-coupled
+-scratch initialization. The only new selection retains item coordinates 1..14,
+-completing a two-by-two deletion of source coordinates zero and fifteen.
+-Scorer and tower columns follow the same retained coordinates. Context/action,
+-hidden tensors, buffers, RNG policy and forward operators stay inherited.
+-No trained reference, data-dependent selection or novelty claim is involved.
+-Numerical model checks, training and assessment are host-owned.
++"""Prospective two-factor deletion of item coordinate fifteen.
++
++ID and item-attribute widths vary independently between fifteen and sixteen.
++Context/action widths, UF compression, Dice, heads and gradient gates remain
++inherited. Copy exact prefix coordinates from a scratch full16 source, including
++semantic scorer/tower columns, and preserve its ending CPU RNG stream. No
++checkpoint, labels, scoring, data access or trained teacher enters construction.
++Numerical parity and host cost/quality evaluation remain pending. Same-seed
++replays are consistency controls, not independent repetitions or novelty proof.
+ """
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'item_embedding_dim': 15, 'action_embedding_dim': 16, 'source_coupled_initialization': True, 'item_coordinate_selection': 'prefix'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'id_embedding_dim': 16, 'attribute_embedding_dim': 15, 'action_embedding_dim': 16, 'source_coupled_initialization': True}
+ 
+ import copy
+@@ -20,16 +20,12 @@
+ 
+ 
+-
+-
+-def _capacity_layout(feature_map, item_width, action_width):
+-    """Derive candidate-local widths without mutating host metadata.
+-
+-    Mirror FeatureEmbeddingDict's ordered alias ownership. Context aliases
+-    protect their table at sixteen. Cross-group aliases keep the larger width;
+-    the constructor rejects a layout that cannot implement the requested cell.
+-    Actual alias identities and parameter savings still need host audit.
++def _capacity_layout(feature_map, id_width, attribute_width, action_width):
++    """Copy public metadata and honor ordered upstream table aliases.
++
++    Aliases keep the maximum requested width. The constructor rejects a cell
++    if sharing prevents its exact ID/attribute/context/action allocation.
+     """
+-    if item_width not in (8, 12, 14, 15, 16) or action_width != 16:
+-        raise ValueError('Item width must be 8/12/14/15/16 and action width sixteen')
++    if id_width not in (15, 16) or attribute_width not in (15, 16) or action_width != 16:
++        raise ValueError('ID/attribute widths must be fifteen or sixteen; action stays sixteen')
+     if ('item_id' not in feature_map.features
+             or feature_map.features['item_id'].get('source') != 'item'
+@@ -38,6 +34,5 @@
+     local_map = copy.copy(feature_map)
+     local_map.features = copy.deepcopy(feature_map.features)
+-    owner_for = {}
+-    owner_widths = {}
++    owner_for, owner_widths = {}, {}
+     for name, spec in feature_map.features.items():
+         if spec['type'] == 'meta':
+@@ -51,5 +46,5 @@
+         owner_for[name] = owner
+         if spec.get('source') == 'item':
+-            requested = item_width
++            requested = id_width if name == 'item_id' else attribute_width
+         elif spec.get('source') == 'action':
+             requested = action_width
+@@ -65,5 +60,6 @@
+ class _NativeModel(MultiTaskModel):
+     def __init__(self, feature_map, model_id='ItemActionCapacity', gpu=-1,
+-                 embedding_dim=16, item_embedding_dim=16, action_embedding_dim=16,
++                 embedding_dim=16, id_embedding_dim=16, attribute_embedding_dim=16,
++                 action_embedding_dim=16,
+                  attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+@@ -90,7 +86,7 @@
+         self.block_aux_item_grad = block_aux_item_grad
+         if embedding_dim != 16:
+-            raise ValueError('Keep fallback embedding_dim=16; use item/action capacity factors')
++            raise ValueError('Keep fallback embedding_dim=16; use ID/attribute capacity factors')
+         local_map, self.table_widths = _capacity_layout(
+-            feature_map, item_embedding_dim, action_embedding_dim)
++            feature_map, id_embedding_dim, attribute_embedding_dim, action_embedding_dim)
+         self.embedding_layer = FeatureEmbeddingDict(local_map, embedding_dim)
+         for name, width in self.table_widths.items():
+@@ -106,6 +102,8 @@
+         if self.action_field is None:
+             raise ValueError('Historical action field is required')
+-        if any(self.table_widths[name] != item_embedding_dim for name in self.item_fields):
+-            raise ValueError('Embedding aliases prevent the requested uniform item width')
++        if any(self.table_widths[name] != (id_embedding_dim if name == 'item_id'
++                                         else attribute_embedding_dim)
++               for name in self.item_fields):
++            raise ValueError('Embedding aliases prevent the requested ID/attribute widths')
+         if self.table_widths[self.action_field] != action_embedding_dim:
+             raise ValueError('Embedding aliases prevent the requested action width')
+@@ -254,31 +252,14 @@
+         return predictions
+ 
+-
+-def _item_coordinates(item_width, selection):
+-    """Predeclared coordinate replacements; no data or RNG is consulted."""
+-    if item_width not in (8, 12, 14, 15, 16):
+-        raise ValueError('Unsupported item width')
+-    if selection == 'interior':
+-        if item_width != 14:
+-            raise ValueError('Interior selection requires width fourteen')
+-        return list(range(1, 15))
+-    if selection not in ('prefix', 'suffix'):
+-        raise ValueError('Selection must be prefix, suffix or interior')
+-    start = 0 if selection == 'prefix' else 16 - item_width
+-    return list(range(start, start + item_width))
+-
+-
+-def _source_columns(item_field_count, context_field_count, item_width, action_width,
+-                    item_coordinate_selection='prefix'):
+-    """Map native input coordinates to semantic full16 field/block positions."""
+-    if item_width not in (8, 12, 14, 15, 16) or action_width != 16:
+-        raise ValueError('Item width must be 8/12/14/15/16 and action width sixteen')
+-    if item_field_count <= 0 or context_field_count < 0:
+-        raise ValueError('Invalid supplied field counts')
+-    full_key = 16 * item_field_count
++def _source_columns(item_widths, context_field_count, action_width=16):
++    """Map variable-width fields into all semantic full16 input blocks."""
++    if (not item_widths or any(width not in (15, 16) for width in item_widths)
++            or context_field_count < 0 or action_width != 16):
++        raise ValueError('Invalid ID/attribute source layout')
++    full_key = 16 * len(item_widths)
+     full_context = 16 * context_field_count
+     key_columns = [16 * field + coordinate
+-                   for field in range(item_field_count)
+-                   for coordinate in _item_coordinates(item_width, item_coordinate_selection)]
++                   for field, width in enumerate(item_widths)
++                   for coordinate in range(width)]
+     scorer_columns = [block * full_key + column
+                       for block in range(4) for column in key_columns]
+@@ -293,38 +274,34 @@
+ 
+ class Model(_NativeModel):
+-    def __init__(self, feature_map, model_id='EndpointCoordinateDeletion', gpu=-1,
+-                 item_embedding_dim=15, action_embedding_dim=16,
+-                 source_coupled_initialization=True,
+-                 item_coordinate_selection='prefix', **kwargs):
++    def __init__(self, feature_map, model_id='IDAttributeCapacity', gpu=-1,
++                 id_embedding_dim=16, attribute_embedding_dim=15,
++                 action_embedding_dim=16, source_coupled_initialization=True, **kwargs):
+         if not isinstance(source_coupled_initialization, bool):
+             raise ValueError('Initialization coupling must be boolean')
+-        # Validate the new factor before constructing any model or consuming RNG.
+-        _item_coordinates(item_embedding_dim, item_coordinate_selection)
+-        self.item_coordinate_selection = item_coordinate_selection
+-        # Both modes pay for the same untrained CPU reference. No data,
+-        # checkpoint or trained teacher is involved. Capture the incoming RNG
+-        # so the uncoupled control has ordinary native initialization.
++        # Reject unsupported metadata before any RNG-consuming construction.
++        _capacity_layout(feature_map, id_embedding_dim, attribute_embedding_dim,
++                         action_embedding_dim)
+         incoming_cpu_rng = torch.get_rng_state()
+         reference = _NativeModel(
+             feature_map, model_id=model_id, gpu=-1,
+-            item_embedding_dim=16, action_embedding_dim=16, **kwargs)
+-        # Preserve the ending full16 CPU stream for subsequent host sampling.
+-        # This fork touches no device RNG and never reseeds a generator.
++            id_embedding_dim=16, attribute_embedding_dim=16,
++            action_embedding_dim=16, **kwargs)
++        # Keep the same ending full16 CPU stream for the host's data sampler.
++        # Construction uses no device random draws or manually chosen seeds.
+         with torch.random.fork_rng(devices=[]):
+             torch.set_rng_state(incoming_cpu_rng)
+             super().__init__(
+                 feature_map, model_id=model_id, gpu=gpu,
+-                item_embedding_dim=item_embedding_dim,
++                id_embedding_dim=id_embedding_dim,
++                attribute_embedding_dim=attribute_embedding_dim,
+                 action_embedding_dim=action_embedding_dim, **kwargs)
+         if source_coupled_initialization:
+             self._copy_source_initialization(reference)
+-        # Scratch parameters/buffers never become registered model state.
+         del reference
+ 
+     def _copy_source_initialization(self, reference):
++        item_widths = [self.table_widths[field] for field in self.item_fields]
+         scorer_columns, tower_columns = _source_columns(
+-            len(self.item_fields), len(self.user_fields),
+-            self.table_widths[self.item_fields[0]], self.action_width,
+-            self.item_coordinate_selection)
++            item_widths, len(self.user_fields), self.action_width)
+         source_state = reference.state_dict()
+         target_state = self.state_dict()
+@@ -333,8 +310,6 @@
+         tower_inputs = {'towers.' + str(index) + '.0.weight'
+                         for index in range(self.num_tasks)}
+-        item_tables = {'embedding_layer.embedding_layers.' + field + '.weight'
+-                       for field in self.item_fields}
+-        item_coordinates = _item_coordinates(
+-            self.table_widths[self.item_fields[0]], self.item_coordinate_selection)
++        item_tables = {'embedding_layer.embedding_layers.' + field + '.weight':
++                       self.table_widths[field] for field in self.item_fields}
+         with torch.no_grad():
+             for name, target in target_state.items():
+@@ -343,9 +318,6 @@
+                     if value.ndim != 2 or target.ndim != 2:
+                         raise ValueError('Expected categorical embedding matrices')
+-                    if name in item_tables:
+-                        value = value[:, item_coordinates]
+-                    else:
+-                        # Context/action retain all sixteen source coordinates.
+-                        value = value[:, :target.shape[1]]
++                    width = item_tables.get(name, 16)
++                    value = value[:, :width]
+                 elif name == 'local_activation.0.weight':
+                     value = value[:, scorer_columns]

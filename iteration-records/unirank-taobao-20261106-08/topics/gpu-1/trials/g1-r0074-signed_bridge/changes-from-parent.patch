@@ -1,0 +1,78 @@
+--- g1-r0073-even_readout/model.py
++++ g1-r0074-signed_bridge/model.py
+@@ -1,12 +1,11 @@
+-"""Prospective click-adapter sign-invariance replacement study; unmeasured.
+-
+-At the click residual adapter only, compare f(x,c), f(x,axis(c)), and the
+-continuous even readout (f(x,c)+f(x,-c))/2. The same stateless ReLU adapter
+-and all three evaluations execute in every cell; unselected evaluations
+-remain in the backward graph with zero coefficient. No parameter, buffer,
+-input event, task mask, initialization or host recipe is added or changed.
+-Other consumers retain the inherited coarse axis. This tests one supplied
+-coarse-summary polarity, not invariance to arbitrary event order.
+-Native torch/BF16/autograd checks and performance measurements are host-owned.
++"""Prospective click-only capacity x coarse-sign readout factorial.
++
++The candidate widens only the click residual Linear/ReLU/Linear adapter.
++Signed/even treatments have identical parameters and execution at each width.
++The inherited helper evaluates both signs and the pivot axis in every cell;
++the even readout averages the two signs before the unchanged tower/Dice.
++All input handling, masks, summaries, other consumers and host recipe remain
++inherited. This is a local sign quotient, not global history invariance.
++Native execution and measured performance are pending authorized host checks.
+ """
+ import torch
+@@ -17,5 +16,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'interaction_coarse_signed': False, 'primary_adapter_coarse_signed': True, 'auxiliary_adapter_coarse_signed': False, 'block_primary_adapter_coarse_grad': False, 'primary_adapter_readout': 'even'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'interaction_coarse_signed': False, 'primary_adapter_coarse_signed': True, 'auxiliary_adapter_coarse_signed': False, 'block_primary_adapter_coarse_grad': False, 'primary_adapter_readout': 'signed', 'primary_residual_hidden': 16}
+ 
+ 
+@@ -40,5 +39,6 @@
+                  interaction_coarse_signed=False,
+                  block_primary_adapter_coarse_grad=False,
+-                 primary_adapter_readout='even',
++                 primary_adapter_readout='signed',
++                 primary_residual_hidden=16,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -73,4 +73,11 @@
+             raise ValueError('Readout study requires signed attached primary, axis auxiliary and direct routing')
+         self.primary_adapter_readout = primary_adapter_readout
++        if (not isinstance(primary_residual_hidden, int)
++                or isinstance(primary_residual_hidden, bool)
++                or primary_residual_hidden not in (16, 64)):
++            raise ValueError('Click adapter width must be 16 or 64')
++        if residual_hidden != 16:
++            raise ValueError('Auxiliary adapters retain the inherited width 16')
++        self.primary_residual_hidden = primary_residual_hidden
+         if block_aux_scorer_grad is not True:
+             raise ValueError('Auxiliary scorer parameter gradients must stay blocked')
+@@ -193,5 +200,5 @@
+ 
+         # Inherit the action-aware scorer and towers from the previous factorial.
+-        # All cells instantiate exactly the same modules in exactly this order.
++        # All cells first instantiate the inherited modules in this order.
+         layers = []
+         width = 4 * self.key_width + embedding_dim
+@@ -242,4 +249,19 @@
+             for output in self.interaction_outputs:
+                 nn.init.zeros_(output.weight)
++        # First construct ALL inherited modules with the original shapes and
++        # RNG order. Replace only the click adapter afterwards, in a separate
++        # fork: auxiliary adapters, context/history projections, outputs,
++        # towers, embeddings and the caller RNG stay identical across widths.
++        # The discarded narrow click module is not registered or optimized.
++        if self.primary_residual_hidden != residual_hidden:
++            click_index = list(feature_map.labels).index('is_click')
++            adapter_input = input_width + len(self.match_fields) + 5 * self.value_width
++            with torch.random.fork_rng(devices=[]):
++                click_adapter = nn.Sequential(
++                    nn.Linear(adapter_input, self.primary_residual_hidden), nn.ReLU(),
++                    nn.Linear(self.primary_residual_hidden, self.value_width))
++                nn.init.zeros_(click_adapter[-1].weight)
++                nn.init.zeros_(click_adapter[-1].bias)
++            self.residual_bank[click_index] = click_adapter
+         # Add only nonlearned state, AFTER every inherited learned module and
+         # initialization. Native Dice has running mean/variance and counters.

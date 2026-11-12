@@ -1,0 +1,112 @@
+--- g0-r0017-available_norm/model.py
++++ g0-r0018-block_energy_reversed/model.py
+@@ -1,8 +1,8 @@
+-"""Prospective support by scale factorial for a duplicate match channel.
+-
+-Keep the four incumbent summaries and the fifth match direction. Cross the
+-inherited joint-support gate with basic availability, and norm-matched with
+-raw coefficients. Every cell builds all alternatives before selection.
+-Ordinals are array positions, not elapsed time. No new moment is claimed.
++"""Prospective block-energy balancing of the fifth target-match summary.
++
++Retain all incumbent summaries, task adapters and gradient ownership. Compare
++aligned per-active-block inverse-energy gains, reversed active-block gains,
++and the incumbent global normalization at equal total coefficient norm.
++Positions are released array ordinals, never elapsed time. No priority claim.
+ """
+ import torch
+@@ -13,5 +13,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'match_balance': 'reversed'}
+ 
+ 
+@@ -25,5 +25,5 @@
+                  temporal_detail='position', block_detail='ordinal',
+                  curvature_detail='quadratic', joint_detail='duplicate_match',
+-                 match_support='available', match_scaling='norm',
++                 match_support='available', match_scaling='norm', match_balance='reversed',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -74,4 +74,9 @@
+         self.joint_detail = joint_detail
+         self.match_support = match_support
++        if match_support != 'available' or match_scaling != 'norm':
++            raise ValueError('This study freezes basic support and global norm')
++        if match_balance not in ('local', 'reversed', 'global'):
++            raise ValueError('Unknown block-energy balancing control')
++        self.match_balance = match_balance
+         self.match_scaling = match_scaling
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+@@ -172,5 +177,5 @@
+ 
+     def _target_match_summary(self, item, values, mask):
+-        """Five masked value summaries; only fifth support/scale varies.
++        """Five masked value summaries; only fifth block gain assignment varies.
+ 
+         Quadratic/scrambled coefficients are orthogonal to valid constants
+@@ -264,14 +269,12 @@
+     def _joint_coefficients(self, affinity, position, fourth, valid, counts,
+                             rank, scrambled_rank):
+-        """Retain the incumbent gate; vary only duplicate-match support/scale.
+-
+-        All basis construction is FP32 and independent of learned values.
+-        Within-block centering gives orthogonality to every block-constant
+-        coefficient, including the inherited linear and quadratic moments.
+-        Two projection sweeps reduce finite-precision leakage into the
+-        remaining local-ordinal and target-match directions. The common
+-        support gate can carry availability information even in a duplicate
+-        direction. Build every inherited coefficient in all factorial cells;
+-        basic availability additionally admits matches lacking joint moments.
++        """Replace only the fifth channel's active-block gain assignment.
++
++        Inherited joint and duplicate builders execute in every cell as a
++        common cost/parity bridge. The first four returned summaries are
++        unchanged. New candidates use within-block centered match affinity,
++        positive gains and the same basic availability and global norm.
++        Inverse energy equalizes active blocks; reversing those gains among
++        active blocks controls their alignment without changing support.
+         """
+         position_norm2 = position.square().sum(dim=(1, 2), keepdim=True)
+@@ -313,9 +316,35 @@
+         available_raw = affinity * available
+         joint_raw = affinity * support
+-        # All four cells build all four alternatives. The joint/norm cell
+-        # returns exactly the old expression for a same-seed parity bridge.
+-        if self.match_support == 'available':
+-            return available_norm if self.match_scaling == 'norm' else available_raw
+-        return duplicate_match if self.match_scaling == 'norm' else joint_raw
++        # Build every replacement in every cell, using only masked IDs.
++        # Affinity was already centered within each block. Reweighting by
++        # a block scalar preserves that centering and zero padding.
++        energy = affinity.square().sum(dim=-1, keepdim=True)
++        active = energy > 1e-10
++        inverse_energy = torch.where(
++            active, energy.clamp_min(1e-10).rsqrt(), torch.ones_like(energy))
++        # Reverse gains only among blocks with nonzero match energy. This
++        # preserves active-block support and the multiset of assigned gains;
++        # a naive roll would conflate balancing with zeroing sparse blocks.
++        block_ids = torch.arange(10, device=affinity.device).view(1, 10, 1)
++        packed_ids = torch.where(active, block_ids, torch.full_like(block_ids, 10))
++        packed_ids = packed_ids.sort(dim=1).values
++        active_rank = active.to(torch.long).cumsum(dim=1) - 1
++        active_count = active.sum(dim=1, keepdim=True)
++        reverse_rank = (active_count - 1 - active_rank).clamp(min=0, max=9)
++        reverse_ids = packed_ids.gather(1, reverse_rank).clamp(max=9)
++        reverse_gain = inverse_energy.gather(1, reverse_ids)
++        reverse_gain = torch.where(active, reverse_gain, torch.ones_like(reverse_gain))
++        local_raw = affinity * inverse_energy
++        reversed_raw = affinity * reverse_gain
++        local_norm2 = local_raw.square().sum(dim=(1, 2), keepdim=True)
++        reversed_norm2 = reversed_raw.square().sum(dim=(1, 2), keepdim=True)
++        local = local_raw * (position_norm2 / local_norm2.clamp_min(1e-10)).sqrt() * available
++        reversed_local = reversed_raw * (position_norm2 / reversed_norm2.clamp_min(1e-10)).sqrt() * available
++        if self.match_balance == 'local':
++            return local
++        if self.match_balance == 'reversed':
++            return reversed_local
++        # Exact incumbent coefficient expression; same-seed parity bridge.
++        return available_norm
+ 
+     @staticmethod

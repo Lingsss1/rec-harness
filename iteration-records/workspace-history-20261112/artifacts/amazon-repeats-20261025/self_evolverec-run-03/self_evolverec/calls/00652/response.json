@@ -1,0 +1,62 @@
+{
+  "markdown_report": "The next experiment should test **training with missing item content**, keeping SASRec’s inference architecture unchanged. At 0% research progress, this offers a small, falsifiable intervention before adding another fusion mechanism.\n\n**Insights from the starting point.** Electronics has 9.67% sampled training ranking reversals in Inspiration 2. This identifies uneven training separation, but does not establish validation failure. Recent residual experiments lack reported validation results. Their training margins cannot justify selecting a residual architecture. Embedding alignment near 0.54–0.58 does not demonstrate collapse. Geometry and ranking quality require separate measurements.\n\n**Insights from related work.** Robust Training [1] reports sensitivity to missing recent interactions. This motivates training explicitly for missing content, although sensitivity itself need not be harmful. Metamorphic testing [2] supports checking controlled input/output relationships. Such checks can validate the diagnostic adapter without exact recommendation labels. Rank-estimation work [3] demonstrates sampling-induced rank bias. Consequently, loader-negative margins remain descriptive rather than substitutes for pinned HR@10.\n\n**Framework and directions.** Organize methods along three axes: representation changes, training interventions, and measurement. Recent residuals change representation; competitor-set cross-entropy changes training competition; content dropout changes input reliability during training. Fixed-candidate perturbations measure dependence, while the unchanged host benchmark determines selection. The gap is whether robustness training helps generalization while retaining useful recent signals.\n\n**Candidate ideas.** Scores are originality/potential/difficulty; higher difficulty means harder implementation.\n\n| Idea | Scores | Positive assessment | Negative assessment |\n|---|---|---|---|\n| Item-content dropout [1] | 3/7/3 | Simple robustness hypothesis; preserves inference scorer | Established augmentation; may erase useful specificity |\n| Fixed multi-competitor diagnostic [3] | 2/6/3 | Exposes easy-negative success cheaply | Measurement alone cannot improve rankings |\n| Injected-fault probe validation [2] | 4/7/4 | Tests whether diagnostics detect known failures | Fault detection need not predict recommendation quality |\n\n**Selected algorithm.** During training, independently replace each eligible item’s content embedding with zero at probability 0.1, retaining positional embeddings, original padding masks, causal attention, and targets. Preserve the earliest nonpadding item so singleton histories remain intact. Apply the augmentation before positional addition and ordinary dropout; disable it completely during inference. This trains missing-content handling without treating an unknown item as padding or inventing user preferences.\n\nCompare baseline SASRec against this single augmentation, preserving loss, sampler, optimizer, checkpoint rules, seeds, and all four routes. Use the existing epoch environment behavior, default 200, and charge every attempt against the shared budget. Select exclusively by host macro validation HR@10. Report clean and matched-count recent/older content-masking diagnostics separately; do not demand invariance because recent information can be useful.\n\nPreserve `DiagnosisProbe(view, device)` and return metrics plus definitions. Restore model modes after diagnosis, retain nulls for undefined statistics, and leave unavailable metadata breakdowns empty. Verify exported predictor score parity across all categories. No improvement is claimed before validation.",
+  "idea": {
+    "description": "Train baseline SASRec with mild item-content dropout: zero selected nonpadding input embeddings before positional addition while preserving the original attention and padding masks. Disable the augmentation at inference.",
+    "motivation": "The supplied experiments establish uneven sampled training separation, with Electronics weakest, but provide no validation evidence favoring additional recent-history branches. Missing-input robustness offers a distinct, inexpensive hypothesis supported by related work, while acknowledging that removing recent evidence can harm specific recommendations.",
+    "implementation_notes": "Integrate the provided function at the baseline item-embedding lookup, before embedding scaling, positional addition, and ordinary embedding dropout. Compute padding and attention masks from original sequence IDs. Never replace sequence IDs or targets with padding IDs. At p=0 or in evaluation mode, return the original embedding tensor exactly. Keep the earliest nonpadding item in each sequence unmasked; singleton histories therefore receive no augmentation. Use independent Bernoulli draws for other observed positions. Do not add consistency loss or change negative sampling in this experiment.\n\nRetain DATA_DIR = os.environ['GAGC_DATA_DIR'], Movies_and_TV, Industrial_and_Scientific, Electronics, CDs_and_Vinyl, dataset routing, existing splits, preprocessing seed 0, training seed 42, and SASREC_EPOCHS with default 200. Train each trial on one GPU. Preserve baseline loss, regularization, optimizer, sampler, checkpoint schedule, and selection rules. Save content_dropout_p in checkpoint configuration. Update the predictor writer to reconstruct the same model configuration and explicitly call eval(); the augmentation must be inactive in generated working/predict.py. Write all artifacts beneath the trial directory.\n\nPredeclare only baseline p=0 and augmentation p=0.1, subject to remaining shared budget. Record all attempted configurations and actual GPU seconds, including diagnosis and failures; do not assume the full 43,200 GPU-seconds remain after earlier attempts. Compare common completed training steps and report runtime alongside host validation results. Select using only the unchanged 200-user/category, 99-unique-negative, seed-42 host evaluator and equal-weight macro HR@10. Access no hidden tests, external datasets, or pretrained weights.\n\nPreserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. view.model is the actual trained module, and item_emb, log2feats, predict_score, user_train, meta_data, and review_data retain the compatibility contract. Preserve the existing clean training-margin probes and separately label optional deterministic content-masking probes. An audit should use an explicit input-embedding override, without activating ordinary dropout or mutating the item table. Compare recent and older masking only on eligible histories, with equal masked counts, fixed candidates, original positions, and reported denominators. These are acute perturbations, not causal estimates or validation metrics. Restore every submodule's prior training flag in finally. Undefined statistics are null; unavailable category breakdowns remain empty. Twenty training users' full-catalog recommendations remain exploratory and separate from benchmark selection.\n\nCheck exact evaluation-mode parity at p=0 and p=0.1 using matched weights; unchanged original padding masks; causal future-token invariance; finite gradients; empty and singleton histories; and candidate-score parity after loading generated predict.py for all four routes. No experiments or performance measurements have been executed in this response.",
+    "pseudocode": "import torch\n\n\ndef item_content_dropout(sequence, item_vectors, p=0.1, training=False):\n    \"\"\"sequence: [B,L]; item_vectors: [B,L,D].\n\n    Insert immediately after the baseline item embedding lookup.\n    Attention masks must continue to use the ORIGINAL sequence IDs.\n    \"\"\"\n    if not 0.0 <= p <= 1.0:\n        raise ValueError('p must be in [0, 1]')\n    if not training or p == 0.0:\n        return item_vectors\n\n    valid = sequence.ne(0)\n    first_valid = valid & valid.long().cumsum(dim=1).eq(1)\n    eligible = valid & ~first_valid\n    draws = torch.rand(valid.shape, device=item_vectors.device)\n    remove_content = eligible & draws.lt(p)\n    return item_vectors.masked_fill(remove_content.unsqueeze(-1), 0.0)\n\n\n# Inside the EXISTING SASRec encoder:\n# original_padding_mask = sequence.eq(0)\n# x = item_content_dropout(\n#     sequence, self.item_emb(sequence),\n#     p=self.content_dropout_p, training=self.training)\n# Continue baseline scaling, positional addition, dropout, attention,\n# normalization, and scoring without changing their order or semantics.\n# Build attention eligibility from original_padding_mask, never from x.\n# Train with unchanged baseline targets, loss, negatives, and regularization.\n\n# Checkpoint metadata includes content_dropout_p.\n# Predictor writer reconstructs the baseline architecture and calls eval().\n# DiagnosisProbe retains its public constructor and run_full_diagnosis method.\n# Clean diagnosis uses eval() and no_grad(); optional masking is an explicit\n# embedding override with original positions and attention masks retained.\n# Restore saved per-submodule training flags in finally.\n# Return {'metrics': metrics, 'metric_definitions': metric_definitions}.\n# Host validation, not training diagnostics, selects the final configuration.",
+    "originality": {
+      "score": 3,
+      "positive": "Tests a distinct intervention from recent residual fusion and multi-negative objectives, with explicit separation between missing content and padding.",
+      "negative": "Input corruption and missing-interaction robustness are established techniques; this is a controlled application rather than a new model family."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "A successful comparison could motivate evidence-dependent robustness policies and better tests of when recent interactions help.",
+      "negative": "Augmentation may remove precisely the narrow preference evidence users value; robustness gains may not improve pinned validation HR@10."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Requires one small embedding-stage transformation and no new trained parameters or inference scoring components.",
+      "negative": "Correct integration depends on preserving baseline mask semantics, operation order, diagnostic overrides, and generated predictor parity."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Robust Training of Sequential Recommender Systems with Missing Input Data (2024)",
+      "link": "https://iris.uniroma1.it/bitstream/11573/1740238/1/Siciliano_Robust-Training_2024.pdf",
+      "contributions": [
+        "The supplied search summary reports SASRec sensitivity to deleting recent interactions and motivates explicit missing-input robustness training.",
+        "Provides precedent for the selected augmentation hypothesis."
+      ],
+      "limitations": [
+        "Does not establish that the proposed zero-content augmentation improves this four-category benchmark.",
+        "Deleting an interaction and retaining its position with zero content are different interventions."
+      ]
+    },
+    {
+      "title": "Metamorphic testing for recommender systems (2024)",
+      "link": "https://www.sciencedirect.com/science/article/pii/S0950584924000156",
+      "contributions": [
+        "Supports testing recommender behavior through controlled input/output relationships.",
+        "Motivates diagnostic validation with deliberately injected faults."
+      ],
+      "limitations": [
+        "The proposed SASRec probe controls are a synthesis, not a suite validated by this paper.",
+        "Detecting controlled faults does not establish higher recommendation accuracy."
+      ]
+    },
+    {
+      "title": "Improved Estimation of Ranks for Learning Item Recommenders with Negative Sampling (2024)",
+      "link": "https://research.google/pubs/improved-estimation-of-ranks-for-learning-item-recommenders-with-negative-sampling/",
+      "contributions": [
+        "Addresses sampling-induced rank-estimation bias.",
+        "Motivates separating loader-negative margins from benchmark ranking outcomes."
+      ],
+      "limitations": [
+        "Does not validate a particular diagnostic sampler for this task.",
+        "Does not justify changing the pinned host evaluator or interpreting sampled training margins as full-catalog quality."
+      ]
+    }
+  ]
+}

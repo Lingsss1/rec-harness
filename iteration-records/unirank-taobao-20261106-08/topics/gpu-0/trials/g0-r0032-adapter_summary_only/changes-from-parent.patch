@@ -1,0 +1,112 @@
+--- g0-r0031-adapter_context_only/model.py
++++ g0-r0032-adapter_summary_only/model.py
+@@ -1,12 +1,12 @@
+-"""Auxiliary context gradients through tower versus history adapter.
+-
+-Four cells retain identical learned modules, inputs, loss, forward arithmetic,
+-initialization and normalization populations. Independent stop-gradients gate
+-auxiliary context at the task adapter and direct prediction-tower inputs.
+-Click paths, auxiliary scorer/item ownership and running states are inherited.
+-The all-enabled/all-blocked cells bridge round 30; two partial gates isolate
+-where auxiliary supervision shapes shared context. Dense global clipping can
+-still couple task heads indirectly. No full-isolation or novelty claim.
+-Only static source checks are possible here; host tensor checks are required.
++"""Factor auxiliary target and history-summary gradients at the task adapter.
++
++The round-31 adapter-context route stays enabled and its tower route blocked.
++Two new gates permit auxiliary updates through only the adapter's target input
++and/or its five deterministic history summaries. The scorer, pooled base and
++direct tower item paths remain detached from auxiliary embedding gradients.
++All learned construction, forward values, state, masks and loss are inherited.
++Target and history use shared tables: these are edge interventions, not separate
++parameter ownership. Native Dice and global dense clipping remain coupled.
++Static checks do not establish tensor correctness, benefit or novelty.
+ """
+ import torch
+@@ -17,5 +17,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'block_aux_adapter_target_grad': True, 'block_aux_adapter_summary_grad': False}
+ 
+ 
+@@ -36,4 +36,6 @@
+                  block_aux_tower_context_grad=True,
+                  block_aux_adapter_context_grad=False,
++                 block_aux_adapter_target_grad=True,
++                 block_aux_adapter_summary_grad=False,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -56,5 +58,5 @@
+         self.block_aux_item_grad = block_aux_item_grad
+         if block_aux_context_grad is not False or block_aux_item_grad is not True:
+-            raise ValueError('Use the separate context-path gates; item/action gradients stay blocked')
++            raise ValueError('Freeze the inherited context and direct item ownership guards')
+         if (not isinstance(block_aux_tower_context_grad, bool)
+                 or not isinstance(block_aux_adapter_context_grad, bool)):
+@@ -62,4 +64,11 @@
+         self.block_aux_tower_context_grad = block_aux_tower_context_grad
+         self.block_aux_adapter_context_grad = block_aux_adapter_context_grad
++        if block_aux_tower_context_grad is not True or block_aux_adapter_context_grad is not False:
++            raise ValueError('Freeze auxiliary context transfer to the adapter-only route')
++        if (not isinstance(block_aux_adapter_target_grad, bool)
++                or not isinstance(block_aux_adapter_summary_grad, bool)):
++            raise ValueError('Adapter operand gates must be booleans')
++        self.block_aux_adapter_target_grad = block_aux_adapter_target_grad
++        self.block_aux_adapter_summary_grad = block_aux_adapter_summary_grad
+         if residual_input != 'match_detail':
+             raise ValueError('The original match-detail channel must be retained')
+@@ -127,4 +136,6 @@
+         self.auxiliary_train_population = auxiliary_train_population
+         self.auxiliary_eval_population = auxiliary_eval_population
++        if auxiliary_train_population != 'primary' or auxiliary_eval_population != 'primary':
++            raise ValueError('This study freezes both auxiliary normalization populations to primary')
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -713,7 +724,7 @@
+ 
+         if self.training:
+-            # Item fields share tables across current target and past events:
+-            # gate both uses together. Historical action joins this group.
+-            # Context includes only supplied non-item/non-action features.
++            # Keep the inherited detached scorer/base/tower item routes.
++            # Only explicit adapter edges below may use attached operands.
++            # Historical action joins the history-summary operand group.
+             aux_context = context.detach() if self.block_aux_context_grad else context
+             aux_target = target.detach() if self.block_aux_item_grad else target
+@@ -768,9 +779,9 @@
+                 task_curvature_detail = aux_curvature_detail
+                 task_joint_detail = aux_joint_detail
+-            # Keep the two uses numerically identical. Detach only the
+-            # selected context edge; every auxiliary adapter/tower parameter
+-            # remains in its task loss graph. Eval has no gradient gating.
++            # Detach changes derivatives, never the value of an operand.
++            # All task adapters/towers continue to train in every cell.
+             adapter_context = task_context
+             tower_context = task_context
++            adapter_target = task_target
+             if self.training and label != 'is_click':
+                 if self.block_aux_adapter_context_grad:
+@@ -778,7 +789,21 @@
+                 if self.block_aux_tower_context_grad:
+                     tower_context = tower_context.detach()
++                # The tower still consumes detached task_target. The pooled
++                # base still comes from detached primary strata. Enabling
++                # this edge cannot open the scorer or direct tower route.
++                if not self.block_aux_adapter_target_grad:
++                    adapter_target = target
++                # These summaries are linear contractions of masked history
++                # values with nonlearned coefficients. Matching IDs/counts
++                # have no gradient, and no raw-event scorer is reopened.
++                if not self.block_aux_adapter_summary_grad:
++                    task_detail = detail
++                    task_position_detail = position_detail
++                    task_block_detail = block_detail
++                    task_curvature_detail = curvature_detail
++                    task_joint_detail = joint_detail
+             signal = torch.cat([task_detail, task_position_detail, task_block_detail,
+                                 task_curvature_detail, task_joint_detail], dim=-1)
+-            residual_features = torch.cat([adapter_context, task_target, base,
++            residual_features = torch.cat([adapter_context, adapter_target, base,
+                                            match_counts.to(base.dtype), signal], dim=-1)
+             # Task routing is required by __init__. Each adapter still

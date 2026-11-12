@@ -1,0 +1,27 @@
+{
+  "category_edits": [
+    {
+      "category": "feature_construction",
+      "rationale": "Across all four datasets, scale history embeddings by clamp((median_positive_training_count / item_count)^0.25, 0.5, 2.0). This deterministic feature may reduce domination by frequent items without adding learned parameters. Counts use training interactions only; padding remains zero. The buffer is checkpointed and restored by the existing predictor's dynamic model import. Candidate embeddings, GRU topology, readout, loss, optimizer and training settings remain fixed.",
+      "edits": [
+        {
+          "find": "        self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)\n        dropout = dropout_rate if num_layers > 1 else 0.0",
+          "replace": "        self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)\n        self.register_buffer(\"input_frequency_scale\", torch.ones(itemnum + 1))\n        self.input_frequency_scale[0] = 0.0\n        dropout = dropout_rate if num_layers > 1 else 0.0"
+        },
+        {
+          "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))",
+          "replace": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(\n            self.item_emb(seq) * self.input_frequency_scale[seq].unsqueeze(-1)\n        )"
+        },
+        {
+          "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))",
+          "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(\n            self.item_emb(seq) * self.input_frequency_scale[seq].unsqueeze(-1)\n        )"
+        },
+        {
+          "find": "    ).to(device)\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)",
+          "replace": "    ).to(device)\n    counts = np.zeros(itemnum + 1, dtype=np.float64)\n    for history in user_train.values():\n        np.add.at(counts, np.asarray(history, dtype=np.int64), 1.0)\n    counts[0] = 0.0\n    observed = counts > 0\n    median_count = float(np.median(counts[observed])) if observed.any() else 1.0\n    scales = np.full(itemnum + 1, 2.0, dtype=np.float32)\n    scales[observed] = np.clip(\n        (median_count / counts[observed]) ** 0.25, 0.5, 2.0\n    ).astype(np.float32)\n    scales[0] = 0.0\n    with torch.no_grad():\n        model.input_frequency_scale.copy_(torch.from_numpy(scales).to(device))\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Add training-frequency history scaling consistently during training and inference for each category's single GRU4Rec model. Save scales in checkpoints; existing predictor loading restores them automatically."
+}

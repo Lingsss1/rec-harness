@@ -1,0 +1,90 @@
+--- g3-r0058-fixed_angle_negative/model.py
++++ g2-r0079-auxiliary_union_permuted/model.py
+@@ -1,10 +1,16 @@
+-"""Auxiliary scalar-angle replacement at fixed forward architecture.
+-
+-A prospective 2x2 study crosses native versus fixed pi/4 nuisance-exclusion
+-angle with external +/- sign. Auxiliary radius, transported Q orientation
+-bit and inherited validity are retained. All helpers run in all four cells.
+-Only the shared-context surrogate VJP selection changes; it is not the
+-ordinary derivative of the reported joint BCE. No novelty claim is made.
++"""Mask-conditioned action-permutation controls of the frozen incumbent.
++
++All learned modules, initializations, losses and surrogate gradients are
++inherited unchanged from g3-r0058-fixed_angle_negative. Only historical
++codes are rotated within valid-position groups at both train and eval.
++Groups are all valid events, auxiliary-union membership, or all four task
++mask bits. This is a deterministic sensitivity contrast, not a random
++conditional-independence test. Full-signature groups can be code-constant;
++in that case this intervention is exactly identity and is uninformative
++about usefulness of providing the same information through another path.
++No novelty or new performance claim is made.
+ """
++
++ACTION_PERMUTATION_GROUPS = 'auxiliary_union'
+ import torch
+ from torch import nn
+@@ -895,4 +901,56 @@
+         self.model_to_device()
+ 
++    def _action_inputs(self, item, mask, task_masks, auxiliary):
++        """Rotate codes within row-local groups without modifying host inputs.
++
++        The ordering key (group * length + position) is unique per row,
++        so sorting needs no tie rule. Invalid events occupy a final bucket
++        and never contribute counts. Scatter computes each original slot's
++        packed rank; group counts and exclusive starts locate a half-group
++        cyclic source. This is a bijection within each valid group, even
++        for noncontiguous masks. Singleton and code-constant groups are
++        identities. Codes never move between rows, groups or into padding.
++        Every treatment computes all four mask bits and uses the same
++        gather/scatter path. No parameters, buffers, RNG or labels enter.
++        """
++        action = item[self.action_field]
++        if (action.ndim != 2 or action.shape[1] != mask.shape[1] + 1
++                or action.shape[0] != mask.shape[0]):
++            raise ValueError('Expected aligned action codes [B,101]')
++        if len(task_masks) != 4 or any(m.shape != mask.shape for m in task_masks):
++            raise ValueError('Expected four aligned historical task masks')
++        history = action[:, :-1]
++        valid = mask.bool()
++        signature = torch.zeros_like(history)
++        for index, task_mask in enumerate(task_masks):
++            signature = signature + (task_mask > 0).long() * (1 << index)
++        if ACTION_PERMUTATION_GROUPS == 'all_valid':
++            groups = torch.zeros_like(signature)
++        elif ACTION_PERMUTATION_GROUPS == 'auxiliary_union':
++            groups = auxiliary.long()
++        elif ACTION_PERMUTATION_GROUPS == 'task_signature':
++            groups = signature
++        else:
++            raise ValueError('Unknown action permutation groups')
++        length = history.shape[1]
++        positions = torch.arange(length, device=history.device, dtype=torch.long)
++        positions = positions.unsqueeze(0).expand_as(history)
++        bucket = torch.where(valid, groups, torch.full_like(groups, 16))
++        order = (bucket * length + positions).argsort(dim=-1)
++        packed_rank = torch.zeros_like(history).scatter(-1, order, positions)
++        counts = history.new_zeros((history.shape[0], 17)).scatter_add(
++            -1, bucket, valid.long())
++        starts = counts.cumsum(dim=-1) - counts
++        own_count = counts.gather(-1, bucket)
++        own_start = starts.gather(-1, bucket)
++        source = own_start + (
++            packed_rank - own_start + own_count // 2
++        ).remainder(own_count.clamp_min(1))
++        treated = history.gather(-1, order).gather(-1, source)
++        result = dict(item)
++        result[self.action_field] = torch.cat(
++            [torch.where(valid, treated, history), action[:, -1:]], dim=1)
++        return result
++
+     def _represent(self, inputs):
+         # Do not allow the framework fallback that treats every event as
+@@ -918,4 +976,6 @@
+             auxiliary = auxiliary | (task_masks[index] > 0)
+         auxiliary = auxiliary & mask.bool()
++        # Before every action-dependent scorer, summary and moment path.
++        item = self._action_inputs(item, mask, task_masks, auxiliary)
+         user_emb = self.embedding_layer(user)
+         item_emb = self.embedding_layer(item)

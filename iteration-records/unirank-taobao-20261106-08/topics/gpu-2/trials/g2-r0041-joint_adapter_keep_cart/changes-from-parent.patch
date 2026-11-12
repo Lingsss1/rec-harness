@@ -1,0 +1,82 @@
+--- g2-r0040-joint_owner_capacity_keep_buy/model.py
++++ g2-r0041-joint_adapter_keep_cart/model.py
+@@ -1,10 +1,9 @@
+-"""Equal-budget auxiliary head allocation under fixed buy-only context ownership.
+-
+-Retain all four outputs/losses and the parent's forward/masking implementation.
+-Initialize the complete parent template before slicing independently chosen
+-auxiliary towers. Parameters outside the chosen heads and global RNG draws
+-are unchanged at construction. Dense global gradient clipping can still
+-couple heads during training; detached inputs do not prove optimization
+-independence. No architectural originality or measured speedup is asserted.
++"""Matched residual capacity allocations under fixed buy-only context ownership.
++
++All four outputs and losses stay active. Instantiate the complete inherited
++random template before removing fixed auxiliary adapter channels. Common
++initialization draws, all forward methods and task gradient gates are inherited.
++Global dense gradient clipping can couple private heads during optimization.
++No measured efficiency, independence or architectural novelty is asserted.
+ """
+ import torch
+@@ -15,5 +14,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [48, 32], 'fav': [48, 32]}}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [48, 32], 'fav': [48, 32]}, 'auxiliary_residual_overrides': {'fav': 2, 'buy': 2}}
+ 
+ 
+@@ -35,4 +34,5 @@
+                  auxiliary_tower_hidden_units=(112, 64),
+                  auxiliary_tower_overrides=None,
++                 auxiliary_residual_overrides=None,
+                  auxiliary_context_tasks=('buy',),
+                  task='binary_classification', **kwargs):
+@@ -119,4 +119,16 @@
+         if not isinstance(auxiliary_residual_hidden, int) or isinstance(auxiliary_residual_hidden, bool) or auxiliary_residual_hidden < 1:
+             raise ValueError('Auxiliary residual width must be a positive integer')
++        if auxiliary_residual_overrides is None:
++            auxiliary_residual_overrides = {}
++        if not isinstance(auxiliary_residual_overrides, dict):
++            raise ValueError('Residual overrides must map auxiliary labels to widths')
++        if any(label not in ('cart', 'fav', 'buy')
++               for label in auxiliary_residual_overrides):
++            raise ValueError('Only auxiliary residual widths may be overridden')
++        for hidden in auxiliary_residual_overrides.values():
++            if (isinstance(hidden, bool) or not isinstance(hidden, int)
++                    or not 1 <= hidden <= auxiliary_residual_hidden):
++                raise ValueError('Residual widths must fit the inherited template')
++        auxiliary_residual_overrides = dict(auxiliary_residual_overrides)
+         self.residual_input = residual_input
+         self.residual_routing = residual_routing
+@@ -214,4 +226,31 @@
+                       else auxiliary_tower_overrides.get(label, auxiliary_tower_hidden_units))
+             self._reduce_tower(tower, widths)
++        # Keep every parent RNG draw, including all full-width residuals.
++        # This is an untrained channel subnetwork, not checkpoint pruning.
++        # Clone the slices so removed channels retain no backing storage.
++        # Retained first-layer weights keep the original initialization scale.
++        for label, adapter in zip(feature_map.labels, self.residual_bank):
++            if label not in auxiliary_residual_overrides:
++                continue
++            hidden = auxiliary_residual_overrides[label]
++            first, output = adapter[0], adapter[2]
++            if not isinstance(first, nn.Linear) or not isinstance(output, nn.Linear):
++                raise ValueError('Unexpected inherited residual structure')
++            if first.out_features != auxiliary_residual_hidden or output.in_features != auxiliary_residual_hidden:
++                raise ValueError('Unexpected inherited residual width')
++            if hidden == auxiliary_residual_hidden:
++                continue
++            with torch.no_grad():
++                first.weight = nn.Parameter(
++                    first.weight[:hidden, :].detach().clone(),
++                    requires_grad=first.weight.requires_grad)
++                first.bias = nn.Parameter(
++                    first.bias[:hidden].detach().clone(),
++                    requires_grad=first.bias.requires_grad)
++                output.weight = nn.Parameter(
++                    output.weight[:, :hidden].detach().clone(),
++                    requires_grad=output.weight.requires_grad)
++                first.out_features = hidden
++                output.in_features = hidden
+         self.model_to_device()
+ 

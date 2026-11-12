@@ -1,0 +1,110 @@
+--- g2-r0069-summary_global/model.py
++++ g2-r0070-layout_pool/model.py
+@@ -1,9 +1,8 @@
+-"""Prospective prediction-only summary workspace and dead-work factorial.
+-
+-Training and learned capacity are inherited unchanged from native96. Global
+-contraction removes block-summary materialization; live coefficient work omits
+-only discarded normalizations while retaining all support-gate calculations.
+-Real-arithmetic equivalence does not imply identical BF16 predictions or speed.
+-No local training or tensor execution has been performed.
++"""Prediction-only coefficient layout and weighted-pooling workspace factorial.
++
++All training, learned Parameters, masks and support gates inherit the frozen
++global-contraction parent. Direct layout preserves its exact GEMM operand;
++stratum pooling preserves promoted operands but changes reduction order.
++Neither numerical agreement nor prediction-cost reduction is measured locally.
+ """
+ import torch
+@@ -14,5 +13,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'budgeted_factor', 'owner_context_rank': 96, 'owner_context_scale': 'inherited', 'owner_context_balance': 'balanced', 'owner_context_evaluation': 'native', 'evaluation_summary_contraction': 'global', 'evaluation_coefficient_work': 'all'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_projection': 'budgeted_factor', 'owner_context_rank': 96, 'owner_context_scale': 'inherited', 'owner_context_balance': 'balanced', 'owner_context_evaluation': 'native', 'evaluation_summary_contraction': 'global', 'evaluation_coefficient_work': 'all', 'evaluation_coefficient_layout': 'direct', 'evaluation_pool_reduction': 'contract'}
+ 
+ 
+@@ -352,4 +351,6 @@
+                  evaluation_summary_contraction='block',
+                  evaluation_coefficient_work='all',
++                 evaluation_coefficient_layout='native',
++                 evaluation_pool_reduction='materialize',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -374,4 +375,12 @@
+         self.evaluation_summary_contraction = evaluation_summary_contraction
+         self.evaluation_coefficient_work = evaluation_coefficient_work
++        if evaluation_coefficient_layout not in ('native', 'direct'):
++            raise ValueError('Unknown prediction coefficient layout')
++        if evaluation_pool_reduction not in ('materialize', 'contract'):
++            raise ValueError('Unknown prediction pool reduction')
++        if evaluation_coefficient_layout == 'direct' and evaluation_summary_contraction != 'global':
++            raise ValueError('Direct coefficient layout requires global contraction')
++        self.evaluation_coefficient_layout = evaluation_coefficient_layout
++        self.evaluation_pool_reduction = evaluation_pool_reduction
+         if owner_context_evaluation not in ('native', 'folded', 'fused'):
+             raise ValueError('Unknown prediction-time context implementation')
+@@ -918,18 +927,28 @@
+             incumbent_fifth, centered_position, fourth, linear,
+             block_rank, scrambled_rank, valid, counts, total)
+-        coefficients = torch.stack(
+-            (centered, centered_position, block_coefficients, fourth, fifth), dim=-2)
+-        if not self.training and self.evaluation_summary_contraction == 'global':
+-            # [B,block,summary,event] -> [B,summary,block*event].
+-            # Same masked coefficients and 100 event values; no event removal.
+-            # This changes BF16 accumulation/rounding and must be assessed.
+-            global_coefficients = coefficients.to(values.dtype).transpose(1, 2).reshape(
+-                batch, 5, 100)
++        if not self.training and self.evaluation_coefficient_layout == 'direct':
++            # Stack directly in the order required by the SAME global BMM.
++            # Each input is [B,block,event]; flatten keeps block/event order.
++            # No [B,block,summary,event] transpose/copy is constructed.
++            # Cast, denominator, coefficient computations and gates are intact.
++            global_coefficients = torch.stack(
++                (centered, centered_position, block_coefficients, fourth, fifth),
++                dim=1).to(values.dtype).reshape(batch, 5, 100)
+             summaries = torch.bmm(global_coefficients, values)
+         else:
+-            summaries = torch.bmm(
+-                coefficients.to(values.dtype).reshape(batch * 10, 5, 10),
+-                values.reshape(batch * 10, 10, width))
+-            summaries = summaries.reshape(batch, 10, 5, width).sum(dim=1)
++            coefficients = torch.stack(
++                (centered, centered_position, block_coefficients, fourth, fifth), dim=-2)
++            if not self.training and self.evaluation_summary_contraction == 'global':
++                # [B,block,summary,event] -> [B,summary,block*event].
++                # Same masked coefficients and 100 event values; no event removal.
++                # This changes BF16 accumulation/rounding and must be assessed.
++                global_coefficients = coefficients.to(values.dtype).transpose(1, 2).reshape(
++                    batch, 5, 100)
++                summaries = torch.bmm(global_coefficients, values)
++            else:
++                summaries = torch.bmm(
++                    coefficients.to(values.dtype).reshape(batch * 10, 5, 10),
++                    values.reshape(batch * 10, 10, width))
++                summaries = summaries.reshape(batch, 10, 5, width).sum(dim=1)
+         summaries = summaries / total.sqrt().unsqueeze(-1).to(summaries.dtype)
+         return (summaries[:, 0, :], summaries[:, 1, :], summaries[:, 2, :],
+@@ -1161,4 +1180,23 @@
+         batch, slots, _ = values.shape
+         weights = weights.reshape(batch, slots) * counts.to(weights.dtype)
++        if not self.training and self.evaluation_pool_reduction == 'contract':
++            # Preserve weights*counts rounding above, THEN use the dtype of
++            # the parent's elementwise weights*values product. Under the
++            # frozen BF16 protocol, compressed means remain FP32. Disable
++            # autocast only here so BMM does not silently lower that precision.
++            # Three strided dot products retain block/stratum alignment without
++            # explicitly allocating the full [B,10,3,V] weighted-value tensor.
++            # Backend packing/scratch, launch overhead and reduction rounding
++            # are possible costs; measure them rather than assume a speedup.
++            promoted_dtype = torch.promote_types(weights.dtype, values.dtype)
++            block_weights = weights.reshape(batch, 10, 3)
++            block_values = values.reshape(batch, 10, 3, self.value_width)
++            pooled = []
++            with torch.autocast(device_type=values.device.type, enabled=False):
++                for stratum in range(3):
++                    pooled.append(torch.bmm(
++                        block_weights[:, :, stratum].unsqueeze(1).to(promoted_dtype),
++                        block_values[:, :, stratum, :].to(promoted_dtype)))
++            return torch.cat(pooled, dim=1)
+         weighted = (weights.unsqueeze(-1) * values).reshape(batch, 10, 3, self.value_width)
+         return weighted.sum(dim=1)

@@ -1,0 +1,136 @@
+--- g3-r0022-selector_disabled/model.py
++++ g3-r0028-context_route_detached/model.py
+@@ -1,17 +1,13 @@
+-"""Prospective selector-score transfer, initialized to the inherited function.
+-
+-Parent: g3-r0021-aux_private_detached. The auxiliary selector uses detached
+-private embeddings; its trunk and readout rows still learn from auxiliary BCE.
+-Transfer only centered, bounded per-event selector scores into the click
+-pooling coefficients. Donor values and predicted task probabilities are never
+-transferred. Three zero-initialized coefficients add no random draws. The
+-positive modulation preserves click coefficient signs and absolute mass.
+-
+-Matched controls select auxiliary/self/disabled donors, with detached/live
+-auxiliary-score derivatives. All cells allocate the same modules and calculate
+-the same score statistics. Live transfer lets click update the auxiliary trunk
+-and readout rows, while private selector-input detachment remains inherited.
+-Self donor columns coincide: allocated capacity matches, effective rank does
+-not. No claim of improvement or novelty precedes host validation.
++"""Prospective task-conditioned context/event exchange.
++
++Parent: g3-r0022-selector_disabled. Same inherited prediction function at
++initialization. A zero-initialized task matrix maps per-example normalized
++shared context into the existing feedback-by-target-match event basis.
++Compare routing that signal before pooling with its masked-mean logit readout,
++and cross these with live/detached auxiliary context derivatives on this new
++path only. Inherited auxiliary context gradients remain live in every cell.
++All four cells allocate and calculate the same new projections and statistics.
++No optimizer changes, labels in forward, extra inputs, or gradient surgery.
++The implementation is an experimental adaptation, without a novelty claim.
+ """
+ import copy
+@@ -23,5 +19,5 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary', 'rank_evidence_scope': 'event', 'rank_evidence_location': 'route', 'rank_feedback_identity': False, 'retain_position_route': False, 'rank_primary_gain': 2.0, 'rank_aux_gradient': 'primary', 'selector_input_space': 'private', 'selector_input_gradient': 'detached', 'selector_transfer_source': 'none', 'selector_transfer_gradient': 'detached'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary', 'rank_evidence_scope': 'event', 'rank_evidence_location': 'route', 'rank_feedback_identity': False, 'retain_position_route': False, 'rank_primary_gain': 2.0, 'rank_aux_gradient': 'primary', 'selector_input_space': 'private', 'selector_input_gradient': 'detached', 'selector_transfer_source': 'none', 'selector_transfer_gradient': 'detached', 'context_exchange_location': 'route', 'context_exchange_aux_gradient': 'detached'}
+ 
+ 
+@@ -45,6 +41,12 @@
+                  selector_transfer_source='none',
+                  selector_transfer_gradient='detached',
++                 context_exchange_location='route',
++                 context_exchange_aux_gradient='detached',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
++        if context_exchange_location not in ('route', 'readout'):
++            raise ValueError('Context exchange location must be route or readout')
++        if context_exchange_aux_gradient not in ('live', 'detached'):
++            raise ValueError('Unknown context exchange auxiliary derivative')
+         labels = list(feature_map.labels)
+         if num_tasks is not None and num_tasks != len(labels):
+@@ -259,4 +261,13 @@
+         # Appended after inherited initialization; dense, zero and RNG-neutral.
+         self.selector_transfer_weight = nn.Parameter(torch.zeros(3))
++        # Append after every inherited allocation/reset: exact parent RNG and
++        # initial function. No bias, learned normalization or copied tables.
++        self.context_exchange_width = len(self.user_fields) * embedding_dim
++        if self.context_exchange_width < 1:
++            raise ValueError('Context exchange requires nonempty context')
++        self.context_exchange_location = context_exchange_location
++        self.context_exchange_aux_gradient = context_exchange_aux_gradient
++        self.context_exchange_weight = nn.Parameter(torch.zeros(
++            len(labels), self.gate_width, self.context_exchange_width))
+         self.model_to_device()
+ 
+@@ -432,5 +443,5 @@
+             return route, readout
+ 
+-    def _event_route_gain(self, channels, matches, mask, rank_route):
++    def _event_route_gain(self, channels, matches, mask, rank_route, context_route):
+         """Bounded [B,L,T] gains with a donor added only to click logits.
+ 
+@@ -463,4 +474,9 @@
+                                        rank_route)
+             gate_logits = gate_logits + applied_rank
++            # The same raw event logits are computed in all cells. Place
++            # them before the inherited live self-donor and bounded gate.
++            # Readout cells keep an explicit zero-gradient route branch.
++            route_factor = 1.0 if self.context_exchange_location == 'route' else 0.0
++            gate_logits = gate_logits + route_factor * context_route
+             # Both donor alternatives are calculated in every variant. The
+             # contracted four labels may be ordered arbitrarily by FeatureMap.
+@@ -608,4 +624,37 @@
+         return result
+ 
++    def _context_event_exchange(self, context, channels, matches, mask):
++        """Return identical event logits and their masked mean in every cell.
++
++        All normalization is within an example, without learned affine terms.
++        Task rows follow FeatureMap label order. Detachment on auxiliary rows
++        blocks only the NEW path into shared context; the task projection and
++        the inherited context-to-tower path still train. No cache or VJP probe.
++        Raw event logits are bounded by sqrt(gate_width); empty/masked events
++        contribute exactly zero, including to the readout alternative.
++        """
++        if context.ndim != 2 or context.shape[-1] != self.context_exchange_width:
++            raise ValueError('Context exchange width differs from inherited tower width')
++        with torch.autocast(device_type=mask.device.type, enabled=False):
++            valid = mask.bool().unsqueeze(-1)
++            features = (channels.unsqueeze(-1) * matches.unsqueeze(-2)).flatten(2)
++            features = features.float().masked_fill(~valid, 0)
++            normalized = torch.nn.functional.layer_norm(
++                context.float(), (self.context_exchange_width,), eps=1e-5)
++            event_logits = []
++            for index, label in enumerate(self.feature_map.labels):
++                task_context = normalized
++                if label != 'is_click' and self.context_exchange_aux_gradient == 'detached':
++                    task_context = task_context.detach()
++                query = torch.tanh(torch.nn.functional.linear(
++                    task_context, self.context_exchange_weight[index])
++                    / math.sqrt(self.context_exchange_width))
++                event_logits.append((features * query[:, None, :]).sum(dim=-1)
++                                    / math.sqrt(self.gate_width))
++            event_logits = torch.stack(event_logits, dim=-1).masked_fill(~valid, 0)
++            count = valid.float().sum(dim=1).clamp_min(1.0)
++            mean_logits = event_logits.sum(dim=1) / count
++            return event_logits, mean_logits
++
+     def forward(self, inputs):
+         if len(inputs) != 4 or inputs[3] is None:
+@@ -629,4 +678,8 @@
+             values = torch.cat([keys, action], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
++        context_route, context_readout = self._context_event_exchange(
++            context, channels, matches, mask)
++        readout_factor = 1.0 if self.context_exchange_location == 'readout' else 0.0
++        correction = correction + readout_factor * context_readout
+         # Auxiliary target/history values remain private in every cell. The
+         # auxiliary selector can separately read primary or private geometry.
+@@ -669,5 +722,5 @@
+             scores = scores.masked_fill(~valid, 0)
+             raw_selector_scores = scores
+-            gain = self._event_route_gain(channels, matches, mask, rank_route)
++            gain = self._event_route_gain(channels, matches, mask, rank_route, context_route)
+             # Factor only click's gate. Private item tables, auxiliary gates,
+             # additive evidence and primary selector ownership stay inherited.

@@ -1,0 +1,1518 @@
+
+# round-0001-slot-0 | regular | 0.5475 | Add checkpointed training-frequency input scales consistently across all four category models, with automatic restoration by the existing predictor writer.
+--- round-0001-slot-0/input.py
++++ round-0001-slot-0/candidate.py
+@@ -185,6 +185,7 @@
+         self.hidden_units = hidden_units
+         self.maxlen = maxlen
+         self.mask_token = itemnum + 1
++        self.register_buffer("input_scale", torch.ones(itemnum + 2))
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+         encoder_layer = nn.TransformerEncoderLayer(
+@@ -209,7 +210,7 @@
+         batch, length = seq.shape
+         pos = torch.arange(length, device=seq.device).unsqueeze(0).expand(batch, -1) + 1
+         pos = pos * (seq != 0).long()
+-        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)
++        x = self.item_emb(seq) * self.input_scale[seq].unsqueeze(-1) * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+         safe_padding = padding.clone()
+@@ -248,6 +249,18 @@
+         dropout_rate=DROPOUT_RATE,
+         maxlen=MAXLEN,
+     ).to(device)
++    item_counts = np.zeros(itemnum + 2, dtype=np.int64)
++    for history in user_train.values():
++        np.add.at(item_counts, np.asarray(history, dtype=np.int64), 1)
++    observed = item_counts[1:itemnum + 1] > 0
++    input_scale = np.ones(itemnum + 2, dtype=np.float32)
++    if observed.any():
++        observed_ids = np.flatnonzero(observed) + 1
++        frequency_scale = np.log1p(item_counts[observed_ids].astype(np.float64)) ** (-0.25)
++        frequency_scale /= frequency_scale.mean()
++        input_scale[observed_ids] = np.clip(frequency_scale, 0.75, 1.25).astype(np.float32)
++    with torch.no_grad():
++        model.input_scale.copy_(torch.as_tensor(input_scale, device=device))
+     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+ 
+     working_dir = os.path.join(os.path.dirname(__file__), "working")
+
+# round-0001-slot-1 | regular | 0.5275 | Set the default sequence window to 64, consistently updating training, model construction and the embedded predictor fallback. Preserve one BERT4Rec model per category and all other training behavior.
+--- round-0001-slot-1/input.py
++++ round-0001-slot-1/candidate.py
+@@ -163,7 +163,7 @@
+ 
+ 
+ # Hyper-parameters
+-MAXLEN        = int(os.environ.get("BERT4REC_MAXLEN", "128"))
++MAXLEN        = int(os.environ.get("BERT4REC_MAXLEN", "64"))
+ HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+ NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+ NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+@@ -179,7 +179,7 @@
+ 
+ class BERT4RecModel(nn.Module):
+     def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 2,
+-                 num_heads: int = 2, dropout_rate: float = 0.2, maxlen: int = 128):
++                 num_heads: int = 2, dropout_rate: float = 0.2, maxlen: int = 64):
+         super().__init__()
+         self.itemnum = itemnum
+         self.hidden_units = hidden_units
+@@ -385,7 +385,7 @@
+     else:
+         return [0.0] * len(candidates)
+ 
+-    maxlen = int(meta.get("maxlen", 128))
++    maxlen = int(meta.get("maxlen", 64))
+     seq_arr = [0] * maxlen
+     for i, item in enumerate(reversed(history[-maxlen:])):
+         seq_arr[maxlen - 1 - i] = item
+
+# round-0001-slot-2 | regular | 0.5537 | Replace BPR with full-catalog masked-item cross-entropy across all four datasets. Padding and the exclusive mask token are excluded from output classes; checkpoint shapes and predictor remain compatible.
+--- round-0001-slot-2/input.py
++++ round-0001-slot-2/candidate.py
+@@ -156,10 +156,15 @@
+ 
+ 
+ def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+-    pos_scores, neg_scores = model(seq, pos, neg)
+-    mask = (pos != 0).float()
+-    loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
+-    return (loss * mask).sum() / mask.sum().clamp(min=1.0)
++    out = model.encode_sequence(seq)
++    mask = pos != 0
++    masked_states = out[mask]
++    targets = pos[mask] - 1
++    # Only real item IDs 1..itemnum are prediction classes.
++    logits = torch.nn.functional.linear(
++        masked_states, model.item_emb.weight[1:model.itemnum + 1]
++    )
++    return torch.nn.functional.cross_entropy(logits, targets, reduction="mean")
+ 
+ 
+ # Hyper-parameters
+
+# round-0001-slot-3 | regular | 0.535 | Double BERT4Rec embedding width to 128 for all four category models. Existing metadata and embedded predictor writer retain checkpoint shape consistency.
+--- round-0001-slot-3/input.py
++++ round-0001-slot-3/candidate.py
+@@ -164,7 +164,7 @@
+ 
+ # Hyper-parameters
+ MAXLEN        = int(os.environ.get("BERT4REC_MAXLEN", "128"))
+-HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
++HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "128"))
+ NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+ NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+ DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
+@@ -178,7 +178,7 @@
+ 
+ 
+ class BERT4RecModel(nn.Module):
+-    def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 2,
++    def __init__(self, itemnum: int, hidden_units: int = 128, num_blocks: int = 2,
+                  num_heads: int = 2, dropout_rate: float = 0.2, maxlen: int = 128):
+         super().__init__()
+         self.itemnum = itemnum
+
+# round-0002-slot-0 | regular | 0.525 | Use post-norm bidirectional Transformer blocks across all four BERT4Rec models, preserving masked-target training and appended-mask inference.
+--- round-0002-slot-0/input.py
++++ round-0002-slot-0/candidate.py
+@@ -199,7 +199,7 @@
+             dropout=dropout_rate,
+             activation="gelu",
+             batch_first=True,
+-            norm_first=True,
++            norm_first=False,
+         )
+         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_blocks)
+         self.dropout = nn.Dropout(dropout_rate)
+
+# round-0002-slot-1 | regular | 0.5187 | Apply final-position-weighted masked-item cross-entropy to all four category models. Checkpoint shapes and the embedded predictor remain compatible.
+--- round-0002-slot-1/input.py
++++ round-0002-slot-1/candidate.py
+@@ -164,7 +164,11 @@
+     logits = torch.nn.functional.linear(
+         masked_states, model.item_emb.weight[1:model.itemnum + 1]
+     )
+-    return torch.nn.functional.cross_entropy(logits, targets, reduction="mean")
++    losses = torch.nn.functional.cross_entropy(logits, targets, reduction="none")
++    position_weights = torch.ones_like(pos, dtype=losses.dtype)
++    position_weights[:, -1] = 2.0
++    target_weights = position_weights[mask]
++    return (losses * target_weights).sum() / target_weights.sum().clamp(min=1.0)
+ 
+ 
+ # Hyper-parameters
+
+# round-0002-slot-2 | regular | 0.5575 | Jointly tune all four BERT4Rec category models: learning rate 5e-4, dropout 0.3 and weight decay 1e-5. Retain one checkpoint per category and all other behavior.
+--- round-0002-slot-2/input.py
++++ round-0002-slot-2/candidate.py
+@@ -172,9 +172,9 @@
+ HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+ NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+ NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+-DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
+-LR            = float(os.environ.get("BERT4REC_LR", "1e-3"))
+-WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
++DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.3"))
++LR            = float(os.environ.get("BERT4REC_LR", "5e-4"))
++WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "1e-5"))
+ BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
+ NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+ NUM_EPOCHS    = int(os.environ.get("BERT4REC_EPOCHS", "200"))
+
+# round-0002-slot-3 | regular | 0.5912 | Normalize the tied BERT4Rec item table to a fixed Xavier-scale row norm across context lookup, training logits and candidate scoring. Preserve zero padding, the exclusive mask ID and existing checkpoint shapes; the embedded predictor automatically imports the updated implementation.
+--- round-0002-slot-3/input.py
++++ round-0002-slot-3/candidate.py
+@@ -162,7 +162,7 @@
+     targets = pos[mask] - 1
+     # Only real item IDs 1..itemnum are prediction classes.
+     logits = torch.nn.functional.linear(
+-        masked_states, model.item_emb.weight[1:model.itemnum + 1]
++        masked_states, model.effective_item_weight()[1:model.itemnum + 1]
+     )
+     return torch.nn.functional.cross_entropy(logits, targets, reduction="mean")
+ 
+@@ -210,11 +210,21 @@
+             nn.init.xavier_uniform_(self.pos_emb.weight)
+             self.pos_emb.weight[0].zero_()
+ 
++    def effective_item_weight(self) -> torch.Tensor:
++        row_norm = math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
++        nonpadding = torch.nn.functional.normalize(
++            self.item_emb.weight[1:], p=2, dim=-1, eps=1e-12
++        ) * row_norm
++        return torch.cat((torch.zeros_like(self.item_emb.weight[:1]), nonpadding), dim=0)
++
+     def encode_sequence(self, seq: torch.Tensor) -> torch.Tensor:
+         batch, length = seq.shape
+         pos = torch.arange(length, device=seq.device).unsqueeze(0).expand(batch, -1) + 1
+         pos = pos * (seq != 0).long()
+-        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)
++        item_vectors = torch.nn.functional.embedding(
++            seq, self.effective_item_weight(), padding_idx=0
++        )
++        x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+         safe_padding = padding.clone()
+@@ -224,8 +234,9 @@
+ 
+     def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):
+         out = self.encode_sequence(seq)
+-        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)
+-        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)
++        item_weight = self.effective_item_weight()
++        pos_scores = (out * torch.nn.functional.embedding(pos, item_weight, padding_idx=0)).sum(dim=-1)
++        neg_scores = (out * torch.nn.functional.embedding(neg, item_weight, padding_idx=0)).sum(dim=-1)
+         return pos_scores, neg_scores
+ 
+     def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:
+@@ -234,7 +245,9 @@
+         prediction_seq[:, -1] = self.mask_token
+         out = self.encode_sequence(prediction_seq)
+         user_emb = out[0, -1]
+-        cand_emb = self.item_emb(candidates)
++        cand_emb = torch.nn.functional.embedding(
++            candidates, self.effective_item_weight(), padding_idx=0
++        )
+         return torch.matmul(cand_emb, user_emb)
+ 
+ 
+
+# round-0003-slot-0 | regular | 0.5862 | Add training-only frequency percentile input scaling to each category's single BERT4Rec model, persisted in its checkpoint and automatically restored during prediction.
+--- round-0003-slot-0/input.py
++++ round-0003-slot-0/candidate.py
+@@ -190,6 +190,8 @@
+         self.hidden_units = hidden_units
+         self.maxlen = maxlen
+         self.mask_token = itemnum + 1
++        self.register_buffer("input_scale", torch.ones(itemnum + 2))
++        self.input_scale[0] = 0.0
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+         encoder_layer = nn.TransformerEncoderLayer(
+@@ -224,7 +226,7 @@
+         item_vectors = torch.nn.functional.embedding(
+             seq, self.effective_item_weight(), padding_idx=0
+         )
+-        x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)
++        x = item_vectors * self.input_scale[seq].unsqueeze(-1) * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+         safe_padding = padding.clone()
+@@ -266,6 +268,24 @@
+         dropout_rate=DROPOUT_RATE,
+         maxlen=MAXLEN,
+     ).to(device)
++    item_counts = np.zeros(itemnum + 2, dtype=np.int64)
++    for history in user_train.values():
++        np.add.at(item_counts, np.asarray(history, dtype=np.int64), 1)
++    log_frequency = np.log1p(item_counts[1:itemnum + 1].astype(np.float64))
++    _, inverse, tie_counts = np.unique(
++        log_frequency, return_inverse=True, return_counts=True
++    )
++    first_rank = np.cumsum(tie_counts) - tie_counts
++    midpoint_rank = first_rank + (tie_counts - 1) / 2.0
++    if itemnum > 1:
++        percentile = midpoint_rank[inverse] / float(itemnum - 1)
++    else:
++        percentile = np.full(itemnum, 0.5, dtype=np.float64)
++    input_scale = np.ones(itemnum + 2, dtype=np.float32)
++    input_scale[0] = 0.0
++    input_scale[1:itemnum + 1] = (0.75 + 0.5 * percentile).astype(np.float32)
++    with torch.no_grad():
++        model.input_scale.copy_(torch.as_tensor(input_scale, device=device))
+     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+ 
+     working_dir = os.path.join(os.path.dirname(__file__), "working")
+
+# round-0003-slot-1 | regular | 0.5762 | Double the normalized tied item embedding scale for every category; the existing predictor writer automatically uses the updated implementation.
+--- round-0003-slot-1/input.py
++++ round-0003-slot-1/candidate.py
+@@ -211,7 +211,7 @@
+             self.pos_emb.weight[0].zero_()
+ 
+     def effective_item_weight(self) -> torch.Tensor:
+-        row_norm = math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
++        row_norm = 2.0 * math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
+         nonpadding = torch.nn.functional.normalize(
+             self.item_emb.weight[1:], p=2, dim=-1, eps=1e-12
+         ) * row_norm
+
+# round-0003-slot-2 | regular | 0.6038 | Narrow BERT4Rec feed-forward layers from 4× to 2× hidden width, retaining one independently trained model per category and compatible predictor construction.
+--- round-0003-slot-2/input.py
++++ round-0003-slot-2/candidate.py
+@@ -195,7 +195,7 @@
+         encoder_layer = nn.TransformerEncoderLayer(
+             d_model=hidden_units,
+             nhead=num_heads,
+-            dim_feedforward=hidden_units * 4,
++            dim_feedforward=hidden_units * 2,
+             dropout=dropout_rate,
+             activation="gelu",
+             batch_first=True,
+
+# round-0003-slot-3 | regular | 0.58 | Add 0.05 label smoothing to full-catalog masked-item cross-entropy, excluding padding and the exclusive mask token through the existing real-item logit slice.
+--- round-0003-slot-3/input.py
++++ round-0003-slot-3/candidate.py
+@@ -164,7 +164,9 @@
+     logits = torch.nn.functional.linear(
+         masked_states, model.effective_item_weight()[1:model.itemnum + 1]
+     )
+-    return torch.nn.functional.cross_entropy(logits, targets, reduction="mean")
++    return torch.nn.functional.cross_entropy(
++        logits, targets, reduction="mean", label_smoothing=0.05
++    )
+ 
+ 
+ # Hyper-parameters
+
+# round-0004-slot-0 | regular | 0.5913 | Use SwiGLU feed-forward blocks across all four independently trained category models, with matching inference through the existing predictor import.
+--- round-0004-slot-0/input.py
++++ round-0004-slot-0/candidate.py
+@@ -182,6 +182,30 @@
+ PATIENCE      = int(os.environ.get("BERT4REC_PATIENCE", "20"))
+ 
+ 
++class SwiGLUEncoderLayer(nn.TransformerEncoderLayer):
++    def __init__(self, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        self.linear_gate = nn.Linear(
++            self.linear1.in_features,
++            self.linear1.out_features,
++            bias=self.linear1.bias is not None,
++        )
++
++    def _ff_block(self, x: torch.Tensor) -> torch.Tensor:
++        gated = torch.nn.functional.silu(self.linear_gate(x)) * self.linear1(x)
++        return self.dropout2(self.linear2(self.dropout(gated)))
++
++    def forward(self, src: torch.Tensor, src_mask=None,
++                src_key_padding_mask=None, is_causal: bool = False) -> torch.Tensor:
++        x = src
++        x = x + self._sa_block(
++            self.norm1(x), src_mask, src_key_padding_mask,
++            is_causal=is_causal,
++        )
++        x = x + self._ff_block(self.norm2(x))
++        return x
++
++
+ class BERT4RecModel(nn.Module):
+     def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 2,
+                  num_heads: int = 2, dropout_rate: float = 0.2, maxlen: int = 128):
+@@ -192,7 +216,7 @@
+         self.mask_token = itemnum + 1
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+-        encoder_layer = nn.TransformerEncoderLayer(
++        encoder_layer = SwiGLUEncoderLayer(
+             d_model=hidden_units,
+             nhead=num_heads,
+             dim_feedforward=hidden_units * 2,
+
+# round-0004-slot-1 | regular | 0.5938 | Add position-derived recency input scaling to each category's single BERT4Rec model, automatically shared by the generated predictor.
+--- round-0004-slot-1/input.py
++++ round-0004-slot-1/candidate.py
+@@ -224,7 +224,18 @@
+         item_vectors = torch.nn.functional.embedding(
+             seq, self.effective_item_weight(), padding_idx=0
+         )
+-        x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)
++        nonpadding = seq != 0
++        chronological_rank = nonpadding.long().cumsum(dim=1) - 1
++        rank_denominator = (nonpadding.sum(dim=1, keepdim=True) - 1).clamp_min(1)
++        relative_recency = chronological_rank.clamp_min(0).to(item_vectors.dtype) / rank_denominator.to(item_vectors.dtype)
++        observed = nonpadding & (seq != self.mask_token)
++        input_scale = torch.where(
++            observed,
++            0.9 + 0.2 * relative_recency,
++            torch.ones_like(relative_recency),
++        )
++        input_scale = input_scale * nonpadding.to(item_vectors.dtype)
++        x = item_vectors * input_scale.unsqueeze(-1) * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+         safe_padding = padding.clone()
+
+# round-0004-slot-2 | regular | 0.5925 | Jointly tune learning rate, dropout and weight decay for all four independent BERT4Rec category models.
+--- round-0004-slot-2/input.py
++++ round-0004-slot-2/candidate.py
+@@ -172,9 +172,9 @@
+ HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+ NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+ NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+-DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
+-LR            = float(os.environ.get("BERT4REC_LR", "1e-3"))
+-WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
++DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.3"))
++LR            = float(os.environ.get("BERT4REC_LR", "7e-4"))
++WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "1e-5"))
+ BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
+ NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+ NUM_EPOCHS    = int(os.environ.get("BERT4REC_EPOCHS", "200"))
+
+# round-0004-slot-3 | regular | 0.5337 | Use equal sequence weighting for full-catalog masked-item cross-entropy across all four datasets. Checkpoint shapes and predictor remain compatible.
+--- round-0004-slot-3/input.py
++++ round-0004-slot-3/candidate.py
+@@ -164,7 +164,13 @@
+     logits = torch.nn.functional.linear(
+         masked_states, model.effective_item_weight()[1:model.itemnum + 1]
+     )
+-    return torch.nn.functional.cross_entropy(logits, targets, reduction="mean")
++    position_losses = torch.nn.functional.cross_entropy(logits, targets, reduction="none")
++    sequence_indices = mask.nonzero(as_tuple=True)[0]
++    sequence_loss_sums = position_losses.new_zeros(seq.size(0)).scatter_add(
++        0, sequence_indices, position_losses
++    )
++    target_counts = mask.sum(dim=1).to(position_losses.dtype).clamp_min(1)
++    return (sequence_loss_sums / target_counts).mean()
+ 
+ 
+ # Hyper-parameters
+
+# round-0005-slot-0 | regular | 0.5825 | Jointly tune BERT4Rec hidden width to 96 and learning rate to 8e-4 for all four category models, using existing metadata-driven predictor dimensions.
+--- round-0005-slot-0/input.py
++++ round-0005-slot-0/candidate.py
+@@ -169,11 +169,11 @@
+ 
+ # Hyper-parameters
+ MAXLEN        = int(os.environ.get("BERT4REC_MAXLEN", "128"))
+-HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
++HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "96"))
+ NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+ NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+ DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
+-LR            = float(os.environ.get("BERT4REC_LR", "1e-3"))
++LR            = float(os.environ.get("BERT4REC_LR", "8e-4"))
+ WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
+ BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
+ NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+
+# round-0005-slot-1 | regular | 0.5775 | Halve feed-forward residual updates in every BERT4Rec block across all four datasets, with matching inference through the existing predictor import.
+--- round-0005-slot-1/input.py
++++ round-0005-slot-1/candidate.py
+@@ -182,6 +182,18 @@
+ PATIENCE      = int(os.environ.get("BERT4REC_PATIENCE", "20"))
+ 
+ 
++class ScaledFFNEncoderLayer(nn.TransformerEncoderLayer):
++    def forward(self, src: torch.Tensor, src_mask=None,
++                src_key_padding_mask=None, is_causal: bool = False) -> torch.Tensor:
++        x = src
++        x = x + self._sa_block(
++            self.norm1(x), src_mask, src_key_padding_mask,
++            is_causal=is_causal,
++        )
++        x = x + 0.5 * self._ff_block(self.norm2(x))
++        return x
++
++
+ class BERT4RecModel(nn.Module):
+     def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 2,
+                  num_heads: int = 2, dropout_rate: float = 0.2, maxlen: int = 128):
+@@ -192,7 +204,7 @@
+         self.mask_token = itemnum + 1
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+-        encoder_layer = nn.TransformerEncoderLayer(
++        encoder_layer = ScaledFFNEncoderLayer(
+             d_model=hidden_units,
+             nhead=num_heads,
+             dim_feedforward=hidden_units * 2,
+
+# round-0005-slot-2 | regular | 0.6088 | Replace padded-slot position IDs with chronological nonpadding ranks in all four BERT4Rec category models, automatically shared by the generated predictor.
+--- round-0005-slot-2/input.py
++++ round-0005-slot-2/candidate.py
+@@ -219,8 +219,8 @@
+ 
+     def encode_sequence(self, seq: torch.Tensor) -> torch.Tensor:
+         batch, length = seq.shape
+-        pos = torch.arange(length, device=seq.device).unsqueeze(0).expand(batch, -1) + 1
+-        pos = pos * (seq != 0).long()
++        nonpadding = (seq != 0).long()
++        pos = nonpadding.cumsum(dim=1) * nonpadding
+         item_vectors = torch.nn.functional.embedding(
+             seq, self.effective_item_weight(), padding_idx=0
+         )
+
+# round-0005-slot-3 | regular | 0.565 | Use temperature-0.5 masked-item cross-entropy for each category’s single BERT4Rec model; predictor changes are unnecessary.
+--- round-0005-slot-3/input.py
++++ round-0005-slot-3/candidate.py
+@@ -164,7 +164,7 @@
+     logits = torch.nn.functional.linear(
+         masked_states, model.effective_item_weight()[1:model.itemnum + 1]
+     )
+-    return torch.nn.functional.cross_entropy(logits, targets, reduction="mean")
++    return torch.nn.functional.cross_entropy(logits / 0.5, targets, reduction="mean")
+ 
+ 
+ # Hyper-parameters
+
+# round-0006-slot-0 | regular | 0.6075 | Add checkpointed training-frequency counts and bounded history-relative input scaling to each category’s single BERT4Rec model, shared automatically with inference.
+--- round-0006-slot-0/input.py
++++ round-0006-slot-0/candidate.py
+@@ -190,6 +190,7 @@
+         self.hidden_units = hidden_units
+         self.maxlen = maxlen
+         self.mask_token = itemnum + 1
++        self.register_buffer("training_item_counts", torch.zeros(itemnum + 2))
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+         encoder_layer = nn.TransformerEncoderLayer(
+@@ -224,6 +225,16 @@
+         item_vectors = torch.nn.functional.embedding(
+             seq, self.effective_item_weight(), padding_idx=0
+         )
++        visible = (seq > 0) & (seq <= self.itemnum)
++        log_frequency = torch.log1p(self.training_item_counts[seq])
++        visible_count = visible.sum(dim=1, keepdim=True).clamp_min(1)
++        visible_frequency = torch.where(visible, log_frequency, torch.zeros_like(log_frequency))
++        mean_frequency = visible_frequency.sum(dim=1, keepdim=True) / visible_count
++        centered = torch.where(visible, log_frequency - mean_frequency, torch.zeros_like(log_frequency))
++        variance = centered.square().sum(dim=1, keepdim=True) / visible_count
++        z = centered / (variance.sqrt() + 1e-6)
++        frequency_scale = torch.where(visible, 1.0 + 0.05 * torch.tanh(z), torch.ones_like(z))
++        item_vectors = item_vectors * frequency_scale.unsqueeze(-1)
+         x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+@@ -266,6 +277,11 @@
+         dropout_rate=DROPOUT_RATE,
+         maxlen=MAXLEN,
+     ).to(device)
++    training_counts = np.zeros(itemnum + 2, dtype=np.float32)
++    for history in user_train.values():
++        np.add.at(training_counts, np.asarray(history, dtype=np.int64), 1.0)
++    with torch.no_grad():
++        model.training_item_counts.copy_(torch.from_numpy(training_counts).to(device))
+     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+ 
+     working_dir = os.path.join(os.path.dirname(__file__), "working")
+
+# round-0006-slot-1 | regular | 0.5975 | Jointly reduce BERT4Rec dropout from 0.2 to 0.1 and learning rate from 1e-3 to 8e-4 across all four datasets, retaining one independent checkpoint per category.
+--- round-0006-slot-1/input.py
++++ round-0006-slot-1/candidate.py
+@@ -172,8 +172,8 @@
+ HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+ NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+ NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+-DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
+-LR            = float(os.environ.get("BERT4REC_LR", "1e-3"))
++DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.1"))
++LR            = float(os.environ.get("BERT4REC_LR", "8e-4"))
+ WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
+ BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
+ NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+
+# round-0006-slot-2 | regular | 0.5887 | Double the effective nonpadding item embedding radius for each category’s single BERT4Rec model, consistently across training and generated prediction.
+--- round-0006-slot-2/input.py
++++ round-0006-slot-2/candidate.py
+@@ -211,7 +211,7 @@
+             self.pos_emb.weight[0].zero_()
+ 
+     def effective_item_weight(self) -> torch.Tensor:
+-        row_norm = math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
++        row_norm = 2.0 * math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
+         nonpadding = torch.nn.functional.normalize(
+             self.item_emb.weight[1:], p=2, dim=-1, eps=1e-12
+         ) * row_norm
+
+# round-0006-slot-3 | regular | 0.5737 | Replace chronological nonpadding positions with reverse recency ranks in every category’s single BERT4Rec model, consistently shared by training and the generated predictor.
+--- round-0006-slot-3/input.py
++++ round-0006-slot-3/candidate.py
+@@ -220,7 +220,7 @@
+     def encode_sequence(self, seq: torch.Tensor) -> torch.Tensor:
+         batch, length = seq.shape
+         nonpadding = (seq != 0).long()
+-        pos = nonpadding.cumsum(dim=1) * nonpadding
++        pos = nonpadding.flip(dims=[1]).cumsum(dim=1).flip(dims=[1]) * nonpadding
+         item_vectors = torch.nn.functional.embedding(
+             seq, self.effective_item_weight(), padding_idx=0
+         )
+
+# round-0007-slot-0 | regular | 0.585 | Cap training, validation and generated-predictor sequences at 64 positions while preserving checkpoint shapes and one BERT4Rec model per dataset.
+--- round-0007-slot-0/input.py
++++ round-0007-slot-0/candidate.py
+@@ -80,6 +80,7 @@
+ 
+ def sample_batch(user_train: dict[int, list[int]], itemnum: int, batch_size: int, maxlen: int):
+     # Cloze training: masked targets are not exposed as unmasked shifted inputs.
++    maxlen = min(maxlen, 64)
+     users = [u for u, items in user_train.items() if len(items) >= 2]
+     if not users:
+         raise RuntimeError("no users with at least two training interactions")
+@@ -114,6 +115,7 @@
+ 
+ 
+ def _history_to_tensor(history: list[int], maxlen: int, device: torch.device) -> torch.Tensor:
++    maxlen = min(maxlen, 64)
+     seq_arr = np.zeros(maxlen, dtype=np.int64)
+     for i, item in enumerate(reversed(history[-maxlen:])):
+         seq_arr[maxlen - 1 - i] = item
+@@ -403,7 +405,7 @@
+     else:
+         return [0.0] * len(candidates)
+ 
+-    maxlen = int(meta.get("maxlen", 128))
++    maxlen = min(int(meta.get("maxlen", 128)), 64)
+     seq_arr = [0] * maxlen
+     for i, item in enumerate(reversed(history[-maxlen:])):
+         seq_arr[maxlen - 1 - i] = item
+
+# round-0007-slot-1 | regular | 0.6075 | Add checkpointed training-frequency input scaling to each category’s single BERT4Rec model, shared automatically with generated inference.
+--- round-0007-slot-1/input.py
++++ round-0007-slot-1/candidate.py
+@@ -190,6 +190,9 @@
+         self.hidden_units = hidden_units
+         self.maxlen = maxlen
+         self.mask_token = itemnum + 1
++        self.register_buffer("input_log_count", torch.zeros(itemnum + 2))
++        self.register_buffer("input_mean_log_count", torch.zeros(()))
++        self.register_buffer("input_std_log_count", torch.ones(()))
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+         encoder_layer = nn.TransformerEncoderLayer(
+@@ -224,6 +227,13 @@
+         item_vectors = torch.nn.functional.embedding(
+             seq, self.effective_item_weight(), padding_idx=0
+         )
++        visible_real = (seq > 0) & (seq <= self.itemnum)
++        rarity = (self.input_mean_log_count - self.input_log_count[seq]) / self.input_std_log_count.clamp_min(1e-6)
++        input_scale = torch.where(
++            visible_real, 1.0 + 0.05 * torch.tanh(rarity), torch.ones_like(rarity)
++        )
++        input_scale = input_scale.masked_fill(seq == 0, 0.0)
++        item_vectors = item_vectors * input_scale.unsqueeze(-1)
+         x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+@@ -266,6 +276,15 @@
+         dropout_rate=DROPOUT_RATE,
+         maxlen=MAXLEN,
+     ).to(device)
++    training_counts = np.zeros(itemnum + 2, dtype=np.float64)
++    for history in user_train.values():
++        np.add.at(training_counts, np.asarray(history, dtype=np.int64), 1.0)
++    with torch.no_grad():
++        log_counts = torch.as_tensor(np.log1p(training_counts), dtype=torch.float32, device=device)
++        real_log_counts = log_counts[1:itemnum + 1]
++        model.input_log_count.copy_(log_counts)
++        model.input_mean_log_count.copy_(real_log_counts.mean())
++        model.input_std_log_count.copy_(real_log_counts.std(unbiased=False).clamp_min(1e-6))
+     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+ 
+     working_dir = os.path.join(os.path.dirname(__file__), "working")
+
+# round-0007-slot-2 | regular | 0.5975 | Add 0.02 label smoothing to the existing full-catalog masked-item cross-entropy for each category’s single BERT4Rec model.
+--- round-0007-slot-2/input.py
++++ round-0007-slot-2/candidate.py
+@@ -164,7 +164,7 @@
+     logits = torch.nn.functional.linear(
+         masked_states, model.effective_item_weight()[1:model.itemnum + 1]
+     )
+-    return torch.nn.functional.cross_entropy(logits, targets, reduction="mean")
++    return torch.nn.functional.cross_entropy(logits, targets, reduction="mean", label_smoothing=0.02)
+ 
+ 
+ # Hyper-parameters
+
+# round-0007-slot-3 | regular | 0.58 | Untie normalized input and output item embeddings within each category’s single BERT4Rec model. Preserve initialization values, embedding radius, masked training, dot-product scoring and predictor/checkpoint consistency.
+--- round-0007-slot-3/input.py
++++ round-0007-slot-3/candidate.py
+@@ -162,7 +162,7 @@
+     targets = pos[mask] - 1
+     # Only real item IDs 1..itemnum are prediction classes.
+     logits = torch.nn.functional.linear(
+-        masked_states, model.effective_item_weight()[1:model.itemnum + 1]
++        masked_states, model.effective_output_weight()[1:model.itemnum + 1]
+     )
+     return torch.nn.functional.cross_entropy(logits, targets, reduction="mean")
+ 
+@@ -191,6 +191,7 @@
+         self.maxlen = maxlen
+         self.mask_token = itemnum + 1
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
++        self.output_item_weight = nn.Parameter(torch.empty(itemnum + 1, hidden_units))
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+         encoder_layer = nn.TransformerEncoderLayer(
+             d_model=hidden_units,
+@@ -207,6 +208,7 @@
+         with torch.no_grad():
+             nn.init.xavier_uniform_(self.item_emb.weight)
+             self.item_emb.weight[0].zero_()
++            self.output_item_weight.copy_(self.item_emb.weight[:itemnum + 1])
+             nn.init.xavier_uniform_(self.pos_emb.weight)
+             self.pos_emb.weight[0].zero_()
+ 
+@@ -216,6 +218,13 @@
+             self.item_emb.weight[1:], p=2, dim=-1, eps=1e-12
+         ) * row_norm
+         return torch.cat((torch.zeros_like(self.item_emb.weight[:1]), nonpadding), dim=0)
++
++    def effective_output_weight(self) -> torch.Tensor:
++        row_norm = math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
++        nonpadding = torch.nn.functional.normalize(
++            self.output_item_weight[1:], p=2, dim=-1, eps=1e-12
++        ) * row_norm
++        return torch.cat((torch.zeros_like(self.output_item_weight[:1]), nonpadding), dim=0)
+ 
+     def encode_sequence(self, seq: torch.Tensor) -> torch.Tensor:
+         batch, length = seq.shape
+@@ -234,7 +243,7 @@
+ 
+     def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):
+         out = self.encode_sequence(seq)
+-        item_weight = self.effective_item_weight()
++        item_weight = self.effective_output_weight()
+         pos_scores = (out * torch.nn.functional.embedding(pos, item_weight, padding_idx=0)).sum(dim=-1)
+         neg_scores = (out * torch.nn.functional.embedding(neg, item_weight, padding_idx=0)).sum(dim=-1)
+         return pos_scores, neg_scores
+@@ -246,7 +255,7 @@
+         out = self.encode_sequence(prediction_seq)
+         user_emb = out[0, -1]
+         cand_emb = torch.nn.functional.embedding(
+-            candidates, self.effective_item_weight(), padding_idx=0
++            candidates, self.effective_output_weight(), padding_idx=0
+         )
+         return torch.matmul(cand_emb, user_emb)
+ 
+
+# round-0008-slot-0 | jump | 0.5962 | Coordinate visible-history recency scaling with dropout 0.1 and learning rate 7e-4 across all four single-model BERT4Rec routes. Preserve masked-target training, appended-mask inference, checkpoint shapes and predictor consistency.
+--- round-0008-slot-0/input.py
++++ round-0008-slot-0/candidate.py
+@@ -172,8 +172,8 @@
+ HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+ NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+ NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+-DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
+-LR            = float(os.environ.get("BERT4REC_LR", "1e-3"))
++DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.1"))
++LR            = float(os.environ.get("BERT4REC_LR", "7e-4"))
+ WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
+ BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
+ NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+@@ -224,6 +224,14 @@
+         item_vectors = torch.nn.functional.embedding(
+             seq, self.effective_item_weight(), padding_idx=0
+         )
++        visible = (seq > 0) & (seq <= self.itemnum)
++        visible_rank = visible.long().cumsum(dim=1).to(item_vectors.dtype)
++        visible_count = visible.sum(dim=1, keepdim=True).to(item_vectors.dtype)
++        recency = 2.0 * (visible_rank - 1.0) / (visible_count - 1.0).clamp_min(1.0) - 1.0
++        recency = torch.where(
++            visible & (visible_count > 1.0), recency, torch.zeros_like(recency)
++        )
++        item_vectors = item_vectors * (1.0 + 0.10 * recency).unsqueeze(-1)
+         x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+
+# round-0008-slot-1 | jump | 0.5162 | Coordinate visible-context length scaling, final-position weighted masked-item loss, and gentler optimization across all four category models. Preserve BERT4Rec, single-checkpoint routing, masking, seeds, splits, epoch and batch limits, and predictor compatibility.
+--- round-0008-slot-1/input.py
++++ round-0008-slot-1/candidate.py
+@@ -164,7 +164,11 @@
+     logits = torch.nn.functional.linear(
+         masked_states, model.effective_item_weight()[1:model.itemnum + 1]
+     )
+-    return torch.nn.functional.cross_entropy(logits, targets, reduction="mean")
++    losses = torch.nn.functional.cross_entropy(logits, targets, reduction="none")
++    position_weights = torch.ones_like(pos, dtype=logits.dtype)
++    position_weights[:, -1] = 3.0
++    weights = position_weights[mask]
++    return (losses * weights).sum() / weights.sum()
+ 
+ 
+ # Hyper-parameters
+@@ -172,8 +176,8 @@
+ HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+ NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+ NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+-DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
+-LR            = float(os.environ.get("BERT4REC_LR", "1e-3"))
++DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.15"))
++LR            = float(os.environ.get("BERT4REC_LR", "5e-4"))
+ WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
+ BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
+ NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+@@ -224,6 +228,11 @@
+         item_vectors = torch.nn.functional.embedding(
+             seq, self.effective_item_weight(), padding_idx=0
+         )
++        visible_real = (seq > 0) & (seq <= self.itemnum)
++        visible_count = visible_real.sum(dim=1, keepdim=True).to(item_vectors.dtype)
++        length_cue = 0.08 * torch.log1p(visible_count) / math.log(129.0)
++        input_scale = 1.0 + visible_real.to(item_vectors.dtype) * length_cue
++        item_vectors = item_vectors * input_scale.unsqueeze(-1)
+         x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+
+# round-0008-slot-2 | jump | 0.6125 | Coordinate four changes across all category models: lower learning rate/dropout, temperature-0.8 masked CE, checkpointed training-frequency input scaling, and 0.8-times tied embedding radius. Preserve bidirectional masked training, appended-mask inference, routing and one checkpoint per category.
+--- round-0008-slot-2/input.py
++++ round-0008-slot-2/candidate.py
+@@ -29,7 +29,7 @@
+     if part.strip()
+ ]
+ 
+-DATA_DIR = os.environ.get("GAGC_DATA_DIR", "./input/trainval")
++DATA_DIR = os.environ['GAGC_DATA_DIR']
+ 
+ SEED = int(os.environ.get("GAGC_SEED", "42"))
+ random.seed(SEED)
+@@ -164,7 +164,7 @@
+     logits = torch.nn.functional.linear(
+         masked_states, model.effective_item_weight()[1:model.itemnum + 1]
+     )
+-    return torch.nn.functional.cross_entropy(logits, targets, reduction="mean")
++    return torch.nn.functional.cross_entropy(logits / 0.8, targets, reduction="mean")
+ 
+ 
+ # Hyper-parameters
+@@ -172,8 +172,8 @@
+ HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+ NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+ NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+-DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.2"))
+-LR            = float(os.environ.get("BERT4REC_LR", "1e-3"))
++DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.1"))
++LR            = float(os.environ.get("BERT4REC_LR", "7e-4"))
+ WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
+ BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
+ NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+@@ -191,6 +191,7 @@
+         self.maxlen = maxlen
+         self.mask_token = itemnum + 1
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
++        self.register_buffer("item_input_scale", torch.ones(itemnum + 2))
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+         encoder_layer = nn.TransformerEncoderLayer(
+             d_model=hidden_units,
+@@ -211,7 +212,7 @@
+             self.pos_emb.weight[0].zero_()
+ 
+     def effective_item_weight(self) -> torch.Tensor:
+-        row_norm = math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
++        row_norm = 0.8 * math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
+         nonpadding = torch.nn.functional.normalize(
+             self.item_emb.weight[1:], p=2, dim=-1, eps=1e-12
+         ) * row_norm
+@@ -224,6 +225,7 @@
+         item_vectors = torch.nn.functional.embedding(
+             seq, self.effective_item_weight(), padding_idx=0
+         )
++        item_vectors = item_vectors * self.item_input_scale[seq].unsqueeze(-1)
+         x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+@@ -266,6 +268,16 @@
+         dropout_rate=DROPOUT_RATE,
+         maxlen=MAXLEN,
+     ).to(device)
++    training_counts = np.zeros(itemnum + 2, dtype=np.float64)
++    for training_history in user_train.values():
++        np.add.at(training_counts, np.asarray(training_history, dtype=np.int64), 1.0)
++    log_counts = np.log1p(training_counts[1:itemnum + 1])
++    standardized_counts = (log_counts - log_counts.mean()) / max(float(log_counts.std()), 1e-6)
++    input_scales = 1.0 + 0.04 * np.tanh(standardized_counts)
++    with torch.no_grad():
++        model.item_input_scale[1:itemnum + 1].copy_(
++            torch.as_tensor(input_scales, dtype=model.item_input_scale.dtype, device=device)
++        )
+     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+ 
+     working_dir = os.path.join(os.path.dirname(__file__), "working")
+
+# round-0008-slot-3 | jump | 0.61 | Across all four datasets, combine checkpointed rarity-based input scaling with CE plus a 0.1-weighted pairwise ranking loss. Preserve masked training, appended-mask inference, backbone, hyperparameters and one checkpoint per category.
+--- round-0008-slot-3/input.py
++++ round-0008-slot-3/candidate.py
+@@ -164,7 +164,12 @@
+     logits = torch.nn.functional.linear(
+         masked_states, model.effective_item_weight()[1:model.itemnum + 1]
+     )
+-    return torch.nn.functional.cross_entropy(logits, targets, reduction="mean")
++    ce_loss = torch.nn.functional.cross_entropy(logits, targets, reduction="mean")
++    positive_scores = logits.gather(1, targets.unsqueeze(1)).squeeze(1)
++    negative_targets = neg[mask] - 1
++    negative_scores = logits.gather(1, negative_targets.unsqueeze(1)).squeeze(1)
++    ranking_loss = torch.nn.functional.softplus(negative_scores - positive_scores).mean()
++    return ce_loss + 0.1 * ranking_loss
+ 
+ 
+ # Hyper-parameters
+@@ -190,6 +195,7 @@
+         self.hidden_units = hidden_units
+         self.maxlen = maxlen
+         self.mask_token = itemnum + 1
++        self.register_buffer("item_input_scale", torch.ones(itemnum + 2))
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+         encoder_layer = nn.TransformerEncoderLayer(
+@@ -224,6 +230,7 @@
+         item_vectors = torch.nn.functional.embedding(
+             seq, self.effective_item_weight(), padding_idx=0
+         )
++        item_vectors = item_vectors * self.item_input_scale[seq].unsqueeze(-1)
+         x = item_vectors * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+         padding = seq == 0
+@@ -266,6 +273,24 @@
+         dropout_rate=DROPOUT_RATE,
+         maxlen=MAXLEN,
+     ).to(device)
++    training_counts = np.bincount(
++        np.fromiter(
++            (item for history in user_train.values() for item in history),
++            dtype=np.int64,
++        ),
++        minlength=itemnum + 2,
++    )
++    with torch.no_grad():
++        log_counts = torch.as_tensor(
++            np.log1p(training_counts[1:itemnum + 1]),
++            dtype=model.item_input_scale.dtype,
++            device=device,
++        )
++        count_mean = log_counts.mean()
++        count_std = log_counts.std(unbiased=False).clamp_min(1e-6)
++        model.item_input_scale[1:itemnum + 1].copy_(
++            1.0 + 0.03 * torch.tanh((count_mean - log_counts) / count_std)
++        )
+     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+ 
+     working_dir = os.path.join(os.path.dirname(__file__), "working")
+
+# round-0009-slot-0 | retune | None | Double the training-frequency input-feature amplitude for all four category models using the existing checkpointed scales.
+--- round-0009-slot-0/input.py
++++ round-0009-slot-0/candidate.py
+@@ -273,7 +273,7 @@
+         np.add.at(training_counts, np.asarray(training_history, dtype=np.int64), 1.0)
+     log_counts = np.log1p(training_counts[1:itemnum + 1])
+     standardized_counts = (log_counts - log_counts.mean()) / max(float(log_counts.std()), 1e-6)
+-    input_scales = 1.0 + 0.04 * np.tanh(standardized_counts)
++    input_scales = 1.0 + 0.08 * np.tanh(standardized_counts)
+     with torch.no_grad():
+         model.item_input_scale[1:itemnum + 1].copy_(
+             torch.as_tensor(input_scales, dtype=model.item_input_scale.dtype, device=device)
+
+# round-0009-slot-1 | retune | 0.595 | Lower the normalized tied embedding radius multiplier to 0.65 for each category’s single BERT4Rec model.
+--- round-0009-slot-1/input.py
++++ round-0009-slot-1/candidate.py
+@@ -212,7 +212,7 @@
+             self.pos_emb.weight[0].zero_()
+ 
+     def effective_item_weight(self) -> torch.Tensor:
+-        row_norm = 0.8 * math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
++        row_norm = 0.65 * math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
+         nonpadding = torch.nn.functional.normalize(
+             self.item_emb.weight[1:], p=2, dim=-1, eps=1e-12
+         ) * row_norm
+
+# round-0009-slot-2 | retune | None | Add a 0.05-weighted pairwise softplus loss at masked positions alongside existing cross-entropy. Predictor and checkpoint shapes remain unchanged.
+--- round-0009-slot-2/input.py
++++ round-0009-slot-2/candidate.py
+@@ -164,7 +164,14 @@
+     logits = torch.nn.functional.linear(
+         masked_states, model.effective_item_weight()[1:model.itemnum + 1]
+     )
+-    return torch.nn.functional.cross_entropy(logits / 0.8, targets, reduction="mean")
++    ce_loss = torch.nn.functional.cross_entropy(logits / 0.8, targets, reduction="mean")
++    positive_scores = logits.gather(1, targets.unsqueeze(1)).squeeze(1)
++    negative_targets = neg[mask] - 1
++    negative_scores = logits.gather(1, negative_targets.unsqueeze(1)).squeeze(1)
++    ranking_loss = torch.nn.functional.softplus(
++        (negative_scores - positive_scores) / 0.8
++    ).mean()
++    return ce_loss + 0.05 * ranking_loss
+ 
+ 
+ # Hyper-parameters
+
+# round-0009-slot-3 | retune | 0.6112 | Increase BERT4Rec feed-forward width from 2× to 3× hidden size for all four independently trained category models; inference uses the updated architecture through its existing model-class import.
+--- round-0009-slot-3/input.py
++++ round-0009-slot-3/candidate.py
+@@ -196,7 +196,7 @@
+         encoder_layer = nn.TransformerEncoderLayer(
+             d_model=hidden_units,
+             nhead=num_heads,
+-            dim_feedforward=hidden_units * 2,
++            dim_feedforward=hidden_units * 3,
+             dropout=dropout_rate,
+             activation="gelu",
+             batch_first=True,
+
+# round-0010-slot-0 | retune | 0.5925 | Use post-normalization in every category’s BERT4Rec attention blocks, with matching inference through the existing predictor import.
+--- round-0010-slot-0/input.py
++++ round-0010-slot-0/candidate.py
+@@ -200,7 +200,7 @@
+             dropout=dropout_rate,
+             activation="gelu",
+             batch_first=True,
+-            norm_first=True,
++            norm_first=False,
+         )
+         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_blocks)
+         self.dropout = nn.Dropout(dropout_rate)
+
+# round-0010-slot-1 | retune | 0.6 | Raise only the normalized tied item-embedding radius multiplier to 0.9 for all four category models, consistently in training and prediction.
+--- round-0010-slot-1/input.py
++++ round-0010-slot-1/candidate.py
+@@ -212,7 +212,7 @@
+             self.pos_emb.weight[0].zero_()
+ 
+     def effective_item_weight(self) -> torch.Tensor:
+-        row_norm = 0.8 * math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
++        row_norm = 0.9 * math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
+         nonpadding = torch.nn.functional.normalize(
+             self.item_emb.weight[1:], p=2, dim=-1, eps=1e-12
+         ) * row_norm
+
+# round-0010-slot-2 | retune | 0.5887 | Replace chronological position IDs with reverse nonpadding recency ranks. Preserve history truncation, masked training, final-mask readout, embeddings, backbone, scoring, loss, optimizer, and dataset routing.
+--- round-0010-slot-2/input.py
++++ round-0010-slot-2/candidate.py
+@@ -221,7 +221,7 @@
+     def encode_sequence(self, seq: torch.Tensor) -> torch.Tensor:
+         batch, length = seq.shape
+         nonpadding = (seq != 0).long()
+-        pos = nonpadding.cumsum(dim=1) * nonpadding
++        pos = nonpadding.flip(dims=[1]).cumsum(dim=1).flip(dims=[1]) * nonpadding
+         item_vectors = torch.nn.functional.embedding(
+             seq, self.effective_item_weight(), padding_idx=0
+         )
+
+# round-0010-slot-3 | retune | 0.5988 | Reduce training-frequency input modulation from 0.04 to 0.02 for all four category models. The existing predictor loads the checkpointed feature buffer without changes.
+--- round-0010-slot-3/input.py
++++ round-0010-slot-3/candidate.py
+@@ -273,7 +273,7 @@
+         np.add.at(training_counts, np.asarray(training_history, dtype=np.int64), 1.0)
+     log_counts = np.log1p(training_counts[1:itemnum + 1])
+     standardized_counts = (log_counts - log_counts.mean()) / max(float(log_counts.std()), 1e-6)
+-    input_scales = 1.0 + 0.04 * np.tanh(standardized_counts)
++    input_scales = 1.0 + 0.02 * np.tanh(standardized_counts)
+     with torch.no_grad():
+         model.item_input_scale[1:itemnum + 1].copy_(
+             torch.as_tensor(input_scales, dtype=model.item_input_scale.dtype, device=device)
+
+# round-0011-slot-0 | retune | 0.5962 | Jointly set MAXLEN=64 and LR=6e-4 for all four category models; existing metadata keeps predictor shapes consistent.
+--- round-0011-slot-0/input.py
++++ round-0011-slot-0/candidate.py
+@@ -168,12 +168,12 @@
+ 
+ 
+ # Hyper-parameters
+-MAXLEN        = int(os.environ.get("BERT4REC_MAXLEN", "128"))
++MAXLEN        = int(os.environ.get("BERT4REC_MAXLEN", "64"))
+ HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+ NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+ NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+ DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.1"))
+-LR            = float(os.environ.get("BERT4REC_LR", "7e-4"))
++LR            = float(os.environ.get("BERT4REC_LR", "6e-4"))
+ WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
+ BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
+ NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+
+# round-0011-slot-1 | retune | 0.5888 | Change BERT4Rec feed-forward activation from GELU to SiLU across all four datasets; preserve all other training and prediction behavior.
+--- round-0011-slot-1/input.py
++++ round-0011-slot-1/candidate.py
+@@ -198,7 +198,7 @@
+             nhead=num_heads,
+             dim_feedforward=hidden_units * 2,
+             dropout=dropout_rate,
+-            activation="gelu",
++            activation=torch.nn.functional.silu,
+             batch_first=True,
+             norm_first=True,
+         )
+
+# round-0011-slot-2 | retune | 0.5988 | Change masked-item CE temperature from 0.8 to 1.0 for all four category models. No predictor or checkpoint changes are required.
+--- round-0011-slot-2/input.py
++++ round-0011-slot-2/candidate.py
+@@ -164,7 +164,7 @@
+     logits = torch.nn.functional.linear(
+         masked_states, model.effective_item_weight()[1:model.itemnum + 1]
+     )
+-    return torch.nn.functional.cross_entropy(logits / 0.8, targets, reduction="mean")
++    return torch.nn.functional.cross_entropy(logits / 1.0, targets, reduction="mean")
+ 
+ 
+ # Hyper-parameters
+
+# round-0011-slot-3 | retune | 0.6188 | Reduce only the tied normalized embedding radius multiplier to 0.75 for all four category models, consistently in training and inference.
+--- round-0011-slot-3/input.py
++++ round-0011-slot-3/candidate.py
+@@ -212,7 +212,7 @@
+             self.pos_emb.weight[0].zero_()
+ 
+     def effective_item_weight(self) -> torch.Tensor:
+-        row_norm = 0.8 * math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
++        row_norm = 0.75 * math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
+         nonpadding = torch.nn.functional.normalize(
+             self.item_emb.weight[1:], p=2, dim=-1, eps=1e-12
+         ) * row_norm
+
+# round-0012-slot-0 | retune | 0.5887 | Lower training dropout to 0.05 for all four BERT4Rec models; preserve all other settings and behavior.
+--- round-0012-slot-0/input.py
++++ round-0012-slot-0/candidate.py
+@@ -172,7 +172,7 @@
+ HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+ NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+ NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+-DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.1"))
++DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.05"))
+ LR            = float(os.environ.get("BERT4REC_LR", "7e-4"))
+ WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
+ BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
+
+# round-0012-slot-1 | retune | 0.6 | Change only masked-item cross-entropy temperature from 0.8 to 0.7 for all four category models.
+--- round-0012-slot-1/input.py
++++ round-0012-slot-1/candidate.py
+@@ -164,7 +164,7 @@
+     logits = torch.nn.functional.linear(
+         masked_states, model.effective_item_weight()[1:model.itemnum + 1]
+     )
+-    return torch.nn.functional.cross_entropy(logits / 0.8, targets, reduction="mean")
++    return torch.nn.functional.cross_entropy(logits / 0.7, targets, reduction="mean")
+ 
+ 
+ # Hyper-parameters
+
+# round-0012-slot-2 | retune | None | Increase training-frequency input modulation to 0.06 for all four category models; existing checkpoint and predictor plumbing remain compatible.
+--- round-0012-slot-2/input.py
++++ round-0012-slot-2/candidate.py
+@@ -273,7 +273,7 @@
+         np.add.at(training_counts, np.asarray(training_history, dtype=np.int64), 1.0)
+     log_counts = np.log1p(training_counts[1:itemnum + 1])
+     standardized_counts = (log_counts - log_counts.mean()) / max(float(log_counts.std()), 1e-6)
+-    input_scales = 1.0 + 0.04 * np.tanh(standardized_counts)
++    input_scales = 1.0 + 0.06 * np.tanh(standardized_counts)
+     with torch.no_grad():
+         model.item_input_scale[1:itemnum + 1].copy_(
+             torch.as_tensor(input_scales, dtype=model.item_input_scale.dtype, device=device)
+
+# round-0012-slot-3 | retune | 0.6013 | Reduce only the tied normalized item-embedding radius multiplier from 0.75 to 0.70 for all four datasets.
+--- round-0012-slot-3/input.py
++++ round-0012-slot-3/candidate.py
+@@ -212,7 +212,7 @@
+             self.pos_emb.weight[0].zero_()
+ 
+     def effective_item_weight(self) -> torch.Tensor:
+-        row_norm = 0.75 * math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
++        row_norm = 0.70 * math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
+         nonpadding = torch.nn.functional.normalize(
+             self.item_emb.weight[1:], p=2, dim=-1, eps=1e-12
+         ) * row_norm
+
+# round-0013-slot-0 | regular | 0.6175 | Increase only the tied normalized item-embedding radius multiplier to 0.775 for all four datasets.
+--- round-0013-slot-0/input.py
++++ round-0013-slot-0/candidate.py
+@@ -212,7 +212,7 @@
+             self.pos_emb.weight[0].zero_()
+ 
+     def effective_item_weight(self) -> torch.Tensor:
+-        row_norm = 0.75 * math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
++        row_norm = 0.775 * math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
+         nonpadding = torch.nn.functional.normalize(
+             self.item_emb.weight[1:], p=2, dim=-1, eps=1e-12
+         ) * row_norm
+
+# round-0013-slot-1 | regular | 0.585 | Replace chronological positions with reverse nonpadding ranks in each category’s single BERT4Rec model; the inference mask always receives position 1.
+--- round-0013-slot-1/input.py
++++ round-0013-slot-1/candidate.py
+@@ -221,7 +221,7 @@
+     def encode_sequence(self, seq: torch.Tensor) -> torch.Tensor:
+         batch, length = seq.shape
+         nonpadding = (seq != 0).long()
+-        pos = nonpadding.cumsum(dim=1) * nonpadding
++        pos = nonpadding.flip(dims=[1]).cumsum(dim=1).flip(dims=[1]) * nonpadding
+         item_vectors = torch.nn.functional.embedding(
+             seq, self.effective_item_weight(), padding_idx=0
+         )
+
+# round-0013-slot-2 | regular | 0.6113 | Jointly set default learning rate to 5e-4 and dropout to 0.15 for all four independent BERT4Rec category models.
+--- round-0013-slot-2/input.py
++++ round-0013-slot-2/candidate.py
+@@ -172,8 +172,8 @@
+ HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+ NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+ NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+-DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.1"))
+-LR            = float(os.environ.get("BERT4REC_LR", "7e-4"))
++DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.15"))
++LR            = float(os.environ.get("BERT4REC_LR", "5e-4"))
+ WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
+ BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
+ NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+
+# round-0013-slot-3 | regular | 0.6038 | Use GEGLU feed-forward sublayers in every category’s BERT4Rec model, with matching inference through the existing predictor import.
+--- round-0013-slot-3/input.py
++++ round-0013-slot-3/candidate.py
+@@ -182,6 +182,23 @@
+ PATIENCE      = int(os.environ.get("BERT4REC_PATIENCE", "20"))
+ 
+ 
++class GEGLUTransformerEncoderLayer(nn.TransformerEncoderLayer):
++    def __init__(self, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        self.linear1 = nn.Linear(
++            self.linear1.in_features,
++            self.linear1.out_features * 2,
++            bias=self.linear1.bias is not None,
++        )
++        # Disable the fused GELU/ReLU path so evaluation uses the gated sublayer.
++        self.activation_relu_or_gelu = 0
++
++    def _ff_block(self, x: torch.Tensor) -> torch.Tensor:
++        value, gate = self.linear1(x).chunk(2, dim=-1)
++        gated = value * torch.nn.functional.gelu(gate)
++        return self.dropout2(self.linear2(self.dropout(gated)))
++
++
+ class BERT4RecModel(nn.Module):
+     def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 2,
+                  num_heads: int = 2, dropout_rate: float = 0.2, maxlen: int = 128):
+@@ -193,7 +210,7 @@
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+         self.register_buffer("item_input_scale", torch.ones(itemnum + 2))
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+-        encoder_layer = nn.TransformerEncoderLayer(
++        encoder_layer = GEGLUTransformerEncoderLayer(
+             d_model=hidden_units,
+             nhead=num_heads,
+             dim_feedforward=hidden_units * 2,
+
+# round-0014-slot-0 | regular | 0.5625 | Apply final-position-weighted masked-item cross-entropy to each category’s single BERT4Rec model. Checkpoint shapes and predictor remain consistent without changes.
+--- round-0014-slot-0/input.py
++++ round-0014-slot-0/candidate.py
+@@ -164,7 +164,11 @@
+     logits = torch.nn.functional.linear(
+         masked_states, model.effective_item_weight()[1:model.itemnum + 1]
+     )
+-    return torch.nn.functional.cross_entropy(logits / 0.8, targets, reduction="mean")
++    losses = torch.nn.functional.cross_entropy(logits / 0.8, targets, reduction="none")
++    target_weights = torch.ones_like(pos, dtype=losses.dtype)
++    target_weights[:, -1] = 2.0
++    masked_weights = target_weights[mask]
++    return (losses * masked_weights).sum() / masked_weights.sum()
+ 
+ 
+ # Hyper-parameters
+
+# round-0014-slot-1 | regular | 0.615 | Halve BERT4Rec feed-forward residual contributions in every category model, consistently during training and prediction, without changing checkpoint shapes.
+--- round-0014-slot-1/input.py
++++ round-0014-slot-1/candidate.py
+@@ -182,6 +182,22 @@
+ PATIENCE      = int(os.environ.get("BERT4REC_PATIENCE", "20"))
+ 
+ 
++class ScaledFFTransformerEncoderLayer(nn.TransformerEncoderLayer):
++    def forward(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
++        x = src
++        if self.norm_first:
++            x = x + self._sa_block(
++                self.norm1(x), src_mask, src_key_padding_mask, is_causal=is_causal
++            )
++            x = x + 0.5 * self._ff_block(self.norm2(x))
++        else:
++            x = self.norm1(x + self._sa_block(
++                x, src_mask, src_key_padding_mask, is_causal=is_causal
++            ))
++            x = self.norm2(x + 0.5 * self._ff_block(x))
++        return x
++
++
+ class BERT4RecModel(nn.Module):
+     def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 2,
+                  num_heads: int = 2, dropout_rate: float = 0.2, maxlen: int = 128):
+@@ -193,7 +209,7 @@
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+         self.register_buffer("item_input_scale", torch.ones(itemnum + 2))
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+-        encoder_layer = nn.TransformerEncoderLayer(
++        encoder_layer = ScaledFFTransformerEncoderLayer(
+             d_model=hidden_units,
+             nhead=num_heads,
+             dim_feedforward=hidden_units * 2,
+
+# round-0014-slot-2 | regular | 0.5962 | Set shared defaults to MAXLEN=64, batch size=256 and LR=1e-3 for the four independently trained BERT4Rec category models; existing predictor metadata handles the changed history length.
+--- round-0014-slot-2/input.py
++++ round-0014-slot-2/candidate.py
+@@ -168,14 +168,14 @@
+ 
+ 
+ # Hyper-parameters
+-MAXLEN        = int(os.environ.get("BERT4REC_MAXLEN", "128"))
++MAXLEN        = int(os.environ.get("BERT4REC_MAXLEN", "64"))
+ HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+ NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+ NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+ DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.1"))
+-LR            = float(os.environ.get("BERT4REC_LR", "7e-4"))
++LR            = float(os.environ.get("BERT4REC_LR", "1e-3"))
+ WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
+-BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
++BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "256"))
+ NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+ NUM_EPOCHS    = int(os.environ.get("BERT4REC_EPOCHS", "200"))
+ EVAL_EVERY    = int(os.environ.get("BERT4REC_EVAL_EVERY", "5"))
+
+# round-0014-slot-3 | regular | 0.6025 | Reduce only the tied normalized item-embedding radius multiplier from 0.75 to 0.74 for all four category models.
+--- round-0014-slot-3/input.py
++++ round-0014-slot-3/candidate.py
+@@ -212,7 +212,7 @@
+             self.pos_emb.weight[0].zero_()
+ 
+     def effective_item_weight(self) -> torch.Tensor:
+-        row_norm = 0.75 * math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
++        row_norm = 0.74 * math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
+         nonpadding = torch.nn.functional.normalize(
+             self.item_emb.weight[1:], p=2, dim=-1, eps=1e-12
+         ) * row_norm
+
+# round-0015-slot-0 | regular | 0.6225 | Exempt only the exclusive mask-token embedding from normalization; preserve real-item radius 0.75, tying, frequency modulation, backbone, scoring, loss, optimizer and category routing.
+--- round-0015-slot-0/input.py
++++ round-0015-slot-0/candidate.py
+@@ -213,10 +213,13 @@
+ 
+     def effective_item_weight(self) -> torch.Tensor:
+         row_norm = 0.75 * math.sqrt(2.0 * self.hidden_units / (self.itemnum + 2 + self.hidden_units))
+-        nonpadding = torch.nn.functional.normalize(
+-            self.item_emb.weight[1:], p=2, dim=-1, eps=1e-12
++        real_items = torch.nn.functional.normalize(
++            self.item_emb.weight[1:self.mask_token], p=2, dim=-1, eps=1e-12
+         ) * row_norm
+-        return torch.cat((torch.zeros_like(self.item_emb.weight[:1]), nonpadding), dim=0)
++        mask_vector = self.item_emb.weight[self.mask_token:self.mask_token + 1]
++        return torch.cat(
++            (torch.zeros_like(self.item_emb.weight[:1]), real_items, mask_vector), dim=0
++        )
+ 
+     def encode_sequence(self, seq: torch.Tensor) -> torch.Tensor:
+         batch, length = seq.shape
+
+# round-0015-slot-1 | regular | 0.6138 | Across all four category models, retain chronological positions through 16 and use paired position buckets thereafter. Preserve histories, final-mask readout, embeddings, backbone, scoring, loss, optimizer, and predictor compatibility.
+--- round-0015-slot-1/input.py
++++ round-0015-slot-1/candidate.py
+@@ -221,7 +221,12 @@
+     def encode_sequence(self, seq: torch.Tensor) -> torch.Tensor:
+         batch, length = seq.shape
+         nonpadding = (seq != 0).long()
+-        pos = nonpadding.cumsum(dim=1) * nonpadding
++        chronological_pos = nonpadding.cumsum(dim=1)
++        pos = torch.where(
++            chronological_pos <= 16,
++            chronological_pos,
++            16 + (chronological_pos - 16 + 1) // 2,
++        ) * nonpadding
+         item_vectors = torch.nn.functional.embedding(
+             seq, self.effective_item_weight(), padding_idx=0
+         )
+
+# round-0015-slot-2 | regular | 0.6062 | Apply 0.8 feed-forward residual scaling to every BERT4Rec block across all four datasets, consistently in training and imported prediction architecture.
+--- round-0015-slot-2/input.py
++++ round-0015-slot-2/candidate.py
+@@ -182,6 +182,24 @@
+ PATIENCE      = int(os.environ.get("BERT4REC_PATIENCE", "20"))
+ 
+ 
++class ScaledFFTransformerEncoderLayer(nn.TransformerEncoderLayer):
++    def forward(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
++        x = src
++        if self.norm_first:
++            x = x + self._sa_block(
++                self.norm1(x), src_mask, src_key_padding_mask,
++                is_causal=is_causal,
++            )
++            x = x + 0.8 * self._ff_block(self.norm2(x))
++        else:
++            x = self.norm1(x + self._sa_block(
++                x, src_mask, src_key_padding_mask,
++                is_causal=is_causal,
++            ))
++            x = self.norm2(x + 0.8 * self._ff_block(x))
++        return x
++
++
+ class BERT4RecModel(nn.Module):
+     def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 2,
+                  num_heads: int = 2, dropout_rate: float = 0.2, maxlen: int = 128):
+@@ -193,7 +211,7 @@
+         self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+         self.register_buffer("item_input_scale", torch.ones(itemnum + 2))
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+-        encoder_layer = nn.TransformerEncoderLayer(
++        encoder_layer = ScaledFFTransformerEncoderLayer(
+             d_model=hidden_units,
+             nhead=num_heads,
+             dim_feedforward=hidden_units * 2,
+
+# round-0015-slot-3 | regular | 0.6038 | Add 0.02 label smoothing to the existing masked-item loss for each category’s single BERT4Rec model.
+--- round-0015-slot-3/input.py
++++ round-0015-slot-3/candidate.py
+@@ -164,7 +164,7 @@
+     logits = torch.nn.functional.linear(
+         masked_states, model.effective_item_weight()[1:model.itemnum + 1]
+     )
+-    return torch.nn.functional.cross_entropy(logits / 0.8, targets, reduction="mean")
++    return torch.nn.functional.cross_entropy(logits / 0.8, targets, reduction="mean", label_smoothing=0.02)
+ 
+ 
+ # Hyper-parameters
+
+# round-0016-slot-0 | regular | 0.6212 | Set shared BERT4Rec defaults to learning rate 5e-4 and dropout 0.15 for all four independently trained category models.
+--- round-0016-slot-0/input.py
++++ round-0016-slot-0/candidate.py
+@@ -172,8 +172,8 @@
+ HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+ NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+ NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+-DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.1"))
+-LR            = float(os.environ.get("BERT4REC_LR", "7e-4"))
++DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.15"))
++LR            = float(os.environ.get("BERT4REC_LR", "5e-4"))
+ WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
+ BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
+ NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+
+# round-0016-slot-1 | regular | 0.6275 | Reduce training-frequency input modulation from 0.04 to 0.02 for each category’s single BERT4Rec model.
+--- round-0016-slot-1/input.py
++++ round-0016-slot-1/candidate.py
+@@ -276,7 +276,7 @@
+         np.add.at(training_counts, np.asarray(training_history, dtype=np.int64), 1.0)
+     log_counts = np.log1p(training_counts[1:itemnum + 1])
+     standardized_counts = (log_counts - log_counts.mean()) / max(float(log_counts.std()), 1e-6)
+-    input_scales = 1.0 + 0.04 * np.tanh(standardized_counts)
++    input_scales = 1.0 + 0.02 * np.tanh(standardized_counts)
+     with torch.no_grad():
+         model.item_input_scale[1:itemnum + 1].copy_(
+             torch.as_tensor(input_scales, dtype=model.item_input_scale.dtype, device=device)
+
+# round-0016-slot-2 | regular | 0.6038 | Apply smooth magnitude bounding exclusively to the mask-token embedding in each category’s single BERT4Rec model.
+--- round-0016-slot-2/input.py
++++ round-0016-slot-2/candidate.py
+@@ -217,6 +217,9 @@
+             self.item_emb.weight[1:self.mask_token], p=2, dim=-1, eps=1e-12
+         ) * row_norm
+         mask_vector = self.item_emb.weight[self.mask_token:self.mask_token + 1]
++        mask_vector = mask_vector / torch.sqrt(
++            1.0 + mask_vector.square().sum(dim=-1, keepdim=True)
++        )
+         return torch.cat(
+             (torch.zeros_like(self.item_emb.weight[:1]), real_items, mask_vector), dim=0
+         )
+
+# round-0016-slot-3 | regular | 0.615 | Change only masked-item cross-entropy temperature from 0.8 to 1.0 for all four category models.
+--- round-0016-slot-3/input.py
++++ round-0016-slot-3/candidate.py
+@@ -164,7 +164,7 @@
+     logits = torch.nn.functional.linear(
+         masked_states, model.effective_item_weight()[1:model.itemnum + 1]
+     )
+-    return torch.nn.functional.cross_entropy(logits / 0.8, targets, reduction="mean")
++    return torch.nn.functional.cross_entropy(logits / 1.0, targets, reduction="mean")
+ 
+ 
+ # Hyper-parameters
+
+# round-0017-slot-0 | regular | 0.5875 | Use post-norm BERT4Rec Transformer blocks for all four datasets, consistently during training and prediction.
+--- round-0017-slot-0/input.py
++++ round-0017-slot-0/candidate.py
+@@ -200,7 +200,7 @@
+             dropout=dropout_rate,
+             activation="gelu",
+             batch_first=True,
+-            norm_first=True,
++            norm_first=False,
+         )
+         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_blocks)
+         self.dropout = nn.Dropout(dropout_rate)
+
+# round-0017-slot-1 | regular | 0.5975 | Reduce training-frequency input modulation from 0.02 to 0.01 for each category’s single BERT4Rec model.
+--- round-0017-slot-1/input.py
++++ round-0017-slot-1/candidate.py
+@@ -276,7 +276,7 @@
+         np.add.at(training_counts, np.asarray(training_history, dtype=np.int64), 1.0)
+     log_counts = np.log1p(training_counts[1:itemnum + 1])
+     standardized_counts = (log_counts - log_counts.mean()) / max(float(log_counts.std()), 1e-6)
+-    input_scales = 1.0 + 0.02 * np.tanh(standardized_counts)
++    input_scales = 1.0 + 0.01 * np.tanh(standardized_counts)
+     with torch.no_grad():
+         model.item_input_scale[1:itemnum + 1].copy_(
+             torch.as_tensor(input_scales, dtype=model.item_input_scale.dtype, device=device)
+
+# round-0017-slot-2 | regular | 0.595 | Set shared BERT4Rec defaults to MAXLEN=64 and batch size=256; existing metadata keeps checkpoint and predictor shapes consistent.
+--- round-0017-slot-2/input.py
++++ round-0017-slot-2/candidate.py
+@@ -168,14 +168,14 @@
+ 
+ 
+ # Hyper-parameters
+-MAXLEN        = int(os.environ.get("BERT4REC_MAXLEN", "128"))
++MAXLEN        = int(os.environ.get("BERT4REC_MAXLEN", "64"))
+ HIDDEN_UNITS  = int(os.environ.get("BERT4REC_HIDDEN", "64"))
+ NUM_BLOCKS    = int(os.environ.get("BERT4REC_BLOCKS", "2"))
+ NUM_HEADS     = int(os.environ.get("BERT4REC_HEADS", "2"))
+ DROPOUT_RATE  = float(os.environ.get("BERT4REC_DROPOUT", "0.1"))
+ LR            = float(os.environ.get("BERT4REC_LR", "7e-4"))
+ WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "0.0"))
+-BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "128"))
++BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "256"))
+ NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+ NUM_EPOCHS    = int(os.environ.get("BERT4REC_EPOCHS", "200"))
+ EVAL_EVERY    = int(os.environ.get("BERT4REC_EVAL_EVERY", "5"))
+
+# round-0017-slot-3 | regular | 0.6188 | Change masked-item cross-entropy temperature from 0.8 to 0.7 for all four BERT4Rec category models.
+--- round-0017-slot-3/input.py
++++ round-0017-slot-3/candidate.py
+@@ -164,7 +164,7 @@
+     logits = torch.nn.functional.linear(
+         masked_states, model.effective_item_weight()[1:model.itemnum + 1]
+     )
+-    return torch.nn.functional.cross_entropy(logits / 0.8, targets, reduction="mean")
++    return torch.nn.functional.cross_entropy(logits / 0.7, targets, reduction="mean")
+ 
+ 
+ # Hyper-parameters

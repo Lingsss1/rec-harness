@@ -1,0 +1,164 @@
+{
+  "markdown_report": "Three starting insights motivate a conservative extension. First, recent deletion lowers training margins in every dataset. This supports preserving recent evidence, but repacking confounds causal interpretation. Second, Movies_and_TV retains 5.05% wrong training-pair ranks. This identifies residual discrimination errors without explaining validation performance. Third, users report unsupported broad matches and overextended older interests. Candidate-specific historical support could address both, but relevance must remain a hypothesis.\n\nThree literature insights sharpen the design. [DIN](https://arxiv.org/abs/1706.06978) and [CARCA](https://arxiv.org/abs/2204.06519) support candidate-dependent aggregation. DIN also motivates allowing weak aggregate interest rather than forcing attention onto irrelevant history. [FPMC](https://doi.org/10.1145/1772690.1772773) establishes directional transitions, reducing the proposed head’s originality; [SComGNN](https://arxiv.org/abs/2401.02130) cautions that relatedness differs from complementarity. [gSASRec](https://arxiv.org/abs/2308.07192) motivates matched-negative objective controls. None establishes gains here.\n\nThe conceptual framework separates three directions:\n\n| Direction | Existing mechanism | Proposed experiment | Remaining gap |\n|---|---|---|---|\n| Candidate discrimination | SASRec; gSASRec | Matched-negative objectives | Training margins versus validation ranking |\n| Current-interest support | Recent pooling; DIN; CARCA | Candidate attention, recency, null slot | Older relevant evidence; unsupported matches |\n| Behavioral specificity | FPMC; SComGNN inspiration | Directional residual | Compatibility remains unobserved |\n\nThree minimal ideas follow. Scores are 0–10; higher difficulty means harder. Each cell gives a positive and negative reason. U/M denote user/model diagnosis alignment.\n\n| Idea | Originality | Potential | U | M | Difficulty |\n|---|---|---|---|---|---|\n| A: Softmax-only control | 2: useful comparison / established | 7: cheap foundation / limited mechanism | 4: sharper ranking / no intent evidence | 8: more competitors / training-only evidence | 2: small edit / sampler care |\n| B: Gated multiscale pooling | 3: adaptive fusion / familiar | 6: economical / candidate independent | 7: current-interest focus / broad affinity persists | 6: history targeting / deletion confounded | 3: small module / masking care |\n| C: Candidate-conditioned directional residual with null slot | 4: focused combination / established components | 7: selective evidence / sparse transitions | 8: specificity and recency / compatibility unknown | 7: candidate separation / improvement unproven | 6: small head / expensive scoring and integration |\n\nSelect **C** at 10% progress, retaining A as the first experimental gate. A candidate queries causal historical embeddings with directional bilinear attention and a nonnegative recency penalty. An always-allowed zero-valued null slot permits approximate abstention; a zero-initialized scalar gates the residual into SASRec.\n\nThis targets unsupported broad-affinity matches through selective evidence and abstention, and older isolated interests through recency weighting. It targets Movies_and_TV’s residual discrimination errors. Functional duplication remains unresolved; transitions do not prove compatibility.\n\nStage matched-negative objective controls before A/B/C comparisons, then ablate null, recency, and pairwise directionality. Include parameter-matched candidate-independent attention. Freeze contrasts and validation looks within 43,200 GPU-seconds; preserve seeds, routing, diagnostic contracts, and predictor parity. Select solely by pinned macro validation HR@10. Report paired uncertainty only if host per-user outcomes are available; sampled gains do not establish full-catalog gains.",
+  "idea": {
+    "description": "Add a zero-initialized candidate-conditioned directional history residual with an explicit zero-valued null slot to the existing per-dataset SASRec. For candidate c and prefix ending at t, attend over nonpadding historical item embeddings at positions j<=t plus the null slot, using directional bilinear interactions and a nonnegative recency penalty. Convert the attended history into a scalar candidate score and gate it into the original SASRec logit. The null slot permits approximate rejection of all real historical evidence, addressing a limitation of softmax over real history alone.",
+    "motivation": "The user diagnosis identifies unsupported broad-affinity recommendations and excessive reliance on older isolated interactions. Candidate-specific support, approximate abstention, and adaptive recency explicitly target these two failures. Movies_and_TV's 5.05% wrong training-pair ranks provide a concrete model-facing discrimination target. However, a learned attention residual does not require genuine semantic support: it can learn popularity or lexical shortcuts, and the unchanged SASRec branch can still rank unsupported items highly. Functional duplication, ownership, and device compatibility remain unresolved. Recent-deletion effects are confounded by repacking; nearly zero shuffle effects in short prefixes do not establish deficient order modeling. Electronics' embedding alignment does not establish collapse or recommendation diversity. Neither the diagnostics nor the cited literature establishes validation improvement.",
+    "implementation_notes": "Architecture: retain the supplied SASRec encoder and shared item embeddings. For column embeddings e_c and e_j, define q_c=Qe_c, k_j=Ke_j, v_j=Ve_j, and ell_tcj=q_c^T k_j/sqrt(d)-softplus(beta)*(t-j). Initialize Q, K, and V independently with Xavier initialization and no projection biases; initialize beta=0 and the scalar residual gate alpha=0. Append a null attention logit fixed at zero and a null value fixed exactly at the zero vector. Never pass the null through a biased projection. Apply softmax over permitted real positions plus the null. Define R_tc=e_c^T(sum_j a_tcj v_j)/sqrt(d), omitting the zero null contribution, and S_tc=h_t^T e_c+alpha*R_tc. Finite logits permit approximate abstention, not guaranteed exact abstention. For an empty prefix, explicitly return a zero base feature and zero residual, avoiding all-masked attention and backbone NaNs. Do not zero both the gate and projection matrices: that would block learning. With alpha initially zero, head gradients initially vanish but the gate can learn from a nonzero initialized residual. Use position ages initially; do not introduce timestamp inference requirements.\n\nContext and compatibility: encode each sequence once and explicitly pass an immutable context containing SASRec states, projected raw-item keys/values, shared sequence item IDs, padding mask, and absolute prefix positions. Cache this context per batch or request, never as mutable 'last history' state on the model. Raw item embeddings are the initial attention keys/values; contextual history keys are a separate experiment. Keep log2feats(sequence) and predict_score(features, items) callable through the compatibility view by returning a documented feature/context object and adapting every diagnostic consumer accordingly. view.model remains the actual trained nn.Module, and view.item_emb remains accessible. Preserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. Retain fixed training-only diagnostic samples, finite counts, and definitions; explicitly report unavailable categories, ratings, reviews, and simulator traits. Score cached diagnostic positives and negatives through the complete residual scorer rather than a plain embedding dot product.\n\nTraining: use 64 unique uniform negatives per valid positive, sampled without replacement from real item IDs excluding that user's observed training positives and padding. Reduce K when the eligible catalog is smaller and fail clearly if no negative exists. Consult no held-out labels. Use a dedicated seeded training sampler, share negative draws between matched comparisons where possible, and average candidate-set cross-entropy over all valid positions. Candidate zero is the positive. This is conditional candidate-set cross-entropy, not an unbiased full-catalog likelihood. Use temperature 1 initially. Preserve the baseline optimizer, learning rate, batch size, encoder dimensions, dropout, regularization, training examples, and checkpoint cadence; record their resolved values in each trial manifest. Honor SASREC_EPOCHS with default 200. Add no extra regularizer in the first comparison.\n\nMemory and correctness: construct explicit prefix-and-padding masks using original sequence positions. Positions after t, including the next-item target, must never enter attention. If using PyTorch SDPA, boolean True denotes an allowed entry; avoid relying on rectangular is_causal alignment. Disable attention dropout initially and disable all model dropout during evaluation. Chunk valid prefix positions and candidates, avoiding a B×L×65×L attention tensor. Preserve each positive's softmax denominator across every candidate chunk, for example by concatenating only the small score tensors before cross-entropy. Use activation checkpointing around attention blocks to recompute their activations during backward; simply summing chunk losses does not release their graphs. Normalize globally across valid positions and perform one optimizer update per original batch. Do not independently normalize candidate chunks or detach encoder context without explicitly restoring its gradients.\n\nInference and reproducibility: reuse the final-prefix context across full-catalog candidate chunks, apply the baseline unseen-item exclusions, and maintain running top-k with a fixed item-ID tie rule. Chunking bounds memory but retains attention work for every candidate. Save all encoder/head parameters, masks and padding conventions, architecture configuration, item mapping, category routing, resolved hyperparameters, and software versions beneath the trial directory. Update the predictor writer so working/predict.py implements the identical encoder and candidate scorer. Retain all four dataset routes, DATA_DIR=os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, and single-GPU execution. No external datasets, pretrained weights, unavailable metadata, hidden tests, or evaluator modifications are permitted.\n\nControls and budget: run an architecture-preserving objective stage first: original baseline, then BCE, candidate-softmax, and paper-defined gBCE at the same feasible negative count. For gBCE use its published calibration definition with t=0.75 and record catalog size, eligible count, and effective negative count; do not treat it as ordinary reweighted BCE. Vary negative count separately only if budget remains. Next compare loss-only A, multiscale pooling B, and C with identical objectives, negatives, history windows, and optimizer updates. Define B's pools as the last item, masked means over the latest 3 and 5 items, and the whole available prefix; a small softmax gate conditioned on h_t and log1p(prefix length) mixes these pools, followed by a zero-initialized residual scalar. Include candidate-independent attention with approximately matched trainable parameter count and document any mismatch. Ablate C's null slot and recency separately. For a pairwise symmetry control, tie Q=K and use V=A^T A with no role-specific biases; tying Q=K alone leaves value-side directionality. Even this control does not make the complete history-normalized scorer exchange-symmetric. A full factorial across every loss, negative count, pooling, and attention option is a follow-up, not a prerequisite under the finite budget. Staged comparisons cannot identify all interactions.\n\nBefore training, verify causal future-token invariance, finite empty-history scores with zero residual, candidate-chunk and order invariance, running top-k equivalence, chunked versus unchunked gradients, saved-context independence from intervening requests, and training-prefix/inference parity using identical padding and positions with dropout disabled. All debugging, diagnostics, validation, and failed training runs consume the shared 43,200 GPU-second budget. Estimate costs from the first run, reserve budget for completion, log every trial, and preregister the affordable contrast list, checkpoint rule, and validation cadence before comparing outcomes. Use equal examples and optimizer updates for attribution; separately report GPU seconds for practical efficiency. Do not describe time-truncated runs as equal-update comparisons.\n\nSelection and uncertainty: select only by the unchanged host four-category macro validation HR@10 with its fixed users, candidates, and seed. Report category values and deltas as well as the macro result. Cap validation looks and freeze model selection before held-out evaluation. If the host exposes per-user binary hits, independently bootstrap 200 users within each category, reuse each sampled index set across compared models, compute one-quarter of the sum of category mean differences, and use 10,000 replicates with a dedicated seed 42 for a 95% percentile interval. If these outcomes are unavailable, report that limitation instead of reconstructing or changing the evaluator. Such intervals condition on trained models and fixed candidates, omit training-seed and candidate-sampling uncertainty, and remain exploratory after selection. Sampled ranking gains do not establish full-catalog recommendation gains.",
+    "pseudocode": "Preserve all four RecHarness routes, unchanged splits, and DATA_DIR=os.environ['GAGC_DATA_DIR'].\nPreregister affordable contrasts and the baseline checkpoint rule within 43,200 GPU-seconds.\nRun correctness checks before GPU trials; charge their applicable cost to the budget.\nFor each dataset route and planned variant:\n    initialize the unchanged SASRec backbone using training seed 42\n    initialize bias-free Q, K, V normally; beta=0; alpha=0\n    for epoch in range(int(os.environ.get('SASREC_EPOCHS', '200'))):\n        for (_, sequence, positive, negative) in train_loader:\n            context = encode_once(sequence)\n            # Immutable H, raw-item projected K/V, padding mask, original positions.\n            valid_positions = positions with nonpadding input and positive target\n            sample unique uniform negatives per positive using training histories only\n            optimizer.zero_grad()\n            for memory-bounded groups of valid positions:\n                candidates = [positive] + sampled_negatives\n                for candidate chunks:\n                    base = dot(context.H[t], item_emb(candidates))\n                    real_logits = Q(item_emb(candidates)) @ context.keys.T / sqrt(d)\n                    real_logits -= softplus(beta) * original_position_age(t)\n                    mask padding and every history position j > t\n                    append always-allowed null logit 0 and fixed null value 0\n                    attention = masked_softmax(real_logits_with_null)\n                    residual = dot(item_emb(candidates), attention @ values_with_null) / sqrt(d)\n                    scores_chunk = base + alpha * residual\n                    # Checkpoint attention computation to bound saved activations.\n                concatenate candidate scores, preserving the complete denominator\n                accumulate summed cross_entropy(scores, target_index=0)\n            loss = accumulated_loss / total_valid_positions\n            loss.backward()\n            optimizer.step()\n        apply the preregistered baseline validation/checkpoint schedule\n    save trial-local checkpoint, complete scorer configuration, mapping, and manifest\nGenerate working/predict.py with identical context/scorer and four-category routing.\nAt inference, encode once; reuse final-prefix context across candidate chunks; maintain top-k.\nRun preserved training-only diagnostics through the complete scorer and adapted view.\nSelect using host macro validation HR@10; report category results and GPU cost.\nIf host per-user hits are available, compute the specified paired stratified bootstrap.\nFreeze selection before the host's separate held-out inference.",
+    "originality": {
+      "score": 4,
+      "positive": "The compact combination of candidate-specific retrieval, directional scoring, a null slot, recency bias, and zero-initialized SASRec fusion forms a concrete experiment addressing the supplied diagnoses.",
+      "negative": "DIN, CARCA, FPMC, residual gating, and attention no-op mechanisms establish the main ingredients. The null slot strengthens the design but does not establish a new model family."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Selective evidence and approximate abstention provide a controlled route toward studying unsupported recommendations, with later extensions using permitted titles, descriptions, or timestamps.",
+      "negative": "Sparse histories may not identify reliable transitions, and the head can learn popularity shortcuts. Observational interactions cannot establish ownership, compatibility, complementarity, or full-catalog usefulness."
+    },
+    "code_difficulty": {
+      "score": 6,
+      "positive": "The encoder remains unchanged and the additional trainable head consists of three projections, a recency parameter, and a residual gate.",
+      "negative": "Correct causal context handling, globally normalized chunked softmax, bounded-memory gradients, full-catalog scoring, predictor parity, and diagnostic adaptation require substantial integration and verification."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Introduces causal self-attention for sequential recommendation and supplies the required SASRec starting architecture."
+      ],
+      "limitations": [
+        "Its shared sequence representation does not explicitly retrieve different historical evidence for each candidate.",
+        "Published results do not establish performance under this pinned RecHarness protocol."
+      ]
+    },
+    {
+      "title": "Deep Interest Network for Click-Through Rate Prediction",
+      "link": "https://arxiv.org/abs/1706.06978",
+      "contributions": [
+        "Uses candidate-dependent activation to aggregate historical behaviors.",
+        "Omits softmax normalization to preserve interest intensity, motivating an explicit mechanism for weak or absent historical support."
+      ],
+      "limitations": [
+        "CTR prediction differs from next-item ranking under the supplied benchmark.",
+        "Unnormalized aggregation can depend on history length and does not guarantee abstention.",
+        "Candidate-conditioned aggregation alone does not establish compatibility or complementarity."
+      ]
+    },
+    {
+      "title": "CARCA: Context and Attribute-Aware Next-Item Recommendation via Cross-Attention",
+      "link": "https://arxiv.org/abs/2204.06519",
+      "contributions": [
+        "Provides a direct precedent for target-to-history cross-attention in recommendation."
+      ],
+      "limitations": [
+        "The proposed residual does not reproduce CARCA's complete architecture or attribute inputs.",
+        "Candidate attention still requires computation for every scored catalog item."
+      ]
+    },
+    {
+      "title": "Factorizing Personalized Markov Chains for Next-Basket Recommendation",
+      "link": "https://doi.org/10.1145/1772690.1772773",
+      "contributions": [
+        "Combines personalized preference with factorized directional item transitions.",
+        "Establishes asymmetric candidate-history scoring as a prior mechanism."
+      ],
+      "limitations": [
+        "Factorized transitions do not supply the proposed adaptive attention over the complete available prefix.",
+        "Observed transitions do not identify functional compatibility."
+      ]
+    },
+    {
+      "title": "Fusing Similarity Models with Markov Chains for Sparse Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1609.09152",
+      "contributions": [
+        "Combines history aggregation with personalized higher-order Markov effects.",
+        "Provides a precedent for sharing representations across persistent and sequential preference terms."
+      ],
+      "limitations": [
+        "The proposed candidate-dependent attention is a different aggregation mechanism.",
+        "The precedent reduces novelty claims for combining long-term preference and directional short-term effects."
+      ]
+    },
+    {
+      "title": "SComGNN",
+      "link": "https://arxiv.org/abs/2401.02130",
+      "contributions": [
+        "Models complementary relationships using relatedness and dissimilarity, motivating separation of behavioral evidence from broad similarity."
+      ],
+      "limitations": [
+        "The proposed bilinear residual does not reproduce its graph-filter architecture.",
+        "Sequential observations alone cannot identify true complementary relationships."
+      ]
+    },
+    {
+      "title": "gSASRec",
+      "link": "https://arxiv.org/abs/2308.07192",
+      "contributions": [
+        "Examines overconfidence under negative-sampled BCE.",
+        "Motivates matched-negative generalized-BCE controls and separate negative-count comparisons."
+      ],
+      "limitations": [
+        "Generalized BCE differs from the proposed candidate-set softmax.",
+        "Its reported improvements do not establish gains on the four-category pinned evaluation."
+      ]
+    },
+    {
+      "title": "Quantizable Transformers: Removing Outliers by Helping Attention Heads Do Nothing",
+      "link": "https://papers.nips.cc/paper_files/paper/2023/hash/edbcb7583fd8921dad78adecfe06a99b-Abstract-Conference.html",
+      "contributions": [
+        "Provides a related precedent for attention mechanisms that can produce no-op updates."
+      ],
+      "limitations": [
+        "Its setting does not establish recommendation benefits from a null history slot.",
+        "Finite softmax logits yield approximate abstention rather than guaranteed zero real-history mass."
+      ]
+    },
+    {
+      "title": "PyTorch Scaled Dot Product Attention and Autograd Documentation",
+      "link": "https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention",
+      "contributions": [
+        "Documents boolean-mask semantics, dropout behavior, and causal alignment relevant to correct attention implementation.",
+        "Autograd documentation at https://docs.pytorch.org/docs/stable/autograd.html explains graph retention and gradient propagation relevant to chunked training."
+      ],
+      "limitations": [
+        "API documentation does not establish model quality.",
+        "Candidate chunking alone does not release saved computation graphs or preserve a cross-chunk softmax denominator automatically."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Explains limitations of interpreting sampled-candidate recommendation metrics."
+      ],
+      "limitations": [
+        "Does not justify changing the required host evaluator.",
+        "Full-catalog user-facing quality remains a separate empirical question."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/beta/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how repeated model selection can overfit finite validation evidence."
+      ],
+      "limitations": [
+        "Capped validation looks and preregistered contrasts mitigate but do not eliminate selection bias.",
+        "Post-selection bootstrap intervals do not remove winner's bias."
+      ]
+    },
+    {
+      "title": "Statistical Significance Tests for Machine Translation Evaluation",
+      "link": "https://www.research.ed.ac.uk/en/publications/statistical-significance-tests-for-machine-translation-evaluation/",
+      "contributions": [
+        "Provides a paired resampling precedent adapted here to fixed per-user recommendation outcomes."
+      ],
+      "limitations": [
+        "The proposed category-stratified bootstrap is an adaptation to this benchmark.",
+        "It requires host-exposed per-user outcomes and excludes training-seed and candidate-sampling uncertainty."
+      ]
+    }
+  ]
+}

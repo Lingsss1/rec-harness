@@ -1,0 +1,80 @@
+--- g0-r0030-primary_context_allowed/model.py
++++ g0-r0031-tower_context_only/model.py
+@@ -1,13 +1,12 @@
+-"""Auxiliary normalization population by context-gradient factorial.
+-
+-The complete inherited model and both native Dice running-state trajectories
+-are retained. Only the auxiliary training readout population and the existing
+-context stop-gradient switch vary. All eval paths use primary running moments.
+-Blocking context changes backward flow through both auxiliary readout and task
+-adapter; fixed-state probabilities and running-buffer updates are unchanged.
+-Auxiliary scorer parameters, target/history/action inputs and primary-strata
+-reuse remain detached. Shared optimizer clipping can still couple task heads;
+-this is a direct-gradient intervention, not full training isolation.
+-No new learned tensors, loss weights, features, or inference operators.
++"""Auxiliary context gradients through tower versus history adapter.
++
++Four cells retain identical learned modules, inputs, loss, forward arithmetic,
++initialization and normalization populations. Independent stop-gradients gate
++auxiliary context at the task adapter and direct prediction-tower inputs.
++Click paths, auxiliary scorer/item ownership and running states are inherited.
++The all-enabled/all-blocked cells bridge round 30; two partial gates isolate
++where auxiliary supervision shapes shared context. Dense global clipping can
++still couple task heads indirectly. No full-isolation or novelty claim.
++Only static source checks are possible here; host tensor checks are required.
+ """
+ import torch
+@@ -18,5 +17,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': False, 'block_aux_adapter_context_grad': True}
+ 
+ 
+@@ -35,4 +34,6 @@
+                  training_support='folded', residual_execution='direct',
+                  auxiliary_train_population='primary', auxiliary_eval_population='primary',
++                 block_aux_tower_context_grad=False,
++                 block_aux_adapter_context_grad=True,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -54,6 +55,11 @@
+         self.block_aux_context_grad = block_aux_context_grad
+         self.block_aux_item_grad = block_aux_item_grad
+-        if block_aux_item_grad is not True:
+-            raise ValueError('Auxiliary item/action gradients must remain blocked')
++        if block_aux_context_grad is not False or block_aux_item_grad is not True:
++            raise ValueError('Use the separate context-path gates; item/action gradients stay blocked')
++        if (not isinstance(block_aux_tower_context_grad, bool)
++                or not isinstance(block_aux_adapter_context_grad, bool)):
++            raise ValueError('Context-path gates must be booleans')
++        self.block_aux_tower_context_grad = block_aux_tower_context_grad
++        self.block_aux_adapter_context_grad = block_aux_adapter_context_grad
+         if residual_input != 'match_detail':
+             raise ValueError('The original match-detail channel must be retained')
+@@ -762,7 +768,17 @@
+                 task_curvature_detail = aux_curvature_detail
+                 task_joint_detail = aux_joint_detail
++            # Keep the two uses numerically identical. Detach only the
++            # selected context edge; every auxiliary adapter/tower parameter
++            # remains in its task loss graph. Eval has no gradient gating.
++            adapter_context = task_context
++            tower_context = task_context
++            if self.training and label != 'is_click':
++                if self.block_aux_adapter_context_grad:
++                    adapter_context = adapter_context.detach()
++                if self.block_aux_tower_context_grad:
++                    tower_context = tower_context.detach()
+             signal = torch.cat([task_detail, task_position_detail, task_block_detail,
+                                 task_curvature_detail, task_joint_detail], dim=-1)
+-            residual_features = torch.cat([task_context, task_target, base,
++            residual_features = torch.cat([adapter_context, task_target, base,
+                                            match_counts.to(base.dtype), signal], dim=-1)
+             # Task routing is required by __init__. Each adapter still
+@@ -777,5 +793,5 @@
+                 correction = bank[:, index, :] if self.residual_routing == 'task' else bank.mean(dim=1)
+             pooled = base + has_history * correction
+-            features = torch.cat([task_context, task_target, pooled], dim=-1)
++            features = torch.cat([tower_context, task_target, pooled], dim=-1)
+             predictions[label + '_pred'] = torch.sigmoid(tower(features))
+         return predictions

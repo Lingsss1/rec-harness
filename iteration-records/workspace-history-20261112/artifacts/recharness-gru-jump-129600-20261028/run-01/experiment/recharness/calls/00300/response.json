@@ -1,0 +1,23 @@
+{
+  "category_edits": [
+    {
+      "category": "network_architecture",
+      "rationale": "Apply separate learned LayerNorms to reset, update and candidate preactivations within each GRU cell across all four datasets. Preserve hidden width, depth, GRU equations, embeddings, readout, scoring, loss and optimizer. Precompute input projections and script each recurrent layer to reduce execution overhead. The generated predictor already imports GRU4RecModel from train.py, so it reconstructs the same architecture and loads one checkpoint per category.",
+      "edits": [
+        {
+          "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+          "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+        },
+        {
+          "find": "class GRU4RecModel(nn.Module):",
+          "replace": "class LayerNormGRULayer(nn.Module):\n    def __init__(self, hidden_units: int):\n        super().__init__()\n        self.hidden_units = hidden_units\n        self.input_projection = nn.Linear(hidden_units, 3 * hidden_units)\n        self.hidden_projection = nn.Linear(hidden_units, 3 * hidden_units)\n        self.reset_norm = nn.LayerNorm(hidden_units)\n        self.update_norm = nn.LayerNorm(hidden_units)\n        self.candidate_norm = nn.LayerNorm(hidden_units)\n        bound = hidden_units ** -0.5\n        for projection in (self.input_projection, self.hidden_projection):\n            nn.init.uniform_(projection.weight, -bound, bound)\n            nn.init.uniform_(projection.bias, -bound, bound)\n\n    def forward(self, inputs: torch.Tensor):\n        projected = self.input_projection(inputs)\n        hidden = inputs.new_zeros((inputs.size(0), self.hidden_units))\n        outputs = torch.jit.annotate(list[torch.Tensor], [])\n        for input_step in projected.unbind(1):\n            input_reset, input_update, input_candidate = input_step.chunk(3, dim=-1)\n            hidden_reset, hidden_update, hidden_candidate = self.hidden_projection(hidden).chunk(3, dim=-1)\n            reset = torch.sigmoid(self.reset_norm(input_reset + hidden_reset))\n            update = torch.sigmoid(self.update_norm(input_update + hidden_update))\n            candidate = torch.tanh(self.candidate_norm(input_candidate + reset * hidden_candidate))\n            hidden = (1.0 - update) * candidate + update * hidden\n            outputs.append(hidden)\n        return torch.stack(outputs, dim=1), hidden\n\n\nclass LayerNormGRU(nn.Module):\n    def __init__(self, hidden_units: int, num_layers: int, dropout: float):\n        super().__init__()\n        self.layers = nn.ModuleList([\n            torch.jit.script(LayerNormGRULayer(hidden_units))\n            for _ in range(num_layers)\n        ])\n        self.inter_layer_dropout = nn.Dropout(dropout)\n\n    def forward(self, inputs: torch.Tensor):\n        output = inputs\n        final_states = []\n        for layer_index, layer in enumerate(self.layers):\n            output, hidden = layer(output)\n            final_states.append(hidden)\n            if layer_index + 1 < len(self.layers):\n                output = self.inter_layer_dropout(output)\n        return output, torch.stack(final_states, dim=0)\n\n\nclass GRU4RecModel(nn.Module):"
+        },
+        {
+          "find": "        self.gru = nn.GRU(hidden_units, hidden_units, num_layers=num_layers,\n                          batch_first=True, dropout=dropout)",
+          "replace": "        self.gru = LayerNormGRU(hidden_units, num_layers=num_layers, dropout=dropout)"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Replace the GRU with a gate-normalized GRU using separate learned reset, update and candidate LayerNorms. Preserve all four category models and existing training settings, including the 200-epoch default. The predictor imports the updated architecture directly."
+}

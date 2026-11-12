@@ -1,0 +1,104 @@
+--- g2-r0034-joint_dice_both/model.py
++++ g2-r0036-joint_tower_budget_both/model.py
+@@ -1,8 +1,9 @@
+-"""Evaluation-only affine factoring under the fixed joint model.
+-
+-All learned Parameters, initialization and training operations are inherited.
+-Controls separate splitting, query reuse and signed-weight algebraic merging.
+-The rewrite is exact over real arithmetic; BF16 quality/cost need measurement.
+-No parameter reduction, weight tying or architectural novelty is claimed.
++"""Prospective task-specific tower capacity contrast.
++
++Construct the unchanged full random initialization, then retain fixed leading
++channel slices before the host creates optimizers. No checkpoint, data-driven
++channel selection, additional RNG, weight sharing or learned gate is used.
++All representations, masks, source gradients and forward methods are inherited.
++Matching initialization does not make reduced architectures forward-equivalent.
+ """
+ import torch
+@@ -13,5 +14,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [80, 64], 'auxiliary_tower_hidden_units': [112, 64]}
+ 
+ 
+@@ -30,4 +31,6 @@
+                  support_gradient='attached', evaluation_projection='merged_hoist',
+                  evaluation_dice='both',
++                 click_tower_hidden_units=(80, 64),
++                 auxiliary_tower_hidden_units=(112, 64),
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -42,4 +45,14 @@
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         self.compression_routes = compression_routes
++        # The full-width template fixes the common initialization draws.
++        # Effective widths are architecture choices; host training is unchanged.
++        if tuple(tower_hidden_units) != (128, 64):
++            raise ValueError('The initialization template must remain (128, 64)')
++        for widths in (click_tower_hidden_units, auxiliary_tower_hidden_units):
++            if not isinstance(widths, (list, tuple)) or len(widths) != 2:
++                raise ValueError('Each task tower requires two hidden widths')
++            for width, maximum in zip(widths, tower_hidden_units):
++                if isinstance(width, bool) or not isinstance(width, int) or not 1 <= width <= maximum:
++                    raise ValueError('Effective widths must be positive integers within the template')
+         if evaluation_projection not in ('split_repeat', 'split_hoist', 'merged_hoist'):
+             raise ValueError('Unknown evaluation affine factoring control')
+@@ -165,5 +178,56 @@
+                 nn.init.zeros_(adapter[-1].weight)
+                 nn.init.zeros_(adapter[-1].bias)
++        # Apply only after EVERY parent initialization operation, including
++        # residual-bank creation inside fork_rng. Common Parameters and the
++        # external RNG state then match the original source at this point.
++        # All discarded channels are removed, including Dice state, before
++        # optimizer construction; no full-sized backing tensors are retained.
++        for label, tower in zip(feature_map.labels, self.towers):
++            widths = (click_tower_hidden_units if label == 'is_click'
++                      else auxiliary_tower_hidden_units)
++            self._reduce_tower(tower, widths)
+         self.model_to_device()
++
++    @staticmethod
++    def _reduce_tower(tower, widths):
++        """Fixed channel subnetwork of a fresh, untrained random template.
++
++        Clone slices so a reduced Parameter owns only its reduced storage.
++        Unchanged modules keep their original Parameter objects. The retained
++        random weights use the original Xavier scale; no rescaling is applied.
++        Initialization scale remains a stated alternative to capacity effects.
++        This constructor helper is never called during forward or training.
++        """
++        previous = tower[0].in_features
++        with torch.no_grad():
++            for index, hidden in enumerate(widths):
++                linear, dice = tower[2 * index], tower[2 * index + 1]
++                if not isinstance(linear, nn.Linear) or not isinstance(dice, Dice):
++                    raise ValueError('Unexpected parent tower structure')
++                if linear.in_features != previous or linear.out_features != hidden:
++                    linear.weight = nn.Parameter(
++                        linear.weight[:hidden, :previous].detach().clone(),
++                        requires_grad=linear.weight.requires_grad)
++                    linear.bias = nn.Parameter(
++                        linear.bias[:hidden].detach().clone(),
++                        requires_grad=linear.bias.requires_grad)
++                    linear.in_features = previous
++                    linear.out_features = hidden
++                if dice.bn.num_features != hidden:
++                    dice.alpha = nn.Parameter(
++                        dice.alpha[:hidden].detach().clone(),
++                        requires_grad=dice.alpha.requires_grad)
++                    dice.bn.running_mean = dice.bn.running_mean[:hidden].detach().clone()
++                    dice.bn.running_var = dice.bn.running_var[:hidden].detach().clone()
++                    dice.bn.num_features = hidden
++                previous = hidden
++            output = tower[-1]
++            if not isinstance(output, nn.Linear) or output.out_features != 1:
++                raise ValueError('Unexpected parent output layer')
++            if output.in_features != previous:
++                output.weight = nn.Parameter(
++                    output.weight[:, :previous].detach().clone(),
++                    requires_grad=output.weight.requires_grad)
++                output.in_features = previous
+ 
+     def _represent(self, inputs):

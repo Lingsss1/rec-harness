@@ -1,0 +1,182 @@
+{
+  "markdown_report": "At 20% progress, prioritize a small, baseline-preserving change: **residual depth aggregation inside NextItNet**, with prefix conditioning disabled initially. Retain the other ideas as alternatives; current evidence does not justify a more complex replacement.\n\nThree starting insights motivate this choice. First, normalized depth aggregation previously scored 0.5175 versus the supplied cold start’s 0.5300. Without paired outcomes or uncertainty, this supports caution rather than establishing why aggregation underperformed. Second, users report stale interests and broad relatedness displacing specific current matches. Depth selection targets both hypotheses, but a retained deepest-state path prevents any guarantee of forgetting. Third, Industrial_and_Scientific has an 8.22% sampled training wrong-ranking rate. This is a measured discrimination target; its effective rank of 8.12 alone does not establish a defect.\n\nThree literature insights delimit the proposal. First, [NextItNet](https://arxiv.org/abs/1808.05163) supplies causal depths, while [Jumping Knowledge](https://proceedings.mlr.press/v80/xu18c/xu18c.pdf), [ELMo](https://aclanthology.org/N18-1202.pdf), [SkipRec](https://cdn.aaai.org/ojs/16518/16518-13-20012-1-2-20210518.pdf), and [ReZero](https://arxiv.org/abs/2003.04887) substantially limit novelty claims. Second, [sampled-softmax research](https://wujcan.github.io/papers/tois-ssm.pdf) motivates stronger competition, without establishing transfer here. Third, [Recformer](https://arxiv.org/abs/2305.13731) motivates content sharing, without validating text encoders trained from scratch.\n\nThese form three directions: context selection, ranking supervision, and content sharing. The framework is:\n\n| Direction | Existing mechanism | Minimal experiment | Remaining gap |\n|---|---|---|---|\n| Context | NextItNet dilation; JK/ELMo aggregation | Residual depth correction | Complete-output prefix sensitivity |\n| Supervision | Sampled softmax | Multiple uniform negatives | False negatives and benchmark transfer |\n| Content | Recformer text | Jointly trained title pooling | Sparse supervision without pretraining |\n\nThree atomic ideas follow. Scores are originality/future potential/user alignment/model alignment/difficulty; higher difficulty means harder implementation. Each cell gives a positive and a limitation.\n\n| Idea | Originality | Potential | User alignment | Model alignment | Difficulty |\n|---|---|---|---|---|---|\n| Residual depth correction | 3: specific combination; strong prior art | 6: controlled context study; redundant depths | 7: targets stale and broad matches; no forgetting guarantee | 6: targets misranking; mechanism unverified | 4: small head; integration and controls |\n| Multi-negative softmax | 3: feasible transfer; established objective | 7: stronger competition; false negatives | 5: sharper distinctions; weak recency mechanism | 8: direct discrimination; training-only evidence | 4: shared scorer; added compute |\n| Title residual embedding | 4: constrained sharing; established fusion | 6: sparse-item transfer; weak lexical supervision | 7: specific names; compatibility unresolved | 5: shared evidence; no lexical diagnosis | 6: small encoder; vocabulary and serialization |\n\nSelect residual depth correction for feasibility and continuity. Preserve the final-block path and add a zero-initialized scalar times gated, normalized depth differences. This explicitly targets stale-interest emphasis and broad matches outranking current-specific choices, plus sampled training misranking. Improvement remains unmeasured; lexical compatibility and duplication remain unresolved.\n\nCompare baseline, static weights, and positionwise weights with fixed training controls. Inspect complete-output prefix interventions and optional lag gradients; gate weights alone are insufficient evidence ([Jain & Wallace](https://arxiv.org/abs/1902.10186)). Select only by pinned macro validation HR@10, retaining baseline on ties. Predefine checkpoint selection to limit adaptive overfitting ([Cawley & Talbot](https://www.jmlr.org/papers/v11/cawley10a.html)); available paired intervals remain descriptive after selection. Sampled gains establish neither full-catalog gains nor utility ([Krichene & Rendle](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/)). Deploy one jointly trained checkpoint per category with identical training and predictor implementations.",
+  "idea": {
+    "description": "Add a baseline-preserving residual depth correction to the supplied corrected NextItNet. At each valid position, normalize existing residual-block states over channels, compute depth weights, and aggregate their differences from the normalized final state. Add that correction to the unmodified final-block state through one zero-initialized trainable scalar. Keep one item-scoring head and one independently trained checkpoint per category. Disable additional masked-prefix conditioning in the initial experiment; the existing causal states already contain prefix information.",
+    "motivation": "The selected idea explicitly targets two observed user-facing failures: older seasonal or secondary interests receiving excessive emphasis, and broadly related recommendations displacing specific matches to current purpose. Selecting among existing causal depths may change that emphasis, but cannot guarantee intent recognition or removal of old information. It also targets the measured model-facing sampled training misranking rate, especially Industrial_and_Scientific's 8.22% and Electronics' 6.67%. These measurements are descriptive training statistics, not validation HR@10, and do not demonstrate that receptive-field selection is the cause of error. The earlier aggregation result of 0.5175 versus 0.5300 motivates preserving an exact final-state path instead of replacing it, but without paired outcomes it does not establish statistical inferiority or a mechanism. Compatibility, quantity suitability, duplication and unmet purchasing needs remain unobserved or unresolved. At 20% progress, retain multi-negative softmax as the next independent hypothesis if this controlled architecture comparison fails; do not combine interventions before their individual contributions are measured.",
+    "implementation_notes": "Integrate the module below immediately after collecting existing block outputs and before the baseline's unchanged final feature transformation. The supplied baseline source is absent from the prompt, so this is an integration component rather than a fabricated replacement train.py. Every state must have shape B x L x D. Instantiate the module once in the model constructor, after baseline parameters are initialized and before creating the optimizer. Pass the identical class and configuration into the embedded predictor writer; strict-load its state_dict together with the backbone. Set mode='adaptive' for the proposal or mode='static' for the controlled comparison. The baseline control omits this module. No additional backbone passes or independent predictors are introduced. The static implementation registers only its used bias parameter, avoiding an unused trainable gate matrix. Require at least two block states; with one block the correction is identically zero.\n\nThe correction is y = h_final + alpha * sum_k weight_k * (LN(h_k) - LN(h_final)), with shared affine-free channel LayerNorm and its epsilon explicitly saved. Because weights sum to one, this equals h_final + alpha * (sum_k weight_k * LN(h_k) - LN(h_final)). It is NOT generally (1-alpha)*h_final + alpha*sum_k weight_k*LN(h_k), because the direct final state is unnormalized. Alpha is unconstrained, so neither form should be described as a convex interpolation. Normalized correction and raw residual also have different scales; record their norm ratio, alpha and the effective correction norm on valid positions rather than interpreting gate weights alone. Scale effects are a potential alternative explanation for gains.\n\nInitialize alpha and all gate parameters to zero. For finite activations and the same masked baseline state this initially preserves the final-block readout exactly, rather than identity-initializing the backbone. Gate gradients initially vanish while alpha can learn; subsequently the gate can receive gradients. If alpha stays near zero, nearly uniform weights do not establish a failed context selector because the selector may barely have trained. The final-depth difference is zero, but its softmax weight still controls the total contribution assigned to other differences. Log effective correction use without treating alpha or gate values as causal explanations. Added layers use deterministic zero initialization and affine-free normalization, avoiding extra initialization draws; any equality check must also hold baseline parameters, random states and dropout operations fixed.\n\nThe adaptive gate reads only same-position causal block states. There is no separate prefix average, timestamp feature, auxiliary scorer, or independently fitted component. Channel-only normalization is causal; pooling over the whole sequence would leak future training positions. All depths still execute, so this proposal provides no block-execution savings. Their receptive fields overlap, shallow states may already contain older information, and the direct deepest-state residual continues to transmit old context. Gate-mediated dependence is another path from old inputs to outputs. Lower distant-prefix sensitivity must be demonstrated at the complete output before claiming context suppression.\n\nKeep the host baseline's loss, optimizer, sampler, embedding dimension, dilation schedule, dropout, weight decay and final transformation unchanged for this architectural comparison. Record their exact inherited values in a trial-local manifest before fitting; this prompt does not supply all those values. Preserve left-only padding and mask inside existing blocks after biased convolutions, normalizations and residual updates. Mask aggregation outputs and exclude invalid targets from loss. Gather the largest nonzero sequence index at inference, handling empty histories with the supplied baseline convention. Preserve item_emb, log2feats(sequence), predict_score(features, items), view.model and every ModelView interface. The original structural diagnostic must recognize the added positionwise operations or report its reachability analysis as unavailable; it must not silently certify an outdated graph. Retain DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions, and diagnosis_interpreter_prompt(raw_diagnosis), using measured metrics and definitions. The loader continues to yield (None, sequence, positive, negative), all tensors B x L. Define added gate and correction statistics and distinguish them from ranking evidence.\n\nThe primary comparison comprises final-only baseline, global static weights and same-position adaptive weights, all with identical backbone and training controls. Static versus adaptive isolates input dependence only within this correction parameterization. It does not isolate normalization, correction scale, added parameters or initialization. Normalization on/off, a parameter-matched pointwise control, uniform weights, direct mixing, and fixed versus learned or nonzero-initialized alpha are possible later controls; do not run an unrestricted factorial sweep within the shared budget. Mean-gate replacement is an inference intervention on the same fitted network, not an independently fitted predictor or a substitute for training the static control. The primary implementation retains all K states and thus incurs O(B*L*K*D) activation storage; report measured peak memory and runtime, and reduce diagnostic batch sizes rather than silently changing the baseline training batch size.\n\nUse fixed, identified public training users for mechanism probes, preserving the recent suffix, valid length, padding and candidate IDs while replacing only older prefixes with real training-history items. Fix suffix lengths to 1, 2, 4 and 8 where both prefix and suffix remain nonempty; use a seed-42 deterministic donor selection matched by available history length, report eligibility and changed-draw counts, and describe these as perturbations rather than verified plausible intent shifts. Reuse the baseline probe's fixed 99 unseen training-observed candidates where available. Without authorized relevance labels, report candidate-score changes and top-10 overlap only; any positive-negative margins use permitted training targets and remain in-sample. Never reconstruct or alter the pinned validation evaluation interface. Prefix interventions and score changes are not ranking improvements, and reduced sensitivity can also mean discarding useful history.\n\nIf budget permits, complement finite interventions with gradients of fixed candidate scores, or permitted training positive-negative margins, with respect to pre-mask item input embeddings. Sum gradient L2 norms across valid positions at each lag, normalize within each history only when total mass is nonzero, then report mean distant-lag mass, per-user 90%/95% mass context lengths and absolute gradient mass. Lags run backward from the actual final nonpadding index. Report zero-gradient cases separately; gradients are local sensitivity and may miss finite effects or saturation. These measurements adapt effective receptive-field analysis rather than establish a recommendation theorem. For deeper attribution, cache states and weights from original and prefix-replaced histories, then cross original/replaced states with original/replaced weights in a 2x2 intervention. Separately patch the direct final-state residual while fixing the correction. These off-manifold hybrid computations provide diagnostic contrasts, not independently trained models or deployed score fusion, and do not establish natural causal mediation. Uniform/mean-gate replacements provide additional inexpensive controls. Corruption and patching choices materially affect interpretation; record them before comparing models.\n\nRetain Movies_and_TV, Industrial_and_Scientific, Electronics and CDs_and_Vinyl routing; DATA_DIR = os.environ['GAGC_DATA_DIR']; preprocessing seed 0; training seed 42; maximum 200 epochs and exactly 200 batches per executed epoch. Preserve the host SASREC_EPOCHS environment default of 200 despite its historical variable name, and cap execution at 200. Run on one GPU and save all artifacts beneath the trial directory. Before execution, record remaining shared GPU seconds and fix the configuration order, checkpoint inspection, stopping and tie-breaking rules. Use the baseline's host-compatible checkpoint schedule for every configuration; serialize its actual epoch list in the manifest. Allocate the remaining 43,200 GPU-second shared budget across the planned configurations and all four categories, including previous expenditure, failed attempts and diagnostics. Budget feasibility cannot be certified from the supplied report alone. If three complete configurations cannot fit based on host timing and remaining allowance, drop the static control before inspecting new comparison scores and limit mechanistic claims. Do not rank incomplete configurations using fewer than four categories. Each configuration trains from scratch without reading another trial's checkpoints; controls are separate experiments, never combined at deployment.\n\nSelect the configuration solely by pinned four-category macro validation HR@10, preferring baseline on exact ties and static over adaptive on remaining exact ties. Record all attempted configurations, checkpoint comparisons, GPU usage, parameter counts and throughput. Equal seeds alone do not ensure identical negative draws after changes; preserve existing sampler streams and record any deviations. When the unmodified host supplies paired validation outcomes, report category and macro differences and discordant-user counts; resample paired users within each category for 2000 seed-42 bootstrap replicates and average the four category differences equally. One changed hit among 200 users is 0.5 percentage points within a category and 0.125 percentage points in the four-category macro. These intervals are conditional on fitted models and fixed candidates, omit training-seed and candidate-sampling variability, and remain descriptive after adaptive checkpoint/configuration selection. They do not remove selection optimism or establish significance for the selected winner. Do not modify the host evaluator to obtain unavailable outcomes. If only aggregate scores are supplied, report paired uncertainty as unavailable. No arbitrary practical-improvement threshold is supplied here; any such deployment preference must be fixed before inspecting comparison results.\n\nDo not change the evaluator or infer omitted diagnostic values. The benchmark uses 200 validation users per category and 99 unique negative candidates with evaluation seed 42. Gains are specific to this sampled HR@10 benchmark; fixed candidates improve comparison but do not establish full-catalog top-10 gains or real-user utility. Simulator feedback from twenty training users is qualitative evidence, not a representative utility estimate or an auxiliary selection metric. Use observed histories, titles, descriptions and timestamps only; ratings, reviews, prices, stores, item categories and simulator traits remain unavailable. Keep test files and labels untouched. Freeze one selected checkpoint per category and its matching predictor before held-out evaluation. Check strict save/load score agreement, causality under future-position perturbations, padding behavior, batch reordering, and final-position readout before submitting the predictor; these essential integration checks consume the method's budget when executed.",
+    "pseudocode": "import torch\nfrom torch import nn\nimport torch.nn.functional as F\n\n\nclass ResidualDepthCorrection(nn.Module):\n    \"\"\"One jointly trained feature layer within the existing NextItNet.\"\"\"\n    def __init__(self, num_blocks, hidden_dim, mode='adaptive', eps=1e-5):\n        super().__init__()\n        if num_blocks < 2 or hidden_dim < 1:\n            raise ValueError('Need at least two valid backbone depths')\n        if mode not in ('adaptive', 'static') or eps <= 0:\n            raise ValueError('Invalid depth correction configuration')\n        self.num_blocks = num_blocks\n        self.hidden_dim = hidden_dim\n        self.mode = mode\n        self.eps = eps\n        if mode == 'adaptive':\n            self.gate_weight = nn.Parameter(\n                torch.zeros(num_blocks, hidden_dim)\n            )\n        else:\n            self.register_parameter('gate_weight', None)\n        self.gate_bias = nn.Parameter(torch.zeros(num_blocks))\n        self.alpha = nn.Parameter(torch.zeros(()))\n\n    def components(self, states, sequence):\n        # Existing causal block outputs: each B x L x D.\n        if len(states) != self.num_blocks:\n            raise ValueError('Checkpoint depth and backbone depth disagree')\n        expected = (*sequence.shape, self.hidden_dim)\n        if any(tuple(h.shape) != expected for h in states):\n            raise ValueError('Expected B x L x D block states')\n        mask = sequence.ne(0).unsqueeze(-1)\n        final = states[-1] * mask\n        normalized = torch.stack([\n            F.layer_norm(h, (self.hidden_dim,), eps=self.eps) * mask\n            for h in states\n        ], dim=2)  # B x L x K x D\n        if self.mode == 'adaptive':\n            logits = torch.einsum(\n                'blkd,kd->blk', normalized, self.gate_weight\n            ) + self.gate_bias\n        else:\n            logits = self.gate_bias.view(1, 1, -1).expand(\n                sequence.shape[0], sequence.shape[1], -1\n            )\n        weights = logits.softmax(dim=-1)\n        delta = normalized - normalized[:, :, -1:, :]\n        return final, delta, weights, mask\n\n    def compose(self, final, delta, weights, mask):\n        # Also permits diagnostic state/weight patching in eval mode.\n        # Patching is never used for deployed prediction.\n        correction = (weights.unsqueeze(-1) * delta).sum(dim=2)\n        return (final + self.alpha * correction) * mask\n\n    def forward(self, states, sequence):\n        return self.compose(*self.components(states, sequence))\n\n\n# Integration into the supplied model constructor, BEFORE optimizer creation:\n# Initialize the original backbone first using its unchanged seed convention.\n# self.depth_correction = ResidualDepthCorrection(K, D, mode='adaptive')\n# Save K, D, mode, eps and this module's state in the category checkpoint.\n# Static controls instantiate mode='static'; baseline omits the module.\n#\n# Integration into the existing log2feats(sequence):\n# h = existing_embedding_and_input_processing(sequence)\n# states = []\n# for block in self.blocks:\n#     h = existing_masked_causal_block_forward(block, h, sequence)\n#     states.append(h)\n# h = self.depth_correction(states, sequence)\n# return existing_final_transform(h) * sequence.ne(0).unsqueeze(-1)\n# Preserve the original loss and valid-target masking.\n#\n# Inference readout, with host empty-history handling before gathering:\n# positions = torch.arange(sequence.shape[1], device=sequence.device)\n# last = positions.expand_as(sequence).masked_fill(sequence.eq(0), -1).amax(1)\n# nonempty = last.ge(0)\n# Apply the supplied baseline empty-history convention to ~nonempty.\n# features = model.log2feats(sequence)\n# rows = torch.arange(len(sequence), device=sequence.device)[nonempty]\n# endpoint = features[rows, last[nonempty]]\n# scores = model.predict_score(endpoint, candidates_for_nonempty_rows)\n#\n# Optional same-network diagnostic patching, using identical suffix/padding:\n# final_o, delta_o, weight_o, mask = module.components(states_original, seq_o)\n# final_r, delta_r, weight_r, _ = module.components(states_replaced, seq_r)\n# for final, delta in [(final_o, delta_o), (final_r, delta_r)]:\n#     for weight in [weight_o, weight_r]:\n#         h = module.compose(final, delta, weight, mask)\n#         score through the unchanged final transform and scoring head\n# Also compare compose(final_r, delta_o, weight_o, mask) against the\n# original composition to isolate a direct-residual patch with correction fixed.\n# Report score changes as exploratory intervention effects, not relevance gains.\n#\n# Before execution, serialize inherited training settings, exact checkpoint\n# epochs, remaining budget, stopping and tie rules in a trial-local manifest.\n# Train every eligible configuration independently for all four categories,\n# preserving seed 42, <=200 epochs and 200 batches per executed epoch.\n# Select only by the unchanged pinned four-category macro validation HR@10.\n#\n# The predictor writer must emit the same model and correction definitions,\n# reconstruct the saved configuration and strict-load exactly one state_dict\n# for the routed category. Never average checkpoints or score outputs.\n# Retain ModelView and both required diagnosis_tools.py entry points.",
+    "originality": {
+      "score": 3,
+      "positive": "The normalized difference correction, direct final-state path and positionwise causal weights define a specific controlled adaptation within NextItNet.",
+      "negative": "Jumping Knowledge and ELMo establish intermediate-layer aggregation; SkipRec's NextItNet+ and ReZero establish zero-initialized residual coefficients. The combination supports modest originality, not a seminal novelty claim."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "A small intervention supports controlled studies of depth selection, complete-output context sensitivity and baseline-preserving initialization without new data.",
+      "negative": "The prior aggregation result is lower than baseline, existing depths may be redundant, and the retained deepest-state path can preserve stale information. Gate shortcuts and benchmark-specific gains remain plausible."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "The core module is small and preserves the causal backbone, item-scoring interface and one-model deployment requirement.",
+      "negative": "Reliable experiments require internal masking, activation-memory management, diagnostic graph adaptation, prespecified controls and exact checkpoint/predictor reconstruction; these make difficulty higher than the head alone suggests."
+    }
+  },
+  "related_work": [
+    {
+      "title": "NextItNet: A Simple Convolutional Generative Network for Next Item Recommendation",
+      "link": "https://arxiv.org/abs/1808.05163",
+      "contributions": [
+        "Uses residual dilated causal convolutions to model sequential dependencies.",
+        "Supplies the required backbone and intermediate states used by the proposed correction."
+      ],
+      "limitations": [
+        "Expanded receptive fields do not establish intent boundaries or effective forgetting.",
+        "Does not validate the proposed adaptive residual depth correction."
+      ]
+    },
+    {
+      "title": "On the Effectiveness of Sampled Softmax Loss for Item Recommendation",
+      "link": "https://wujcan.github.io/papers/tois-ssm.pdf",
+      "contributions": [
+        "Analyzes sampled-softmax optimization and its emphasis on difficult negatives.",
+        "Motivates the alternative multi-negative supervision experiment."
+      ],
+      "limitations": [
+        "Collaborative-filtering evidence does not establish improvement for this NextItNet benchmark.",
+        "Hard negative competition can emphasize false negatives and requires additional compute."
+      ]
+    },
+    {
+      "title": "Recformer",
+      "link": "https://arxiv.org/abs/2305.13731",
+      "contributions": [
+        "Studies recommendation from item text and motivates sharing information across items through content.",
+        "Provides conceptual support for the alternative title-embedding direction."
+      ],
+      "limitations": [
+        "Its pretrained language representations and Transformer architecture cannot be directly adopted under these constraints.",
+        "Its results do not establish that a randomly initialized title encoder improves this task."
+      ]
+    },
+    {
+      "title": "Representation Learning on Graphs with Jumping Knowledge Networks",
+      "link": "https://proceedings.mlr.press/v80/xu18c/xu18c.pdf",
+      "contributions": [
+        "Aggregates intermediate network depths using concatenation, max pooling or adaptive attention.",
+        "Establishes substantial prior art for adaptive receptive-field selection through depth aggregation."
+      ],
+      "limitations": [
+        "Graph-learning evidence does not validate sequential recommendation gains.",
+        "Aggregation does not establish suppression of older inputs in this causal residual architecture."
+      ]
+    },
+    {
+      "title": "Deep Contextualized Word Representations",
+      "link": "https://aclanthology.org/N18-1202.pdf",
+      "contributions": [
+        "ELMo learns task-specific softmax layer weights and an overall scale.",
+        "Provides precedent for normalized layer mixing and global-weight controls."
+      ],
+      "limitations": [
+        "Its task-specific mixing weights are shared across tokens, unlike the proposed positionwise gate.",
+        "Language-model results do not establish recommendation benefits."
+      ]
+    },
+    {
+      "title": "SkipRec",
+      "link": "https://cdn.aaai.org/ojs/16518/16518-13-20012-1-2-20210518.pdf",
+      "contributions": [
+        "Learns user-specific binary block-execution policies for sequential recommendation.",
+        "Its NextItNet+ backbone includes zero-initialized learnable residual coefficients, directly limiting novelty claims."
+      ],
+      "limitations": [
+        "Skipping execution differs from aggregating already computed block states.",
+        "The proposed aggregation executes every block and cannot inherit SkipRec's inference savings."
+      ]
+    },
+    {
+      "title": "ReZero Is All You Need: Fast Convergence at Large Depth",
+      "link": "https://arxiv.org/abs/2003.04887",
+      "contributions": [
+        "Uses zero-initialized residual scalars to control the initial contribution of added transformations.",
+        "Supports the initialization principle behind the proposed correction."
+      ],
+      "limitations": [
+        "Preserving a final-state readout is distinct from identity-initializing an entire backbone.",
+        "Does not establish usefulness of normalized depth differences for recommendation."
+      ]
+    },
+    {
+      "title": "Attention Is Not Explanation",
+      "link": "https://arxiv.org/abs/1902.10186",
+      "contributions": [
+        "Shows that attention coefficients need not faithfully explain input importance.",
+        "Motivates complete-output interventions rather than interpreting depth weights as evidence of forgetting."
+      ],
+      "limitations": [
+        "Does not directly study this NextItNet gate.",
+        "Does not imply that all weighting mechanisms lack predictive value."
+      ]
+    },
+    {
+      "title": "Understanding the Effective Receptive Field in Deep Convolutional Neural Networks",
+      "link": "https://arxiv.org/abs/1701.04128",
+      "contributions": [
+        "Distinguishes effective sensitivity from theoretical receptive-field reachability.",
+        "Motivates lag-wise gradient measurements alongside finite prefix interventions."
+      ],
+      "limitations": [
+        "Gradient-based sensitivity is local and can miss finite perturbation effects or saturation.",
+        "Its results do not establish useful forgetting or improved recommendation rankings."
+      ]
+    },
+    {
+      "title": "Towards Best Practices of Activation Patching in Language Models: Metrics and Methods",
+      "link": "https://arxiv.org/abs/2309.16042",
+      "contributions": [
+        "Examines how corruption choices and measurement methods affect activation-patching interpretations.",
+        "Motivates explicit state/gate patching controls and documentation of intervention construction."
+      ],
+      "limitations": [
+        "Language-model patching results do not validate the proposed recommendation probes.",
+        "Hybrid patched activations can be off-manifold and do not establish natural causal mediation."
+      ]
+    },
+    {
+      "title": "Statistical Inference at Scale",
+      "link": "https://piret.info/pubs/2023/SIGIR23-InferenceAtScale",
+      "contributions": [
+        "Provides relevant statistical-inference principles for comparing recommendation outcomes.",
+        "Supports preserving paired users and reporting differences with uncertainty rather than relying on small score gaps."
+      ],
+      "limitations": [
+        "The proposed stratified macro bootstrap is a task-specific application.",
+        "Conditional paired intervals omit training-seed variability and do not correct adaptive selection."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how optimization of model-selection criteria creates selection bias.",
+        "Motivates prespecified checkpoint rules, complete trial logs and cautious post-selection interpretation."
+      ],
+      "limitations": [
+        "Does not supply a selection-adjusted interval for this adaptive search.",
+        "Prespecification reduces researcher flexibility but does not eliminate all selection optimism."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled recommendation metrics can disagree with full-catalog metrics, including model orderings.",
+        "Limits interpretation of gains against the benchmark's 99 sampled negatives."
+      ],
+      "limitations": [
+        "Does not invalidate using the stipulated sampled HR@10 for benchmark selection.",
+        "Fixed candidate sets improve paired comparisons but do not remove sampled-metric bias."
+      ]
+    }
+  ]
+}

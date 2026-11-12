@@ -1,0 +1,62 @@
+{
+  "markdown_report": "At 0% progress, prioritize a small, testable architectural change: **gated recent-history pooling alongside SASRec**, accompanied by controlled history diagnostics. No improvement is established yet.\n\n**Insights from the starting point.** (1) Feedback identifies broad relatedness crowding out specific next choices. This motivates testing whether recent evidence improves ranking. (2) Existing margins measure training-pair separation. They cannot establish useful history dependence or validation gains. (3) Compatibility and redundancy complaints require evidence unavailable from interaction IDs alone. Diagnostic claims must distinguish explicit evidence from uncertainty.\n\n**Insights from related work.** (1) [Recency research](https://arxiv.org/abs/2409.09722) warns that excessive recent-item emphasis can reduce accuracy. A bounded, learned contribution is therefore preferable to assuming stronger recency always helps. (2) [FCESR](https://arxiv.org/abs/2504.13632) separates sufficiency from necessity. Retaining and deleting matched history subsets can expose different model dependencies. (3) [Krichene and Rendle](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/) show sampled metrics can change model ordering. Selection must nevertheless use the pinned benchmark, with auxiliary diagnostics interpreted separately.\n\n**Framework and directions.** Separate predictive mechanisms, behavioral probes, and evidence-based interpretation:\n\n| Layer | Existing approach | Proposed addition | Remaining gap |\n|---|---|---|---|\n| Prediction | SASRec sequence features | Gated recent-history residual | Recent activity may be incidental |\n| Dependence | Training margins | Matched deletion and retention | Dependence does not establish intent |\n| Interpretation | Metadata breakdowns | Source-supported flags and abstention | Ownership and prerequisites remain uncertain |\n\n**Candidate ideas and assessments.** Scores are originality/potential/difficulty; higher difficulty means harder implementation.\n\n1. **Gated history residual — 4/7/3.** Originality: explicit controllable branch, but familiar pooling. Potential: cheap and readily ablated, but may duplicate SASRec. Difficulty: small model change, but requires identical inference implementation.\n2. **Matched history perturbations — 4/6/4.** Originality: task-specific controls, but established perturbation methods. Potential: exposes dependence, but does not itself improve ranking. Difficulty: existing hooks suffice, but padding and position shifts require care.\n3. **Evidence-backed rejection flags — 5/6/6.** Originality: connects feedback to inspectable spans, but resembles rule-based verification. Potential: makes diagnoses actionable, but metadata coverage limits recall. Difficulty: deterministic extraction is feasible, but specification matching is brittle.\n\n**Selected algorithm.** For each causal sequence prefix, compute SASRec feature h and an exponentially weighted mean r of its last k non-padding item embeddings. Score candidates using z = LayerNorm(h + g·r), where g = sigmoid(a) is learned per dataset and initialized near zero. Reuse the baseline loss, optimizer and seeds; initially fix k=5 and decay=0.7 to limit search cost.\n\n```python\nh = sasrec(sequence)\nr = causal_recent_pool(item_emb(sequence), k=5, decay=0.7)\nz = layer_norm(h + sigmoid(gate) * r)\nlogits = candidate_dot(z, item_emb(candidates))\n```\n\nCompare against baseline and retrained g=0 controls using macro validation HR@10. Preserve all four routes, splits, DATA_DIR, trial-local artifacts and predictor serialization. Keep DiagnosisProbe’s interface; expose z through log2feats and score it consistently. Report unavailable category metadata as empty and treat simulator feedback as exploratory.",
+  "idea": {
+    "description": "Add a learned, initially small residual from causal recent-history embedding pooling to each SASRec sequence feature, independently for each of the four dataset models.",
+    "motivation": "The qualitative feedback suggests testing whether recent observed activity supplies useful ranking evidence. A small residual offers an inexpensive experiment without assuming that recency represents intent or that stronger recency necessarily improves accuracy.",
+    "implementation_notes": "Retain DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, all dataset routes, and the environment's SASREC_EPOCHS default of 200. Pool only non-padding events available at each prediction position; never include future positives. Start with k=5, exponential decay 0.7, and gate logit -4. Use the baseline training configuration otherwise. Save the gate and normalization parameters and update the predictor writer with the same architecture. Preserve DiagnosisProbe(view, device) and run_full_diagnosis(train_loader), returning metrics and metric_definitions. view.model must reference the trained module; log2feats must return the residual-enhanced features used for prediction. Existing margin definitions remain descriptive of training samples. Preserve the existing embedding diagnostic, with its stated limitations. Unavailable metadata breakdowns remain empty. Count all trial costs against the shared budget and select only by the pinned macro validation HR@10.",
+    "pseudocode": "class RecentResidualSASRec(nn.Module):\n    def log2feats(self, sequence):\n        h = self.sasrec.log2feats(sequence)\n        embeddings = self.item_emb(sequence)\n        numerator = zeros_like(embeddings)\n        denominator = zeros_like(sequence, dtype=float)\n        # shift_right inserts zero padding and never wraps around.\n        for offset in range(5):\n            shifted_ids = shift_right(sequence, offset)\n            shifted_emb = shift_right(embeddings, offset)\n            weight = (0.7 ** offset) * (shifted_ids != 0)\n            numerator += shifted_emb * weight[..., None]\n            denominator += weight\n        recent = numerator / denominator.clamp_min(1)[..., None]\n        features = self.residual_norm(h + sigmoid(self.gate) * recent)\n        return features * (sequence != 0)[..., None]\n\n    def predict_score(self, features, items):\n        return candidate_dot(features, self.item_emb(items))\n\n# Train four independent dataset models with the unchanged baseline loss.\n# Export this exact feature and scoring implementation through the predictor writer.\n# Compare baseline, residual model, and retrained zero-gate control using pinned validation.",
+    "originality": {
+      "score": 4,
+      "positive": "Provides an explicit, inspectable recent-history contribution that can be ablated independently.",
+      "negative": "Gated residuals and recency pooling are established techniques; this is an incremental combination."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Offers a low-cost foundation for studying when recent history adds predictive information across categories.",
+      "negative": "The branch may duplicate SASRec or amplify incidental interactions; improved user intent matching is unproven."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Requires only causal pooling, a scalar gate, normalization, and corresponding serialization changes.",
+      "negative": "Training and exported inference must agree exactly on masking, sequence positions, and feature construction."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Measuring Recency Bias (2024)",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "Provides evidence that excessive emphasis on recent interactions can hurt recommendation accuracy.",
+        "Motivates testing a bounded, learned recency contribution."
+      ],
+      "limitations": [
+        "Does not establish that recent-history pooling improves the four RecHarness datasets.",
+        "Recency sensitivity does not directly identify user intent."
+      ]
+    },
+    {
+      "title": "FCESR (2025)",
+      "link": "https://arxiv.org/abs/2504.13632",
+      "contributions": [
+        "Distinguishes recommendation sufficiency from necessity through retained and removed history evidence.",
+        "Motivates complementary history perturbation probes."
+      ],
+      "limitations": [
+        "Model dependence on interactions does not establish that those interactions reflect the user's perceived intent.",
+        "Perturbation effects require controls for deletion count, padding, and positional shifts."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Establishes that sampled evaluation can change model ordering, even in expectation.",
+        "Supports keeping benchmark selection distinct from broader ranking claims."
+      ],
+      "limitations": [
+        "Does not justify changing the pinned RecHarness evaluation protocol.",
+        "Repeated candidate draws do not eliminate systematic sampling bias."
+      ]
+    }
+  ]
+}

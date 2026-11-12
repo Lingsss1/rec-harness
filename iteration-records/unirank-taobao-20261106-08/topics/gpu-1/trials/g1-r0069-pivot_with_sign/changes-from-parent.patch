@@ -1,0 +1,96 @@
+--- g1-r0068-axis_with_sign/model.py
++++ g1-r0069-pivot_with_sign/model.py
+@@ -1,10 +1,10 @@
+-"""Prospective coarse orientation information-restoration factorial.
+-
+-Cross raw/canonical coarse moment with detached pivot-sign/constant scalar.
+-Both learned summary consumers receive the scalar; local and other moments
+-stay unchanged. All cells add the same128 zero-initialized dense weights.
+-Information recoverability does not guarantee one-pass learnability.
+-No new measured result, novelty or whole-order-invariance claim.
+-Native tensor/autograd/resource checks belong to the authorized host.
++"""Prospective target-relative coarse chart / orientation-bit factorial.
++
++Use the incumbent's exact five summaries and both learned consumers.
++Compare target-relative and max-coordinate charts, each with a detached
++sign bit or a constant. All four cells have identical learned capacity,
++initialization and execution paths. Each chart alone removes only the
++coarse vector's global sign, conditional on its anchor; neither is a
++whole-history order-invariant model. Results and native checks unmeasured.
+ """
+ import torch
+@@ -15,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'canonicalize_coarse': True, 'expose_coarse_sign': True}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'coarse_chart_reference': 'pivot', 'expose_coarse_sign': True}
+ 
+ 
+@@ -35,5 +35,5 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16, summary_placement='block',
+-                 canonicalize_coarse=True, expose_coarse_sign=True,
++                 coarse_chart_reference='pivot', expose_coarse_sign=True,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -48,7 +48,9 @@
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         self.compression_routes = compression_routes
+-        if not isinstance(canonicalize_coarse, bool) or not isinstance(expose_coarse_sign, bool):
+-            raise ValueError('Chart and sign availability switches must be booleans')
+-        self.canonicalize_coarse = canonicalize_coarse
++        if coarse_chart_reference not in ('target', 'pivot'):
++            raise ValueError('Unknown coarse chart reference')
++        if not isinstance(expose_coarse_sign, bool):
++            raise ValueError('Sign availability must be boolean')
++        self.coarse_chart_reference = coarse_chart_reference
+         self.expose_coarse_sign = expose_coarse_sign
+         if block_aux_scorer_grad is not True:
+@@ -291,6 +293,11 @@
+         # scalar has no embedding gradient, including on auxiliary routes.
+         # Both alternatives execute in every cell, train and eval alike.
+-        coarse_axis, coarse_sign = self._coarse_chart(block_detail)
+-        block_detail = coarse_axis if self.canonicalize_coarse else block_detail
++        pivot_axis, pivot_sign = self._coarse_chart(block_detail)
++        target_axis, target_sign = self._target_coarse_chart(
++            block_detail, target, pivot_sign)
++        if self.coarse_chart_reference == 'target':
++            block_detail, coarse_sign = target_axis, target_sign
++        else:
++            block_detail, coarse_sign = pivot_axis, pivot_sign
+         orientation_code = (coarse_sign if self.expose_coarse_sign
+                             else torch.ones_like(coarse_sign))
+@@ -314,4 +321,33 @@
+         orientation = torch.where(pivot < 0, -torch.ones_like(pivot),
+                                   torch.ones_like(pivot)).to(moment.dtype)
++        return moment * orientation, orientation
++
++    @staticmethod
++    def _target_coarse_chart(moment, target, pivot_sign):
++        """Orient toward the supplied current item, with a fixed tie fallback.
++
++        Only matching item-field coordinates enter the FP32 inner product;
++        the historical action coordinates have no current-action anchor.
++        The detached sign multiplies the WHOLE original moment. At relative
++        dot margins <=1e-6 use the existing deterministic pivot convention.
++        Conditional on target, c(-m)=c(m) and s*c=m, including orthogonal,
++        all-zero and action-only cases. The discrete sign has no derivative
++        into either item source; all inherited auxiliary gates still apply.
++        No raw IDs, new event information or learned parameters are added.
++        """
++        if (moment.ndim != 2 or target.ndim != 2
++                or moment.shape[0] != target.shape[0]
++                or target.shape[1] < 1 or target.shape[1] > moment.shape[1]
++                or pivot_sign.shape != moment[:, :1].shape):
++            raise ValueError('Invalid moment, target or fallback shapes')
++        item_moment = moment.detach().float()[:, :target.shape[1]]
++        anchor = target.detach().float()
++        dot = (item_moment * anchor).sum(dim=-1, keepdim=True)
++        scale = (item_moment.square().sum(dim=-1, keepdim=True).sqrt()
++                 * anchor.square().sum(dim=-1, keepdim=True).sqrt())
++        target_sign = torch.where(dot < 0, -torch.ones_like(dot),
++                                  torch.ones_like(dot))
++        orientation = torch.where(dot.abs() > 1e-6 * scale,
++                                  target_sign, pivot_sign.float()).to(moment.dtype)
+         return moment * orientation, orientation
+ 

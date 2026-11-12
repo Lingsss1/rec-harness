@@ -1,0 +1,103 @@
+--- g2-r0049-joint_layer_reference/model.py
++++ g2-r0051-joint_channel_spread96/model.py
+@@ -1,9 +1,8 @@
+-"""Capacity by initialization-scale contrast for the context-owning buy tower.
+-
+-The full random template and all parent reductions are inherited. After those
+-operations, an optional deterministic variance correction touches only buy
+-hidden/readout weights. It uses actual versus original-template fan sums,
+-adds no RNG draws or Parameters, and leaves every forward/loss method intact.
+-This is a local capacity/optimization diagnostic, not an originality claim.
++"""Fixed channel-identity controls for a reduced context-owning buy tower.
++
++The full untrained random template, inherited initialization scale, all shared
++modules, source-gradient ownership and train/eval operators are retained.
++Only a predeclared 96-of-112 subset changes before optimizer construction.
++This local capacity attribution study makes no architectural novelty claim.
+ """
+ import torch
+@@ -14,5 +13,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32], 'buy': [96, 64]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_first_channels': 'spread'}
+ 
+ 
+@@ -42,4 +41,5 @@
+                  private_readout_scale='inherited',
+                  owner_initialization_scale='inherited',
++                 owner_first_channels='prefix',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -54,4 +54,14 @@
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         self.compression_routes = compression_routes
++        # Predeclared, data-independent subsets of the 112-channel buy owner.
++        # The width/scale factorial is frozen; only retained channel identity varies.
++        if owner_first_channels not in ('prefix', 'suffix', 'spread'):
++            raise ValueError('Unknown buy first-layer channel subset')
++        if owner_first_channels != 'prefix':
++            if (tuple(auxiliary_tower_hidden_units) != (112, 64)
++                    or auxiliary_tower_overrides is None
++                    or tuple(auxiliary_tower_overrides.get('buy', ())) != (96, 64)
++                    or owner_initialization_scale != 'inherited'):
++                raise ValueError('Nonprefix subsets require buy 96/64 within 112/64 and inherited scale')
+         if owner_initialization_scale not in ('inherited', 'xavier'):
+             raise ValueError('Unknown owner tower initialization scale')
+@@ -273,4 +283,6 @@
+             widths = (click_tower_hidden_units if label == 'is_click'
+                       else auxiliary_tower_overrides.get(label, auxiliary_tower_hidden_units))
++            if label == 'buy' and owner_first_channels != 'prefix':
++                self._select_owner_first_channels(tower, owner_first_channels)
+             if label in ('cart', 'fav') and nonowner_tower_depths[label] == 1:
+                 # The full template output has 64 inputs. Retain its first
+@@ -336,4 +348,49 @@
+                         tower, input_width, tower_hidden_units, 'xavier', 'xavier')
+         self.model_to_device()
++
++    @staticmethod
++    def _select_owner_first_channels(tower, selection):
++        """Materialize one fixed 96-of-112 subnetwork before optimization.
++
++        Select matching first-affine rows, Dice state and second-affine
++        columns. All original template initialization has already executed;
++        other modules and the external RNG are untouched. No trained weight,
++        validation statistic or label selects these indices. No rescaling.
++        The ordinary reduction helper runs next. Indexing occurs only here,
++        with no masks, gather, padding or full-width storage left in forward.
++        """
++        if selection == 'suffix':
++            channels = list(range(16, 112))
++        elif selection == 'spread':
++            # Drop 6,13,...,111: sixteen uniformly spaced indices.
++            channels = [index for index in range(112) if index % 7 != 6]
++        else:
++            raise ValueError('The prefix control uses the unchanged reducer')
++        if len(channels) != 96 or len(set(channels)) != 96:
++            raise ValueError('Expected 96 distinct retained channels')
++        first, dice, second = tower[0], tower[1], tower[2]
++        if (not isinstance(first, nn.Linear) or not isinstance(dice, Dice)
++                or not isinstance(second, nn.Linear)
++                or first.out_features != 128 or second.in_features != 128):
++            raise ValueError('Channel selection requires the unmodified 128-channel template')
++        indices = torch.tensor(channels, dtype=torch.long, device=first.weight.device)
++        with torch.no_grad():
++            first.weight = nn.Parameter(
++                first.weight.index_select(0, indices).detach().clone(),
++                requires_grad=first.weight.requires_grad)
++            first.bias = nn.Parameter(
++                first.bias.index_select(0, indices).detach().clone(),
++                requires_grad=first.bias.requires_grad)
++            dice.alpha = nn.Parameter(
++                dice.alpha.index_select(0, indices).detach().clone(),
++                requires_grad=dice.alpha.requires_grad)
++            dice.bn.running_mean = dice.bn.running_mean.index_select(0, indices).detach().clone()
++            dice.bn.running_var = dice.bn.running_var.index_select(0, indices).detach().clone()
++            second.weight = nn.Parameter(
++                second.weight.index_select(1, indices).detach().clone(),
++                requires_grad=second.weight.requires_grad)
++            first.out_features = 96
++            dice.bn.num_features = 96
++            second.in_features = 96
+ 
+     @staticmethod

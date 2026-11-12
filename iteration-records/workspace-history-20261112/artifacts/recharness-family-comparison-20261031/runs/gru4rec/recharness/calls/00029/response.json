@@ -1,0 +1,31 @@
+{
+  "category_edits": [
+    {
+      "category": "feature_construction",
+      "rationale": "Test gentle training-frequency correction on history inputs across all four datasets: clamp((median_positive_count/max(count,1))^0.10,0.8,1.2), with zero padding. Checkpoint the deterministic scales for identical inference. Preserve learned embeddings, GRU topology, readout, candidate scoring, loss, optimizer and training settings.",
+      "edits": [
+        {
+          "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+          "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+        },
+        {
+          "find": "        self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)\n        dropout = dropout_rate if num_layers > 1 else 0.0",
+          "replace": "        self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)\n        self.register_buffer(\"history_frequency_scale\", torch.ones(itemnum + 1))\n        self.history_frequency_scale[0] = 0.0\n        dropout = dropout_rate if num_layers > 1 else 0.0"
+        },
+        {
+          "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))",
+          "replace": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(\n            self.item_emb(seq) * self.history_frequency_scale[seq].unsqueeze(-1)\n        )"
+        },
+        {
+          "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))",
+          "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(\n            self.item_emb(seq) * self.history_frequency_scale[seq].unsqueeze(-1)\n        )"
+        },
+        {
+          "find": "    ).to(device)\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)",
+          "replace": "    ).to(device)\n    training_items = np.fromiter(\n        (item for history in user_train.values() for item in history),\n        dtype=np.int64,\n    )\n    training_counts = np.bincount(training_items, minlength=itemnum + 1).astype(np.float32)\n    positive_counts = training_counts[1:][training_counts[1:] > 0]\n    median_count = float(np.median(positive_counts)) if positive_counts.size else 1.0\n    frequency_scale = np.clip(\n        (median_count / np.maximum(training_counts, 1.0)) ** 0.10,\n        0.8,\n        1.2,\n    ).astype(np.float32)\n    frequency_scale[0] = 0.0\n    with torch.no_grad():\n        model.history_frequency_scale.copy_(\n            torch.as_tensor(frequency_scale, device=device)\n        )\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Add mild training-only frequency scaling to history inputs for all four category models. Registered buffers are saved in each checkpoint and restored by the existing generated predictor, which imports the updated model class."
+}

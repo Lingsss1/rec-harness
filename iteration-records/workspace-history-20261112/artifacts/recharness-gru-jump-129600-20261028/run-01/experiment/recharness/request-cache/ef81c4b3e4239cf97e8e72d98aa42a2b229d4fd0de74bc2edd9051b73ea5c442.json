@@ -1,0 +1,35 @@
+{
+  "request_sha256": "ef81c4b3e4239cf97e8e72d98aa42a2b229d4fd0de74bc2edd9051b73ea5c442",
+  "response": {
+    "category_edits": [
+      {
+        "category": "network_architecture",
+        "rationale": "Add a jointly trained residual bottleneck adapter after each GRU timestep: h + W_up GELU(W_down h). Its width is max(8, hidden_units // 4), and zero-initialized output weights preserve the initial GRU mapping. Keep the existing embeddings, readout, scoring, loss and optimizer. Persist the adapter width and load the same architecture through the predictor writer.",
+        "edits": [
+          {
+            "find": "    def __init__(self, itemnum: int, hidden_units: int = 128, num_layers: int = 1,\n                 dropout_rate: float = 0.1):\n        super().__init__()\n        self.itemnum = itemnum\n        self.hidden_units = hidden_units\n        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)\n        dropout = dropout_rate if num_layers > 1 else 0.0\n        self.gru = nn.GRU(hidden_units, hidden_units, num_layers=num_layers,\n                          batch_first=True, dropout=dropout)\n        self.dropout = nn.Dropout(dropout_rate)",
+            "replace": "    def __init__(self, itemnum: int, hidden_units: int = 128, num_layers: int = 1,\n                 dropout_rate: float = 0.1, adapter_width: int | None = None):\n        super().__init__()\n        self.itemnum = itemnum\n        self.hidden_units = hidden_units\n        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)\n        dropout = dropout_rate if num_layers > 1 else 0.0\n        self.gru = nn.GRU(hidden_units, hidden_units, num_layers=num_layers,\n                          batch_first=True, dropout=dropout)\n        self.adapter_width = max(8, hidden_units // 4) if adapter_width is None else adapter_width\n        self.adapter = nn.Sequential(\n            nn.Linear(hidden_units, self.adapter_width),\n            nn.GELU(),\n            nn.Linear(self.adapter_width, hidden_units),\n        )\n        nn.init.zeros_(self.adapter[-1].weight)\n        nn.init.zeros_(self.adapter[-1].bias)\n        self.dropout = nn.Dropout(dropout_rate)"
+          },
+          {
+            "find": "        out, _ = self.gru(emb)\n        # Histories are LEFT padded; count-1 indexes padding on short histories.",
+            "replace": "        out, _ = self.gru(emb)\n        out = out + self.adapter(out)\n        # Histories are LEFT padded; count-1 indexes padding on short histories."
+          },
+          {
+            "find": "        out, _ = self.gru(emb)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)",
+            "replace": "        out, _ = self.gru(emb)\n        out = out + self.adapter(out)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)"
+          },
+          {
+            "find": "            \"num_layers\": NUM_LAYERS,\n            \"dropout_rate\": DROPOUT_RATE,",
+            "replace": "            \"num_layers\": NUM_LAYERS,\n            \"dropout_rate\": DROPOUT_RATE,\n            \"adapter_width\": model.adapter_width,"
+          },
+          {
+            "find": "            num_layers=meta[\"num_layers\"],\n            dropout_rate=0.0,",
+            "replace": "            num_layers=meta[\"num_layers\"],\n            dropout_rate=0.0,\n            adapter_width=meta[\"adapter_width\"],"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Add a zero-initialized residual bottleneck adapter to the GRU outputs, with matching checkpoint metadata and predictor construction. Retain one model per category and the existing training configuration."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/run-01/experiment/recharness/calls/00051"
+}

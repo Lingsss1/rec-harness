@@ -1,0 +1,142 @@
+--- g3-r0005-private_aux_items/model.py
++++ g3-r0008-collapsed_availability_control/model.py
+@@ -1,15 +1,19 @@
+-"""Auxiliary-owned item/action tables under a primary-owned history selector.
+-
+-The primary click path and shared context tables follow the incumbent. Auxiliary
+-heads may learn one private item/action representation shared by cart/fav/buy.
+-A four-mode replacement suite separates adaptive private values from a frozen
+-initial basis and from tied primary-only/joint embedding updates. All modes have
+-identical allocated capacity and initialization, but active capacity and backward
+-cost differ. Clones start from the inherited initialization, never a checkpoint.
+-Related work: STEM (Su et al., AAAI 2024), arXiv:2308.13537v2, and the local DIN
+-adaptation. This is neither a STEM reproduction nor an originality claim.
+-Forward uses only the frozen host inputs; current target action is never used.
++"""Feedback-resolved target-history evidence with task-specific logit readouts.
++
++Retains the archived private-auxiliary DIN adaptation and adds deterministic
++history statistics: exposure and four feedback channels crossed with all events,
++same category, same brand, and joint category/brand matches. Each cell supplies
++a normalized log count and a within-channel fraction. A zero-initialized 40-to-4
++linear map lets each task use complementary feedback without sharing item-table
++gradients. Initialization of every inherited component is unchanged.
++
++The 2x2 controls remove target equality or erase feedback-channel identity.
++Allocated capacity is equal; feature rank and optimization geometry can differ.
++Related work inspected: DIN primary text and pinned UniRank INFNet source
++(feedback-mask aggregation). This is neither a reproduction nor a novelty claim.
++Uses only released prefixes and host masks; never current labels/target action.
+ """
+ import copy
++import math
+ import torch
+ from torch import nn
+@@ -18,14 +22,15 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': False, 'feedback_identity': False}
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='PrivateAuxiliaryItemRepresentation', gpu=-1,
++    def __init__(self, feature_map, model_id='FeedbackMatchEvidence', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(128, 32),
+                  tower_hidden_units=(128, 64), routing='task',
+                  feedback_in_score=True, selector_gradient='primary',
+                  auxiliary_selector='none', block_aux_context_gradient=False,
+-                 auxiliary_item_mode='private', num_tasks=None,
++                 auxiliary_item_mode='private', target_matches=False,
++                 feedback_identity=False, num_tasks=None,
+                  task='binary_classification', **kwargs):
+         labels = list(feature_map.labels)
+@@ -54,4 +59,18 @@
+         if block_aux_context_gradient:
+             raise ValueError('This study fixes context sharing; auxiliary_item_mode controls item ownership')
++        if auxiliary_item_mode != 'private':
++            raise ValueError('This evidence study fixes learned private auxiliary tables')
++        if not isinstance(target_matches, bool) or not isinstance(feedback_identity, bool):
++            raise ValueError('Evidence switches must be boolean')
++        if set(labels) != {'is_click', 'cart', 'fav', 'buy'} or len(labels) != 4:
++            raise ValueError('Exactly the four contracted tasks are required')
++        if not all(name in feature_map.features for name in ('cate_id', 'brand')):
++            raise ValueError('Category and brand fields are required')
++        self.target_matches = target_matches
++        self.feedback_identity = feedback_identity
++        # Zero is the released missing-row sentinel. Also honor any declared
++        # padding sentinel; do not infer vocabulary frequencies or raw IDs.
++        self.match_padding = {name: feature_map.features[name].get('padding_idx')
++                              for name in ('cate_id', 'brand')}
+         self.auxiliary_item_mode = auxiliary_item_mode
+         self.block_aux_context_gradient = block_aux_context_gradient
+@@ -122,5 +141,51 @@
+             for name in self.aux_item_fields
+             if name in self.embedding_layer.feature_encoders}))
++        self.evidence_width = (1 + len(labels)) * 4 * 2
++        # A raw zero Parameter consumes no RNG and is registered after the
++        # inherited reset. It is a dense parameter under the host optimizer.
++        # No extra bias: empty histories receive exactly zero logit correction.
++        self.evidence_weight = nn.Parameter(torch.zeros(len(labels), self.evidence_width))
+         self.model_to_device()
++
++    def _history_evidence(self, item, mask, multi_masks):
++        """Return [B,40], ordered channel / match-bin / (log-count, fraction).
++
++        Channel order is exposure, then feature_map.labels. Feedback masks may
++        overlap; their counts are not mutually exclusive conversion counts.
++        The identity control averages *features* across four feedback channels,
++        preserving exposure features and the sum across feedback slots. It is
++        not a union of feedback events and not a shuffled-label control.
++        """
++        valid = mask.to(dtype=torch.bool)
++        if multi_masks is None or len(multi_masks) != len(self.towers):
++            raise ValueError('Four host-provided historical feedback masks are required')
++        if any(m.shape != mask.shape for m in multi_masks):
++            raise ValueError('Feedback mask shape mismatch')
++        matches = [valid]
++        for name in ('cate_id', 'brand'):
++            history = item[name][:, :-1]
++            target = item[name][:, -1:]
++            known = valid & history.ne(0) & target.ne(0)
++            padding = self.match_padding[name]
++            if padding is not None:
++                known = known & history.ne(padding) & target.ne(padding)
++            matches.append(known & history.eq(target) if self.target_matches else known)
++        matches.append(matches[1] & matches[2])
++        match_tensor = torch.stack(matches, dim=-1).float()  # [B,L,4]
++        channels = torch.stack([valid] + [m.to(dtype=torch.bool) & valid
++                                        for m in multi_masks], dim=-1).float()
++        # These are input-only statistics. Force FP32 accumulation even under
++        # BF16 host autocast; casts alone would still allow autocast bmm.
++        with torch.autocast(device_type=mask.device.type, enabled=False):
++            counts = torch.bmm(channels.transpose(1, 2), match_tensor)
++            denominator = channels.sum(dim=1).unsqueeze(-1).clamp_min(1.0)
++            log_counts = torch.log1p(counts) / math.log1p(max(mask.shape[1], 1))
++            fractions = counts / denominator
++            evidence = torch.stack([log_counts, fractions], dim=-1)  # [B,5,4,2]
++            if not self.feedback_identity:
++                shared = evidence[:, 1:].mean(dim=1, keepdim=True)
++                evidence = torch.cat([evidence[:, :1],
++                                      shared.expand(-1, len(self.towers), -1, -1)], dim=1)
++        return evidence.reshape(mask.shape[0], self.evidence_width)
+ 
+     def _history_scores(self, hidden, interactions):
+@@ -157,5 +222,9 @@
+ 
+     def forward(self, inputs):
+-        user, item, mask = self.get_inputs(inputs)
++        if len(inputs) != 4 or inputs[3] is None:
++            raise ValueError('Historical feedback masks must be supplied by the host')
++        user, item, mask, multi_masks = self.get_inputs(inputs, return_multi_masks=True)
++        evidence = self._history_evidence(item, mask, multi_masks)
++        correction = torch.nn.functional.linear(evidence, self.evidence_weight)
+         user_emb = self.embedding_layer(user)
+         item_emb = self.embedding_layer(item)
+@@ -226,4 +295,6 @@
+                 task_target = auxiliary_target
+             features = torch.cat([task_context, task_target, pooled[:, index]], dim=-1)
+-            outputs[label + '_pred'] = torch.sigmoid(tower(features))
++            logits = tower(features)
++            outputs[label + '_pred'] = torch.sigmoid(
++                logits + correction[:, index:index + 1].to(dtype=logits.dtype))
+         return outputs

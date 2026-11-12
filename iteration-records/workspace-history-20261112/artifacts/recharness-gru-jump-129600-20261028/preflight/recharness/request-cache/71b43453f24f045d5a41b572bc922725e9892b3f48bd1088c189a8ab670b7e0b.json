@@ -1,0 +1,35 @@
+{
+  "request_sha256": "71b43453f24f045d5a41b572bc922725e9892b3f48bd1088c189a8ab670b7e0b",
+  "response": {
+    "category_edits": [
+      {
+        "category": "sequence_modeling",
+        "rationale": "Limit each causal GRU context to its 20 most recent interactions in chronological order. Preserve all sampled target examples by applying rolling windows during training, and use the same context cap for validation and prediction. This may reduce interference from stale interests while preserving the embeddings, GRU topology, readout, loss, optimizer and four-category routing.",
+        "edits": [
+          {
+            "find": "MAXLEN        = int(os.environ.get(\"GRU4REC_MAXLEN\", \"128\"))",
+            "replace": "MAXLEN        = int(os.environ.get(\"GRU4REC_MAXLEN\", \"128\"))\nCONTEXT_LEN   = 20"
+          },
+          {
+            "find": "def _history_to_tensor(history: list[int], maxlen: int, device: torch.device) -> torch.Tensor:\n    seq_arr = np.zeros(maxlen, dtype=np.int64)",
+            "replace": "def _history_to_tensor(history: list[int], maxlen: int, device: torch.device) -> torch.Tensor:\n    maxlen = min(maxlen, CONTEXT_LEN)\n    seq_arr = np.zeros(maxlen, dtype=np.int64)"
+          },
+          {
+            "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores",
+            "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        # Keep every sampled target, with a separate bounded causal context.\n        windows = torch.nn.functional.pad(seq, (CONTEXT_LEN - 1, 0)).unfold(\n            1, CONTEXT_LEN, 1\n        )\n        mask = pos != 0\n        contexts = windows[mask]\n        emb = self.dropout(self.item_emb(contexts))\n        out, _ = self.gru(emb)\n        states = out[:, -1, :]\n        valid_pos_scores = (states * self.item_emb(pos[mask])).sum(dim=-1)\n        valid_neg_scores = (states * self.item_emb(neg[mask])).sum(dim=-1)\n        pos_scores = states.new_zeros(pos.shape).masked_scatter(mask, valid_pos_scores)\n        neg_scores = states.new_zeros(neg.shape).masked_scatter(mask, valid_neg_scores)\n        return pos_scores, neg_scores"
+          },
+          {
+            "find": "            \"maxlen\": MAXLEN,",
+            "replace": "            \"maxlen\": min(MAXLEN, CONTEXT_LEN),"
+          },
+          {
+            "find": "    maxlen = int(meta.get(\"maxlen\", 128))",
+            "replace": "    maxlen = min(20, int(meta.get(\"maxlen\", 20)))"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Apply chronological rolling contexts of at most 20 interactions during training, validation and generated prediction, retaining all sampled training targets and one GRU checkpoint per dataset."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/preflight/recharness/calls/00002"
+}

@@ -1,0 +1,182 @@
+{
+  "markdown_report": "The best early-stage direction remains a **support-gated transition residual with candidate-set cross-entropy**, with normalization tested separately. Correct user-level exclusion and objective controls take priority over expanding the encoder.\n\n**Insights from the starting point.**\n\n1. Directed transitions provide next-step evidence beyond broad similarity, but cannot establish compatibility or unsatisfied needs.\n2. Cross-fitting prevents training targets from supporting their own graph features. Known users must retain their exclusion graph at inference; averaging all fold graphs restores self-support.\n3. Recency may emphasize current interests, but recent-removal sensitivity already exceeds distant-removal sensitivity. Additional recency weighting needs validation.\n\n**Insights from related work.**\n\n1. Sampled-softmax analysis motivates discrimination and temperature controls [1]. Electronics’ 7.9% negative-win rate supports testing objectives, without establishing causality.\n2. Sequential Rules and PCTM already combine directed transitions, recency, and popularity adjustments [2,3]. Novelty is therefore modest; sparse-edge reliability remains a useful question.\n3. FAME motivates separating preferences [4], while gSASRec provides an objective alternative [5]. Neither establishes transfer to this benchmark.\n\n**Framework.** Objective calibration changes discrimination; directed evidence changes association specificity; intent routing changes history aggregation. User-level exclusion and pinned validation govern all three. Behavioral associations cannot verify functional compatibility.\n\nScores are originality/potential/user alignment/model alignment/difficulty, each 0–10; higher difficulty means harder implementation.\n\n| Atomic idea | Scores | Assessment by dimension |\n|---|---|---|\n| A: Candidate CE; normalization ablation [1,5] | 3/7/5/9/3 | Originality: useful adaptation / established objective. Potential: reusable / transfer uncertain. User: sharper competition / no purpose evidence. Model: targets separation / training margins can mislead. Difficulty: compact / sampler controls matter. |\n| B: Support-gated transitions plus A [2,3] | 4/7/8/8/6 | Originality: reliability and exclusion combination / estimator largely anticipated. Potential: interpretable evidence / sparse coverage. User: recent next-step support / compatibility unverified. Model: candidate competition / residual may hide encoder weakness. Difficulty: sparse implementation / exclusion and diagnostics require integration. |\n| C: Two gated intent heads [4] | 4/7/7/6/6 | Originality: compact adaptation / established routing. Potential: separates interests / sparse-history uncertainty. User: reduces mixing / no complementarity guarantee. Model: richer features / no direct calibration. Difficulty: few heads / unstable routing. |\n\n**Selected algorithm: B.** At 10% progress, retain this feasible hypothesis while testing A first. It addresses nonspecific recommendations and older-interest carryover through bounded recent transition evidence; CE targets weak Electronics separation. These are intended mechanisms, not demonstrated improvements.\n\nPartition users into fixed folds. Build each graph entirely outside its fold, including normalization statistics; use that same graph for its users throughout training and inference. Apply smoothed positive log-lift with separate edge/source shrinkage, aggregate five recent prefix items, and add an initially small bounded residual. Preserve unrestricted SASRec history.\n\nCompare SASRec-only, objective-only, graph-only, and combined scores within matched budgets. Separate normalization, smoothing, and shrinkage ablations. Select exclusively by pinned four-category macro validation HR@10; report category results, graph coverage, complete-score margins, graph-removal effects, memory, and latency. No gain is yet measured.\n\nReferences: [1](https://wujcan.github.io/papers/tois-ssm.pdf), [2](https://github.com/rn5l/session-rec/blob/master/algorithms/baselines/sr.py), [3](https://github.com/spotify-research/sequential-capacity-probes), [4](https://arxiv.org/abs/2411.01457), [5](https://arxiv.org/abs/2308.07192).",
+  "idea": {
+    "description": "Add a bounded, support-shrunk directed-transition residual to per-dataset SASRec, using the same user-excluded graph during training and inference. Test multi-negative candidate-set cross-entropy first; evaluate embedding normalization and temperature separately rather than attributing their combined effects to the objective.",
+    "motivation": "The user diagnosis identifies broadly plausible recommendations lacking a specific next-step connection and continued influence from older interests. Recent transitions supported by other users provide a testable behavioral signal for both failures. They do not establish compatibility, missing capabilities, satisfied needs, or actual purchase intent. Electronics has a training negative-win rate of 0.079 and a 10th-percentile margin of 0.2522, motivating objective controls. Recent-history removal already changes encoder logits substantially more than distant-history removal; stronger recency and embedding isotropy are hypotheses, not established remedies. Sequential Rules and PCTM substantially anticipate the transition estimator, reducing the originality assessment. At 10% research progress, a staged objective-first comparison remains preferable to adding candidate attention or multiple intent experts immediately.",
+    "implementation_notes": "Retain four independent dataset models and routing, preprocessing seed 0, training seed 42, DATA_DIR=os.environ['GAGC_DATA_DIR'], trial-local artifacts, and the SASREC_EPOCHS environment default of 200. Keep execution single-GPU and account for all training, diagnostics, debugging, and failed trials within the shared 43,200 GPU-second budget. Do not change splits, evaluator candidates, or evaluation seeds; never read hidden test data or use held-out labels for graph construction or negative filtering.\n\nCross-fitting: use K=5 deterministic user folds, assigned from a stable digest of dataset name, user identifier, and seed 0; do not use Python's randomized hash. Persist assignments. For each fold, construct a graph using only other folds' training histories, excluding the held-out group's contributions from every count, prior, pruning decision, and auxiliary statistic. A known user uses this same exclusion graph for every training prefix and at inference. Do not average all five graphs: four contain that user's training transitions. This historical self-support is distinct from held-out-label leakage, but breaks the intended exclusion and changes features. A genuinely unseen user receives a deterministic fold assignment using the same rule; do not introduce a full-data fallback. Repeated-partition ensembles are deferred; if later tested, each branch must exclude the user's group and have matching training construction.\n\nGraph definition: use adjacent ordered training events only, distance weight 1, preserving repeated events and self-transitions. For the relevant exclusion graph, c_ij is the number of i-to-j events, c_i=sum_j c_ij, d_j=sum_i c_ij, and N=sum_i c_i. Let I be the dataset item vocabulary size, excluding padding, and p_j=(d_j+eta)/(N+eta*I). Start with eta=1, alpha=10, beta=5, gamma=20. For observed edges, W_ij=min(5, max(0, log(((c_ij+alpha*p_j)/(c_i+alpha))/p_j))) * c_ij/(c_ij+beta) * c_i/(c_i+gamma). Unobserved edges have weight zero. These are proposed defaults, not values attributed to prior work or established optima. The floor makes the log-lift PMI-like; exact PPMI equivalence requires consistent unsmoothed transition-event marginals. Source and destination counts must come from the same exclusion graph. When N=0, return an all-zero residual.\n\nFor every causal training position, aggregate its last five nonpadding input items, including that position, with weights proportional to 2^(-r/2), where r=0 is the newest retained item. Normalize over available items. Repeated source items contribute at each occurrence. The aggregated graph score lies in [0,5]. Add lambda times this score to backbone logits, with lambda=2*sigmoid(a), initialized to lambda=0.01. Keep the full-history SASRec branch. A scalar lambda is trained independently for each dataset; do not add a complex gate initially. Validate the residual scale and use a fixed prespecified ablation lambda=0. Structural lack of graph support means a zero residual, not evidence that a candidate is unsuitable.\n\nObjective and sampler: start with 64 uniform unique negatives without replacement from nonpadding item IDs excluding the target and all items in the user's training history. Sample min(64, eligible_count), mask unused candidate slots, and skip positions with no eligible negatives while reporting their count. Preserve user identifiers internally in the training sampler or a side channel; the diagnostic loader must continue yielding (None, sequence, positive, negative). Never recover users by matching potentially identical sequences. Use the same sampled candidate batches across objective controls when feasible, with identical initialization, optimizer, filtering, batch schedule, and tuning budget. Mean candidate CE over valid positions is discrimination within sampled candidate sets, not an unbiased full-catalog softmax estimator. Sampling without replacement is specified explicitly; do not silently deduplicate with-replacement samples or apply a with-replacement importance formula. Padding and target collisions are forbidden. History filtering changes the training task relative to evaluation and is a limitation to measure, not a reason to modify the evaluator.\n\nStage controls to fit the budget: reproduce the existing baseline, then compare 64-negative BCE and candidate CE under unchanged dot-product logits and shared sampling. Reduce BCE by averaging negative terms per position before averaging valid positions, and document the positive/negative weighting. Candidate CE has its shared denominator, so numerical loss magnitudes are not directly comparable. If the objective warrants further study, test cosine normalization and temperature separately, starting at tau=0.2, then add the graph to the selected objective configuration. A gBCE control should follow its published positive calibration exactly; gBCE is not importance-corrected softmax. Corrected softmax and hard-negative mining are deferred rather than bundled into the initial experiment. Temperature changes training gradients despite preserving rankings for a fixed normalized model. Preserve the baseline optimizer and its hyperparameters until a separately budgeted optimizer ablation is justified.\n\nValidation and overfitting: use only the host's pinned four-category macro validation HR@10 for selection, preserving 200 validation users/category, 99 unique negatives, and evaluation seed 42. Prespecify comparisons and keep a trial ledger to limit adaptive validation overfitting. Do not claim full-catalog HR or infer causal improvements from training margins. Report category HR and paired user-level uncertainty only if permitted evaluator outputs expose per-user hit indicators; do not reconstruct unavailable results. Bootstrap uncertainty conditional on these fixed candidate sets does not account for repeated model selection. Full-catalog unseen-item recommendations for the twenty simulator users remain a separate qualitative assessment.\n\nSparse implementation: initially store every observed positive-weight edge in sorted sparse rows; missing edges return zero. Use binary search or hashing for batched candidate lookup. If memory requires top-K row pruning, declare K before comparison, record target-edge coverage before and after pruning, and persist the pruned graph used in both training and inference. For full-catalog recommendations, scatter-add the five weighted graph rows into catalog buffers and combine with chunked neural scoring; use the host's existing seen-item exclusion behavior. Record per-category edge count, memory, scoring latency, held-out validation target-edge coverage only as a diagnostic, zero-residual frequency, and training support/degree strata. Do not use validation targets to modify graphs or choose pruning edges.\n\nSerialization: update the predictor writer to save and restore model architecture, item-ID mapping, dataset routing, score normalization mode, temperature, residual parameters, graph definitions, fold graphs, and stable user assignments. Verify that reloaded candidate scores match in-memory scores before host evaluation. The predictor must receive or preserve the evaluator's user identity to select the exclusion graph. If that interface exposes only sequences, retain its public call signature and use an available stable user-index mapping; if no reliable identity is available, this graph variant is not implementable as specified and must not substitute an ensemble that restores self-support.\n\nDiagnostics: preserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions, with view.model referencing the actual trained nn.Module. Retain item_emb, log2feats, predict_score, user_train, meta_data, and review_data compatibility; do not populate unavailable reviews or item attributes. Add complete scoring that receives sequences, candidates, and an explicit user/fold context. Since the diagnostic loader's first element is None, obtain identity from an explicit diagnostic side channel or directly sample indexed public training histories; never infer identity from sequence contents. Keep encoder-only and complete-score margins separate, record graph-removal effects, embedding norms, cosine alignment, effective rank, and fixed-candidate recent/distant perturbations. Use matched users for perturbation comparisons when both masks change their history, retaining unchanged-history controls. Recompute the residual under perturbed histories while holding the user's graph fixed. If complete scoring lacks user context, return an unavailable metric with a reason rather than mislabeling encoder-only values. Enter evaluation mode for probes and restore the previous mode afterward.\n\nUser diagnosis alignment: 8/10. Positive: explicitly tests recent, specific next-step evidence against broad relevance and older-interest carryover. Negative: no available signal verifies compatibility, quantity needs, duplicate capability, or content tone. Model diagnosis alignment: 8/10. Positive: directly tests candidate discrimination and distinguishes graph improvements from encoder behavior. Negative: stronger training margins, lower alignment, or graph coverage need not improve validation HR@10, and popularity or high-support transitions can become shortcuts.",
+    "pseudocode": "For each category independently:\n  retain original splits, item mapping, preprocessing seed=0, training seed=42\n  assign each training user to one of K=5 folds with a stable seeded digest\n  for fold f:\n    count adjacent directed events using training users outside f only\n    compute source counts, destination counts, and smoothed priors from those events\n    construct bounded, edge/source-shrunk positive log-lift sparse rows\n  persist folds, graph configuration, and sparse rows\n\nFor the prespecified objective-only controls:\n  keep SASRec architecture, initialization, optimizer, batches, and filtering fixed\n  sample up to 64 uniform eligible negatives without replacement per valid position\n  compare multi-negative BCE and candidate CE with identical dot-product logits\n  separately evaluate normalization and tau=0.2 if budget permits\n\nFor the selected objective plus graph:\n  initialize bounded residual coefficient lambda=0.01\n  for internal training batch with explicit user IDs:\n    h = SASRec(sequence)\n    candidates = positive plus eligible sampled negatives; mask unused slots\n    base = configured backbone scores(h, candidates)\n    for each valid position:\n      graph = normalized_recency_lookup(G_excluding_fold[user], causal_prefix_last_five, candidates)\n    logits = base + lambda * graph\n    minimize the configured loss over valid positions\n  save model, scoring configuration, user/fold mapping, graphs, and routing\n  write predictor that restores all scoring components\n  verify reloaded scores match in-memory scores\n\nAt inference for user u:\n  obtain u's persisted fold, or deterministic fold for a genuinely unseen u\n  score = backbone_score + lambda * recent_graph_score(G_excluding_fold[u])\n  for full catalog, scatter-add sparse graph rows and score neural candidates in chunks\n\nRun diagnostic loader with its unchanged (None, sequence, positive, negative) contract:\n  measure encoder-only statistics\n  measure complete scores only with explicit user/fold context\n  return metrics and metric_definitions, flagging unavailable measurements honestly\n\nSelect only by pinned four-category macro validation HR@10; report no unmeasured gain.",
+    "originality": {
+      "score": 4,
+      "positive": "Combines user-level exclusion, explicit support reliability, and controlled objective comparisons into a falsifiable adaptation with interpretable scoring.",
+      "negative": "Sequential Rules and PCTM already anticipate directed transitions, recency aggregation, and popularity adjustment; shrinkage, cross-fitting, and candidate CE are established techniques."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides a measurable evidence branch and a foundation for later reliability-aware candidate routing, with graph coverage and complete-score diagnostics exposing where it helps.",
+      "negative": "Sparse transitions, repeated validation selection, and popularity shortcuts may limit transfer; interaction order cannot identify functional compatibility or satisfied needs."
+    },
+    "code_difficulty": {
+      "score": 6,
+      "positive": "Preserves SASRec and uses conventional sparse rows, candidate lookup, and an inexpensive scalar residual.",
+      "negative": "Correct fold identity throughout causal training, inference, serialization, and diagnostics requires substantial integration; five exclusion graphs also increase memory and artifact size."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Sampled-softmax analysis (2024; supplied search result)",
+      "link": "https://wujcan.github.io/papers/tois-ssm.pdf",
+      "contributions": [
+        "Analyzes normalized representations and temperature in sampled-softmax training.",
+        "Motivates objective, normalization, and temperature controls before expanding sequence architecture."
+      ],
+      "limitations": [
+        "Does not establish improvements on the pinned four-category evaluation.",
+        "Reported temperature settings require validation under this task.",
+        "Uncorrected candidate CE should not be described as an unbiased full-catalog softmax estimator."
+      ]
+    },
+    {
+      "title": "Revisiting Graph Projections (2025)",
+      "link": "https://arxiv.org/abs/2506.09209",
+      "contributions": [
+        "Provides an interaction-only precedent for directed weighted item graphs."
+      ],
+      "limitations": [
+        "Directed association does not establish practical compatibility or functional complementarity.",
+        "The proposed user-exclusion protocol and support gate require independent evaluation."
+      ]
+    },
+    {
+      "title": "FAME (WSDM 2025)",
+      "link": "https://arxiv.org/abs/2411.01457",
+      "contributions": [
+        "Uses attention-head preference components and gated predictions to separate interests.",
+        "Supports the retained two-intent-head alternative."
+      ],
+      "limitations": [
+        "Transfer to these sparse Amazon histories is uncertain.",
+        "Multiple preference components alone do not identify complementary purchases."
+      ]
+    },
+    {
+      "title": "Sequential Rules implementation",
+      "link": "https://github.com/rn5l/session-rec/blob/master/algorithms/baselines/sr.py",
+      "contributions": [
+        "Counts directed transitions across bounded distances.",
+        "Supports distance weighting, recency-weighted history aggregation, optional IDF, and per-source pruning.",
+        "Substantially anticipates several components of the proposed residual."
+      ],
+      "limitations": [
+        "Does not establish the proposed exact smoothing and separate edge/source shrinkage formula.",
+        "Repository behavior does not demonstrate gains under the pinned RecHarness protocol."
+      ]
+    },
+    {
+      "title": "PCTM and sequential capacity probes repository",
+      "link": "https://github.com/spotify-research/sequential-capacity-probes",
+      "contributions": [
+        "Combines smoothed multi-distance transition estimates with recency weighting and popularity adjustment.",
+        "Includes graph-only Markov-chain and Sequential Rules baselines and full-catalog ranking."
+      ],
+      "limitations": [
+        "Closely related components reduce the proposed estimator's methodological novelty.",
+        "Full-catalog results do not establish ranking improvements with the host's 99 sampled negatives."
+      ]
+    },
+    {
+      "title": "Scikit-learn Target Encoder cross-fitting example",
+      "link": "https://scikit-learn.org/stable/auto_examples/preprocessing/plot_target_encoder_cross_val.html",
+      "contributions": [
+        "Illustrates excluding an observation's supervisory contribution when constructing training features.",
+        "Motivates the user-group exclusion principle."
+      ],
+      "limitations": [
+        "Applying the principle to transition graphs is a methodological inference.",
+        "The example does not establish that user-excluded graphs improve recommendation accuracy."
+      ]
+    },
+    {
+      "title": "CatBoost: unbiased boosting with categorical features",
+      "link": "https://arxiv.org/abs/1706.09516",
+      "contributions": [
+        "Analyzes target leakage and prediction shift associated with target-derived features.",
+        "Motivates matching exclusion rules across feature construction and prediction."
+      ],
+      "limitations": [
+        "Its original setting differs from sequential recommendation.",
+        "User-level exclusion does not eliminate every possible distribution shift."
+      ]
+    },
+    {
+      "title": "Scikit-learn TargetEncoder documentation",
+      "link": "https://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.TargetEncoder.html",
+      "contributions": [
+        "Distinguishes cross-fitted training transformations from mappings used for new observations.",
+        "Helps clarify why a known user is not unseen at the user grouping unit."
+      ],
+      "limitations": [
+        "Standard full-training mappings for new observations do not justify averaging self-containing graphs for known training users.",
+        "Historical self-support is not automatically held-out-label leakage."
+      ]
+    },
+    {
+      "title": "TensorFlow candidate sampling reference",
+      "link": "https://www.tensorflow.org/extras/candidate_sampling.pdf",
+      "contributions": [
+        "Explains candidate-sampling conventions and sampling-probability corrections.",
+        "Supports distinguishing sampled candidate discrimination from partition estimation."
+      ],
+      "limitations": [
+        "Corrections depend on the precise sampling distribution and replacement convention.",
+        "Finite-sample partition estimates do not yield unbiased log-loss gradients, and excluded items cannot be recovered through weighting."
+      ]
+    },
+    {
+      "title": "gSASRec: generalized BCE for sequential recommendation",
+      "link": "https://arxiv.org/abs/2308.07192",
+      "contributions": [
+        "Addresses sampling-induced overconfidence through generalized BCE and more negatives.",
+        "Provides an objective control distinct from candidate CE."
+      ],
+      "limitations": [
+        "Generalized BCE uses independent sigmoid terms and is not importance-corrected softmax.",
+        "Transfer requires matched sampling, logits, reductions, and tuning budgets."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled ranking metrics can disagree with full-catalog model comparisons.",
+        "Supports preserving the exact host evaluation protocol and limiting interpretation to its metric."
+      ],
+      "limitations": [
+        "Does not provide evidence that any proposed variant improves this benchmark.",
+        "Does not authorize changing the pinned evaluator."
+      ]
+    },
+    {
+      "title": "Damani (2013): significant co-occurrence and PMI",
+      "link": "https://aclanthology.org/W13-3503/",
+      "contributions": [
+        "Addresses rare-event inflation in PMI using co-occurrence significance.",
+        "Motivates testing support reliability separately from association magnitude."
+      ],
+      "limitations": [
+        "Does not specify the proposed exact edge/source shrinkage formula.",
+        "Its evidence does not establish the proposed default hyperparameters or recommendation gains."
+      ]
+    },
+    {
+      "title": "Han et al. (2026; supplied local-transition diagnostic reference)",
+      "link": "https://arxiv.org/abs/2605.07125",
+      "contributions": [
+        "Motivates examining local-transition behavior alongside aggregate ranking metrics, according to the supplied search result."
+      ],
+      "limitations": [
+        "Used only as supporting motivation; no specific unverified result is attributed to it.",
+        "Does not establish transfer to the pinned four-category benchmark."
+      ]
+    }
+  ]
+}

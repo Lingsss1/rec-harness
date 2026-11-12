@@ -1,0 +1,76 @@
+--- round_02_best.py
++++ round_03_best.py
+@@ -88,7 +88,7 @@
+         history = user_train[user]
+         seq = np.zeros(maxlen, dtype=np.int64)
+         pos = np.zeros(maxlen, dtype=np.int64)
+-        neg = np.zeros(maxlen, dtype=np.int64)
++        neg = np.zeros((maxlen, NUM_NEGS), dtype=np.int64)
+         nxt = history[-1]
+         idx = maxlen - 1
+         interacted = set(history)
+@@ -96,10 +96,11 @@
+             seq[idx] = item
+             pos[idx] = nxt
+             if nxt != 0:
+-                neg_item = random.randint(1, itemnum)
+-                while neg_item in interacted:
++                for k in range(NUM_NEGS):
+                     neg_item = random.randint(1, itemnum)
+-                neg[idx] = neg_item
++                    while neg_item in interacted:
++                        neg_item = random.randint(1, itemnum)
++                    neg[idx, k] = neg_item
+             nxt = item
+             idx -= 1
+             if idx < 0:
+@@ -155,12 +156,19 @@
+ def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+     pos_scores, neg_scores = model(seq, pos, neg)
+     mask = (pos != 0).float()
+-    # Sampled softmax (cross-entropy with sampled negatives) for better ranking
+-    logits = torch.cat([pos_scores.unsqueeze(-1), neg_scores.unsqueeze(-1)], dim=-1)  # [B, L, 2]
+-    labels = torch.zeros_like(logits[..., 0]).long()  # pos item is class 0
+-    loss_per = torch.nn.functional.cross_entropy(
+-        logits.reshape(-1, 2), labels.reshape(-1), reduction='none'
+-    ).reshape_as(pos_scores)
++    if neg_scores.dim() == 2:
++        logits = torch.cat([pos_scores.unsqueeze(-1), neg_scores.unsqueeze(-1)], dim=-1)
++        labels = torch.zeros_like(logits[..., 0]).long()
++        loss_per = torch.nn.functional.cross_entropy(
++            logits.reshape(-1, 2), labels.reshape(-1), reduction='none'
++        ).reshape_as(pos_scores)
++    else:
++        K = neg_scores.shape[-1]
++        logits = torch.cat([pos_scores.unsqueeze(-1), neg_scores], dim=-1)  # [B, L, K+1]
++        labels = torch.zeros(logits.shape[0], logits.shape[1], dtype=torch.long, device=seq.device)
++        loss_per = torch.nn.functional.cross_entropy(
++            logits.reshape(-1, K + 1), labels.reshape(-1), reduction='none'
++        ).reshape_as(pos_scores)
+     return (loss_per * mask).sum() / mask.sum().clamp(min=1.0)
+ 
+ 
+@@ -173,6 +181,7 @@
+ LR            = float(os.environ.get("BERT4REC_LR", "5e-4"))
+ WEIGHT_DECAY  = float(os.environ.get("BERT4REC_WD", "1e-5"))
+ BATCH_SIZE    = int(os.environ.get("BERT4REC_BATCH", "256"))
++NUM_NEGS      = int(os.environ.get("BERT4REC_NUM_NEGS", "10"))
+ NUM_BATCHES   = int(os.environ.get("BERT4REC_BATCHES", "200"))
+ NUM_EPOCHS    = int(os.environ.get("BERT4REC_EPOCHS", "200"))
+ EVAL_EVERY    = int(os.environ.get("BERT4REC_EVAL_EVERY", "5"))
+@@ -218,7 +227,14 @@
+     def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):
+         out = self.encode_sequence(seq)
+         pos_scores = (out * self.item_emb(pos)).sum(dim=-1)
+-        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)
++        B, L, D = out.shape
++        if neg.dim() == 2:
++            neg_scores = (out * self.item_emb(neg)).sum(dim=-1)
++        else:
++            K = neg.shape[-1]
++            neg_flat = neg.reshape(-1)
++            neg_emb = self.item_emb(neg_flat).reshape(B, L, K, D)
++            neg_scores = (out.unsqueeze(2) * neg_emb).sum(dim=-1)  # [B, L, K]
+         return pos_scores, neg_scores
+ 
+     def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:

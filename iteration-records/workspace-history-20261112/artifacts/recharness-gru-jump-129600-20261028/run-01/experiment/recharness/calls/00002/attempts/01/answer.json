@@ -1,0 +1,59 @@
+{
+  "category_edits": [
+    {
+      "category": "feature_construction",
+      "rationale": "Scale each existing input embedding by 1 + 0.1*log1p(c), where c counts earlier occurrences of that item in the causal history before context truncation. Apply identical features during training, validation and prediction for all four category models, preserving embedding parameters, GRU topology, readout, loss and optimizer.",
+      "edits": [
+        {
+          "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+          "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+        },
+        {
+          "find": "    batch_seq, batch_pos, batch_neg = [], [], []",
+          "replace": "    batch_seq, batch_pos, batch_neg, batch_counts = [], [], [], []"
+        },
+        {
+          "find": "        history = user_train[user]\n        seq = np.zeros(maxlen, dtype=np.int64)",
+          "replace": "        history = user_train[user]\n        seen = {}\n        prior_counts = []\n        for item in history[:-1]:\n            prior_counts.append(seen.get(item, 0))\n            seen[item] = seen.get(item, 0) + 1\n        counts = np.zeros(maxlen, dtype=np.float32)\n        tail_counts = prior_counts[-maxlen:]\n        if tail_counts:\n            counts[-len(tail_counts):] = tail_counts\n        seq = np.zeros(maxlen, dtype=np.int64)"
+        },
+        {
+          "find": "        batch_neg.append(neg)\n    return np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg)",
+          "replace": "        batch_neg.append(neg)\n        batch_counts.append(counts)\n    return np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg), np.asarray(batch_counts)"
+        },
+        {
+          "find": "def _history_to_tensor(history: list[int], maxlen: int, device: torch.device) -> torch.Tensor:\n    seq_arr = np.zeros(maxlen, dtype=np.int64)\n    for i, item in enumerate(reversed(history[-maxlen:])):\n        seq_arr[maxlen - 1 - i] = item\n    return torch.tensor([seq_arr], dtype=torch.long, device=device)",
+          "replace": "def _history_to_tensor(history: list[int], maxlen: int, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:\n    seq_arr = np.zeros(maxlen, dtype=np.int64)\n    count_arr = np.zeros(maxlen, dtype=np.float32)\n    seen = {}\n    prior_counts = []\n    for item in history:\n        prior_counts.append(seen.get(item, 0))\n        seen[item] = seen.get(item, 0) + 1\n    tail = history[-maxlen:]\n    if tail:\n        seq_arr[-len(tail):] = tail\n        count_arr[-len(tail):] = prior_counts[-maxlen:]\n    return (torch.tensor(seq_arr[None, :], dtype=torch.long, device=device),\n            torch.tensor(count_arr[None, :], dtype=torch.float32, device=device))"
+        },
+        {
+          "find": "            seq_t = _history_to_tensor(history, maxlen, device)\n            cand_t = torch.tensor(candidates, dtype=torch.long, device=device)\n            scores = model.score_candidates(seq_t, cand_t).detach().cpu().tolist()",
+          "replace": "            seq_t, counts_t = _history_to_tensor(history, maxlen, device)\n            cand_t = torch.tensor(candidates, dtype=torch.long, device=device)\n            scores = model.score_candidates(seq_t, cand_t, counts_t).detach().cpu().tolist()"
+        },
+        {
+          "find": "def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:\n    pos_scores, neg_scores = model(seq, pos, neg)",
+          "replace": "def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor,\n                      repeat_counts: torch.Tensor) -> torch.Tensor:\n    pos_scores, neg_scores = model(seq, pos, neg, repeat_counts)"
+        },
+        {
+          "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))",
+          "replace": "    def encode(self, seq: torch.Tensor, repeat_counts: torch.Tensor) -> torch.Tensor:\n        scale = 1.0 + 0.1 * torch.log1p(repeat_counts)\n        emb = self.dropout(self.item_emb(seq) * scale.unsqueeze(-1))"
+        },
+        {
+          "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))",
+          "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor,\n                repeat_counts: torch.Tensor):\n        scale = 1.0 + 0.1 * torch.log1p(repeat_counts)\n        emb = self.dropout(self.item_emb(seq) * scale.unsqueeze(-1))"
+        },
+        {
+          "find": "    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:\n        user_emb = self.encode(seq)[0]",
+          "replace": "    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor,\n                         repeat_counts: torch.Tensor) -> torch.Tensor:\n        user_emb = self.encode(seq, repeat_counts)[0]"
+        },
+        {
+          "find": "            seq, pos, neg = sample_batch(user_train, itemnum, BATCH_SIZE, MAXLEN)\n            seq_t = torch.tensor(seq, dtype=torch.long, device=device)\n            pos_t = torch.tensor(pos, dtype=torch.long, device=device)\n            neg_t = torch.tensor(neg, dtype=torch.long, device=device)\n            loss = bpr_sequence_loss(model, seq_t, pos_t, neg_t)",
+          "replace": "            seq, pos, neg, counts = sample_batch(user_train, itemnum, BATCH_SIZE, MAXLEN)\n            seq_t = torch.tensor(seq, dtype=torch.long, device=device)\n            pos_t = torch.tensor(pos, dtype=torch.long, device=device)\n            neg_t = torch.tensor(neg, dtype=torch.long, device=device)\n            counts_t = torch.tensor(counts, dtype=torch.float32, device=device)\n            loss = bpr_sequence_loss(model, seq_t, pos_t, neg_t, counts_t)"
+        },
+        {
+          "find": "    maxlen = int(meta.get(\"maxlen\", 128))\n    seq_arr = [0] * maxlen\n    for i, item in enumerate(reversed(history[-maxlen:])):\n        seq_arr[maxlen - 1 - i] = item\n    seq_t = torch.tensor([seq_arr], dtype=torch.long, device=_device)\n    cand_t = torch.tensor(candidates, dtype=torch.long, device=_device)\n    with torch.no_grad():\n        scores = model.score_candidates(seq_t, cand_t).detach().cpu().tolist()",
+          "replace": "    maxlen = int(meta.get(\"maxlen\", 128))\n    seq_arr = [0] * maxlen\n    count_arr = [0.0] * maxlen\n    seen = {}\n    prior_counts = []\n    for item in history:\n        prior_counts.append(seen.get(item, 0))\n        seen[item] = seen.get(item, 0) + 1\n    tail = history[-maxlen:]\n    if tail:\n        seq_arr[-len(tail):] = tail\n        count_arr[-len(tail):] = prior_counts[-maxlen:]\n    seq_t = torch.tensor([seq_arr], dtype=torch.long, device=_device)\n    counts_t = torch.tensor([count_arr], dtype=torch.float32, device=_device)\n    cand_t = torch.tensor(candidates, dtype=torch.long, device=_device)\n    with torch.no_grad():\n        scores = model.score_candidates(seq_t, cand_t, counts_t).detach().cpu().tolist()"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Add causal repeat-count input scaling across all four category models, with matching training, validation and embedded predictor logic. Counts include earlier history beyond the truncation window. Preserve the single-model GRU architecture and training settings."
+}

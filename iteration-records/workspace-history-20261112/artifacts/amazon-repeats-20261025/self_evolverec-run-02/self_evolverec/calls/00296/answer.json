@@ -1,0 +1,86 @@
+{
+  "markdown_report": "At 0% progress, prioritize a small, testable extension: **SASRec with a gated recent-and-repeated-interest residual**, followed by a separate loss ablation. No benchmark improvement has yet been demonstrated.\n\n**Insights from the starting point.** (1) SASRec can represent sequential preferences, but its objective does not explicitly distinguish recurring interests from incidental interactions. This matches users’ complaints about older, occasional purchases dominating recommendations. (2) Electronics has 14.95% negative-over-positive rankings and a −0.4812 lower-tail margin. These measurements motivate better discrimination, but do not establish the cause or predict validation gains. (3) Embedding similarity scores near 0.54–0.56 provide little evidence of severe collapse. Increasing diversity through strong embedding regularization is therefore a lower priority.\n\n**Insights from related work.** (1) MSMT-LSI separates long- and short-term interests, while HyperHawkes models recurrence. Together they motivate preserving repeated interests without assuming that all older evidence is irrelevant. (2) gSASRec and eSASRec motivate controlled multi-negative loss comparisons. Their findings do not establish that this benchmark needs harder negatives. (3) Graph-projection methods suggest directed transitions can supplement similarity. Such transitions remain behavioral evidence, not verified equipment compatibility.\n\n**Framework.** Organize experiments along three directions: intent representation, ranking supervision, and transition evidence. SASRec supplies the common backbone; gated interest pooling changes representation, sampled softmax changes supervision, and a sparse transition residual changes evidence. Test each independently before combining them.\n\n**Candidate assessments.** Scores are originality/potential/user alignment/model alignment/difficulty; higher difficulty means harder implementation. Each cell gives a benefit and limitation.\n\n| Idea | Originality | Potential | User alignment | Model alignment | Difficulty |\n|---|---|---|---|---|---|\n| Gated recent/repeated residual | 4: useful combination; established components | 8: adaptable; intent remains latent | 8: targets stale influence and broad matches; cannot verify compatibility | 7: sharper contexts; margin gains uncertain | 3: pooling and gate; causal masking needed |\n| 128-negative sampled softmax | 2: established; little novelty | 8: strong baseline; sampling-sensitive | 5: improves discrimination; no explicit intent model | 9: targets ranking confusion; false negatives persist | 3: compact loss; memory overhead |\n| Directed transition residual | 5: complementary evidence; known approach | 7: interpretable; sparse transitions | 7: supports plausible next choices; associations can mislead | 6: additional signal; popularity confounding | 5: sparse graph; serving integration |\n\n**Selected algorithm.** Add a small gated residual pooling the last five valid embeddings and historical embeddings supported by recent interests. Similarity-weighted pooling lets multiple supporting interactions accumulate evidence. This explicitly targets **older incidental influence** and **broad relevance crowding out specific recent matches**. It also targets Electronics’ weak separation through more focused contextual features; this remains a hypothesis.\n\nRetain baseline loss initially. Compare baseline, residual-only, and loss-only models using unchanged macro validation HR@10. Track per-category results, GPU cost, and unchanged margin probes. Compatibility and purchase satisfaction remain unobserved; full-catalog usefulness requires separate qualitative evidence.",
+  "idea": {
+    "description": "Extend each category’s SASRec with a gated residual derived from recent interactions and historical interactions similar to that recent context. Keep candidate scoring as a dot product with the trained item embeddings so the diagnostic compatibility contract remains straightforward.",
+    "motivation": "The user diagnosis identifies excessive influence from incidental or older interactions and broad relatedness outranking specific current interests. Recent-context pooling supplies an explicit local signal, while similarity-weighted historical pooling aggregates repeated supporting evidence. Electronics’ negative lower-tail margin motivates testing whether this more focused representation improves discrimination. Neither functional compatibility nor satisfied purchase demand can be inferred reliably from the available histories.",
+    "implementation_notes": "Use only training histories and learned item embeddings; unavailable review and metadata fields are unnecessary. Compute every auxiliary context causally at each training position. Begin with a five-interaction recent window, cosine-attention temperature 0.2, and a scalar gate initialized near zero; treat these as proposed settings, not validated choices. Keep baseline architecture settings, loss, optimizer, and the SASREC_EPOCHS environment default of 200 for the first comparison. Preserve preprocessing seed 0, training seed 42, all four dataset routes, DATA_DIR = os.environ['GAGC_DATA_DIR'], and trial-local artifacts. Save residual parameters with each category model and update the predictor writer to reproduce the identical architecture. DiagnosisProbe(view, device).run_full_diagnosis(train_loader) must return metrics and metric_definitions; view.model must reference the complete model, and view.log2feats must return the fused features used for inference. Preserve view.item_emb, predict_score, user_train, meta_data, and review_data interfaces without fabricating unavailable fields. Keep existing embedding and margin probes; do not interpret them as validation HR@10. Run controlled trials sequentially on one GPU within the shared budget, selecting only through the pinned four-category macro validation HR@10. No execution or measured improvement is claimed here.",
+    "pseudocode": "class InterestResidualSASRec:\n    # All prefix operations exclude padding and future positions.\n    def log2feats(sequence):\n        base = sasrec.log2feats(sequence)\n        emb = item_emb(sequence)\n        for t in valid_positions(sequence):\n            prefix = emb[:t + 1]\n            recent = mean(last_valid(prefix, count=5))\n            affinity = cosine_similarity(prefix, recent)\n            weights = softmax(affinity / 0.2, over_valid_prefix=True)\n            supported = sum(weights * prefix)\n            residual = projection(concat(recent, supported))\n            fused[t] = base[t] + sigmoid(gate_logit) * residual\n        return fused\n\n    def predict_score(features, items):\n        return dot(features, item_emb(items))\n\n# Initialize gate_logit = -4; train all new parameters jointly.\n# Trial A: unchanged SASRec.\n# Trial B: residual SASRec with unchanged baseline loss.\n# Trial C: unchanged SASRec with 128-negative sampled softmax.\n# Use identical splits, routing, seeds, and pinned validation protocol.\n# Serialize the chosen architecture and emit its matching predictor.",
+    "originality": {
+      "score": 4,
+      "positive": "Combines recent evidence and accumulated historical support in a compact residual compatible with SASRec diagnostics.",
+      "negative": "Long- and short-term preference fusion and recurrence-aware recommendation are established research directions."
+    },
+    "future_potential": {
+      "score": 8,
+      "positive": "Provides a small foundation for later timestamp-aware recurrence or content-conditioned support while allowing controlled ablations.",
+      "negative": "Similarity to a recent pooled embedding can reinforce noisy context and cannot establish practical compatibility."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Requires learned pooling, one projection, a scalar gate, and matching checkpoint and predictor changes.",
+      "negative": "Causal prefix pooling must be vectorized carefully, and naive implementations add quadratic sequence cost."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Provides the causal self-attention backbone and item-embedding scoring used as the starting point."
+      ],
+      "limitations": [
+        "Does not explicitly separate repeated supporting interests from incidental interactions."
+      ]
+    },
+    {
+      "title": "MSMT-LSI",
+      "link": "https://link.springer.com/article/10.1007/s44196-024-00460-5",
+      "contributions": [
+        "Uses separate long- and short-term attention networks with temporal embeddings."
+      ],
+      "limitations": [
+        "Its reported setting does not establish gains on the pinned RecHarness benchmark."
+      ]
+    },
+    {
+      "title": "HyperHawkes",
+      "link": "https://evazangerle.at/publication/peintner-www-2025/",
+      "contributions": [
+        "Combines latent intent discovery, recurring-interest modeling, and immediate-interest attention."
+      ],
+      "limitations": [
+        "A full recurrence model adds complexity beyond the proposed initial residual experiment."
+      ]
+    },
+    {
+      "title": "gSASRec",
+      "link": "https://www.ijcai.org/proceedings/2024/0939.pdf",
+      "contributions": [
+        "Motivates correcting negative-sampling-induced overconfidence and evaluating multiple negatives."
+      ],
+      "limitations": [
+        "Does not establish the cause of Electronics’ observed ranking errors."
+      ]
+    },
+    {
+      "title": "eSASRec",
+      "link": "https://arxiv.org/abs/2508.06450",
+      "contributions": [
+        "Supports testing sampled softmax with autoregressive sequential recommendation."
+      ],
+      "limitations": [
+        "A loss change alone does not explicitly address stale or incidental interest attribution."
+      ]
+    },
+    {
+      "title": "Revisiting Graph Projections",
+      "link": "https://arxiv.org/abs/2506.09209",
+      "contributions": [
+        "Motivates a lightweight directed transition channel constructed from interaction histories."
+      ],
+      "limitations": [
+        "Observed transitions do not verify complementarity, prerequisites, or equipment compatibility."
+      ]
+    }
+  ]
+}

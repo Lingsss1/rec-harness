@@ -1,0 +1,32 @@
+--- amazon-next-v9-round-15-model.py
++++ control-1.py
+@@ -220,6 +220,9 @@
+             NextItNetBlock(hidden_units, dilations[i], kernel_size, dropout_rate)
+             for i in range(num_blocks)
+         ])
++        self.capture_index = list(range(num_blocks))[max(0, num_blocks // 2 - 1)]
++        self.readout_projection = nn.Linear(hidden_units, hidden_units, bias=False)
++        nn.init.zeros_(self.readout_projection.weight)
+         self.dropout = nn.Dropout(dropout_rate)
+         self.norm = nn.LayerNorm(hidden_units)
+         with torch.no_grad():
+@@ -246,6 +249,7 @@
+                     insertion_valid.cumsum(dim=1)[:, :-1], (0, 0, 1, 0)
+                 )
+                 x = (x + 0.0 * insertion_sum / insertion_count.clamp(min=1.0)) * insertion_valid
++        captured = x
+         x = self.norm(x)
+         valid = (seq != 0).unsqueeze(-1).to(x.dtype)
+         # Shift masked prefix sums to exclude the current and all future positions.
+@@ -255,7 +259,10 @@
+         compressed = 4.0 * torch.tanh(x / 4.0)
+         compressed_context = 4.0 * torch.tanh(context / 4.0)
+         blended = 0.85 * compressed + 0.15 * compressed_context
+-        return torch.where(preceding_count > 0, blended, compressed) * valid
++        readout = torch.where(preceding_count > 0, blended, compressed) * valid
++        source = nn.functional.normalize(captured, p=2, dim=-1) * math.sqrt(self.hidden_units)
++        branch = 0.1 * torch.tanh(self.readout_projection(source)) * valid
++        return readout + branch
+ 
+     def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):
+         out = self.encode_sequence(seq)

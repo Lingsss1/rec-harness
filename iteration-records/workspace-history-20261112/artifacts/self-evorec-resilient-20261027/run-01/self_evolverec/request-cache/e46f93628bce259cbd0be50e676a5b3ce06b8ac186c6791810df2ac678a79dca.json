@@ -1,0 +1,66 @@
+{
+  "request_sha256": "e46f93628bce259cbd0be50e676a5b3ce06b8ac186c6791810df2ac678a79dca",
+  "response": {
+    "markdown_report": "The strongest first experiment is a bounded, scale-matched recency residual added to each dataset’s SASRec encoder. It directly tests the supplied diagnosis while keeping implementation and search costs low.\n\n**Insights from the starting point.** (1) Electronics has a 14.95% sampled wrong-rank rate versus 3.03% for Movies_and_TV. This supports dataset-specific adaptation, although training margins do not establish validation quality. (2) User feedback identifies excessive influence from older, broadly related interactions. A causal recent-history branch offers a testable response, but cannot identify compatibility or current intent reliably. (3) Embedding alignment scores cluster near 0.54–0.56. These measurements provide little justification for prioritizing collapse regularization.\n\n**Insights from related work.** (1) Recency-focused work motivates testing simple recent-history representations [2]. It also motivates checking whether gains reflect useful prediction or excessive dependence on the last event. (2) Candidate sampling can change model comparisons [1]. Therefore, retain the pinned evaluator and treat full-catalog recommendations as separate diagnostics. (3) Attribution research motivates controlled interventions [3]. Position-preserving changes reduce positional confounding, although their effects still do not establish causal user intent.\n\nThree research directions follow: lightweight representation correction, controlled reliance measurement, and evaluation robustness.\n\n| Direction | Existing mechanism | Proposed extension | Remaining gap |\n|---|---|---|---|\n| Representation | SASRec attention | Bounded recent-prefix residual | Recent activity may mislead |\n| Reliance | History deletions | Position-preserving branch ablations | Perturbations can shift distributions |\n| Evaluation | Sampled ranking | Paired per-category comparisons | Limited validation precision |\n\n**Candidate ideas.** Scores are originality/potential/difficulty, each 0–10; higher difficulty means harder implementation.\n\n- **Bounded residual: 4/8/2.** Originality: useful combination, familiar components. Potential: cheap and transferable, limited intent expressiveness. Difficulty: small encoder change, careful serialization required. Motivated by [2].\n- **History-length-conditioned gate: 5/7/4.** Originality: adaptive combination, established gating pattern. Potential: handles sparse histories, risks overfitting. Difficulty: tiny gate network, additional calibration and ablations. Motivated by [2,3].\n- **Multi-negative ranking loss: 3/7/4.** Originality: direct ranking alignment, standard technique. Potential: addresses weak separation, unseen negatives may be relevant. Difficulty: straightforward batched scoring, greater memory and sampling cost. Motivated by [1].\n\n**Selected algorithm.** At 10% progress, prioritize the bounded residual. Compute a padding-aware exponential mean of raw item embeddings at every causal prefix; match its norm to the SASRec feature, then add it with one bounded coefficient per dataset. Initialize that coefficient to zero so training begins with baseline behavior. Keep decay fixed initially to isolate the hypothesis.\n\n```python\nrecent = causal_exponential_mean(item_embeddings, valid_mask, decay)\nrecent = normalize(recent) * stop_gradient(norm(sasrec_features))\nfeatures = sasrec_features + 0.5 * tanh(recent_gate) * recent\nscores = features @ target_embeddings.T\n```\n\nTrain and serialize the identical branch in the predictor. Compare against baseline using authorized macro validation HR@10; report category results and measured sensitivity without claiming observed gains.\n\nReferences: [1](https://arxiv.org/abs/2107.13045), [2](https://arxiv.org/abs/2409.09722), [3](https://arxiv.org/abs/2609.27201).",
+    "idea": {
+      "description": "Add a zero-initialized, bounded recency residual to each category’s SASRec features. A padding-aware exponential average of each causal prefix’s item embeddings is scale-matched to its SASRec feature and scored through the existing target embedding table.",
+      "motivation": "The supplied feedback suggests that older broad associations sometimes dominate recent specific interests. A small residual tests whether explicit recency improves the pinned macro validation HR@10 while allowing each dataset to learn a different contribution. Neither the feedback nor fitted-model margins establish that recency will improve held-out performance.",
+      "implementation_notes": "Keep all four dataset routes, preprocessing seed 0, training seed 42, DATA_DIR = os.environ['GAGC_DATA_DIR'], trial-local artifacts, and the effective SASREC_EPOCHS default of 200. Use a fixed initial decay such as 0.8 and coefficient 0.5*tanh(recent_gate), initialized at zero. For every valid prefix, accumulate numerator S_t = decay*S_(t-1) + embedding_t and denominator Z_t = decay*Z_(t-1) + 1; padding must not advance either accumulator. Normalize S_t/Z_t with an epsilon floor, and multiply by the detached SASRec feature norm. Zero outputs at padding positions. Apply the residual inside log2feats so training, recommendation probes, and inference share the same representation. Update the predictor writer and checkpoint configuration together, including decay, bound, and gate parameters. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). Report the effective bounded coefficient explicitly rather than labeling sigmoid(recent_gate) as the coefficient. Run diagnostics in evaluation mode, restore state, and retain full-catalog unseen recommendations for five real training users per category. Use only permitted histories, timestamps, titles, and descriptions; the illustrative review/category fields in the input are unavailable. Select solely through the unchanged host macro validation HR@10 and account for all trials within the shared GPU budget.",
+      "pseudocode": "For each dataset:\n    initialize SASRec and scalar recent_gate = 0\n    for each training batch (None, sequence, positive, negative):\n        h = original_SASRec_features(sequence)\n        e = item_emb(sequence)\n        S, Z = zeros_like(e[:, 0]), zeros(batch, 1)\n        for t in causal sequence order:\n            valid = sequence[:, t] != 0\n            S = where(valid, decay*S + e[:, t], S)\n            Z = where(valid, decay*Z + 1, Z)\n            r[:, t] = where(valid, S / clamp_min(Z, epsilon), 0)\n        r = normalize(r, epsilon) * detach(norm(h))\n        features = mask_padding(h + 0.5*tanh(recent_gate)*r)\n        compute existing training loss through shared target embeddings\n        update model\n    save architecture configuration and state beneath trial directory\n    write predictor implementing the identical feature computation\nCompare baseline and residual using the pinned host validation protocol.\nMeasure branch-disabled and position-preserving history interventions separately as diagnostics.",
+      "originality": {
+        "score": 4,
+        "positive": "Combines a bounded dataset-specific correction, baseline-preserving initialization, and explicit feature-scale matching in a compact hypothesis.",
+        "negative": "Exponential history pooling and residual gating are established techniques; this is an incremental architecture experiment."
+      },
+      "future_potential": {
+        "score": 8,
+        "positive": "Provides a cheap foundation for testing dataset-specific recency and later history-dependent gates under a controlled evaluation contract.",
+        "negative": "Recent interactions can be misleading, and the branch cannot infer duplication, compatibility, or mood from interaction IDs alone."
+      },
+      "code_difficulty": {
+        "score": 2,
+        "positive": "Adds one scalar and a deterministic causal pooling operation per dataset while retaining existing scoring and training interfaces.",
+        "negative": "Padding, normalization, gate diagnostics, and predictor serialization must agree exactly; a naive prefix loop may add training overhead."
+      }
+    },
+    "related_work": [
+      {
+        "title": "Dallmann et al.: sampled evaluation in sequential recommendation",
+        "link": "https://arxiv.org/abs/2107.13045",
+        "contributions": [
+          "The supplied research summary reports that negative sampling and candidate-set size can change model comparisons.",
+          "Motivates preserving the pinned candidate protocol and distinguishing sampled validation from full-catalog diagnostics."
+        ],
+        "limitations": [
+          "Does not establish which architecture will improve this four-dataset task.",
+          "Sampling sensitivity does not authorize changing the host evaluator."
+        ]
+      },
+      {
+        "title": "Measuring Recency Bias",
+        "link": "https://arxiv.org/abs/2409.09722",
+        "contributions": [
+          "The supplied summary describes HRLI@K, measuring how often the final history item appears in full-catalog recommendations.",
+          "Motivates examining last-item dependence alongside any proposed recency mechanism."
+        ],
+        "limitations": [
+          "HRLI@K is unavailable after seen-item filtering.",
+          "Last-item inclusion alone cannot establish harmful recency reliance or validate the proposed residual."
+        ]
+      },
+      {
+        "title": "Temporal-attribution benchmark, as described in the supplied search results",
+        "link": "https://arxiv.org/abs/2609.27201",
+        "contributions": [
+          "The supplied summary reports comparisons of attribution faithfulness and a masking-robust probe.",
+          "Motivates controlled interventions and explicit acknowledgment of perturbation distribution shift."
+        ],
+        "limitations": [
+          "Perturbation sensitivity does not establish causal user intent or generalization.",
+          "Position-preserving residual ablations are a proposed experimental design here, not an established protocol attributed to this work."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/self-evorec-resilient-20261027/run-01/self_evolverec/calls/00545"
+}

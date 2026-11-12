@@ -1,0 +1,82 @@
+name: Staged FML evaluators
+
+on:
+  push:
+    paths: ["staged-autoresearch/**", ".github/workflows/staged-fml.yml"]
+  pull_request:
+    paths: ["staged-autoresearch/**", ".github/workflows/staged-fml.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  protocol:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Offline control-plane tests
+        working-directory: staged-autoresearch
+        run: python -m unittest discover -s tests -v
+      - name: Side-effect-free server preparation plan
+        working-directory: staged-autoresearch
+        run: ./run_fml.sh --prefix /tmp/not-created-study --stage plan
+
+  real-models:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - task: colored_mnist
+            python: "3.10"
+            test: test_fml_models.RealFMLModels.test_colored_mnist_real_erm_checkpoint_and_heldout_inference
+          - task: openood
+            python: "3.9"
+            test: test_fml_models.RealFMLModels.test_openood_real_resnet18_and_external_auroc
+          - task: opacus
+            python: "3.10"
+            test: test_fml_models.RealFMLModels.test_opacus_real_dp_sgd_checkpoint_and_recomputed_accountant
+    env:
+      STAGED_FML_TEST_UPSTREAM: /tmp/fml-upstream
+      STAGED_FML_TEST_DOMAINBED: /tmp/domainbed-upstream
+      OMP_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Download pinned upstream source and CPU task dependencies
+        working-directory: staged-autoresearch
+        env:
+          TASK: ${{ matrix.task }}
+        run: |
+          python - <<'PY'
+          import os, subprocess, sys
+          from staged_research.fml.specs import ENVIRONMENTS, FML_COMMIT, DOMAINBED_COMMIT
+          task = os.environ['TASK']
+          for url, commit, target in [
+              ('https://github.com/qrzou/FML-bench.git', FML_COMMIT, os.environ['STAGED_FML_TEST_UPSTREAM']),
+              ('https://github.com/facebookresearch/DomainBed.git', DOMAINBED_COMMIT, os.environ['STAGED_FML_TEST_DOMAINBED'])]:
+              subprocess.check_call(['git', 'clone', '--no-checkout', url, target])
+              subprocess.check_call(['git', '-C', target, 'checkout', '--detach', commit])
+          spec = ENVIRONMENTS[task]
+          pip = [sys.executable, '-m', 'pip', 'install']
+          subprocess.check_call(pip + ['setuptools==75.8.0', 'wheel==0.45.1'])
+          subprocess.check_call(pip + ['torch==' + spec['torch'] + '+cpu', 'torchvision==' + spec['torchvision'] + '+cpu',
+                                      '--index-url', 'https://download.pytorch.org/whl/cpu'])
+          extras = ['huggingface-hub==0.23.5', 'safetensors==0.4.3', 'PyYAML==6.0.1'] if task == 'colored_mnist' else []
+          subprocess.check_call(pip + spec['packages'] + extras)
+          subprocess.check_call(pip + ['--no-deps', '--no-build-isolation', '.'])
+          subprocess.check_call([sys.executable, '-m', 'pip', 'check'])
+          PY
+      - name: Tiny real-model train, checkpoint and held-out inference (no API/GPU/full data)
+        working-directory: staged-autoresearch
+        env:
+          PYTHONPATH: tests
+        run: python -m unittest "${{ matrix.test }}" test_fml_models.RealFMLModels.test_colored_data_matches_pinned_upstream_transform_and_split -v

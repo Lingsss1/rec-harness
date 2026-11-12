@@ -1,0 +1,53 @@
+{
+  "category_edits": [
+    {
+      "category": "embedding_representation",
+      "rationale": "Apply learned affine LayerNorm exclusively to GRU input embeddings, masking padding back to zero. Preserve embedding dimensions, tying and unnormalized candidate embeddings across all four dataset models.",
+      "edits": [
+        {
+          "find": "        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)",
+          "replace": "        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)\n        self.input_norm = nn.LayerNorm(hidden_units, elementwise_affine=True)"
+        },
+        {
+          "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))",
+          "replace": "    def input_embeddings(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.input_norm(self.item_emb(seq))\n        return emb.masked_fill((seq == 0).unsqueeze(-1), 0.0)\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.input_embeddings(seq))"
+        },
+        {
+          "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))",
+          "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.input_embeddings(seq))"
+        }
+      ]
+    },
+    {
+      "category": "architecture_interaction",
+      "rationale": "Retain GRU recurrence and score through a jointly trained residual feed-forward query and diagonal bilinear compatibility initialized with unit channel weights. Apply identical scoring during training and inference. The predictor imports the modified model class and strictly restores its checkpoint. Preserve BPR, sampling, readout and training settings.",
+      "edits": [
+        {
+          "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+          "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+        },
+        {
+          "find": "        self.dropout = nn.Dropout(dropout_rate)\n        with torch.no_grad():",
+          "replace": "        self.dropout = nn.Dropout(dropout_rate)\n        self.query_ff = nn.Sequential(\n            nn.Linear(hidden_units, 2 * hidden_units),\n            nn.GELU(),\n            nn.Linear(2 * hidden_units, hidden_units),\n        )\n        self.score_diagonal = nn.Parameter(torch.ones(hidden_units))\n        with torch.no_grad():"
+        },
+        {
+          "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:",
+          "replace": "    def scoring_query(self, states: torch.Tensor) -> torch.Tensor:\n        query = states + self.query_ff(states)\n        return query * self.score_diagonal\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:"
+        },
+        {
+          "find": "        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)",
+          "replace": "        query = self.scoring_query(out)\n        pos_scores = (query * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (query * self.item_emb(neg)).sum(dim=-1)"
+        },
+        {
+          "find": "        user_emb = self.encode(seq)[0]",
+          "replace": "        user_emb = self.scoring_query(self.encode(seq))[0]"
+        },
+        {
+          "find": "            dropout_rate=0.0,\n        ).to(_device)\n        model.load_state_dict(torch.load(ckpt_path, map_location=_device, weights_only=True))",
+          "replace": "            dropout_rate=float(meta[\"dropout_rate\"]),\n        ).to(_device)\n        model.load_state_dict(\n            torch.load(ckpt_path, map_location=_device, weights_only=True),\n            strict=True,\n        )"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Across all four category models, combine padding-masked input LayerNorm with residual feed-forward diagonal bilinear scoring. Keep one GRU checkpoint per category, tied embeddings, observed histories, BPR and existing training settings; synchronize predictor construction and strict checkpoint loading."
+}

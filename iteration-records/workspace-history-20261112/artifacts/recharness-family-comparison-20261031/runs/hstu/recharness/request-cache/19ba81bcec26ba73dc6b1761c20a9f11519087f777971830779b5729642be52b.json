@@ -1,0 +1,65 @@
+{
+  "request_sha256": "19ba81bcec26ba73dc6b1761c20a9f11519087f777971830779b5729642be52b",
+  "response": {
+    "category_edits": [
+      {
+        "category": "sequence_interest",
+        "rationale": "Across all four categories, retain newest-128 histories, cumulative positions and decay-4 causal pooling, while learning a state-dependent pooling gate initialized to 0.25. The generated predictor imports the updated architecture and loads its gate from the single category checkpoint.",
+        "edits": [
+          {
+            "find": "        self.last_norm = nn.LayerNorm(hidden_units)\n        with torch.no_grad():",
+            "replace": "        self.last_norm = nn.LayerNorm(hidden_units)\n        self.pool_gate = nn.Linear(hidden_units, 1)\n        nn.init.zeros_(self.pool_gate.weight)\n        nn.init.constant_(self.pool_gate.bias, -math.log(3.0))\n        with torch.no_grad():"
+          },
+          {
+            "find": "        readout = 0.75 * states + 0.25 * pooled",
+            "replace": "        pool_gate = torch.sigmoid(self.pool_gate(states))\n        readout = (1.0 - pool_gate) * states + pool_gate * pooled"
+          }
+        ]
+      },
+      {
+        "category": "feature_construction",
+        "rationale": "Add a jointly learned projection of log1p causal observed-prefix counts capped at 128, preserving the existing frequency feature. Carry full observed-history lengths through sampling, validation and generated prediction so truncation never resets activity counts or exposes future interactions.",
+        "edits": [
+          {
+            "find": "    batch_seq, batch_pos, batch_neg = [], [], []",
+            "replace": "    batch_seq, batch_pos, batch_neg = [], [], []\n    batch_history_lengths = []"
+          },
+          {
+            "find": "        batch_neg.append(neg)\n    return np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg)",
+            "replace": "        batch_neg.append(neg)\n        batch_history_lengths.append(len(history) - 1)\n    return (np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg),\n            np.asarray(batch_history_lengths, dtype=np.int64))"
+          },
+          {
+            "find": "        self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)\n        self.emb_dropout",
+            "replace": "        self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)\n        self.activity_projection = nn.Linear(1, hidden_units, bias=False)\n        nn.init.zeros_(self.activity_projection.weight)\n        self.emb_dropout"
+          },
+          {
+            "find": "    def forward(self, seq: torch.Tensor) -> torch.Tensor:\n        batch_size, maxlen = seq.shape",
+            "replace": "    def forward(self, seq: torch.Tensor, history_lengths: torch.Tensor | None = None) -> torch.Tensor:\n        batch_size, maxlen = seq.shape"
+          },
+          {
+            "find": "        pos = observed.cumsum(dim=1) * observed\n        seq_emb = self.emb_dropout(seq_emb + self.pos_emb(pos))",
+            "replace": "        pos = observed.cumsum(dim=1) * observed\n        retained_lengths = observed.sum(dim=1)\n        if history_lengths is None:\n            history_lengths = retained_lengths\n        else:\n            history_lengths = torch.as_tensor(\n                history_lengths, dtype=torch.long, device=seq.device\n            ).reshape(batch_size)\n        prefix_offset = (history_lengths - retained_lengths).clamp_min(0)\n        prefix_counts = (observed.cumsum(dim=1) + prefix_offset.unsqueeze(1)) * observed\n        activity = torch.log1p(prefix_counts.clamp(max=128).to(seq_emb.dtype)).unsqueeze(-1)\n        activity_emb = self.activity_projection(activity)\n        seq_emb = self.emb_dropout(seq_emb + self.pos_emb(pos) + activity_emb)"
+          },
+          {
+            "find": "            out = model(seq_t)\n            user_emb = out[0, -1]",
+            "replace": "            history_lengths = torch.tensor([len(user_train[user])], dtype=torch.long, device=device)\n            out = model(seq_t, history_lengths=history_lengths)\n            user_emb = out[0, -1]"
+          },
+          {
+            "find": "            seq, pos, neg = sample_batch(user_train, itemnum, BATCH_SIZE, MAXLEN)",
+            "replace": "            seq, pos, neg, history_lengths = sample_batch(user_train, itemnum, BATCH_SIZE, MAXLEN)"
+          },
+          {
+            "find": "            out = model(seq_t)\n            mask = (pos_t != 0).float()",
+            "replace": "            history_lengths_t = torch.tensor(history_lengths, dtype=torch.long, device=device)\n            out = model(seq_t, history_lengths=history_lengths_t)\n            mask = (pos_t != 0).float()"
+          },
+          {
+            "find": "        out = model(seq_t)\\n        user_emb = out[0, -1]",
+            "replace": "        history_lengths = torch.tensor([len(history)], dtype=torch.long, device=_device)\\n        out = model(seq_t, history_lengths=history_lengths)\\n        user_emb = out[0, -1]"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Implement adaptive causal pooling and a causal prefix-activity input feature across all four HSTU category models, with matching training, validation and generated inference. Preserve frequency scaling, backbone, loss, optimizer, routing and training limits."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/hstu/recharness/calls/00028"
+}

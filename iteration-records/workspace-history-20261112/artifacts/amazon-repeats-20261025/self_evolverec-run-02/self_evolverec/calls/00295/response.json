@@ -1,0 +1,70 @@
+{
+  "markdown_report": "At 0% progress, prioritize a small, testable extension: **recency-weighted transition residual scoring with multi-negative training**. All benefits below are hypotheses requiring pinned validation.\n\n**Insights and directions.** Three starting-point insights: (1) Electronics’ 14.95% negative-over-positive rate motivates stronger ranking supervision; sampled training margins do not establish validation HR@10. (2) Embedding similarity near 0.54 does not justify prioritizing collapse remedies. (3) User feedback identifies both incidental-history influence and broadly related recommendations lacking a supported next-step purpose; these motivate recency weighting and directed transitions.\n\nThree literature insights: (1) [GaGNN](https://doi.org/10.1016/j.ins.2024.120623) motivates transition evidence alongside sequence representations, without establishing compatibility. (2) [LSIDN](https://arxiv.org/abs/2407.14743) motivates distinguishing persistent interests from recent intent; additional encoders increase implementation cost. (3) [eSASRec](https://arxiv.org/html/2508.06450v1) motivates sampled softmax, although its architectural changes confound attribution. These define three directions: transition evidence, temporal relevance, and ranking supervision.\n\n| Framework axis | Existing approach | Proposed role / gap |\n|---|---|---|\n| Sequence context | SASRec attention | Retain personalized context |\n| Recent intent | LSIDN separate encoders | Cheap decay over recent sources |\n| Directed association | GaGNN graph modeling | Smoothed training-only transition residual |\n| Candidate discrimination | eSASRec sampled softmax | Multiple uniform negatives |\n\n**Candidate assessments.** Scores are originality / future potential / user alignment / model alignment / code difficulty, each 0–10; higher difficulty means harder. Each cell gives a positive and a limitation.\n\n| Idea | Originality | Potential | User | Model | Difficulty |\n|---|---|---|---|---|---|\n| Multi-negative SASRec | 2: direct; established | 7: reusable; incremental | 4: finer ranking; no temporal mechanism | 9: targets confusion; false negatives | 2: small change; masking needed |\n| Gated recent/history fusion | 4: targeted; familiar | 7: extensible; gate instability | 8: incidental-interest control; no prerequisite evidence | 6: context improves; separation indirect | 5: modular; inference changes |\n| **Recent transition residual + sampled softmax** | 4: useful combination; established parts | 8: reusable; sparse edges | 8: recent purpose; compatibility unresolved | 8: stronger discrimination; graph bias | 4: sparse counts; scoring integration |\n\n**Selected algorithm.** Build directed adjacent-item counts exclusively from training histories. Smooth destination probabilities toward training popularity. Aggregate clipped log-lift from recent history items with exponential positional decay; add this residual to SASRec scores. Train using multiple uniform negatives, excluding known training positives and targets.\n\nThis explicitly targets older/incidental influence through decay and broad relatedness through observed directional associations. Multi-negative competition targets Electronics’ weak separation. It cannot identify fulfilled needs or guarantee compatibility.\n\nPseudocode: `counts ← training transitions; residual ← decayed smoothed transition lift; score ← SASRec + λ·residual; optimize sampled-softmax(score)`.\n\nCompare baseline, loss-only, residual-only, and combined variants using macro validation HR@10. Preserve all routing, seeds, splits, evaluator, and diagnostic interfaces; update the predictor writer with identical scoring. Bound experiments by the shared GPU budget. No improvement is claimed.",
+  "idea": {
+    "description": "Add a recency-weighted, popularity-adjusted directed-transition residual to per-dataset SASRec and train candidate discrimination with multi-negative sampled softmax. This targets two observed user failures—excess influence from incidental older interactions and broad relatedness without evidence of a useful next choice—and the measured weak positive–negative separation, especially in Electronics.",
+    "motivation": "At the initial research stage, sparse transition statistics provide an inexpensive inductive bias without requiring unavailable relation labels or pretrained text encoders. The supplied diagnostics favor investigating ranking confusion over embedding collapse. Directed transitions offer predictive next-step evidence, but cannot establish compatibility, complementarity, or purchase satisfaction.",
+    "implementation_notes": "For each dataset, construct sparse adjacent-transition counts C using training histories only and p(j) from training destination counts. Define q(j|i)=(C(i,j)+alpha*p(j))/(sum_k C(i,k)+alpha), and residual r(H,j)=sum_i w_i*clip(log(q(j|i)/p(j)), -c, c), with normalized exponentially decaying weights over the latest K history positions. Use a positive popularity floor, exclude padding, and compute graph features causally from each training prefix. A missing edge contributes a source-dependent constant before clipping; retain a consistent implementation in training and prediction. Start with modest negative counts such as 32 or 64; exclude each user's known training positives and the target, without consulting validation/test histories. Tune a small set of residual weights, including zero, against the pinned macro validation HR@10; select checkpoints by that metric rather than training margins. Run baseline, loss-only, residual-only, and combined ablations within the shared 43,200 GPU-second budget and single-GPU execution. Retain DATA_DIR=os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, all four dataset routes, and the SASREC_EPOCHS environment default of 200. Store artifacts beneath the trial directory and update the predictor writer to serialize counts, hyperparameters, and identical residual scoring. Preserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions; make predict_score use the same final candidate scores through a consistent feature representation carrying required history. Never infer unavailable categories, reviews, prices, compatibility labels, or simulator traits. No training or validation results have been produced here.",
+    "pseudocode": "for dataset in four_datasets:\n    counts, destination_popularity = build_adjacent_counts(training_histories)\n    for sequence, positive in training_batches:\n        negatives = sample_uniform_excluding_known_training_positives_and_target(M)\n        features = sasrec.log2feats(sequence)\n        for valid prediction position t:\n            history = sequence[:t+1]\n            candidates = [positive[t]] + negatives[t]\n            graph_scores = recency_weighted_clipped_log_lift(history, candidates, counts, destination_popularity)\n            logits = dot(features[t], item_embeddings[candidates]) + lambda_graph * graph_scores\n            loss += cross_entropy(logits, target_index=0)\n        optimize(loss / valid_position_count)\n    evaluate_with_pinned_validation_and_save_checkpoint()\nwrite_predictor_with_identical_model_graph_scoring_and_dataset_routing()",
+    "originality": {
+      "score": 4,
+      "positive": "Combines directed transition lift, recent-source weighting, and multi-negative discrimination around specific observed failures.",
+      "negative": "Each component is established; the contribution is a constrained empirical combination rather than a new model class."
+    },
+    "future_potential": {
+      "score": 8,
+      "positive": "Provides a cheap baseline for later learned temporal gates and asymmetric relation models.",
+      "negative": "Sparse transitions and popularity effects may limit transfer, and observed ordering cannot resolve compatibility or satiation."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Retains the SASRec encoder and uses sparse counts with simple candidate-level arithmetic.",
+      "negative": "Requires efficient causal-prefix scoring, negative masking, and exact agreement among training, prediction, and diagnosis interfaces."
+    }
+  },
+  "related_work": [
+    {
+      "title": "SASRec: Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Provides the causal self-attention starting architecture and shared item scoring."
+      ],
+      "limitations": [
+        "The supplied baseline diagnostics show uneven candidate separation across datasets.",
+        "Sequence prediction alone does not identify compatibility or fulfilled demand."
+      ]
+    },
+    {
+      "title": "GaGNN (2024)",
+      "link": "https://doi.org/10.1016/j.ins.2024.120623",
+      "contributions": [
+        "The supplied search summary describes group and individual transition graphs combined with sequential representations."
+      ],
+      "limitations": [
+        "Does not establish gains for this pinned four-category benchmark.",
+        "Transition associations cannot be treated as verified complementarity."
+      ]
+    },
+    {
+      "title": "LSIDN (2024)",
+      "link": "https://arxiv.org/abs/2407.14743",
+      "contributions": [
+        "The supplied search summary describes separate long- and short-term interest encoders with denoising."
+      ],
+      "limitations": [
+        "Additional encoders increase implementation and tuning cost.",
+        "Interest separation does not establish equipment prerequisites or compatibility."
+      ]
+    },
+    {
+      "title": "eSASRec (RecSys 2025)",
+      "link": "https://arxiv.org/html/2508.06450v1",
+      "contributions": [
+        "The supplied search summary reports strong SASRec results using sampled softmax."
+      ],
+      "limitations": [
+        "Transformer changes prevent attributing reported gains solely to the objective.",
+        "Multiple sampled negatives can include unobserved relevant items."
+      ]
+    }
+  ]
+}

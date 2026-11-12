@@ -1,0 +1,167 @@
+{
+  "request_sha256": "6c152a070fddb27e336c25995b97afe6d05cd972b3373417a91e00762f90c55e",
+  "response": {
+    "markdown_report": "### Evidence and directions\n\nThree baseline insights guide this first experiment. (1) Electronics has 10.71% sampled ranking errors and a −0.0749 tenth-percentile margin, motivating difficult-candidate discrimination without establishing its cause. (2) Collapse scores near 0.5 indicate approximately zero mean cosine similarity; collapse regularization lacks diagnostic support. (3) Users report broad associations, redundant alternatives, and compatibility mismatches. Interactions provide next-item supervision, not labels for compatibility or completed needs.\n\nThree literature insights narrow the options. (1) HSTU supports temporal biases [1], but recency cannot establish purchase completion. (2) HSTU-BLaIR integrates content [2], although its pretrained encoder is prohibited here. (3) Multiple negatives are established in HSTU [3]; GNNO and SRNS provide stronger curriculum and false-negative precedents [5,6]. None establishes TF–IDF mining superiority.\n\n### Framework and candidate assessment\n\nThe framework separates **representation** (specific attributes), **context** (current intent), and **competition** (plausible alternatives). Every candidate retains one HSTU per category. Scores are originality/potential/user alignment/model alignment/difficulty; higher difficulty means harder implementation.\n\n| Candidate | Scores | Positive assessment | Negative assessment |\n|---|---|---|---|\n| Scratch title/description residual embeddings [2] | 5/7/7/6/6 | Represents observable distinctions jointly | Sparse supervision may miss technical semantics |\n| Elapsed-time attention bias [1] | 3/6/6/4/4 | Represents changing current interests | Cannot establish fulfilled needs |\n| **Lexically guided moderate-negative curriculum** [3–6] | **3/6/5/7/6** | Directly tests confusing-item discrimination | False negatives, limited novelty, substantial sampling work |\n\nAt 0% progress, retain the curriculum as a controlled hypothesis, contingent on uniform-only comparison. User alignment remains uncertain: it targets broad thematic substitutions and redundant alternatives, but cannot identify satiation or certify compatibility.\n\n### Selected experiment\n\nBuild training-only TF–IDF neighbors from permitted titles/descriptions, preserving model numbers, units, and formats. Missing metadata produces empty lists. Use bounded blockwise sparse multiplication, never a full similarity matrix; retain 64 neighbors per item.\n\nTrain corrected HSTU with candidate-set cross-entropy and 32 retained negatives. Warm up uniformly, then replace at most eight negatives with moderate-scoring lexical neighbors. Exclude padding, duplicates, the positive, and every observed training item, including items outside the input window. Never inspect held-out labels.\n\n```\npool = eligible_lexical_neighbors(positive, cap=32)\nranked = sort_by_detached_HSTU_score(pool, tie_break=item_id)\nhard = sample_without_replacement(descending_ranks_4_to_16(ranked))\nnegatives = hard[:scheduled_k] + eligible_uniform_fill(32)\nloss = CE([positive_score, negative_scores], target=0)\n```\n\nThe intended user effects are fewer broad substitutes and redundant alternatives displacing the observed next choice; these remain hypotheses. Electronics’ weak lower-tail margins supply the model-facing target. Uncorrected mined CE changes training competition; it is not an unbiased catalog-softmax estimator. Do not apply unjustified logQ correction.\n\nCompare uniform-only, fixed lexical mixing, and curriculum variants with identical retained counts and schedules. Record macro/per-category validation HR@10 and GPU cost; add compute-matched comparison when feasible. Preserve seeds, routing, final nonpadding readout, checkpoint/predictor consistency, and diagnostic interfaces. Lexical lists never contribute inference scores.\n\nReferences: [1] HSTU, arXiv:2402.17152. [2] HSTU-BLaIR, 2025. [3] Official HSTU configuration. [4] arXiv:2208.04116. [5] GNNO, arXiv:2306.10047. [6] SRNS, arXiv:2009.03376.",
+    "idea": {
+      "description": "Retain the corrected HSTU architecture and test a curriculum mixing uniform negatives with moderately difficult lexical neighbors of each training positive. Train one independent model per category and load one selected checkpoint per category. Treat uniform-only multi-negative training as the essential control; lexical mining is an unverified extension.",
+      "motivation": "The user diagnosis identifies broad thematic associations and redundant alternatives occupying top positions. Competition against similar alternatives explicitly targets these two failure modes by learning which item follows a particular context, although it cannot directly supervise completed needs, list redundancy, or compatibility. Electronics supplies the strongest measured motivation: 10.71% negative-over-positive errors, a −0.0749 tenth-percentile margin, and 16.36% of margins below 0.5. These training-position diagnostics neither establish the cause nor demonstrate held-out ranking improvement. Collapse scores near 0.5 do not justify anti-collapse regularization. GNNO and SRNS reduce the novelty of curriculum mining and strengthen the case for a controlled comparison rather than a claimed new model class.",
+      "implementation_notes": "Preserve the supplied corrected HSTU, preprocessing seed 0, training/sampling seed 42, maximum 200 epochs, and exactly 200 training batches per epoch. Keep all four categories and their routing. DATA_DIR remains os.environ['GAGC_DATA_DIR']; artifacts remain beneath the trial directory. Use one GPU and account for preprocessing, training diagnostics, and failed trials within the applicable budget. Do not fetch pretrained weights, additional datasets, or dependencies.\n\nConstruct neighbors only from permitted titles and descriptions, never categories, ratings, prices, stores, reviews, or inferred compatibility labels. Use a deterministic lowercase tokenizer that preserves alphanumeric identifiers, numbers, and units; retain unigrams and bigrams. Proposed fixed settings are at most 256 tokens per document, max_features=50000, min_df=2, max_df=0.2, sublinear TF, and L2-normalized float32 CSR features. Empty or unusable vocabularies yield uniform-only sampling. Metadata eligibility must follow the host's public catalog policy; interactions used for filtering and any learned statistics must never include validation/test labels. Fit preprocessing with seed 0 where randomness exists. Compute similarities blockwise with bounded intermediate memory, prune frequent terms, and retain 64 positive-similarity neighbors excluding self, ordered by similarity then item ID. sparse_dot_topn is a useful implementation reference but is not in the supplied library list; do not assume it is installed. Use available SciPy operations with adaptive blocks and monitor intermediate density. Stored features and lists need O(nnz(X)+64N) space, but construction time and scratch memory can still approach quadratic behavior. Set missing metadata to empty lists and release TF–IDF matrices after neighbor construction if unused.\n\nFor each valid causal target position, draw at most 32 unique candidates uniformly without replacement from its eligible lexical list. Eligibility excludes padding, the positive target, and the user's entire observed training history, including items outside the truncated input. This is a heuristic exclusion policy: it also removes repeats that may be relevant, and it cannot eliminate unobserved positives. Never consult held-out labels. Use sorted history IDs and vectorized searchsorted with explicit bounds/equality checks; avoid B×L×C×history broadcasts. Score pools using the current HSTU's detached features and embeddings under no_grad, reusing the causal forward pass. Sort descending with stable item-ID tie breaking; sample uniformly without replacement from one-based ranks 4 through min(16,m). If fewer than four candidates remain, use uniform fallback rather than switching to the highest-scoring candidates. Chunk at most 1024 valid positions, shrinking further for memory. Recompute selected logits with gradients. Mining costs O(PCd) for P valid positions and C≤32, in addition to HSTU computation.\n\nLet E be the configured epoch horizon, capped at 200, and W=max(1,ceil(0.2E)). For zero-based epoch e, use k=floor(8*min(1,e/W)). Select up to k eligible lexical candidates and fill to 32 with distinct uniform eligible items, excluding already selected candidates. Use bounded rejection rounds followed by exact eligible enumeration only for unresolved rows; permit fewer negatives with a mask when fewer than 32 exist. Skip positions with no eligible negatives and safely skip optimizer updates if no valid loss remains. Seed NumPy, Python, PyTorch, CUDA, samplers, and any workers consistently. Use deterministic item-ID tie breaking rather than relying on unstable topk ties.\n\nUse uncorrected candidate-set CE on one positive plus up to 32 negatives, averaged over valid positions. Preserve the baseline scorer, normalization, temperature, optimizer, batch size, and regularization for the first sampling ablation; serialize their actual configuration. The official HSTU normalized/temperature-0.05 configuration is a separate hypothesis, not an instruction to silently change this baseline. Mined CE intentionally changes the competition distribution. Do not call it an unbiased sampled-softmax estimator or apply uniform logQ to the selected pool. Any later corrected-proposal experiment needs an explicit tractable sampling design, including exclusions, deduplication, and the always-included positive.\n\nRun uniform-only CE first, then fixed mixing with k=8 from epoch zero, then the specified curriculum if budget permits. Hold architecture, retained negative count, seeds, updates, loss, and validation schedule fixed. Report measured macro/per-category validation HR@10, valid diagnostic-position counts, margins, logit/gradient scales, and GPU cost. Equal-update comparisons isolate update schedules but are not compute-matched; report this distinction and add a time-matched comparison only if budget permits. Repeated validation selection can overfit the fixed 200-user/category sample, so preregister this small comparison and avoid broad threshold sweeps. No test labels or metrics are available.\n\nEach variant trains independently; do not reuse another trial's checkpoint, average checkpoints, fuse scores, or use lexical lists at inference. Each category loads exactly one checkpoint. Preserve sample_batch, ModelView, item_emb, log2feats(sequence), and predict_score(features, items). Preserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning measured metrics and metric_definitions, and diagnosis_interpreter_prompt(raw_diagnosis), using those measurements and definitions. Diagnosis batches remain (None, sequence, positive, negative), with B×L tensors. Retain the original supplied-negative margin probes for comparability; describe their sampling distribution and never interpret them as full-catalog accuracy. Empty metadata-category breakdowns remain unavailable rather than inferred. view.model must be the actual trained nn.Module. Read the greatest nonpadding position index for left-padded histories, never count-1. The predictor writer must serialize/load the same architecture and scoring configuration even though this proposal adds no inference component.\n\nLexical overlap is not a substitute/complement label. Similar unseen items may be valid future interests, while useful complements may share little vocabulary. Moderation, capped frequency, uniform mixing, and warm-up reduce exposure but do not prove false-negative avoidance. Report user-facing improvement only if measured by the permitted diagnosis; HR@10 alone cannot establish fewer incompatibilities or satisfied needs. Training-score variability inspired by SRNS is a possible later ablation, not part of this first reproducible experiment.",
+      "pseudocode": "For each of Movies_and_TV, Industrial_and_Scientific, Electronics, CDs_and_Vinyl:\n    Build deterministic TF–IDF neighbor lists from permitted titles/descriptions.\n    Keep at most 64 positive-similarity neighbors per item; missing metadata => [].\n    Build sorted full observed-training item sets per user; never inspect held-out labels.\n    Initialize the supplied corrected HSTU with seed 42.\n    E = configured horizon capped at 200; W = max(1, ceil(0.2 * E)).\n    For zero-based epoch e in range(E):\n        k = floor(8 * min(1, e / W)).\n        For each of exactly 200 family-specific training batches:\n            Obtain user identities internally from the sampler for exclusion checks.\n            Preserve the external diagnostic batch contract.\n            features = model.log2feats(sequence).\n            For chunks of at most 1024 valid causal target positions:\n                eligible_pool = neighbors[positive] minus padding, positive, full user training items.\n                pool = sample up to 32 distinct eligible_pool items with seeded RNG.\n                With no_grad, score pool using detached current-model features/embeddings.\n                Stable-sort descending by score, then ascending item ID.\n                band = one-based ranks 4 through min(16, pool_size).\n                hard = uniformly sample up to k distinct items from band; empty band => [].\n                negatives = hard plus distinct uniform eligible fill, up to 32 total.\n                Mask unavailable slots; skip positions with zero eligible negatives.\n                Recompute selected positive/negative logits with gradients.\n            loss = mean candidate-set CE over valid positions.\n            If loss has valid positions, backpropagate and update this single model.\n        Use the unchanged permitted validation schedule and checkpoint-selection rule.\n    Serialize one selected checkpoint and its exact architecture/scoring configuration.\n    Write the matching category-routed predictor.\nAt inference:\n    Load exactly one checkpoint for the requested category.\n    Read the greatest index whose history item is nonpadding.\n    Score requested candidates using that HSTU alone; do not load lexical scoring artifacts.\nControls, if budget permits:\n    Repeat from initialization with k=0, then fixed k=8, holding other settings fixed.\n    Compare measured macro validation HR@10, per-category results, diagnostics, and GPU cost.\n    No checkpoint reuse, score fusion, or performance claims before host evaluation.",
+      "originality": {
+        "score": 3,
+        "positive": "The specific combination of permitted lexical metadata, moderate same-model score ranks, and a capped curriculum is a practical HSTU adaptation.",
+        "negative": "Curriculum neighborhood mining and false-negative-aware sampling already have strong precedents in GNNO and SRNS; lexical guidance does not establish a new learning principle."
+      },
+      "future_potential": {
+        "score": 6,
+        "positive": "A controlled comparison can reveal whether metadata-guided competition improves difficult next-item discrimination without changing the HSTU inference architecture.",
+        "negative": "There is no supplied evidence that TF–IDF is the right neighborhood signal, and next-item supervision cannot directly resolve fulfilled needs, compatibility, or recommendation-list redundancy."
+      },
+      "code_difficulty": {
+        "score": 6,
+        "positive": "The backbone, predictor scoring path, and checkpoint architecture remain intact; available NumPy, SciPy, scikit-learn, and PyTorch cover the required operations.",
+        "negative": "Bounded sparse neighbor construction, full-history filtering, user-ID propagation inside sampling, stable ranking, masked edge cases, and chunked mining make this substantially more involved than a small loss change."
+      }
+    },
+    "related_work": [
+      {
+        "title": "Actions Speak Louder than Words: Trillion-Parameter Sequential Transducers for Generative Recommendations",
+        "link": "https://arxiv.org/abs/2402.17152",
+        "contributions": [
+          "Introduces the HSTU sequential recommendation backbone.",
+          "Provides temporal and positional mechanisms compatible with causal sequence modeling."
+        ],
+        "limitations": [
+          "Does not establish optimal settings for the four supplied Amazon categories.",
+          "Temporal relevance does not directly identify completed purchase needs."
+        ]
+      },
+      {
+        "title": "HSTU-BLaIR",
+        "link": "https://kdd2025llm4ecommerce.github.io/assets/accepted/13_HSTU_BLaIR_Lightweight_Cont.pdf",
+        "contributions": [
+          "Integrates projected content embeddings with item-ID representations before HSTU encoding."
+        ],
+        "limitations": [
+          "Uses externally pretrained BLaIR representations, which are prohibited in this task.",
+          "Does not validate scratch-trained content encoding or lexical negative mining."
+        ]
+      },
+      {
+        "title": "Official HSTU sampled-softmax reference configuration",
+        "link": "https://github.com/meta-recsys/generative-recommenders/blob/main/configs/ml-1m/hstu-sampled-softmax-n128-final.gin",
+        "contributions": [
+          "Supplies a concrete HSTU configuration using multiple negatives and normalized representations."
+        ],
+        "limitations": [
+          "MovieLens configuration values are not demonstrated optima for this benchmark.",
+          "Does not validate lexical mining or the proposed curriculum.",
+          "Normalization can change item rankings; temperature and normalization must not be silently bundled into a sampling ablation."
+        ]
+      },
+      {
+        "title": "False-negative research cited in the supplied search results",
+        "link": "https://arxiv.org/abs/2208.04116",
+        "contributions": [
+          "Motivates caution when treating difficult unobserved items as negative examples."
+        ],
+        "limitations": [
+          "Does not establish the false-negative rate of the supplied Amazon splits.",
+          "Does not validate the proposed lexical pool or hardness thresholds."
+        ]
+      },
+      {
+        "title": "GNNO, SIGIR 2023",
+        "link": "https://arxiv.org/abs/2306.10047",
+        "contributions": [
+          "Provides sequential-recommendation precedent for transition-neighborhood negative mining and progressively increasing difficulty.",
+          "Reports experiments on three Amazon benchmarks according to the supplied search results."
+        ],
+        "limitations": [
+          "Transition neighborhoods differ from TF–IDF neighborhoods.",
+          "Its results do not establish gains for the supplied corrected HSTU or pinned evaluator."
+        ]
+      },
+      {
+        "title": "SRNS, NeurIPS 2020",
+        "link": "https://arxiv.org/abs/2009.03376",
+        "contributions": [
+          "Combines negative informativeness with prediction variability to reduce potential-positive contamination.",
+          "Supports excluding observed interactions from negative candidates."
+        ],
+        "limitations": [
+          "Moderate score ranks alone do not implement its variability-based safeguard.",
+          "Does not establish that lexical neighbors are valid negatives in this benchmark."
+        ]
+      },
+      {
+        "title": "Shi et al., WWW 2023: hard-negative sampling and partial-AUC optimization",
+        "link": "https://arxiv.org/abs/2302.03472",
+        "contributions": [
+          "Connects hard-negative BPR training with partial-AUC optimization.",
+          "Motivates adapting hardness to the dataset and ranking cutoff."
+        ],
+        "limitations": [
+          "BPR/partial-AUC analysis does not directly guarantee improvements for HSTU candidate-set cross-entropy.",
+          "Does not establish lexical similarity as the appropriate hardness signal."
+        ]
+      },
+      {
+        "title": "McAuley et al., KDD 2015: substitutes and complements",
+        "link": "https://arxiv.org/abs/1506.08839",
+        "contributions": [
+          "Distinguishes substitute and complementary product relationships."
+        ],
+        "limitations": [
+          "Uses supervised product relationships and richer information unavailable here.",
+          "Does not justify treating title overlap as a negative-relevance or compatibility label."
+        ]
+      },
+      {
+        "title": "Adaptive Sampled Softmax with Kernel Based Sampling",
+        "link": "https://proceedings.mlr.press/v80/blanc18a.html",
+        "contributions": [
+          "Analyzes sampled-softmax estimation and model-adaptive proposals.",
+          "Clarifies why proposal choice and correction matter."
+        ],
+        "limitations": [
+          "Does not provide valid correction probabilities for the proposed filtered, rank-selected lexical sampler.",
+          "Does not make uncorrected mined candidate-set cross-entropy an unbiased catalog-softmax estimator."
+        ]
+      },
+      {
+        "title": "sparse_dot_topn implementation reference",
+        "link": "https://github.com/ing-bank/sparse_dot_topn",
+        "contributions": [
+          "Demonstrates fused sparse multiplication with bounded top-k output."
+        ],
+        "limitations": [
+          "The package is not listed among available libraries and must not be assumed installed.",
+          "Bounded output does not guarantee cheap construction when documents share many terms."
+        ]
+      },
+      {
+        "title": "PyTorch searchsorted documentation",
+        "link": "https://docs.pytorch.org/docs/stable/generated/torch.searchsorted.html",
+        "contributions": [
+          "Provides insertion-index operations useful for vectorized membership checks against sorted training histories."
+        ],
+        "limitations": [
+          "Membership requires explicit bounds and equality checks.",
+          "Ragged histories still require a suitable batched representation."
+        ]
+      },
+      {
+        "title": "PyTorch topk documentation",
+        "link": "https://docs.pytorch.org/docs/stable/generated/torch.topk.html",
+        "contributions": [
+          "Documents that tied top-k indices are not guaranteed stable."
+        ],
+        "limitations": [
+          "Reproducible mining therefore requires an explicit stable score/item-ID ordering."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/model-family-comparison-20261029/runs/hstu-self_evolverec/self_evolverec/calls/00089"
+}

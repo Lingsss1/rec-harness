@@ -1,0 +1,69 @@
+{
+  "markdown_report": "At 0% progress, prioritize a small SASRec extension with measurable behavioral targets. No proposed improvement has been validated.\n\n**Insights from the starting point.** (1) SASRec learns sequential associations. These can explain broad relevance without establishing current usefulness. (2) Electronics has 14.95% sampled wrong rankings and a −0.4812 lower-decile margin. Confusing cases deserve attention before increasing capacity. (3) Embedding alignment lies near the diagnostic midpoint. These measurements provide little justification for prioritizing collapse regularization.\n\n**Insights from related work.** (1) [gSASRec](https://www.ijcai.org/proceedings/2024/0939.pdf) motivates calibrated multi-negative learning. Its results support an objective ablation, not a claimed Amazon improvement. (2) [AlterRec](https://aclanthology.org/2025.ijcnlp-long.12.pdf) identifies text undertraining during ID–text fusion. A separate text objective is therefore worth testing, although its findings do not establish performance without pretrained features. (3) [DSLR](https://arxiv.org/abs/2407.14743) separates evolving interests. This motivates testing repeated recent support against isolated interactions.\n\n**Framework.** Three directions connect evidence to interventions: ranking calibration → confusing negatives; behavioral support → isolated-purchase overreach; permitted text → narrower content or purpose matches. Their intersection remains uncertain because lexical agreement cannot establish compatibility or ownership.\n\n**Candidate assessments.** Scores are originality/potential/user alignment/model alignment/difficulty; higher difficulty means harder implementation. Each dimension lists a positive and limitation.\n\n- **Calibrated multi-negative BCE: 2/7/3/9/2.** Originality: useful adaptation/already published; potential: scalable/transfer uncertain; user: sharper ranking/no explicit intent support; model: targets margins/training margins can mislead; difficulty: localized loss change/calibration needs care.\n- **Repeated-interest pooling: 5/7/8/6/4.** Originality: lightweight recurrence adaptation/familiar pooling; potential: reusable support signal/misses new interests; user: favors sustained preferences/cannot establish compatibility; model: contextual separation/no direct loss correction; difficulty: small residual branch/causal masking required.\n- **Repeated-support text residual: 6/8/9/8/5 — selected.** Originality: support-conditioned semantic residual/familiar components; potential: interpretable extension/text may be sparse; user: narrows broad matches and suppresses isolated lexical coincidences/cannot verify usefulness; model: multi-negative discrimination targets weak margins/false negatives remain; difficulty: compact encoder and gate/predictor synchronization required.\n\n**Selected algorithm.** Learn pooled title/description token embeddings from scratch. For each causal history prefix, weight recent item vectors by agreement with other distinct history items; disable the residual without repeated support. Add candidate–interest similarity to SASRec’s score through a bounded, initially near-zero gate. Train the combined score with uniform multi-negative sampled softmax and a small auxiliary text-branch objective.\n\nThis explicitly targets broad-but-weak matches and excessive influence from isolated interactions; improved lower-tail separation is a testable model-facing hypothesis. Compare against unchanged SASRec and loss-only training using pinned macro validation HR@10 across all four datasets. Preserve seeds, splits, routing, diagnostic interfaces, and predictor parity; charge every trial to the shared budget. Compatibility and redundancy require separate observation, not invented labels.",
+  "idea": {
+    "description": "Add a bounded, repeated-support semantic scoring residual to per-dataset SASRec. A small token encoder trained from scratch represents permitted titles and descriptions. A causal recent-history pool emphasizes items supported by another distinct historical item. Candidate text agreement with that pool adds a gated residual to the SASRec logit. Use uniform multi-negative sampled-softmax training to address confusing ranking cases.",
+    "motivation": "The selected idea explicitly targets two reported user failures: broadly associated recommendations lacking specific support, and isolated purchases or superficial similarities outweighing sustained preferences. Requiring repeated historical support makes the semantic residual conservative. Multi-negative discrimination addresses the observed weak lower-tail margins, especially in Electronics. These are hypotheses; neither semantic agreement nor training-margin improvements establish validation gains, compatibility, ownership, or current need.",
+    "implementation_notes": "Retain four separately trained category models and baseline dataset routing. Keep DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, and SASREC_EPOCHS default 200. Fit category-specific token vocabularies and document frequencies using training-visible item text only; use no pretrained weights. Pool at most 32 tokens per item into a 32-dimensional normalized vector, and use the most recent 20 valid history items. Downweight common tokens using training-catalog document frequency. Compute support using positive cosine agreement between distinct historical item IDs; repeated occurrences of the same ID alone must not activate the residual. Require at least two supported items. Form a normalized recency-weighted support pool; missing text produces a zero vector and disables its contribution. Bound the residual coefficient, for example alpha = 0.5 * sigmoid(a), with a initialized to -4. Train with 32 uniform negative candidates per valid target position, masking padding, duplicate candidates, the target, and known prefix positives; restrict masks to available training histories. This sampled-softmax surrogate makes no claim of unbiased full-softmax estimation. Add a small text-only auxiliary loss on positions with supported context and available target text; ablate its weight. Cache token IDs, not detached text embeddings during training. At inference, cache the learned item text embeddings and reproduce the exact gate, history truncation, and score. Update the predictor writer to emit and load this architecture and all vocabulary/configuration artifacts beneath the trial directory. Preserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. Keep view.model as the trained module, expose the original item embedding, and make log2feats return the packed SASRec feature, semantic pool, and gate so predict_score reproduces the combined score. Diagnostic margins must use those combined logits. Report category-based diagnostic breakdowns as unavailable because product categories are not supplied. Do not use review ratings/text, inferred ownership labels, or simulator traits. Select exclusively by the pinned validation macro HR@10; training diagnostics are secondary. Start with baseline, loss-only, and selected-model trials under a predeclared shared GPU-time allocation, retaining the baseline if validation does not improve.",
+    "pseudocode": "def history_features(sequence):\n    h = sasrec.log2feats(sequence)\n    # Compute independently for every causal prefix during training.\n    ids = recent_valid_prefix_items(sequence, limit=20)\n    z = normalize(text_encoder(token_ids[ids]))\n    agreement = positive_cosine(z, z)\n    agreement = mask_self_padding_missing_text_and_equal_item_ids(agreement, ids)\n    support = agreement.max(dim=-1).values\n    supported = support > support_threshold\n    enabled = supported.sum(dim=-1) >= 2\n    weights = support * supported * recency_weights(ids)\n    pool = normalize(weighted_sum(z, weights))\n    gate = 0.5 * sigmoid(gate_parameter) * enabled\n    return pack(h, pool, gate)\n\ndef predict_score(features, candidates):\n    h, pool, gate = unpack(features)\n    base = dot(h, item_emb(candidates))\n    semantic = dot(pool, normalize(text_encoder(token_ids[candidates])))\n    return base + gate * semantic\n\nfor category in FOUR_CATEGORIES:\n    set_training_seed(42)\n    for batch in unchanged_training_loader(category):\n        features = history_features(batch.sequence)\n        negatives = sample_unique_uniform_negatives(count=32)\n        candidates, mask = mask_targets_duplicates_and_prefix_positives(batch, negatives)\n        logits = predict_score(features, candidates)\n        loss = masked_cross_entropy(logits / temperature, positive_index=0)\n        loss += auxiliary_weight * supported_context_text_loss(features, candidates, mask)\n        optimize(loss)\n    save_model_config_vocabulary_and_emit_matching_predictor(category)\n# Host selects using unchanged pinned macro validation HR@10.",
+    "originality": {
+      "score": 6,
+      "positive": "Combines a conservative repeated-support gate with a candidate-dependent semantic residual in a small SASRec extension.",
+      "negative": "Text fusion, interest pooling, and multi-negative objectives are established ingredients; novelty is the particular support rule and integration."
+    },
+    "future_potential": {
+      "score": 8,
+      "positive": "Offers an inspectable way to study when repeated historical evidence should influence semantic recommendation.",
+      "negative": "Sparse metadata, lexical ambiguity, and legitimate preference changes may limit both effectiveness and generality."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "Retains the SASRec backbone and requires only a small text encoder, causal pooling, and an additive scoring branch.",
+      "negative": "Causal training features, negative masking, diagnostic compatibility, and exact predictor parity require careful implementation."
+    }
+  },
+  "related_work": [
+    {
+      "title": "gSASRec",
+      "link": "https://www.ijcai.org/proceedings/2024/0939.pdf",
+      "contributions": [
+        "Motivates correcting overconfidence in sampled binary cross-entropy through generalized BCE and multiple negatives."
+      ],
+      "limitations": [
+        "Does not establish improvements for this pinned four-category benchmark.",
+        "Ranking calibration alone does not explicitly address repeated-interest support."
+      ]
+    },
+    {
+      "title": "On the Effectiveness of Sampled Softmax Loss for Item Recommendation",
+      "link": "https://zlstwebsite.github.io/Zlst/publication/on-the-effectiveness-of-sampled-softmax-loss-for-item-recommendation/",
+      "contributions": [
+        "Analyzes sampled softmax, implicit hard-negative weighting, and connections to top-K recommendation."
+      ],
+      "limitations": [
+        "Provides motivation for the proposed objective rather than evidence of gains on this sequential Amazon task.",
+        "Sampling does not resolve uncertainty about unobserved relevant items."
+      ]
+    },
+    {
+      "title": "AlterRec",
+      "link": "https://aclanthology.org/2025.ijcnlp-long.12.pdf",
+      "contributions": [
+        "Identifies text undertraining in joint ID–text fusion and motivates separate optimization attention."
+      ],
+      "limitations": [
+        "Does not establish that a small text encoder trained without pretrained weights will improve this benchmark."
+      ]
+    },
+    {
+      "title": "DSLR",
+      "link": "https://arxiv.org/abs/2407.14743",
+      "contributions": [
+        "Models evolving session-level interests and motivates distinguishing persistent interests from temporary behavior."
+      ],
+      "limitations": [
+        "The proposed repeated-support residual is an adaptation rather than a reproduced DSLR result.",
+        "Recurring interest does not establish equipment compatibility, ownership, or replenishment need."
+      ]
+    }
+  ]
+}

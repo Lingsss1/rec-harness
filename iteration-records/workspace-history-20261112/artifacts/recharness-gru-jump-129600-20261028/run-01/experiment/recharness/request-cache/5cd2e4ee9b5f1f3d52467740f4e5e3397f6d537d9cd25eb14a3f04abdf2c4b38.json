@@ -1,0 +1,19 @@
+{
+  "request_sha256": "5cd2e4ee9b5f1f3d52467740f4e5e3397f6d537d9cd25eb14a3f04abdf2c4b38",
+  "response": {
+    "category_edits": [
+      {
+        "category": "interest_aggregation",
+        "rationale": "Implement the five-interaction half-life readout using explicitly normalized, causal exponential weights over valid GRU states. Empty prefixes return zero. Training and prediction share this method through the predictor's existing model-class import.",
+        "edits": [
+          {
+            "find": "    def aggregate_states(self, out: torch.Tensor, seq: torch.Tensor) -> torch.Tensor:\n        # Prefix normalization yields weight 2**(-age/5) at every valid step.\n        positions = torch.arange(seq.size(1), device=out.device, dtype=torch.float32)\n        weights = torch.exp2((positions - (seq.size(1) - 1)) / 5.0)\n        weights = weights.unsqueeze(0) * seq.ne(0).float()\n        numerator = torch.cumsum(out.float() * weights.unsqueeze(-1), dim=1)\n        denominator = torch.cumsum(weights, dim=1).unsqueeze(-1)\n        pooled = numerator / denominator.clamp_min(torch.finfo(torch.float32).tiny)\n        return pooled.to(out.dtype)",
+            "replace": "    def aggregate_states(self, out: torch.Tensor, seq: torch.Tensor) -> torch.Tensor:\n        positions = torch.arange(seq.size(1), device=out.device)\n        ages = positions[:, None] - positions[None, :]\n        valid = seq.ne(0)\n        allowed = ages.ge(0).unsqueeze(0) & valid.unsqueeze(1)\n        logits = -ages.to(torch.float32) * (math.log(2.0) / 5.0)\n        logits = logits.unsqueeze(0).expand(seq.size(0), -1, -1)\n        logits = logits.masked_fill(~allowed, float('-inf'))\n        has_history = allowed.any(dim=-1, keepdim=True)\n        logits = torch.where(has_history, logits, torch.zeros_like(logits))\n        weights = torch.softmax(logits, dim=-1).masked_fill(~allowed, 0.0)\n        pooled = torch.bmm(weights, out.float())\n        return pooled.to(out.dtype)"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Replace globally scaled cumulative pooling with explicit causal exponential normalization, avoiding early-prefix underflow for long histories while retaining the specified five-interaction half-life and shared training/inference readout."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/run-01/experiment/recharness/calls/00139"
+}

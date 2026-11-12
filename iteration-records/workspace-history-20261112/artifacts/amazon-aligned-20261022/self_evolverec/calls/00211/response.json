@@ -1,0 +1,66 @@
+{
+  "markdown_report": "At 10% progress, prioritize a small, falsifiable architectural change: a weakly initialized causal history residual added to SASRec. No validation improvement has yet been established.\n\n**Insights from the starting point.** (1) Existing training-margin probes measure sampled separation. They cannot establish whether history aggregation improves validation ranking. (2) User feedback suggests stale interests sometimes overwhelm current purposes. This motivates testing history weighting, but does not establish that stronger recency is beneficial. (3) Uniform-history and last-item controls distinguish aggregation from recency. Disabling the residual tests whether the added branch contributes at all.\n\n**Insights from related work.** (1) [Measuring Recency Bias](https://arxiv.org/abs/2409.09722) reports that excessive recency emphasis can reduce accuracy. Learn the decay and retain a uniform control. (2) [Demystifying Sequential Recommendations](https://arxiv.org/abs/2508.03606) motivates history perturbations. Such tests reveal input dependence, not actual preference drift. (3) [Stability-aware Preference Modeling](https://cis.temple.edu/~jiewu/research/publications/Publication_files/2025-TWeb-Stability-aware%20Preference%20Modeling%20for%20Sequential%20Recommendation.pdf) separates persistent and transient interests. This supports comparing aggregation behavior across history lengths without assuming unobserved user traits.\n\n**Framework and directions.** Organize research around representation, behavioral dependence, and evaluation reliability.\n\n| Component | Existing approach | Proposed addition | Remaining gap |\n|---|---|---|---|\n| Representation | SASRec sequence features | Causal weighted-history residual | Compatibility remains unmodeled |\n| Dependence | Training margins | Branch ablation and matched history edits | Sensitivity does not identify intent |\n| Selection | Pinned macro HR@10 | Paired per-user uncertainty estimates | Fixed candidates limit generalization |\n\n**Candidate ideas.** Scores are originality/potential/difficulty; higher difficulty means harder implementation.\n\n| Idea | Scores | Positive assessment | Negative assessment |\n|---|---|---|---|\n| Learned exponential-history residual | 4/7/3 | Simple, testable combination with clear controls | Closely related to established interest pooling |\n| History-length-conditioned residual gate | 5/6/4 | Allows aggregation strength to vary with evidence | Length is a weak proxy for preference stability |\n| Title-neighbor auxiliary ranking loss | 4/6/5 | Targets distinctions among plausible alternatives | Lexical neighbors may be false negatives; [FineRec](https://arxiv.org/abs/2404.12975) uses unavailable opinion supervision |\n\n**Selected algorithm.** For each valid position, compute `s_t = λ s_(t−1) + e_t`, `z_t = λ z_(t−1) + 1`, and `h_t = s_t/z_t`. Skip padding updates. Score with `f_t = SASRec_t + α LayerNorm(h_t)`, initializing learned α near zero and constraining λ with a sigmoid. Use the existing item embeddings and baseline loss; learn parameters separately per dataset.\n\nRun baseline, uniform, last-item, and learned-decay variants within the shared budget. Preserve seeds, splits, routing, and pinned evaluation. Select solely by four-category macro validation HR@10; use branch ablations and paired within-category user bootstrap differences as supporting diagnostics. Feedback from twenty training users remains exploratory evidence. Keep the diagnostic adapter and predictor writer synchronized with the trained architecture.",
+  "idea": {
+    "description": "Add a weakly initialized, learned causal exponential-history residual to each dataset's SASRec encoder, with baseline, uniform-history, and last-item controls.",
+    "motivation": "Test whether an explicit history summary supplies useful information beyond SASRec's learned sequence features. Qualitative feedback motivates examining stale versus recent interests, but neither establishes preference drift nor guarantees that stronger recency improves HR@10.",
+    "implementation_notes": "Integrate the residual into the shared feature path used by training, log2feats, and inference. Keep the baseline item embedding and scoring function. Initialize alpha=0.01 and decay=0.9 as experimental choices, not established optima. Padding must neither update nor decay the accumulator. The uniform and last-item variants use fixed decay 1 and 0, respectively, with otherwise identical branch capacity. Preserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), its metrics and metric_definitions, and the B×L×2 scoring contract. Write the architecture and branch configuration through the predictor writer, saving all new parameters in checkpoints beneath the trial directory. Retain DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, all four dataset routes, and the SASREC_EPOCHS environment default of 200. Do not infer ownership, opinions, compatibility, or simulator traits from interactions.",
+    "pseudocode": "import math\nimport torch\nfrom torch import nn\n\nclass CausalHistoryResidual(nn.Module):\n    def __init__(self, dim, mode='learned'):\n        super().__init__()\n        if mode not in {'learned', 'uniform', 'last'}:\n            raise ValueError(mode)\n        self.mode = mode\n        self.alpha = nn.Parameter(torch.tensor(0.01))\n        self.norm = nn.LayerNorm(dim)\n        if mode == 'learned':\n            self.decay_logit = nn.Parameter(torch.tensor(math.log(9.0)))\n\n    def forward(self, features, history_embeddings, sequence):\n        # features and embeddings: B x L x D; sequence: B x L.\n        # Pass scaled item embeddings before positional additions/dropout.\n        if self.mode == 'learned':\n            decay = self.decay_logit.sigmoid()\n        else:\n            decay = features.new_tensor(1.0 if self.mode == 'uniform' else 0.0)\n        total = torch.zeros_like(history_embeddings[:, 0])\n        mass = history_embeddings.new_zeros((sequence.shape[0], 1))\n        summaries = []\n        for t in range(sequence.shape[1]):\n            valid = sequence[:, t:t+1].ne(0)\n            total = torch.where(valid, decay * total + history_embeddings[:, t], total)\n            mass = torch.where(valid, decay * mass + 1.0, mass)\n            summary = total / mass.clamp_min(1.0)\n            summaries.append(torch.where(valid, summary, torch.zeros_like(summary)))\n        pooled = torch.stack(summaries, dim=1)\n        result = features + self.alpha * self.norm(pooled)\n        return result.masked_fill(sequence.eq(0).unsqueeze(-1), 0.0)\n\n# In SASRec.log2feats, after the existing encoder and final normalization:\n# return self.history_residual(features, scaled_item_embeddings, sequence)\n# Instantiate the same module in the generated predictor and load its state_dict.\n# Evaluate baseline and mode in ['uniform', 'last', 'learned'] using pinned HR@10.",
+    "originality": {
+      "score": 4,
+      "positive": "Combines a causal weighted-history branch with weak residual initialization and explicit controls that isolate its contribution.",
+      "negative": "Exponential pooling and long/short interest combinations are established techniques; the contribution is primarily a controlled adaptation."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "A useful result could motivate timestamp-based decay or evidence-conditioned aggregation while retaining interpretable ablations.",
+      "negative": "A global decay cannot capture item-specific demand, compatibility, or satisfied needs, and sampled-ranking gains may transfer poorly to full-catalog recommendations."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Requires a small differentiable module and preserves the existing training loss, embedding table, and diagnostic feature interface.",
+      "negative": "The sequential accumulator adds runtime, and predictor serialization, padding behavior, and all supervised positions must remain consistent."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Measuring Recency Bias (2024)",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "Reports that excessive emphasis on recent interactions can harm recommendation accuracy, motivating explicit recency controls."
+      ],
+      "limitations": [
+        "Does not establish that the proposed residual improves this pinned four-category benchmark."
+      ]
+    },
+    {
+      "title": "Demystifying Sequential Recommendations (2025)",
+      "link": "https://arxiv.org/abs/2508.03606",
+      "contributions": [
+        "Uses genetic algorithms to find minimal history edits that change recommendations, motivating perturbation diagnostics."
+      ],
+      "limitations": [
+        "Recommendation sensitivity to edits does not establish causal preference drift or user intent."
+      ]
+    },
+    {
+      "title": "Stability-aware Preference Modeling for Sequential Recommendation (2025)",
+      "link": "https://cis.temple.edu/~jiewu/research/publications/Publication_files/2025-TWeb-Stability-aware%20Preference%20Modeling%20for%20Sequential%20Recommendation.pdf",
+      "contributions": [
+        "Separates long- and short-term interests and models interaction stability."
+      ],
+      "limitations": [
+        "Motivates the proposed comparison but supplies no direct evidence for a single learned exponential decay on these datasets."
+      ]
+    },
+    {
+      "title": "FineRec (SIGIR 2024)",
+      "link": "https://arxiv.org/abs/2404.12975",
+      "contributions": [
+        "Models attribute-specific preferences using review-derived attribute–opinion pairs."
+      ],
+      "limitations": [
+        "Its review-derived supervision is unavailable here; permitted titles and descriptions support attribute evidence without establishing user opinions."
+      ]
+    }
+  ]
+}

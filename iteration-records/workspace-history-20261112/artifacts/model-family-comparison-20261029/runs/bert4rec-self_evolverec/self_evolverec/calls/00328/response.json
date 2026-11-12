@@ -1,0 +1,69 @@
+{
+  "markdown_report": "At 0% progress, prioritize **terminal-focused BERT4Rec training with multiple uniform negatives**: a small, testable change addressing current-intent mismatch and weak discrimination.\n\n**Insights from the starting point.** (1) Random reconstruction differs from next-item prediction. Terminal masking directly matches appended-mask inference. (2) Industrial and Electronics show 12.25% and 11.27% wrong-rank rates. Their negative lower-tail margins motivate stronger discrimination. (3) Users report stale interests and broadly plausible alternatives displacing specific choices. These observations motivate recent-prefix supervision, but do not establish compatibility labels.\n\n**Insights from related work.** (1) [BERT4Rec](https://arxiv.org/abs/1904.06690) includes final-item masking. Increasing its training share preserves the family. (2) [Recency Sampling](https://arxiv.org/abs/2207.02643) motivates emphasizing recent targets under limited computation. It did not evaluate BERT4Rec, so transfer remains hypothetical. (3) [Correcting LogQ](https://arxiv.org/abs/2507.09331) distinguishes always-included positives from sampled negatives. Sampling corrections reduce bias; they do not identify false negatives.\n\n**Framework.** Three directions separate the problem: target alignment changes which hidden item is predicted; discrimination changes competing items; feature specificity changes available representations. Terminal training occupies the first direction, multiple negatives the second, and scratch-trained title features the third. None supplies observed ownership, compatibility, or mood.\n\n**Candidate assessment.** Scores are 0–10; difficulty increases with implementation cost. Each cell gives a positive and a limitation.\n\n| Idea | Originality | Potential | User alignment | Model alignment | Difficulty |\n|---|---|---|---|---|---|\n| A. Recent-prefix terminal ranking, multiple uniform negatives | 3: useful combination; established parts | 8: transferable; unverified | 8: recent priorities and competing broad matches; compatibility unknown | 8: targets weak margins; generalization uncertain | 3: local changes; sampling care |\n| B. Corrected stochastic hard-negative objective | 5: careful combination; known methods | 7: efficient discrimination; false negatives | 6: specific competitors; no recency mechanism | 8: hard cases; biased selection risk | 6: tractable; proposal accounting |\n| C. Joint ID/title encoder trained from scratch | 5: constrained adaptation; established fusion | 7: fine details; sparse text learning | 8: identifiers and purpose; mood ambiguous | 6: differentiated items; margins unproven | 7: one network; tokenization overhead |\n\n**Selected algorithm: A.** Sample training-only prefixes, favoring recent endpoints while retaining uniform coverage. Replace each endpoint target with the reserved mask and remove its entire suffix. Optimize masked-target discrimination against multiple uniformly sampled unseen training items. This addresses two reported failures: outdated priorities receive less supervision, while competing plausible items face a stronger ranking objective. Improved specificity remains a hypothesis, particularly for incompatibility and duplication.\n\n```\nendpoint ~ mixture(uniform, recent)\ninput = left_pad(history[:endpoint] + [MASK])\nh = BERT(input)[final_nonpadding_position]\nloss = mean(softplus(score(h, negatives) - score(h, target)))\n```\n\nExclude all known training positives from negatives. Start with 50% terminal examples and 32 negatives; retain baseline random masking otherwise. Preserve one checkpoint/category, routing, seeds, limits, predictor consistency, and diagnostic interfaces. Select only by fixed macro validation HR@10; check lower-tail margins without treating them as generalization evidence.",
+  "idea": {
+    "description": "Increase terminal-mask supervision within the corrected BERT4Rec and use multiple uniform negatives for each hidden target. Train exactly one model per category, preserving the bidirectional masked-item backbone and appended-mask inference.",
+    "motivation": "Recent-prefix terminal supervision explicitly addresses historical interests outweighing present priorities. Multiple competing negatives address broadly plausible items displacing stronger specific matches. The measured negative 10th-percentile margins in Industrial_and_Scientific and Electronics provide a model-facing reason to test stronger discrimination. Compatibility, ownership, duplication, and mood remain unobserved; improvements on those behaviors cannot be assumed.",
+    "implementation_notes": "Modify the supplied baseline rather than reconstructing its unavailable implementation. Keep DATA_DIR=os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, all four routes, maximum 200 epochs and 200 batches per epoch. For terminal examples, sample an endpoint t>=1 from training histories, use only history[:t] as context, and replace history[t] with the reserved mask. Mix uniform endpoint sampling with exponentially recent endpoint sampling; initialize mixture weights at 0.5 and recency half-life at 10 interactions as experimental settings. Allocate 50% of examples to terminal masking and retain baseline masked-target examples otherwise. Use 32 uniformly sampled negatives excluding the user's known training positives; reduce the count when the eligible pool is smaller. Average pairwise logistic loss across negatives and masked targets so additional negatives do not simply multiply gradient scale. This is a pairwise objective, not a claimed unbiased softmax estimator; no logQ correction is required. Compare against the baseline using the host's fixed macro validation HR@10. Inference remains the single trained BERT4Rec with an appended mask and final nonpadding readout. Update the embedded predictor writer if any model signature or configuration changes. Retain DiagnosisProbe(view, device), run_full_diagnosis(train_loader), diagnosis_interpreter_prompt(raw_diagnosis), and ModelView compatibility. Diagnostic margins must use hidden targets and training-only inputs; report the masking and negative-sampling protocol, since changing it affects comparability. Do not interpret missing category metadata or unidentified simulator items as negative preference evidence.",
+    "pseudocode": "for category in FOUR_CATEGORIES:\n    initialize corrected BERT4Rec using training seed 42\n    for epoch in range(max_epochs_at_most_200):\n        for batch in range(200):\n            examples = []\n            for sampled training history H:\n                if terminal_branch(probability=0.5):\n                    t = sample_endpoint(H, uniform_recent_mixture=0.5)\n                    sequence = left_pad(truncate_context(H[:t]) + [MASK])\n                    supervised_positions = [final_nonpadding_position(sequence)]\n                    targets = [H[t]]\n                else:\n                    sequence, supervised_positions, targets = baseline_masked_example(H)\n                negatives = uniform_items_excluding_training_positives(H, count=32)\n                features = model.log2feats(sequence)\n                positive_scores = model.predict_score(features[supervised_positions], targets)\n                negative_scores = model.predict_score(features[supervised_positions], negatives)\n                examples.append(mean(softplus(negative_scores - positive_scores)))\n            optimize(mean(examples))\n    save exactly one selected model checkpoint and its configuration\n    emit predictor using the same architecture and appended-mask readout\nselect proposal using host macro validation HR@10 only",
+    "originality": {
+      "score": 3,
+      "positive": "Combines endpoint sampling and multiple-negative discrimination in a minimal BERT4Rec experiment tied to the supplied diagnoses.",
+      "negative": "Terminal masking, recency sampling, and pairwise logistic ranking are established techniques; the contribution is their constrained application."
+    },
+    "future_potential": {
+      "score": 8,
+      "positive": "A successful result would justify systematic study of training-target alignment under fixed recommendation compute budgets.",
+      "negative": "No supplied validation evidence establishes gains, and recent endpoint emphasis may weaken long-term preference coverage."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Requires sampler and loss changes while retaining the baseline backbone, scoring interface, and predictor architecture.",
+      "negative": "Correct suffix removal, target hiding, padding readout, and eligible-negative sampling require careful implementation."
+    }
+  },
+  "related_work": [
+    {
+      "title": "BERT4Rec: Sequential Recommendation with Bidirectional Encoder Representations from Transformer",
+      "link": "https://arxiv.org/abs/1904.06690",
+      "contributions": [
+        "Introduces bidirectional masked-item sequential recommendation.",
+        "Includes final-item masking to support next-item prediction."
+      ],
+      "limitations": [
+        "Does not establish the best terminal-example proportion for this benchmark.",
+        "Random reconstruction can provide context unavailable at next-item inference."
+      ]
+    },
+    {
+      "title": "Recency Sampling for Sequential Recommendation",
+      "link": "https://arxiv.org/abs/2207.02643",
+      "contributions": [
+        "Motivates recent-target sampling for efficient sequential recommendation training."
+      ],
+      "limitations": [
+        "Does not evaluate BERT4Rec, so applying its sampling principle here is an experimental adaptation."
+      ]
+    },
+    {
+      "title": "Correcting the LogQ Correction",
+      "link": "https://arxiv.org/abs/2507.09331",
+      "contributions": [
+        "Distinguishes always-included positives from sampled negatives in sampled-softmax correction."
+      ],
+      "limitations": [
+        "Sampling correction does not detect false negatives.",
+        "Its softmax correction is not required by the selected pairwise logistic objective."
+      ]
+    },
+    {
+      "title": "Sampled Estimators For Softmax Must Be Biased",
+      "link": "https://papers.neurips.cc/paper_files/paper/2025/hash/42b7c2f6d320d1fe1afa899a6319d6d7-Abstract-Conference.html",
+      "contributions": [
+        "Establishes limitations of subset-only softmax estimators."
+      ],
+      "limitations": [
+        "Does not establish recommendation gains for a particular sampling strategy or pairwise objective."
+      ]
+    }
+  ]
+}

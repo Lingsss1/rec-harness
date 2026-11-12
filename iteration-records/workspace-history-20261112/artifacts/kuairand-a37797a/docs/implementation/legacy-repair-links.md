@@ -1,0 +1,9 @@
+# 旧失败记录的修复引用
+
+旧文件导入原已覆盖results.tsv、episodes.jsonl、failures.jsonl、lessons.json和strategy.json，原始字节保存在CAS。本次补充失败记录修复引用的图投影。
+
+新Failure投影保留legacy_failure_id、reported_status及reported_repair_refs；其status仍为legacy_unverified，execution_evidence_only仍为true。superseded_by只按显式字符串或整数ID解析，不从自由文本猜测目标；同任务、同协议下已存在的Experiment可通过ADDRESSES指向原Failure。关系绑定声明它的原始LegacyRecord，注明只是可能修复的旧记录声明，不证明执行成功或因果解决。
+
+目标尚不存在时引用保留为原文，没有图边。之后再次导入包含原失败记录的目录、目标已可解析时，只追加关联。Failure是不可修改的事实记录，不为标记解析成功而重写；其历史快照保持原样。既有旧Failure也不追写新字段，仍可从原文及新关联追踪。自引用不解析，其他任务/协议中的同名实验不作为目标。
+
+23项迁移、记忆策略、视图和迁移回归通过（1.325秒）。覆盖迟到目标、原节点/旧快照不变、幂等重导入、跨任务隔离和自引用。证据在rec-harness-runs/legacy-repair-links-v1；无Codex调用或训练。该变更晚于v27安装包，不增加真实模型效果或修复成功的科学结论。

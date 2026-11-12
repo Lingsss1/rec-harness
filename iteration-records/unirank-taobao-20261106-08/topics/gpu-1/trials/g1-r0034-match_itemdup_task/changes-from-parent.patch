@@ -1,0 +1,90 @@
+--- g1-r0033-keep_both_match_shared/model.py
++++ g1-r0034-match_itemdup_task/model.py
+@@ -1,13 +1,14 @@
+-"""Shared residual-bank completion of the match-action availability factorial.
+-
+-Raw row 0 and scaled/gated row 4 action availability is inherited from the
+-paired r0032 task-routed source. Only the CONFIG and constructor default for
+-residual_routing change to shared. The existing forward executes every bank
+-member for every task and takes its mean instead of its task-index member.
+-All masks, contractions, action lookup/pool/ordinal paths, learned modules,
+-initialization, auxiliary ownership and the training-loss interface persist.
+-This is an operational routing contrast, not a new architecture claim.
+-Equal nominal parameters do not equate per-task capacity or gradient scale.
+-Numerical and measured-cost checks are reserved for the authorized host.
++"""Item-summary replacement control for match-aligned historical actions.
++
++Only raw match row 0 and scaled/gated match row 4 action coordinates may be
++replaced by sum(item-field summary embeddings)/sqrt(number of item fields).
++The replacement is a fixed linear duplicate of existing item coordinates:
++it adds no raw information, learned state, action-dependent scaling or RNG.
++Other action summaries and the direct action pool remain observed. Original
++availability gates, visibility masks, coefficient construction, compression,
++Dice populations, auxiliary ownership and learned initialization persist.
++Cross content (observed/item_duplicate) with residual readout (task/shared).
++This is conditional attribution, not whole-history action removal or a new
++architecture claim. Static source checks do not replace host tensor checks.
+ """
+ import torch
+@@ -18,5 +19,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'shared', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'none', 'match_action_availability': 'both'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'none', 'match_action_availability': 'both', 'match_action_content': 'item_duplicate'}
+ 
+ 
+@@ -27,5 +28,5 @@
+                  compression_routes='uf', block_aux_scorer_grad=True,
+                  block_aux_context_grad=False, block_aux_item_grad=True, num_tasks=None,
+-                 residual_input='match_detail', residual_routing='shared', residual_hidden=16,
++                 residual_input='match_detail', residual_routing='task', residual_hidden=16,
+                  temporal_detail='position', block_detail='ordinal',
+                  curvature_detail='quadratic', joint_detail='duplicate_match',
+@@ -36,4 +37,5 @@
+                  summary_action_group='all', summary_action_alignment='rotated',
+                  summary_rotation_group='none', match_action_availability='both',
++                 match_action_content='item_duplicate',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -98,4 +100,7 @@
+             raise ValueError('Unknown match-summary action availability')
+         self.match_action_availability = match_action_availability
++        if match_action_content not in ('observed', 'item_duplicate'):
++            raise ValueError('Unknown match-action content replacement')
++        self.match_action_content = match_action_content
+         self.residual_input = residual_input
+         self.residual_routing = residual_routing
+@@ -396,4 +401,8 @@
+         actions = torch.where(active, rotated[:, :, self.key_width:],
+                               aligned[:, :, self.key_width:])
++        # Replacement reads only already-masked item summaries. The observed
++        # branch is an identity, preserving the exact ancestor graph. Apply
++        # availability afterwards so a disabled row can never be restored.
++        actions = self._match_action_content(rotated[:, :, :self.key_width], actions)
+         # Zero only the selected match-action inputs after both full-width
+         # contractions. Item and ordinal paths and observed pool values stay
+@@ -409,4 +418,24 @@
+         actions = torch.where(available, actions, torch.zeros_like(actions))
+         return torch.cat([rotated[:, :, :self.key_width], actions], dim=-1)
++
++    def _match_action_content(self, item_summaries, actions):
++        """Duplicate existing item inputs in raw/scaled match action slots.
++
++        Each row's field embeddings already occur in the residual input.
++        Their fixed sum/sqrt(F) has the action embedding's width. The scale
++        is fixed by field count, never calibrated from observed actions.
++        It is a conditioning/active-input control, not a same-information-
++        rank or same-gradient control. Ordinal action rows remain untouched.
++        FP32 aggregation precedes conversion to the inherited summary dtype.
++        """
++        if self.match_action_content == 'observed':
++            return actions
++        batch, rows, action_width = actions.shape
++        fields = len(self.item_fields)
++        duplicate = item_summaries.reshape(batch, rows, fields, action_width)
++        duplicate = duplicate.float().sum(dim=2) / (fields ** 0.5)
++        selected = torch.tensor((True, False, False, False, True),
++                                device=actions.device, dtype=torch.bool).view(1, 5, 1)
++        return torch.where(selected, duplicate.to(actions.dtype), actions)
+ 
+     def _coarse_extension_coefficients(self, incumbent, position, quadratic,

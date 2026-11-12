@@ -1,0 +1,57 @@
+{
+  "category_edits": [
+    {
+      "category": "feature_construction",
+      "rationale": "Across all four categories, project training log-frequency relative to its observed-prefix mean into historical inputs. Mask padding and checkpoint the frequency buffer. Preserve candidate embeddings, scoring, loss and training settings; update the predictor writer to restore the same feature configuration.",
+      "edits": [
+        {
+          "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+          "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+        },
+        {
+          "find": "class NextItNetModel(nn.Module):\n    def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 8,\n                 kernel_size: int = 3, dropout_rate: float = 0.2, maxlen: int = 128):",
+          "replace": "class NextItNetModel(nn.Module):\n    def __init__(self, itemnum: int, hidden_units: int = 64, num_blocks: int = 8,\n                 kernel_size: int = 3, dropout_rate: float = 0.2, maxlen: int = 128,\n                 item_log_counts: torch.Tensor | None = None):"
+        },
+        {
+          "find": "            nn.init.xavier_uniform_(self.pos_emb.weight)\n            self.pos_emb.weight[0].zero_()\n\n    def encode_sequence",
+          "replace": "            nn.init.xavier_uniform_(self.pos_emb.weight)\n            self.pos_emb.weight[0].zero_()\n        counts = (torch.zeros(itemnum + 1, dtype=torch.float32)\n                  if item_log_counts is None\n                  else item_log_counts.detach().to(dtype=torch.float32).clone())\n        counts[0] = 0.0\n        self.register_buffer(\"item_log_counts\", counts)\n        self.frequency_projection = nn.Linear(1, hidden_units, bias=False)\n        nn.init.normal_(self.frequency_projection.weight, mean=0.0, std=0.02)\n\n    def encode_sequence"
+        },
+        {
+          "find": "        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)\n        x = self.dropout(x)",
+          "replace": "        x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)\n        observed = (seq != 0).to(dtype=x.dtype)\n        log_frequency = self.item_log_counts[seq] * observed\n        prefix_mean = log_frequency.cumsum(dim=1) / observed.cumsum(dim=1).clamp(min=1.0)\n        relative_frequency = (log_frequency - prefix_mean) * observed\n        x = x + self.frequency_projection(relative_frequency.unsqueeze(-1))\n        x = self.dropout(x)"
+        },
+        {
+          "find": "    model = NextItNetModel(\n        itemnum=itemnum,",
+          "replace": "    training_items = np.fromiter(\n        (item for history in user_train.values() for item in history),\n        dtype=np.int64,\n    )\n    training_counts = np.bincount(training_items, minlength=itemnum + 1)\n    item_log_counts = torch.from_numpy(training_counts).float().log1p()\n    item_log_counts[0] = 0.0\n\n    model = NextItNetModel(\n        itemnum=itemnum,\n        item_log_counts=item_log_counts,"
+        },
+        {
+          "find": "        with open(meta_path, \"rb\") as f:\n            meta = pickle.load(f)\n        model = ModelClass(",
+          "replace": "        with open(meta_path, \"rb\") as f:\n            meta = pickle.load(f)\n        state = torch.load(ckpt_path, map_location=\"cpu\", weights_only=True)\n        model = ModelClass("
+        },
+        {
+          "find": "            maxlen=meta[\"maxlen\"],\n        ).to(_device)\n        model.load_state_dict(torch.load(ckpt_path, map_location=_device, weights_only=True))",
+          "replace": "            maxlen=meta[\"maxlen\"],\n            item_log_counts=state[\"item_log_counts\"],\n        ).to(_device)\n        model.load_state_dict(state, strict=True)\n        del state"
+        }
+      ]
+    },
+    {
+      "category": "architecture_interaction",
+      "rationale": "Retain every NextItNet causal convolution and add a jointly trained channel gate to each residual update. Gates use the normalized current-position residual, with zero weights and bias 2 initially, allowing context-dependent updates within each category's single model. The predictor imports this same architecture.",
+      "edits": [
+        {
+          "find": "        self.activation = nn.GELU()\n\n    def _causal_conv",
+          "replace": "        self.activation = nn.GELU()\n        self.residual_gate = nn.Linear(hidden_units, hidden_units)\n        nn.init.zeros_(self.residual_gate.weight)\n        nn.init.constant_(self.residual_gate.bias, 2.0)\n\n    def _causal_conv"
+        },
+        {
+          "find": "        residual = x\n        y = self.norm1(x).transpose(1, 2)",
+          "replace": "        residual = x\n        normalized_residual = self.norm1(x)\n        y = normalized_residual.transpose(1, 2)"
+        },
+        {
+          "find": "        y = self.dropout(y)\n        return residual + y",
+          "replace": "        y = self.dropout(y)\n        gate = torch.sigmoid(self.residual_gate(normalized_residual))\n        return residual + gate * y"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Add causal relative-frequency input features and context-dependent residual gates across all four category models, with checkpoint-consistent prediction. Preserve NextItNet, one checkpoint per category, routing, splits, seeds, loss and training caps."
+}

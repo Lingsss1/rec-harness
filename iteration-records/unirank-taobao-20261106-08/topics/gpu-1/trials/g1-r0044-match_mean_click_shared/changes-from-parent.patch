@@ -1,0 +1,94 @@
+--- g1-r0043-match_rotate_clickpartition_aligned_task/model.py
++++ g1-r0044-match_mean_click_shared/model.py
+@@ -1,10 +1,10 @@
+-"""Function-matched initialization controls for invertible action-summary bases.
+-
+-Rows 0/4 retain stopped observed action content. Transport only their consuming
+-first-layer weight columns after the inherited initialization, preserving the
+-initial function in real arithmetic without additional state or random draws.
+-Swap tests permutation equivariance; Hadamard tests the frozen optimization and
+-numerical system after removing unmatched first-layer initialization.
+-No architecture novelty or locally executed tensor/performance claim is made.
++"""Conditional action-centroid controls for historical-feedback attribution.
++
++Replace only stopped match-action summary rows 0/4 by contractions of the
++blockwise click-stratum means. Compare true and count-matched shifted groups
++under task/shared routing. Original item/ordinal/pool paths and masks survive.
++The rotate operator is retained as an exact-source bridge to round 43.
++Means retain per-stratum action composition; this is not a click-only model.
++Host tensor, numerical and performance checks remain required.
+ """
+ import torch
+@@ -15,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'match', 'match_action_availability': 'both', 'match_action_content': 'observed', 'match_replacement_gradient': 'blocked', 'match_observed_gradient': 'blocked', 'match_action_basis': 'identity', 'match_basis_initialization': 'unchanged', 'summary_rotation_partition': 'click'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'shared', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'match', 'match_action_availability': 'both', 'match_action_content': 'observed', 'match_replacement_gradient': 'blocked', 'match_observed_gradient': 'blocked', 'match_action_basis': 'identity', 'match_basis_initialization': 'unchanged', 'summary_rotation_partition': 'click', 'summary_stratum_operator': 'mean'}
+ 
+ 
+@@ -24,5 +24,5 @@
+                  compression_routes='uf', block_aux_scorer_grad=True,
+                  block_aux_context_grad=False, block_aux_item_grad=True, num_tasks=None,
+-                 residual_input='match_detail', residual_routing='task', residual_hidden=16,
++                 residual_input='match_detail', residual_routing='shared', residual_hidden=16,
+                  temporal_detail='position', block_detail='ordinal',
+                  curvature_detail='quadratic', joint_detail='duplicate_match',
+@@ -37,4 +37,5 @@
+                  match_basis_initialization='unchanged',
+                  summary_rotation_partition='click',
++                 summary_stratum_operator='mean',
+                  match_replacement_gradient='blocked',
+                  match_observed_gradient='blocked',
+@@ -129,4 +130,11 @@
+             raise ValueError('Unknown historical feedback rotation partition')
+         self.summary_rotation_partition = summary_rotation_partition
++        if summary_stratum_operator not in ('rotate', 'mean'):
++            raise ValueError('Unknown within-stratum action operator')
++        if summary_stratum_operator == 'mean':
++            if (summary_rotation_partition == 'unrestricted'
++                    or summary_action_alignment != 'rotated'):
++                raise ValueError('Mean controls require a declared feedback partition')
++        self.summary_stratum_operator = summary_stratum_operator
+         self.click_index = list(feature_map.labels).index('is_click')
+         self.residual_input = residual_input
+@@ -341,8 +349,13 @@
+ 
+     def _stratified_summary_values(self, values, mask, membership):
+-        """Rotate action embeddings within two frozen historical-feedback strata.
+-
+-        Partition membership only restricts a permutation; no mask or event is
+-        added to a consumer. Positive and negative strata are separately packed
++        """Rotate or average actions within two historical-feedback strata.
++
++        Mean mode replaces each valid action by its stratum centroid. This
++        preserves group sums and removes every within-stratum deviation in
++        exact arithmetic. Empty groups use zero; singleton groups are identities.
++        It retains per-stratum auxiliary composition and changes norms/histograms.
++        The rotate bridge below has the original permutation arithmetic.
++        No original mask or event is added to a consumer.
++        Positive and negative strata are separately packed
+         in original valid-rank order within each ten-position block. Each uses
+         a shift of floor(stratum_count/2). Original positions, block boundaries,
+@@ -357,4 +370,22 @@
+         member = membership.bool().reshape(batch, 10, 10) & valid
+         groups = torch.stack((valid & ~member, member), dim=-2)
++        if self.summary_stratum_operator == 'mean':
++            # Orthogonal projection onto blockwise group-constant action values.
++            # No new parameters, tokens or events. The observed pool and ordinal
++            # consumers still receive their inherited unprojected stream.
++            action_width = width - self.key_width
++            actions = values[:, :, self.key_width:].reshape(batch * 10, 10, action_width)
++            # Disable surrounding bf16 autocast for small group reductions;
++            # cast back before the unchanged ancestor summary contractions.
++            with torch.autocast(device_type=values.device.type, enabled=False):
++                group_weights = groups.reshape(batch * 10, 2, 10).float()
++                counts32 = group_weights.sum(dim=-1, keepdim=True)
++                means32 = torch.bmm(group_weights, actions.float()) / counts32.clamp_min(1)
++                projected32 = torch.bmm(group_weights.transpose(1, 2), means32)
++            projected = projected32.to(values.dtype).reshape(batch, 10, 10, action_width)
++            original = actions.reshape(batch, 10, 10, action_width)
++            actions = torch.where(valid.unsqueeze(-1), projected, original)
++            return torch.cat([values[:, :, :self.key_width],
++                              actions.reshape(batch, length, action_width)], dim=-1)
+         ranks = (groups.long().cumsum(dim=-1) - 1).clamp_min(0)
+         counts = groups.long().sum(dim=-1, keepdim=True)

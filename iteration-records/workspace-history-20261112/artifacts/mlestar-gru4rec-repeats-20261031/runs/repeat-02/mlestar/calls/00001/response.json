@@ -1,0 +1,38 @@
+{
+  "directions": [
+    {
+      "description": "Replace single-negative BPR with multi-negative BPR-max to emphasize difficult negatives. This is a GRU4Rec-native improvement from the [Top-k Gains paper](https://arxiv.org/abs/1706.03847), with an [official implementation](https://github.com/hidasib/GRU4Rec_PyTorch_Official/blob/master/gru4rec_pytorch.py). Its benefit on this benchmark remains a validation hypothesis.",
+      "urls": [
+        "https://arxiv.org/abs/1706.03847",
+        "https://github.com/hidasib/GRU4Rec_PyTorch_Official/blob/master/gru4rec_pytorch.py"
+      ],
+      "implementation": "Keep the supplied causal GRU and shifted sequence targets. At positions where pos != 0, compute positive logits p[N] and K negative logits n[N,K] using the same item_emb. Start with K=64 and score regularization beta=0.1; consider K=128 and beta=1.0 only within budget. Use float32 stable loss:\n\nw = torch.softmax(n.float(), dim=-1)\nlog_w = torch.log_softmax(n.float(), dim=-1)\nranking = -torch.logsumexp(log_w + torch.nn.functional.logsigmoid(p.float()[:, None] - n.float()), dim=-1)\nloss = (ranking + beta * (w * n.float().square()).sum(-1)).mean()\n\nExclude padding, the aligned positive, and the user's training interactions from negatives; sample with replacement from eligible IDs so small vocabularies cannot cause an infinite uniqueness loop. Chunk valid positions to bound memory. Keep inference logits unchanged. For this and every direction: DATA_DIR = os.environ['GAGC_DATA_DIR']; retain all four dataset routes, supplied splits, preprocessing seed 0, training seed 42, 200 batches per epoch, and at most 200 epochs. Use one GPU and save exactly one selected model checkpoint per category beneath the trial directory. Preserve sample_batch, item_emb, log2feats(sequence), and predict_score(features, items) compatibility with ModelView. Read the final nonpadding position using masked positional indices, never count-1. Keep the predictor writer and checkpoint architecture synchronized. Select using the pinned validation protocol and macro HR@10; do not fuse trial predictions or use test data."
+    },
+    {
+      "description": "Replace pairwise BPR with categorical cross-entropy, an alternative supported by the [official GRU4Rec implementation](https://github.com/hidasib/GRU4Rec_PyTorch_Official). Test whether competition among many items improves validation HR@10.",
+      "urls": [
+        "https://github.com/hidasib/GRU4Rec_PyTorch_Official",
+        "https://github.com/hidasib/GRU4Rec_PyTorch_Official/blob/master/gru4rec_pytorch.py"
+      ],
+      "implementation": "Retain tied item embeddings and the existing causal GRU. First test exact full-catalog cross-entropy over nonpadding aligned targets, chunking positions to control memory:\n\nfeatures = model.log2feats(seq)\nmask = pos.ne(0)\nh = features[mask]\ny = pos[mask] - 1\nloss = h.new_zeros(())\nfor hc, yc in zip(h.split(256), y.split(256)):\n    logits = hc @ model.item_emb.weight[1:].T\n    loss = loss + torch.nn.functional.cross_entropy(logits.float(), yc, reduction='sum')\nloss = loss / y.numel()\n\nIf catalog size makes exact softmax too expensive, test sampled softmax separately: draw K=512 IID negatives from a known training-only distribution q, retain duplicate draws, and mask accidental target hits. Use the positive score uncorrected and negative logits score - log(K*q[item]); apply cross-entropy with the positive in column zero. This is an importance-sampled approximation, not exact full softmax. Do not apply sampling corrections during inference. Preserve the shared contracts and single-checkpoint selection described in direction 1."
+    },
+    {
+      "description": "Improve negative coverage using tempered popularity sampling. The [GRU4Rec authors' implementation](https://github.com/hidasib/GRU4Rec/blob/master/README.md) supports additional negatives sampled proportionally to training frequency raised to a tunable exponent.",
+      "urls": [
+        "https://arxiv.org/abs/1706.03847",
+        "https://github.com/hidasib/GRU4Rec/blob/master/README.md",
+        "https://github.com/hidasib/GRU4Rec_PyTorch_Official/blob/master/gru4rec_pytorch.py"
+      ],
+      "implementation": "Isolate sampling from loss changes by first retaining the baseline single-negative BPR objective. Construct counts only from user_train:\n\ncounts = torch.zeros(itemnum + 1, dtype=torch.float64)\nfor history in user_train.values():\n    counts.scatter_add_(0, torch.tensor(history), torch.ones(len(history), dtype=torch.float64))\nalpha = 0.5\nq = counts.clamp_min(1).pow(alpha)\nq[0] = 0\nq /= q.sum()\n\nReplace random.randint in negative generation with seeded draws from q, retaining the baseline rejection of the user's training interactions. Precompute a bounded negative buffer to reduce Python overhead; detect users with no eligible negatives rather than looping forever. Compare alpha=0.0 and alpha=0.5, then optionally 0.75. After selecting a sampling distribution, it may be used inside the single BPR-max network from direction 1. Counts determine training samples only and never contribute an inference score. Keep the evaluation candidate sampler untouched and preserve direction 1's contracts."
+    },
+    {
+      "description": "Separate input embedding dropout from GRU output dropout. The [official GRU4Rec network](https://github.com/hidasib/GRU4Rec_PyTorch_Official/blob/master/gru4rec_pytorch.py) exposes both, while the supplied one-layer baseline applies only input dropout.",
+      "urls": [
+        "https://github.com/hidasib/GRU4Rec_PyTorch_Official/blob/master/gru4rec_pytorch.py",
+        "https://github.com/hidasib/GRU4Rec_PyTorch_Official/tree/master/paramspaces",
+        "https://arxiv.org/abs/1511.06939"
+      ],
+      "implementation": "Keep the baseline GRU backbone, tied item embeddings, optimizer, and loss for this ablation. Add independently configured dropout modules:\n\n# __init__ additions\nself.input_dropout = nn.Dropout(input_dropout)\nself.output_dropout = nn.Dropout(output_dropout)\n\n# shared feature path used by training and inference\ndef log2feats(self, sequence):\n    embedded = self.input_dropout(self.item_emb(sequence))\n    features, _ = self.gru(embedded)\n    return self.output_dropout(features)\n\nRoute forward and encode through log2feats so training and prediction use the same feature definition. Start with input_dropout=0.2 and output_dropout=0.1; compare against the baseline (0.1, 0.0), then optionally (0.3, 0.2). Keep hidden size 128 and one GRU layer initially. Dropout must act on GRU outputs without feeding dropped states back into the recurrence. Record both probabilities in category metadata and update the predictor writer to reconstruct those constructor arguments before loading the checkpoint and calling eval(). Preserve direction 1's final-nonpadding readout and all experiment constraints."
+    }
+  ]
+}

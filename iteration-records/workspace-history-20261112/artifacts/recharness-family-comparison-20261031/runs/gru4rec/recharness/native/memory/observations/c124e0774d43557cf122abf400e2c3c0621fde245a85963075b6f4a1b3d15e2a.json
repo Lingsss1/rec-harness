@@ -1,0 +1,92 @@
+{
+  "schema_version": 2,
+  "protocol_id": "63d884e335450b4c7d4c05470c02cfbc484d52d6b839640f603abc93a1b33219",
+  "record": {
+    "round_idx": 17,
+    "trial_group_id": "trialgrp_1793447777127_2865811",
+    "trial_id": 3,
+    "arm": "architecture_interaction",
+    "selected_categories": [
+      "architecture_interaction"
+    ],
+    "patch_summary": "Implement separately layer-normalized GRU gates with scripted recurrence and matching checkpoint/predictor metadata. Retain one model per category and all existing training settings.",
+    "benchmark_score": 0.5975,
+    "val_score": 0.5975,
+    "is_winner": false,
+    "is_group_winner": false,
+    "valid": true,
+    "failure_type": null,
+    "delta_vs_prev_best": -0.0075,
+    "delta_vs_input": -0.0075,
+    "outcome": "regressed",
+    "val_support": "regressed",
+    "gpu_seconds": 2570.5230351537466,
+    "trial_cap_seconds": 5854.898874223232,
+    "per_dataset_hr10": {
+      "Movies_and_TV": 0.65,
+      "Industrial_and_Scientific": 0.635,
+      "Electronics": 0.44,
+      "CDs_and_Vinyl": 0.665
+    },
+    "error": "",
+    "parameter_changes": [],
+    "changed_definitions": [
+      "GRU4RecModel",
+      "GRU4RecModel.__init__",
+      "LayerNormGRU",
+      "LayerNormGRU.__init__",
+      "LayerNormGRU.forward",
+      "_layernorm_gru_steps",
+      "train_one_dataset",
+      "write_predict_script"
+    ],
+    "summary": "Implement separately layer-normalized GRU gates with scripted recurrence and matching checkpoint/predictor metadata. Retain one model per category and all existing training settings.",
+    "proposal_history": [
+      {
+        "attempt": 1,
+        "summary": "Implement separately layer-normalized GRU gates with scripted recurrence and matching checkpoint/predictor metadata. Retain one model per category and all existing training settings."
+      }
+    ],
+    "hypothesis": "Across all four datasets, replace the standard GRU cell with a layer-normalized GRU: apply separate learned LayerNorms to the reset, update and candidate preactivations before their existing nonlinearities, retaining the standard recurrent equations and hidden width. Stabilizing gate scales may improve optimization with unit-normalized inputs without changing candidate compatibility. Preserve features, embeddings, history selection, incumbent causal readout, dot-product scoring, loss and optimizer. Update the predictor writer and checkpoint metadata for this single recurrent model per category.",
+    "input_source_sha256": "a8e47e71c18270bbe947edf6aef97be7f86631980ae0e9ab2e034de39aefea89",
+    "candidate_source_sha256": "184e8713ae3d4661fba2b475f0c955fc01809b62f134e3076e965f59762543ab",
+    "input_normalized_sha256": "aa418c4406e21a0c1d8e14c49cb5d962d5dab49de0150f37353b862f3e8161d8",
+    "candidate_normalized_sha256": "ff954eb4ef48f2f9d5a093f41e0dce1892bed1479c7eb4dbe9da8ebad980cb73",
+    "patch_sha256": "d3d94505704c1e2018478d51d2ed2fff6f1a9f837da98c8884d8789b24f06c00",
+    "diff_excerpt": "--- \n+++ \n@@ -186,4 +186,61 @@\n \n \n+@torch.jit.script\n+def _layernorm_gru_steps(\n+    input_gates: torch.Tensor, hidden: torch.Tensor,\n+    weight_hh: torch.Tensor, bias_hh: torch.Tensor,\n+    reset_weight: torch.Tensor, reset_bias: torch.Tensor,\n+    update_weight: torch.Tensor, update_bias: torch.Tensor,\n+    candidate_weight: torch.Tensor, candidate_bias: torch.Tensor,\n+) -> tuple[torch.Tensor, torch.Tensor]:\n+    outputs = torch.jit.annotate(list[torch.Tensor], [])\n+    width = hidden.size(1)\n+    for step in range(input_gates.size(1)):\n+        ir, iz, inn = input_gates[:, step, :].chunk(3, dim=-1)\n+        hr, hz, hn = torch.nn.functional.linear(hidden, weight_hh, bias_hh).chunk(3, dim=-1)\n+        reset = torch.sigmoid(torch.nn.functional.layer_norm(\n+            ir + hr, [width], reset_weight, reset_bias, 1e-5))\n+        update = torch.sigmoid(torch.nn.functional.layer_norm(\n+            iz + hz, [width], update_weight, update_bias, 1e-5))\n+        candidate = torch.tanh(torch.nn.functional.layer_norm(\n+            inn + reset * hn, [width], candidate_weight, candidate_bias, 1e-5))\n+        hidden = (1.0 - update) * candidate + update * hidden\n+        outputs.append(hidden)\n+    return torch.stack(outputs, dim=1), hidden\n+\n+\n+class LayerNormGRU(nn.GRU):\n+    def __init__(self, *args, **kwargs):\n+        super().__init__(*args, **kwargs)\n+        self.gate_norms = nn.ModuleList([\n+            nn.ModuleList([nn.LayerNorm(self.hidden_size) for _ in range(3)])\n+            for _ in range(self.num_layers)\n+        ])\n+\n+    def forward(self, input: torch.Tensor, hx: torch.Tensor | None = None):\n+        out = input if self.batch_first else input.transpose(0, 1)\n+        if hx is None:\n+            hx = out.new_zeros(self.num_layers, out.size(0), self.hidden_size)\n+        final_states = []\n+        for layer, norms in enumerate(self.gate_norms):\n+            input_gates = torch.nn.functional.linear(\n+                out, getattr(self, f'weight_ih_l{layer}'),\n+                getattr(self, f'bias_ih_l{layer}'))\n+            out, hidden = _layernorm_gru_steps(\n+                input_gates, hx[layer],\n+                getattr(self, f'weight_hh_l{layer}'),\n+                getattr(self, f'bias_hh_l{layer}'),\n+                norms[0].weight, norms[0].bias,\n+                norms[1].weight, norms[1].bias,\n+                norms[2].weight, norms[2].bias,\n+            )\n+            final_states.append(hidden)\n+            if layer + 1 < self.num_layers and self.dropout > 0.0:\n+                out = torch.nn.functional.dropout(out, p=self.dropout, training=self.training)\n+        if not self.batch_first:\n+            out = out.transpose(0, 1)\n+        return out, torch.stack(final_states, dim=0)\n+\n+\n class GRU4RecModel(nn.Module):\n     def __init__(self, itemnum: int, hidden_units: int = 128, num_layers: int = 1,\n@@ -194,6 +251,6 @@\n         self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)\n         dropout = dropout_ra",
+    "category_rationales": [
+      {
+        "category": "architecture_interaction",
+        "rationale": "Replace standard GRU gates with separately learned layer-normalized reset, update and candidate preactivations across all four category models. Preserve recurrent width, embeddings, causal interest readout, dot-product scoring, loss and optimizer. The predictor imports the same model class and checks matching architecture metadata."
+      }
+    ],
+    "baseline_validation": 0.605,
+    "basin_id": "default",
+    "execution_status": "success",
+    "attempt_count": 1,
+    "training_attempt_count": 1,
+    "training_attempts": [
+      {
+        "id": "round-0016-slot-3-attempt-1",
+        "status": "success",
+        "source_sha256": "184e8713ae3d4661fba2b475f0c955fc01809b62f134e3076e965f59762543ab",
+        "allocated_gpu_seconds": 2570.5230351537466,
+        "error": "",
+        "score": 0.5975
+      }
+    ],
+    "checkpoint_fingerprints": {
+      "Movies_and_TV_model.pt": "46aff08bfe12ff2a2e80a18f2fb478fdc3b19195f043635de9c48e1c0177bc70",
+      "Industrial_and_Scientific_model.pt": "d30cf59eb410e243a0eb37eadccc9656b4aed600052638f373807142e02a5fb1",
+      "Electronics_model.pt": "6326ea5fc544633226699750a30cc4a13886453552f3543cd61bc4326486896b",
+      "CDs_and_Vinyl_model.pt": "c2ecc425e27c6e2b4c585613a8f8ae05f74f4486d1f002028d3a98fd5980ea0b"
+    },
+    "repair_errors": [],
+    "phase": "regular",
+    "promoted": false,
+    "provisional": false,
+    "protocol_id": "63d884e335450b4c7d4c05470c02cfbc484d52d6b839640f603abc93a1b33219",
+    "evidence_id": "c124e0774d43557cf122abf400e2c3c0621fde245a85963075b6f4a1b3d15e2a"
+  },
+  "record_sha256": "fb034a435655ad3953b0a66581f58cd86b4b26782873b3780fa210904fc906a8"
+}

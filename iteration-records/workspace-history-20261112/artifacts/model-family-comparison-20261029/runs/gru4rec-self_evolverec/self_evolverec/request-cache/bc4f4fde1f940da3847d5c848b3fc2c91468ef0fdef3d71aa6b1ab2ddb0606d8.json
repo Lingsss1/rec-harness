@@ -1,0 +1,164 @@
+{
+  "request_sha256": "bc4f4fde1f940da3847d5c848b3fc2c91468ef0fdef3d71aa6b1ab2ddb0606d8",
+  "response": {
+    "markdown_report": "The next experiment should test **transition-conditioned GRU retention using training-only pair-gap statistics**, after verifying padding invariance. At 30% progress, compare this small architectural hypothesis against the corrected baseline before expanding the search. The feature describes an item transition’s historical timing; it does not measure a particular user’s current inactivity.\n\nThree starting-point insights guide this choice. First, padding errors exceed 1e-5 in every category, so context interventions require remeasurement after correction. Second, Movies_and_TV has the highest sampled misranking rate (4.92%), but training margins cannot establish validation improvement. Third, matched prefix removal harms measured margins, supporting preservation of potentially useful older context rather than indiscriminate deletion.\n\nThree literature insights suggest complementary directions. [MTAM](https://arxiv.org/abs/2005.08598) motivates temporal information filtering, but uses a different gate and actual intervals. [GRU4Rec’s top-k losses](https://hidasi.eu/assets/pdf/gru4rec_v2_cikm18.pdf) motivate competitive-negative supervision without directly modeling stale interests. [TedRec](https://arxiv.org/abs/2402.18166) cautions that textual and behavioral representations differ; surface similarity cannot establish practical usefulness. Additional interval-based evidence does not establish that item-pair averages substitute for individual gaps.\n\nThe framework separates **state retention**, **ranking supervision**, and **item representation**. Padding correctness underlies all three. Within retention, distinguish observed user intervals from transition statistics: identical item sequences receive identical proxy features regardless of their actual timestamps.\n\nScores give originality / potential / user alignment / model alignment / implementation difficulty, each out of ten; higher difficulty means harder implementation.\n\n| Idea | Scores | Assessment: positive (+), negative (−) |\n|---|---|---|\n| A. Pair-gap-conditioned GRU update gate | 3/5/5/5/7 | O: +controlled adaptation, −established gating; P: +transition-dependent memory, −sparse proxy; U: +targets stale and broad intent, −cannot identify current inactivity; M: +tests context retention, −context evidence remains confounded; D: +one added term, −custom recurrence and controls |\n| B. Uniform-pool BPR-max | 2/6/4/7/3 | O: +direct family fit, −standard loss; P: +competitive ranking, −false-negative risk; U: +stronger alternatives, −no temporal mechanism; M: +targets misranking, −sampled diagnostics; D: +compact loss, −sampling integration |\n| C. Joint title encoder inside GRU | 4/6/6/4/7 | O: +behavior-conditioned semantics, −known fusion; P: +item sharing, −sparse supervision; U: +specific descriptors, −surface resemblance risk; M: +additional evidence, −no diagnosed semantic deficit; D: +single network, −tokenization and auxiliary tuning |\n\n**Select A provisionally.** It explicitly targets older interests persisting after a change in direction and broad historical relatedness displacing specific recent choices, while testing preservation of useful context. These mechanisms remain hypotheses; it cannot establish compatibility or redundant ownership. Use a genuinely bounded gate offset initialized at zero. Preserve full histories and baseline training settings.\n\nFirst compare the verified baseline with A, then affordable transition-count and permuted-pair controls. Actual-gap experiments require consistent timestamp access in training, diagnostics and prediction. Select solely through pinned macro validation HR@10. Remeasure padding errors and matched-context wrong rates; report proxy coverage and compute costs. Retain one independently trained GRU checkpoint per category with an identical embedded predictor.",
+    "idea": {
+      "description": "Test one GRU4Rec per category whose update gate receives a bounded offset derived from training-only adjacent-item-pair gap statistics and an explicit availability indicator. Initialize the added parameters to zero, preserving the padding-verified baseline recurrence. Describe this as transition-conditioned retention, not user-specific temporal adaptation. Keep the baseline objective, sampler and optimizer fixed.",
+      "motivation": "The hypothesis explicitly targets two observed user-facing failures: older interests remaining influential after behavior changes, and broadly related historical interests displacing specific recent matches. A transition-dependent update may let the GRU revise historical state differently for different newly observed interactions while retaining useful context. The model-facing target is context-dependent ranking robustness: matched prefix removal worsened sampled margins and wrong rates, suggesting that blanket context deletion needs stronger justification. These observations remain confounded until padding verification passes. Pair-gap statistics cannot distinguish users with identical item sequences but different actual intervals, and neither these statistics nor timestamp conditioning establish compatibility, ownership needs or purchase readiness. BPR-max remains the simpler fallback research direction if proxy coverage or computational feasibility is poor; it is a separate experiment rather than an additional simultaneous change.",
+      "implementation_notes": "Integrate into the supplied corrected baseline; its source and exact GRU configuration were not included, so this is an implementation specification rather than a standalone train.py. Preserve its preprocessing, splits, architecture dimensions, activation, projection, scoring, loss reduction, optimizer, sampler and checkpoint rules unless a separately declared experimental condition changes them. Record the resolved configuration and prespecified comparison order before execution.\n\nThe original proposal had two substantive gaps. beta*tanh(g) does not bound the offset when beta is unconstrained, and population item-pair gaps are not observed user-specific intervals. Replace that parameterization with offset=A*tanh(v)*f, where A=1 is fixed, v is a trainable hidden-dimension vector initialized to zero, and |f|<=1. This guarantees an absolute offset no greater than one per dimension. Do not attribute this equation to MTAM: MTAM uses a distinct temporal gate multiplying retained history. Do not impose a monotonic-decay sign constraint; older information can remain useful.\n\nConstruct deterministic features exclusively from adjacent events in chronological training histories, using the supplied timestamp unit explicitly rather than guessing it from magnitude. Convert timestamps to seconds before computing elapsed days. An interval is valid only when both endpoints parse successfully and the later timestamp is at least the earlier one. Equal timestamps are observed zero gaps; invalid, missing or negative intervals are unavailable. Preserve supplied interaction ordering when timestamps tie or are invalid. Record missing, invalid, nonmonotonic and zero-gap counts. Never use the next prediction target's timestamp, held-out interactions or held-out labels to construct a feature.\n\nFor every valid adjacent training pair (i,j), aggregate g=log1p(delta_seconds/86400) into its arithmetic mean and valid-observation count. Store ordered pair keys, means and counts as sparse sorted checkpoint buffers; avoid an item_count-squared dense table. Use collision-free keys based on the saved vocabulary size and int64 arithmetic, checking overflow. At runtime, use searchsorted with explicit bounds and key-equality checks. Missing pairs have mean zero and availability m=0; observed zero-gap pairs have mean zero and m=1. These fixed descriptive buffers do not produce recommendation scores and are not an independently fitted predictor.\n\nSet scale s to the median strictly positive g among valid training intervals, or 1.0 if none exists. Save s, the exact median convention, time unit and feature version. Define f=m*tanh(pair_mean_g/s), with m=0 for the first real event and for unavailable pairs. The separate availability contribution is A*tanh(v_missing)*(1-m), with its own zero-initialized vector. To preserve the stated total bound, combine the mutually exclusive branches as offset=A*(m*tanh(v_gap)*tanh(pair_mean_g/s)+(1-m)*tanh(v_missing)). Neutralize both branches at the first real event because there is no preceding observed transition. Padding is distinct from unavailable timing and receives no recurrent update. This distinguishes an unavailable interval from an observed zero interval without inventing elapsed time. The missingness branch may learn transition coverage shortcuts, so its contribution requires an explicit ablation. Inspect training gap quantiles and the fraction of transformed values above 0.95; normalization precedes tanh, but saturation remains measurable.\n\nTraining, diagnostics and inference must use precisely the same pair lookup. Do not train on actual individual gaps and replace them with pair averages at inference. The sequence-only log2feats(sequence) interface cannot recover an individual's timestamps when histories are identical; pair statistics resolve interface compatibility by changing the scientific hypothesis. If an existing host timestamp side channel can supply actual observed-prefix timestamps consistently in all three paths while preserving ModelView, a separate actual-gap condition may be implemented. Otherwise defer that condition. Do not silently change host signatures, use target timestamps or infer unavailable current-time gaps.\n\nPreserve PyTorch's GRU equations and gate order r,z,n: r=sigmoid(ir+hr), z=sigmoid(iz+hz+offset), n=tanh(inn+r*hn), and h_new=(1-z)*n+z*h_old. Here hn includes the recurrent candidate bias. Preserve the supplied layer arrangement, input/output transformations and dropout conventions; PyTorch multilayer dropout applies between recurrent layers, excluding the final layer. For multilayer models, give each existing recurrent layer its own zero-initialized conditioning vectors while using the same deterministic pair feature. Do not introduce a second recurrent expert or score fusion.\n\nPadding must preserve every layer's prior state and previous real item ID. Emit zero aligned features at padding positions and preserve B x L log2feats(sequence). Select the maximum nonpadding index, never count-1, with explicit zero-feature treatment for empty histories. If repairing the ordinary baseline through packing, first compact valid inputs chronologically to the beginning, pack only nonempty rows with CPU lengths and enforce_sorted=False, and restore aligned outputs without a second unsort. Do not pack the original left-padded tensor.\n\nBefore experimental training, set all added vectors to zero, disable dropout, copy inherited parameters and compare valid outputs, final states, input gradients and inherited parameter gradients against the padding-verified baseline. Check empty and singleton rows, full histories, unsorted and tied lengths, mixed/all-empty batches, batch permutations, different companions and added leading padding. Require eval-mode valid features and candidate scores to agree within absolute tolerance 1e-5; record gradient tolerances separately with dtype and numerical backend. Added parameter gradients need not match a baseline that lacks those parameters. A tolerance failure requires investigation, not a relaxed claim of parity. Preserve scoring transformations in both implementations.\n\nA custom timestep loop can lose fused GRU efficiency. Measure warmed-up forward/backward throughput and peak memory on representative training batches before committing a full four-category condition. Include any compilation overhead and diagnostics in the shared GPU budget. Precomputing input projections or compiling pointwise operations are optional optimizations requiring parity checks and measured benefit; installed compiler support is not assumed. If the full condition is unaffordable, record that outcome and defer it rather than reducing category coverage or silently changing training settings.\n\nCompare the padding-verified baseline and proposed condition first. If the host budget permits mechanistic controls, use the same recurrence with m*tanh(log1p(pair_count)/s_count), where s_count is the training median positive log1p count with fallback 1.0, and separately permute pair means within exact valid-count groups while preserving keys, counts and availability. Use a dedicated analysis RNG seeded 42 and save permutations. Singleton count groups remain unchanged and must be reported. A random-feature control uses one saved Uniform(0,1) value per observed pair with the same dimensionality and availability. These controls ask whether gains arise from pair identity, coverage or support rather than interval statistics. Each condition is independently evaluated and never combined at prediction. Actual-gap shuffling across fixed interaction positions, and within-pair shuffling where support permits, are conditional later controls requiring a consistent actual-gap interface. Sequence shuffling changes transitions and cannot isolate timing.\n\nReport training pair counts, valid timing coverage, singleton fraction, support-bin definitions and transformed-gap saturation. On allowed validation input histories, report lookup coverage and host-provided per-user hit outcomes by the final observed pair's support, if those outcomes are exposed. Predefine support bins as unavailable, count 1, counts 2-4 and count at least 5; counts refer to valid training intervals. Do not modify the evaluator to acquire unavailable results. Sparse bins, conditional training statistics and coverage correlations cannot establish timing causality. Whole-training pair summaries can encode transition support and global historical regularities; call them training-derived statistics rather than per-prefix causal measurements. A genuinely historical causal claim would additionally require prefix-only or time-block-fitted statistics as a separate experiment.\n\nKeep preprocessing seed 0, training seed 42, at most 200 epochs and 200 batches per epoch. Retain Movies_and_TV, Industrial_and_Scientific, Electronics and CDs_and_Vinyl. DATA_DIR remains os.environ['GAGC_DATA_DIR']; write every artifact beneath the trial directory. Use one GPU and count training, diagnostics, compilation and failed trials against 43,200 GPU-seconds. Prespecify affordable comparisons, reserving capacity for all categories. Preserve baseline validation cadence, initialization matching where applicable, example streams and checkpoint tie-breaking. Select solely through unchanged host macro validation HR@10 with 200 users/category, 99 unique negatives and evaluation seed 42. Record all attempted conditions, category outcomes and actual compute. Do not interpret small adaptively selected gains as established generalization; if paired per-user host hits are available, a seed-42 stratified paired bootstrap may describe uncertainty conditional on the fixed models and candidate sets, without correcting adaptive selection.\n\nEach category loads exactly one independently trained selected GRU checkpoint, including all architecture parameters and deterministic feature buffers. No ensemble, checkpoint averaging, independently fitted score components, other-trial checkpoints, extra datasets or pretrained weights are allowed. Update the embedded predictor writer whenever the recurrence or features change and verify checkpoint round-trip feature/score parity. Preserve routing and full-catalog unseen-item recommendations for twenty designated real training users, five per category, as qualitative supporting evidence rather than another selection metric.\n\nPreserve family-specific sample_batch and ModelView interfaces: view.model is the actual trained nn.Module, with item_emb, log2feats(sequence), predict_score(features, items), user_train, meta_data and review_data. Public diagnostic batches remain (None, sequence, positive, negative), tensors B x L. DiagnosisProbe(view, device).run_full_diagnosis(train_loader) must return metrics and metric_definitions; diagnosis_interpreter_prompt(raw_diagnosis) must incorporate measured values and definitions. Remeasure padding errors, paired wrong-rate changes and margins with matched examples after verification. Distinguish proxy-gap strata from actual timestamp strata; unavailable measurements remain null. Larger margins can reflect score scaling, embedding alignment is not recommendation diversity, and increased context sensitivity is not evidence of more useful intent modeling. Only public histories, titles, descriptions and timestamps are available; generic metadata examples do not authorize ratings, reviews, categories, prices, stores or simulator traits.",
+      "pseudocode": "import torch\nimport torch.nn.functional as F\n\n# Integration specification: preserve supplied splits, loops and model configuration.\n# Fit only from allowed adjacent TRAINING events; timestamp units are explicit.\n# Store sparse ordered-pair keys, valid counts, mean log1p elapsed-day gaps,\n# availability, training scale, vocabulary size and feature version in checkpoint.\n# All runtime paths use these identical buffers, never individual training gaps.\n\ndef bounded_offset(pair_mean_g, available, has_previous, scale,\n                   v_gap, v_missing, amplitude=1.0):\n    # available distinguishes an observed zero gap from unavailable timing.\n    m = available.to(pair_mean_g.dtype)\n    gap_feature = torch.tanh(pair_mean_g / scale)\n    offset = amplitude * (\n        m[:, None] * torch.tanh(v_gap) * gap_feature[:, None]\n        + (1.0 - m[:, None]) * torch.tanh(v_missing)\n    )\n    return offset * has_previous[:, None].to(offset.dtype)\n\n\ndef conditioned_gru_step(x, h, offset, w_ih, w_hh, b_ih, b_hh):\n    ir, iz, inn = F.linear(x, w_ih, b_ih).chunk(3, dim=-1)\n    hr, hz, hn = F.linear(h, w_hh, b_hh).chunk(3, dim=-1)\n    reset = torch.sigmoid(ir + hr)\n    update = torch.sigmoid(iz + hz + offset)\n    candidate = torch.tanh(inn + reset * hn)  # hn includes recurrent bias\n    return (1.0 - update) * candidate + update * h\n\n\ndef log2feats(sequence):\n    # Abstract helpers below inherit the supplied baseline's exact layout.\n    # Added v_gap and v_missing vectors are initialized to zero per layer.\n    states = inherited_zero_layer_states(sequence.shape[0])\n    previous_id = sequence.new_zeros(sequence.shape[0])\n    outputs = []\n    for t in range(sequence.shape[1]):\n        current_id = sequence[:, t]\n        valid = current_id.ne(0)\n        has_previous = previous_id.ne(0) & valid\n        mean_g, available = sparse_training_pair_lookup(previous_id, current_id)\n        x = inherited_input_embedding(current_id)\n        for layer in range(number_of_inherited_layers):\n            offset = bounded_offset(\n                mean_g, available, has_previous, saved_training_scale,\n                v_gap[layer], v_missing[layer])\n            proposed = inherited_parameter_conditioned_step(\n                layer, x, states[layer], offset)\n            states[layer] = torch.where(valid[:, None], proposed, states[layer])\n            x = states[layer]\n            if layer + 1 < number_of_inherited_layers:\n                x = inherited_between_layer_dropout(x)\n        features = inherited_output_projection(states[-1])\n        outputs.append(torch.where(valid[:, None], features,\n                                   torch.zeros_like(features)))\n        previous_id = torch.where(valid, current_id, previous_id)\n    if not outputs:\n        return inherited_empty_length_features(sequence)\n    return torch.stack(outputs, dim=1)\n\n\ndef final_features(sequence, aligned_features):\n    if sequence.shape[1] == 0:\n        return aligned_features.new_zeros((sequence.shape[0], feature_dimension))\n    positions = torch.arange(sequence.shape[1], device=sequence.device)\n    last = torch.where(sequence.ne(0), positions[None, :], -1).amax(dim=1)\n    selected = aligned_features[\n        torch.arange(sequence.shape[0], device=sequence.device), last.clamp_min(0)]\n    return torch.where(last[:, None].ge(0), selected, torch.zeros_like(selected))\n\n# Before training:\n# 1. Verify or repair padding invariance in the supplied ordinary GRU.\n# 2. Verify neutral conditioned-cell outputs, states and inherited gradients.\n# 3. Measure representative throughput, memory, feature coverage and saturation.\n# 4. Prespecify budget-feasible four-category comparisons and validation schedule.\n# Preserve baseline loss, sampler, optimizer, seeds and 200x200 training limits.\n# Save one selected checkpoint/category; update and round-trip-test predictor writer.\n# Use only pinned host macro validation HR@10 for selection.\n# Add count/permutation/random-feature controls only if budget permits.\n# Keep diagnostic APIs and report proxy timing separately from actual timing.",
+      "originality": {
+        "score": 3,
+        "positive": "Makes an interface-compatible transition-statistic conditioning hypothesis explicit and supplies falsifiable controls for timing versus transition support.",
+        "negative": "Time-conditioned recurrent gating and transition features are established; the proposal is an engineering adaptation rather than a new temporal modeling principle."
+      },
+      "future_potential": {
+        "score": 5,
+        "positive": "Could identify whether transition-dependent retention merits later study using consistently available individual timestamps.",
+        "negative": "No supplied result validates the proxy, sparse coverage may limit its effect, and identical item histories remain indistinguishable despite different user timing."
+      },
+      "code_difficulty": {
+        "score": 7,
+        "positive": "Adds a small number of jointly trained gate parameters and deterministic sparse buffers while retaining one GRU predictor.",
+        "negative": "Faithful custom recurrence and gradient parity, missingness handling, sparse lookup, throughput constraints, diagnostic controls and embedded predictor consistency require substantial integration."
+      }
+    },
+    "related_work": [
+      {
+        "title": "MTAM (2020)",
+        "link": "https://arxiv.org/abs/2005.08598",
+        "contributions": [
+          "Provides a precedent for time-aware recurrent information filtering using observed intervals.",
+          "Uses a temporal gate on retained history rather than the proposed bounded update-logit offset."
+        ],
+        "limitations": [
+          "Does not establish gains for this modification or the pinned Amazon benchmark.",
+          "Does not validate population pair-gap averages as substitutes for individual intervals.",
+          "Its findings caution against assuming that useful historical information should decay monotonically."
+        ]
+      },
+      {
+        "title": "Recurrent Neural Networks with Top-k Gains for Session-based Recommendations",
+        "link": "https://hidasi.eu/assets/pdf/gru4rec_v2_cikm18.pdf",
+        "contributions": [
+          "Introduces ranking objectives including BPR-max that emphasize competitive negatives in GRU recommendation."
+        ],
+        "limitations": [
+          "Ranking-loss changes alone do not explicitly model temporal shifts.",
+          "Hard-negative emphasis can penalize unlabeled relevant items.",
+          "Does not establish superiority under the pinned benchmark."
+        ]
+      },
+      {
+        "title": "TedRec (2024)",
+        "link": "https://arxiv.org/abs/2402.18166",
+        "contributions": [
+          "Studies differences and alignment between textual and item-ID representations."
+        ],
+        "limitations": [
+          "Does not establish effectiveness of a small randomly initialized title encoder inside this GRU baseline.",
+          "Textual similarity does not establish compatibility or immediate usefulness."
+        ]
+      },
+      {
+        "title": "DeepTimeDelta",
+        "link": "https://repository.tudelft.nl/record/uuid%3A34ffc4b0-6c61-4649-a628-9d1f7b9fa846",
+        "contributions": [
+          "The supplied search summary describes recurrent recommendation using actual interaction gaps and reported benefits after longer inactivity."
+        ],
+        "limitations": [
+          "Does not establish equivalence between individual intervals and item-pair mean gaps.",
+          "Reported findings do not establish transfer to the pinned four-category evaluation."
+        ]
+      },
+      {
+        "title": "TUR",
+        "link": "https://www.comp.hkbu.edu.hk/~lichen/download/Yongxin_WISE22.pdf",
+        "contributions": [
+          "Incorporates observed adjacent-event intervals and elapsed time to recommendation into recurrent gates."
+        ],
+        "limitations": [
+          "Elapsed time to recommendation requires an available inference-time reference.",
+          "Does not validate item-transition average gaps as individual temporal evidence."
+        ]
+      },
+      {
+        "title": "An Analysis of Sequential Recommendation Datasets",
+        "link": "https://ceur-ws.org/Vol-2955/paper8.pdf",
+        "contributions": [
+          "Examines timestamp ambiguity and sequence-shuffling issues in sequential recommendation datasets."
+        ],
+        "limitations": [
+          "Sequence shuffling changes item transitions as well as temporal relationships and cannot isolate gap information.",
+          "Does not validate this proposed gate or its proxy features."
+        ]
+      },
+      {
+        "title": "PyTorch GRU documentation",
+        "link": "https://docs.pytorch.org/docs/main/generated/torch.nn.GRU.html",
+        "contributions": [
+          "Specifies gate equations, parameter ordering and multilayer dropout behavior needed for faithful implementation."
+        ],
+        "limitations": [
+          "Implementation documentation does not establish recommendation quality.",
+          "Custom cells require numerical and gradient parity verification."
+        ]
+      },
+      {
+        "title": "PyTorch pack_padded_sequence documentation",
+        "link": "https://docs.pytorch.org/docs/main/generated/torch.nn.utils.rnn.pack_padded_sequence.html",
+        "contributions": [
+          "Documents packed sequence execution and length handling for variable-length recurrent inputs."
+        ],
+        "limitations": [
+          "Left-padded inputs must first be compacted chronologically.",
+          "Empty histories require separate handling."
+        ]
+      },
+      {
+        "title": "GRU-D",
+        "link": "https://www.nature.com/articles/s41598-018-24271-9",
+        "contributions": [
+          "Supports explicitly representing observation availability alongside elapsed-time features."
+        ],
+        "limitations": [
+          "Its evidence concerns clinical missingness rather than recommendation timestamps.",
+          "Does not validate a missingness gate or pair-gap proxy for this task."
+        ]
+      },
+      {
+        "title": "Optimizing CUDA RNN with TorchScript",
+        "link": "https://pytorch.org/blog/optimizing-cuda-rnn-with-torchscript/",
+        "contributions": [
+          "Discusses performance considerations and optimization opportunities for custom recurrent computation."
+        ],
+        "limitations": [
+          "Speedups depend on implementation, software version and workload.",
+          "Compilation and benchmarking costs count against the search budget."
+        ]
+      },
+      {
+        "title": "PyTorch GRU compiler issue",
+        "link": "https://github.com/pytorch/pytorch/issues/167275",
+        "contributions": [
+          "Illustrates version-dependent compiler limitations relevant to recurrent execution."
+        ],
+        "limitations": [
+          "An issue report does not determine support in the installed environment.",
+          "Compilation must be checked rather than assumed."
+        ]
+      },
+      {
+        "title": "PyTorch compiler profiling documentation",
+        "link": "https://docs.pytorch.org/docs/main/user_guide/torch_compiler/torch.compiler_profiling_torch_compile.html",
+        "contributions": [
+          "Provides guidance for measuring compilation and runtime behavior."
+        ],
+        "limitations": [
+          "Profiling guidance does not guarantee that compilation improves this custom GRU workload."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/model-family-comparison-20261029/runs/gru4rec-self_evolverec/self_evolverec/calls/00875"
+}

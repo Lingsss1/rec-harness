@@ -1,0 +1,147 @@
+{
+  "request_sha256": "9aed59f79c4b80dc0538cb4433032d3ab9441f7c567ed888f99af98e81980dfe",
+  "response": {
+    "markdown_report": "At 0% progress, prioritize **a gated recent-history residual trained with BPR-max**, conditional on a loss-only control. Benefits remain hypotheses requiring validation.\n\n**Insights from the starting point.** (1) Users reject revived older interests; a recent-history pathway could emphasize current intent, although recency can also amplify noise. (2) Broadly related products and weakly connected media displace stronger matches; recent item-level evidence may provide a narrower preference signal, but cannot establish equipment compatibility, functional redundancy or mood. (3) Electronics has 9.7% negative-over-positive comparisons and a 0.0265 tenth-percentile margin. These motivate ranking optimization; embedding scores near 0.5 do not establish collapse.\n\n**Insights from related work.** (1) [GRU4Rec](https://hidasi.eu/assets/pdf/gru4rec_v2_cikm18.pdf) motivates BPR-max for competing sampled negatives; native sampling differs from the proposed history-filtered adapter. (2) [MTAM](https://arxiv.org/abs/2005.08598) motivates temporal intent modeling, while [NARM](https://arxiv.org/abs/1711.04725) and [HGN](https://arxiv.org/abs/1906.09217) provide closer precedents for local/global representations and gating. None establishes this raw-embedding residual’s benefit. (3) [CLA-Rec](https://ieeexplore.ieee.org/document/10884256/) motivates semantic alignment, without establishing scratch-text GRU gains. (4) [Recency-bias evidence](https://arxiv.org/abs/2409.09722) cautions that stronger recency is not necessarily better.\n\n**Framework and directions.** Organize interventions by the evidence they change:\n\n| Direction | Existing mechanism | Compatible experiment | Principal gap |\n|---|---|---|---|\n| Intent representation | Temporal recurrence; local/global aggregation | Gated recent-history residual | Recency need not imply relevance |\n| Ranking objective | BPR-max | Multiple sampled competitors | Unknown false negatives; sampler dependence |\n| Item representation | Text–interaction alignment | Joint scratch text encoder | Sparse text supervision; lexical shortcuts |\n\n**Candidate assessment.** Scores are originality/potential/user alignment/model alignment/difficulty, each 0–10; higher difficulty means harder implementation. Ratings express research judgment, not measured gains.\n\n1. **BPR-max alone: 2/7/4/9/3.** Established objective; reusable baseline; may reduce distracting competitors; directly targets weak separation; modest changes. Limited novelty, uncertain transfer, no explicit current-intent mechanism, scale-sensitive diagnostics and careful sampling remain drawbacks.\n2. **Recent-residual GRU plus BPR-max: 4/7/8/9/6 — selected.** A useful constrained combination; extensible intent pathway; explicitly targets stale-interest revival and weak immediate connections; addresses Electronics separation; feasible incremental architecture. Established components limit novelty, excessive recency can hurt, compatibility remains unobserved, false negatives remain, and sampling/predictor consistency add implementation work. Potential is reduced from 8 and difficulty increased from 5 to reflect these risks.\n3. **Scratch text–ID alignment: 5/6/7/5/7.** Constraint-compatible adaptation; reusable representations; may connect media identities; could improve sparse-item separation; feasible jointly trained encoder. Novelty is uncertain, text supervision may be insufficient, lexical overlap can reproduce broad relevance, ranking benefits are indirect, and tokenization adds complexity.\n\n**Selected implementation.** At each valid position, add a gated projection of the last five observed item embeddings to the causal GRU state. Use a near-closed initial gate and BPR-max with 32 history-filtered uniform negatives. This targets two observed user failures—revived older interests and weak immediate connections—and the measured low-tail separation failure; it does not guarantee resolution.\n\nKeep the supplied baseline control, then test loss-only and combined changes using identical sampling in the two modified runs. If budget permits, test pooling-only, last-item dependence and a parameter-matched GRU-state MLP control; none contributes scores to the deployed predictor. Inspect gate saturation and branch norms for shortcuts. Preserve four routes, one checkpoint per category, seeds 0/42, maximum 200 epochs and 200 batches/epoch.\n\nSelect solely by pinned macro validation HR@10. [Sampled metrics](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/) do not establish full-catalog quality. Report paired hit changes and exploratory paired-user bootstrap intervals when host outputs permit: one net hit changes category HR by 0.5 percentage points and macro HR by 0.125 points. These intervals exclude training/candidate variability and adaptive-selection bias. Log every trial, avoid isolated-peak claims, and reserve confirmation for the host’s untouched evaluation.",
+    "idea": {
+      "description": "Train one GRU4Rec network per category with a jointly learned recent-history residual and BPR-max ranking loss. At every valid position, combine the causal GRU hidden state with a projection of the mean embeddings of the last five observed items through a sigmoid gate. All recommendation scores come from this single jointly trained network. Evaluate a loss-only modification before attributing improvements to the residual.",
+      "motivation": "The residual gives recent coherent behavior a direct influence on predictions, explicitly targeting revived older interests and broadly related but weakly connected recommendations. BPR-max emphasizes sampled competitors to address weak separation, particularly Electronics’ measured 9.7% wrong-order rate. These are plausible mechanisms rather than demonstrated improvements. Neither component establishes compatibility, functional redundancy, quantity needs or mood from unavailable attributes. Embedding similarity scores near 0.5 provide no justification for adding an embedding-collapse penalty.",
+      "implementation_notes": "Modify the supplied corrected baseline; preserve preprocessing, splits, routing, artifact paths and DATA_DIR = os.environ['GAGC_DATA_DIR']. Use only public histories, titles, descriptions and observed timestamps. Do not access unavailable reviews, ratings, prices, stores, item-category attributes, simulator traits or hidden test information. Keep preprocessing seed 0, training seed 42, maximum epochs 200 and batches per epoch 200, including the host SASREC_EPOCHS environment override. Run each trial on one GPU and charge all training/debugging/diagnostics to the shared 43,200 GPU-second budget.\n\nInitial shared hyperparameters across categories: recent window 5, 32 uniform negative draws per valid target, and BPR-max negative-score regularization coefficient 0.01. Retain the corrected baseline’s optimizer, dimensions, dropout, batch size and checkpoint-selection schedule; record their resolved values in the trial configuration. The projection and gate map baseline embedding/hidden dimensions into the existing scoring-feature dimension. Use a bias-free residual projection and an elementwise sigmoid gate with zero-initialized weights and bias -2. This near-closed initialization is a hypothesis, not an established optimum. Initially preserve baseline branch scaling and normalization rather than introducing additional normalization changes.\n\nPool causally over positions max(0,t-4) through t, excluding padding and including the current observed input item. Never include positive[t] in that window through a shifted input construction. Skip padding updates in the GRU exactly as in the corrected baseline; mask fused padding features to zero. Read out at the maximum index with sequence != 0, never count-1. Retain the corrected baseline’s explicit empty-history behavior.\n\nFor each valid training target, sample 32 negatives independently with replacement, uniformly from real item IDs excluding padding, that target and the user’s observed training-history items. Preserve duplicate draws and their multiplicity; do not deduplicate. This is a deliberate departure from native GRU4Rec sampling, which uses shared frequency-weighted draws and in-batch targets without these exclusions. History filtering uses training data only and does not eliminate unknown false negatives. Use sorted user-item membership keys and vectorized GPU search/masking with bounded replenishment, followed by exact eligible-set sampling for unresolved rows. Avoid unbounded Python rejection loops. If no eligible item exists, skip that position and record its count; never invent a negative.\n\nCompute BPR-max with negative-only softmax weights, in float32: ranking = -logsumexp(log_softmax(negative_scores) + logsigmoid(positive_score - negative_scores)). Add 0.01 times the softmax-weighted squared negative scores. Gradients flow through both occurrences of the weights. Do not replace this with weighted mean log-sigmoid loss, detach weights, or substitute embedding regularization. Use raw finite scores consistently; no additional ELU or official epsilon floor is introduced. Reduce over valid positions having valid negatives. Chunk gathered sampled-item embeddings and scores to control O(N*32*D) memory; accumulate sums divided by the total number of eligible positions so chunk sizes do not change weighting. Never construct full-catalog training logits.\n\nRetain log2feats(sequence), item_emb and predict_score(features, items), returning fused per-position features from log2feats and preserving the shared scoring contract. Put exactly the same model definition, hyperparameters, scoring behavior and state-dict keys in the embedded predictor writer. Each category loads exactly one independently trained selected checkpoint; do not average checkpoints, scores or models. Experimental controls are alternative trials, never components of a deployed ensemble.\n\nPreserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), returning metrics and metric_definitions, and diagnosis_interpreter_prompt(raw_diagnosis). view.model remains the actual trained nn.Module; retain all host ModelView interfaces. Measure margins through fused features and predict_score. Preserve existing definitions, report unavailable metadata breakdowns as unavailable, and optionally add clearly defined gate-saturation and residual/state norm metrics. Gate saturation can be the fraction of valid gate components below 0.05 or above 0.95; norm ratio can be mean ||gate*residual||2/(||GRU_state||2+1e-8). Raw margin improvements can reflect score-scale changes and do not prove HR@10 gains.\n\nMinimum attribution sequence: corrected baseline, BPR-max-only with the specified sampler, then residual plus identical BPR-max/sampler. This separates the residual effect from the combined loss/sampling change, but does not identify loss versus sampling effects. Additional controls, only if budget permits, include a pooling-only alternative, last-item-only pooling, excluding the last item, shuffling earlier inputs while preserving the last, and a parameter-matched GRU-state MLP. Shuffling is an inference sensitivity probe rather than an accuracy-preserving transformation. Fixed/learned gates, normalization and gate initialization are secondary ablations, not an unrestricted search grid. Keep the GRU backbone in all deployed candidates.\n\nUse identical pinned validation users/candidates and equal category weighting. Record paired baseline-only/new-only hits when the host exposes them; compute paired-user bootstrap intervals within category only from available validation outcomes. Their interpretation is conditional on fitted models and fixed candidates, assumes independent sampled users, and excludes seed/candidate variability. Repeated selection on 800 users makes winning validation gains optimistic; ordinary intervals do not correct this. Retain the host checkpoint schedule, log all attempted settings and avoid changing selection frequency after seeing results. Confirmatory claims await the host’s untouched final evaluation. No tools were run and no validation improvement is claimed.",
+      "pseudocode": "class RecentResidualGRU(corrected_GRU4Rec):\n    initialize:\n        W_recent = bias_free_projection(embedding_dim, feature_dim)\n        W_gate = linear(hidden_dim + feature_dim, feature_dim)\n        W_gate.weight = 0\n        W_gate.bias = -2\n\n    log2feats(sequence):\n        valid = sequence != 0\n        x = item_emb(sequence)\n        h = corrected_causal_GRU_skipping_padding_updates(x, valid)\n        recent = causal_masked_window_mean(x, valid, window=5)\n        residual = W_recent(recent)\n        gate = sigmoid(W_gate(concat(h, residual)))\n        return (h + gate * residual) * valid[..., None]\n\n    predict_score(features, items):\n        return corrected_baseline_shared_item_scoring(features, items)\n\nfor category in FOUR_SUPPLIED_CATEGORIES:\n    initialize_one_model(seed=42)\n    retain_baseline_optimizer_and_selection_schedule()\n    for epoch in range(resolved_host_epochs_capped_at_200):\n        for step in range(200):\n            users, (_, sequence, positive, supplied_negative) = family_sample_batch_with_internal_user_ids()\n            features = model.log2feats(sequence)\n            keep = (sequence != 0) & (positive != 0)\n            negatives, eligible = sample_uniform_with_replacement(\n                users, positive, count=32,\n                exclude_padding=True,\n                exclude_target=True,\n                exclude_observed_training_history=True,\n                preserve_duplicates=True)\n            keep = keep & eligible\n            if count(keep) == 0:\n                continue\n            optimizer.zero_grad()\n            for chunk in chunks_of_valid_positions(keep):\n                pos = model.predict_score(features[chunk], positive[chunk]).float()\n                neg = model.predict_score(features[chunk], negatives[chunk]).float()\n                logw = log_softmax(neg, dim=-1)\n                ranking = -logsumexp(logw + logsigmoid(pos[:, None] - neg), dim=-1)\n                penalty = 0.01 * sum(exp(logw) * square(neg), dim=-1)\n                # Preserve the shared graph until the final chunk.\n                backward(sum(ranking + penalty) / count(keep), retain_graph=not_last_chunk)\n            apply_baseline_gradient_clipping_and_optimizer_step()\n        apply_unchanged_host_validation_and_checkpoint_schedule()\n    save_one_selected_checkpoint_and_matching_predictor()\n\nprediction(sequence, candidates):\n    features = model.log2feats(sequence)\n    final_index = maximum_position_where_sequence_is_nonzero(sequence)\n    handle_empty_histories_using_corrected_baseline_behavior()\n    return model.predict_score(features[row, final_index], candidates)\n\n# Diagnosis loaders still yield exactly (None, sequence, positive, negative).\n# Training user IDs remain internal to sampling; do not change that adapter interface.\n# Baseline, loss-only and combined variants are alternative trials, never fused.",
+      "originality": {
+        "score": 4,
+        "positive": "Combines a lightweight gated raw-embedding recent-history pathway with a directly relevant GRU ranking objective under a single jointly trained predictor constraint; the supplied references do not establish an exact architectural match.",
+        "negative": "BPR-max, local/global preference representations and gating are established. NARM and HGN narrow the novelty claim to this particular residual formulation and constrained application; absence of an exact match is not proof of novelty."
+      },
+      "future_potential": {
+        "score": 7,
+        "positive": "Provides a small, testable foundation for studying how recurrent and recent preferences interact across product and media domains, with clear loss-only and shortcut controls.",
+        "negative": "Excessive recency can harm ranking, scratch interaction representations cannot establish compatibility or functional redundancy, and sampled validation gains may not transfer to full-catalog recommendations."
+      },
+      "code_difficulty": {
+        "score": 6,
+        "positive": "Adds causal pooling, two projections and a stable sampled ranking objective while preserving the GRU backbone and existing feature/scoring interfaces.",
+        "negative": "Efficient history-filtered sampling, duplicate semantics, chunked gradients, padding behavior, diagnostic adaptation and exact embedded-predictor/checkpoint consistency require more work than the architectural change alone suggests."
+      }
+    },
+    "related_work": [
+      {
+        "title": "Recurrent Neural Networks with Top-k Gains for Session-based Recommendations",
+        "link": "https://hidasi.eu/assets/pdf/gru4rec_v2_cikm18.pdf",
+        "contributions": [
+          "Introduces ranking objectives including BPR-max that emphasize high-scoring sampled competitors for recurrent recommendation.",
+          "BPR-max applies the logarithm to a negative-softmax-weighted sum of pairwise sigmoid probabilities and regularizes weighted squared negative scores."
+        ],
+        "limitations": [
+          "Does not establish gains on the supplied four-category Amazon benchmark or directly address current user intent.",
+          "Native sampling differs from the proposed history-filtered uniform adapter; the adaptation must not be described as an exact reproduction."
+        ]
+      },
+      {
+        "title": "Official GRU4Rec PyTorch implementation",
+        "link": "https://github.com/hidasib/GRU4Rec_PyTorch_Official/blob/master/gru4rec_pytorch.py",
+        "contributions": [
+          "Provides executable BPR-max loss and sampling semantics, including gradients through negative-only softmax weights.",
+          "Uses shared additional sampling and minibatch targets; repeated item columns retain multiplicity in weighting."
+        ],
+        "limitations": [
+          "Its collision handling, frequency-based sampling, optional score activation and numerical floor differ from the explicitly specified adapter.",
+          "Implementation fidelity does not establish effectiveness under this host’s fixed evaluation protocol."
+        ]
+      },
+      {
+        "title": "MTAM: Multi-hop Time-aware Attentive Memory Network for Next-item Recommendation",
+        "link": "https://arxiv.org/abs/2005.08598",
+        "contributions": [
+          "Uses temporal recurrent mechanisms and memory to model sequential preferences."
+        ],
+        "limitations": [
+          "Does not validate the proposed position-based recent-history residual, which avoids changing the sequence-only inference interface."
+        ]
+      },
+      {
+        "title": "CLA-Rec",
+        "link": "https://ieeexplore.ieee.org/document/10884256/",
+        "contributions": [
+          "Studies alignment between description-derived semantic representations and collaborative representations."
+        ],
+        "limitations": [
+          "Its pretrained semantic representations and Transformer backbone do not satisfy this experiment’s constraints or establish scratch-text GRU benefits."
+        ]
+      },
+      {
+        "title": "Neural Attentive Session-based Recommendation",
+        "link": "https://arxiv.org/abs/1711.04725",
+        "contributions": [
+          "Combines a final GRU state with attention-pooled recurrent states to represent global and local session preferences.",
+          "Reports hybrid-versus-component comparisons supporting investigation of complementary representations."
+        ],
+        "limitations": [
+          "Its local representation still uses recurrent states and does not establish that a gated mean of raw recent item embeddings improves GRU4Rec."
+        ]
+      },
+      {
+        "title": "Hierarchical Gating Networks for Sequential Recommendation",
+        "link": "https://arxiv.org/abs/1906.09217",
+        "contributions": [
+          "Provides a precedent for feature and instance gating of recent-item representations."
+        ],
+        "limitations": [
+          "Does not establish the effectiveness or novelty of this specific GRU residual combination."
+        ]
+      },
+      {
+        "title": "Repetition and Exploration in Sequential Recommendation",
+        "link": "https://staff.fnwi.uva.nl/m.derijke/wp-content/papercite-data/pdf/li-2023-repetition.pdf",
+        "contributions": [
+          "Documents repetition shortcuts and repetitive bias, including effects associated with shared input/output embeddings."
+        ],
+        "limitations": [
+          "Repeat-item bias is not direct evidence of last-item dependence in the proposed model.",
+          "Separating output embeddings would introduce another architectural change and is not included in the initial experiment."
+        ]
+      },
+      {
+        "title": "Measuring Recency Bias in Sequential Recommendation",
+        "link": "https://arxiv.org/abs/2409.09722",
+        "contributions": [
+          "Provides evidence that excessive recency emphasis can harm recommendation accuracy."
+        ],
+        "limitations": [
+          "Does not determine the optimal residual window, gate initialization or normalization for this benchmark."
+        ]
+      },
+      {
+        "title": "On Sampled Metrics for Item Recommendation",
+        "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+        "contributions": [
+          "Shows that sampled ranking metrics can reverse full-catalog model comparisons.",
+          "Clarifies why fixed sampled candidates improve comparability without eliminating sampling bias."
+        ],
+        "limitations": [
+          "Does not justify altering the pinned host evaluator; its relevance is to qualifying conclusions."
+        ]
+      },
+      {
+        "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+        "link": "https://www.jmlr.org/beta/papers/v11/cawley10a.html",
+        "contributions": [
+          "Explains how optimizing noisy validation estimates produces selection bias."
+        ],
+        "limitations": [
+          "Ordinary paired confidence intervals do not correct repeated adaptive selection on the same validation users."
+        ]
+      },
+      {
+        "title": "The Reusable Holdout: Preserving Validity in Adaptive Data Analysis",
+        "link": "https://arxiv.org/abs/1506.02629",
+        "contributions": [
+          "Explains risks from repeated adaptive use of held-out data."
+        ],
+        "limitations": [
+          "Its specialized holdout mechanisms are not introduced here because the host evaluation protocol is fixed."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/model-family-comparison-20261029/runs/gru4rec-self_evolverec/self_evolverec/calls/00089"
+}

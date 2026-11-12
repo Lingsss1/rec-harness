@@ -1,0 +1,75 @@
+--- g3-r0030-joint_replay/model.py
++++ g3-r0033-product_context_only/model.py
+@@ -1,9 +1,11 @@
+-"""Prospective auxiliary-supervision controls on the frozen joint model.
+-
+-All representation operators, learned modules, initialization, normalization
+-populations and forward outputs are inherited. Only the training objective
+-and the existing auxiliary adapter context-gradient gate vary. A within-batch
+-cyclic label replacement is a negative control, not a valid-label task model.
+-No predictive or mechanism result is claimed; host execution is required.
++"""Prospective two-path auxiliary context-gradient factorial.
++
++Both existing adapters always execute with identical values and private-task
++learning. Two independent training-only stop-gradient gates act on shared
++context inputs, after the inherited common adapter gate. Click gradients,
++historical action inputs, all four true-label BCE terms, native Dice state,
++capacity, initialization and inference operators are inherited unchanged.
++This is path attribution, not gradient-conflict measurement or a new forward
++architecture. Tensor and sparse-gradient checks require the authorized host.
+ """
+ import torch
+@@ -14,7 +16,7 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16}
+-
+-# Prospective module-local loss intervention, not a host recipe override.
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False}
++
++# Identical true-label joint loss hook inherited from g3-r0032 sources.
+ AUXILIARY_OBJECTIVE = 'joint'
+ 
+@@ -37,4 +39,6 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16,
++                 block_aux_residual_context_grad=True,
++                 block_aux_product_context_grad=False,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -63,4 +67,10 @@
+         self.block_aux_tower_context_grad = block_aux_tower_context_grad
+         self.block_aux_adapter_context_grad = block_aux_adapter_context_grad
++        if (not isinstance(block_aux_residual_context_grad, bool)
++                or not isinstance(block_aux_product_context_grad, bool)):
++            raise ValueError('Adapter-specific context gates must be booleans')
++        # Plain metadata only: no modules, buffers, RNG or parameter changes.
++        self.block_aux_residual_context_grad = block_aux_residual_context_grad
++        self.block_aux_product_context_grad = block_aux_product_context_grad
+         if context_fusion not in ('product', 'sum'):
+             raise ValueError('Unknown context/history fusion operator')
+@@ -818,7 +828,16 @@
+                 if self.block_aux_tower_context_grad:
+                     tower_context = tower_context.detach()
++            # Split only the two context input edges. The master adapter gate
++            # above remains effective; private adapter parameters never detach.
++            residual_context = adapter_context
++            product_context = adapter_context
++            if self.training and label != 'is_click':
++                if self.block_aux_residual_context_grad:
++                    residual_context = residual_context.detach()
++                if self.block_aux_product_context_grad:
++                    product_context = product_context.detach()
+             signal = torch.cat([task_detail, task_position_detail, task_block_detail,
+                                 task_curvature_detail, task_joint_detail], dim=-1)
+-            residual_features = torch.cat([adapter_context, task_target, base,
++            residual_features = torch.cat([residual_context, task_target, base,
+                                            match_counts.to(base.dtype), signal], dim=-1)
+             # Task routing is required by __init__. Each adapter still
+@@ -834,5 +853,5 @@
+             history_features = torch.cat([base, match_counts.to(base.dtype), signal], dim=-1)
+             correction = correction + self._context_history_correction(
+-                index, adapter_context, history_features)
++                index, product_context, history_features)
+             pooled = base + has_history * correction
+             features = torch.cat([tower_context, task_target, pooled], dim=-1)

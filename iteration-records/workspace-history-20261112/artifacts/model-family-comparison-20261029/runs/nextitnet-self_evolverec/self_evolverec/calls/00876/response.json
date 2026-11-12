@@ -1,0 +1,121 @@
+{
+  "markdown_report": "**Recommendation:** add a bounded, candidate-paired, loss-faithful gradient audit to the existing NextItNet diagnostics. At 20% progress, prioritize reproducible measurements; treat saturation as a hypothesis generator rather than a validated predictor of sampling gains.\n\n**Insights from the starting point.** First, training pairwise accuracy reaches 98–99% in three categories. This motivates inspecting negative difficulty but cannot establish saturation or generalization. Second, Industrial endpoint effective rank is approximately 6.7 versus 27–28 elsewhere. Concentration warrants investigation without establishing defective ranking. Third, nested candidate sets control competition while fixing targets. Training-prefix results remain descriptive because fitting may have optimized those targets.\n\n**Insights from related work.** gSASRec addresses sampled-BCE overconfidence, a different mechanism from easy-negative saturation [1]. Sampling research finds popularity-dependent tradeoffs under full-catalog evaluation, limiting transfer to the pinned benchmark [2]. Gradient-conflict research motivates separating magnitude and cancellation, but attention-specific findings do not establish NextItNet failures [3]. SRNS motivates robustness to potentially false negatives without validating saturation as a predictor of sampler gains [4].\n\n**Framework and directions.** Organize diagnosis around three questions:\n\n| Direction | Measurement | Remaining gap |\n|---|---|---|\n| Candidate competition | Nested ranks and exact-pool calibration | Are training negatives informative? |\n| Optimization signal | Loss-faithful derivatives and contribution cancellation | Do measurements add information beyond logits? |\n| Context mechanism | Controlled temporal perturbations | Does sensitivity reflect useful relevance? |\n\n**Candidate ideas.** Scores are originality/potential/difficulty, each out of ten; higher difficulty means harder implementation.\n\n| Idea | Scores | Positive assessment | Negative assessment |\n|---|---|---|---|\n| Paired gradient audit [1,2] | 3/6/5 | Reuses candidates; makes objective fidelity explicit | Derivatives largely restate logits or margins; faithful integration needs care |\n| Modest semi-hard-negative training [2,4] | 3/7/5 | Feasible direct intervention with ranking potential | Established approach; false negatives and popularity shifts complicate attribution |\n| Controlled block activation patching | 5/6/7 | Potentially informative context localization | Corruption-sensitive and substantially harder to implement |\n\n**Selected algorithm.** Freeze at most 64 identified training users/category, one valid prefix target/user, and 99 unique negatives using local seed 42. Reuse candidate-audit examples only when eligibility and sampling match the baseline; otherwise retain separate panels.\n\nAverage 99 baseline-equivalent pair losses, preserving masking, weights, reduction and any factor ½. For BCE, use `softplus(-s_pos) + mean(softplus(s_neg))`; for BPR, use `mean(softplus(s_neg-s_pos))`, before baseline scaling. Averaging all 100 BCE labels changes class weighting. Unique uniform sampling preserves expectation only against a matching uniform baseline distribution.\n\nReport unreduced derivatives, hard-negative tails, feature/embedding norms, separate feature-gradient contributions and cancellation. BCE saturation below 0.01 is descriptive; BPR derivatives are determined by margins. Detached-feature norms depend on coordinates and omit encoder pathways. Do not infer optimizer updates from them.\n\nRun in evaluation mode with local autograd, detached scoring inputs, no optimizer steps, restored module modes and RNG states. Preserve final-nonpadding readout, interfaces, four routes and one checkpoint/category. Unknown objectives yield null metrics. Record runtime and counts. Any later matched uniform-versus-semi-hard experiment must control negative count, compute, loss, exclusions and popularity composition, and earn acceptance through unchanged macro validation HR@10. No improvement is demonstrated.\n\nReferences: [1] https://arxiv.org/abs/2308.07192; [2] https://arxiv.org/abs/2410.17276; [3] https://ise.thss.tsinghua.edu.cn/~mlong/doc/Long-Sequence-Recommendation-ICLR25.pdf; [4] https://papers.nips.cc/paper_files/paper/2020/hash/0c7119e3a6a2209da6a5b90e5b5b75bd-Abstract.html",
+  "idea": {
+    "description": "Extend the existing NextItNet candidate-depth audit with paired, loss-faithful measurements of local optimization signal. Preserve the baseline negative distribution and objective in expectation where feasible, distinguish score derivatives from feature-gradient cancellation, and explicitly test whether these diagnostics add information beyond logits and margins before using them to motivate training changes.",
+    "motivation": "Strong sampled training separation does not establish useful optimization or held-out ranking. However, BCE derivatives are deterministic functions of logits and BPR derivatives are deterministic functions of margins, so saturation statistics alone provide no independent mechanistic evidence. A bounded audit can document negative difficulty, weighting errors and local contribution cancellation while avoiding unsupported claims about representation failure, user intent, optimizer behavior or future semi-hard-sampling gains.",
+    "implementation_notes": "Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), diagnosis_interpreter_prompt(raw_diagnosis), sample_batch and all ModelView interfaces. Preserve view.model as the actual trained nn.Module and retain view.item_emb, log2feats(sequence), predict_score(features, items), user_train, meta_data and review_data. Use only public training histories and available titles, descriptions and timestamps; unavailable ratings, reviews, item categories, prices, stores and simulator traits remain unavailable.\n\nObtain the actual baseline scorer, objective, masking, example weights, negative distribution, exclusions, reduction and regularization specification explicitly from the supplied implementation. Do not infer BCE from margins or substitute an unknown loss. If faithful reproduction is unsupported, return objective-dependent metrics as null with reasons. Separate data-loss diagnostics from regularization; do not multiply a regularizer by the number of sampled pairs.\n\nSelect at most 64 identified training users/category with a local seed-42 generator. Sort mapped user IDs deterministically before sampling. For each selected history with at least two interactions, use the final training interaction as target and its preceding interactions as prefix, applying baseline truncation and left padding. Preserve the baseline policy for repeated targets; document whether exclusion rules use the prefix or complete training history. These targets may have influenced fitting. Report original and retained lengths, selection counts and skip reasons. Do not infer independent users from anonymous loader rows.\n\nFreeze 99 unique eligible negative IDs per user only when the declared pool supports that count. Record candidate IDs, user IDs, target IDs, eligibility rules and sampling specification in trial-local artifacts. Reuse candidate-depth examples only when their targets, exclusions, support and sampling distribution match. A smaller eligible pool is reported as ineligible for the 99-negative panel rather than silently duplicated or padded. Baseline-equivalent gradient estimation and candidate-depth ranking may require separate panels.\n\nFor a matching uniform baseline, average losses over the unique uniform sample. Before baseline-specific scaling, BCE is softplus(-s_positive) plus the mean of softplus(s_negative); BPR is the mean of softplus(s_negative-s_positive). Preserve any baseline factor of one half, valid-position masking, example weights and batch/position normalization. This is an expectation-preserving diagnostic for one-negative pair training, not an assertion that the original sampler produced the same realized examples. Averaging BCE across one positive and 99 negatives as 100 equally weighted labels changes positive:negative weighting; summing changes gradient scale. Joint sampled softmax is a different objective. For a nonuniform baseline, preferably draw independent negatives from its actual distribution and allow repeated IDs in a separate gradient panel. Importance weighting requires known matching support and p0/q for independent draws; unique sampling requires known inclusion probabilities. Do not improvise self-normalized weights or unknown inclusion corrections. Unsupported sampling fidelity produces null baseline-equivalence metrics.\n\nExtract endpoint features in evaluation mode under no_grad, selecting the largest nonzero sequence index and skipping empty prefixes. Preserve every module's original training flag, restore flags in finally, and preserve global Python, NumPy, Torch CPU and relevant CUDA RNG states. Use a local generator. Under enable_grad, detach endpoint features and learned scoring tensors, enabling gradients only on local feature copies and score intermediates. Reproduce the actual scorer, including learned bias, normalization or temperature when present; check reproduced logits against view.predict_score on the identical features/items using atol=1e-6 and rtol=1e-5. A mismatch invalidates derivative metrics. Use autograd.grad without parameter .grad accumulation, backward, optimizer steps, clipping, scheduler changes or checkpoint changes.\n\nReport raw unreduced per-pair score derivatives separately from coefficients after candidate averaging and baseline weighting, since a factor of 1/99 can create artificial apparent saturation. Report positive and negative derivatives, quantiles, hard-negative tails, finite counts, margins and ties. For ordinary unweighted BCE only, report positive and negative fractions with absolute unreduced derivative below 0.01; explicitly label this arbitrary threshold descriptive and not a calibration test. BCE negative derivatives equal sigmoid(s_negative); BPR pair derivatives have magnitude sigmoid(s_negative-s_positive). Consequently these measures largely summarize logits or margins and cannot independently establish sampling failure.\n\nFor dot-product scoring, calculate per-pair positive and negative feature-gradient contributions, their norms, cosine and cancellation ratio ||g_positive+g_negative||/(||g_positive||+||g_negative||). Return null cosine when either norm vanishes and null ratio when their norm sum is zero. Report per-pair contribution statistics separately from the norm after averaging negatives, and report the mean per-user gradient norm separately from the norm of the across-user mean. Include endpoint-feature and scoring-embedding norm quantiles. For a different supported scorer, obtain corresponding local contributions by autograd and state their definition rather than assuming dot-product algebra. Reciprocal feature/embedding rescaling can preserve dot-product logits while changing feature-gradient norms, so these norms are coordinate-dependent. Such a scoring-level identity is not a claim that rescaling tied embeddings preserves the complete encoder.\n\nDetached-feature gradients omit the encoder Jacobian and tied embedding input pathways. They cannot diagnose full-backbone gradient conflict, clipping, Adam updates or learning progress. Full-backward layer/pathway diagnostics and measured optimizer steps are optional future experiments requiring separate authorization within the training design and remaining budget; they are not prerequisites silently added to this bounded audit. If undertaken later, preserve examples, reduction and precision, measure gradients before clipping and after mixed-precision unscaling, and measure actual and relative parameter steps rather than treating raw gradients as updates.\n\nStratify by training-derived target-frequency bins and original history lengths 1-10, 11-25 and 26+, recording exact frequency cutpoints, tie rules and cell counts. Use the same defined strata across paired comparisons; do not interpret tiny cells as stable estimates. Return metrics and metric_definitions with populations, normalization, missingness, objective identity, candidate fidelity and limitations. Existing user bootstrap intervals remain conditional on fitted models and fixed candidates and exclude training-seed, candidate-sampling and adaptive-search uncertainty. No diagnostic result establishes held-out ranking, ownership, compatibility or latent preferences.\n\nBound the audit to the declared user/candidate cap and record synchronized GPU runtime, precision and forward/scoring counts. Keep diagnostics outside production inference. Preserve the corrected NextItNet backbone, preprocessing seed 0, training seed 42, maximum 200 epochs, 200 batches/epoch, DATA_DIR=os.environ['GAGC_DATA_DIR'], trial-local artifacts, supplied splits, single-GPU execution and all four category routes: Movies_and_TV, Industrial_and_Scientific, Electronics and CDs_and_Vinyl. Retain exactly one independently trained checkpoint per category, no score fusion and no additional fitted predictor. Inference and its existing predictor writer remain unchanged.\n\nTreat any subsequent semi-hard sampler as a separate, predeclared training hypothesis. Compare it with uniform sampling under matched negative count, objective, exclusions, compute allocation and training-derived popularity composition, reporting any unavoidable mismatch. Unobserved items can be false negatives. Diagnostic added value requires prospective evidence beyond baseline logits, margins and candidate ranks; four category observations alone cannot establish predictive validity. Select only through the pinned macro validation HR@10 with unchanged users/candidates/evaluator, never hidden tests. Limit adaptive validation reuse and report the number of tried configurations. The current audit claims neither a sampling improvement nor a proven saturation mechanism.",
+    "pseudocode": "run_full_diagnosis(train_loader):\n    retain existing bounded diagnostics and metric definitions\n    save every module mode and global RNG states\n    initialize local seed-42 generator and runtime accounting\n    try:\n        set actual NextItNet model to evaluation mode\n        obtain explicit scorer/loss/sampler/masking/reduction specification\n        if faithful specification is unavailable:\n            record null objective-dependent metrics with reasons\n        else:\n            deterministically select up to 64 identified training users\n            for each user:\n                target = last training interaction\n                prefix = preceding interactions under baseline truncation/padding\n                apply baseline repeated-target and exclusion policies\n                freeze 99 unique negatives when a matching uniform pool permits\n                otherwise construct a separately documented baseline-distribution panel\n                skip unsupported cases with explicit reasons\n            save selected examples and sampling metadata inside this trial\n            under no_grad:\n                H = view.log2feats(left_padded_prefixes)\n                h = gather H at largest nonzero sequence indices\n                reference_logits = view.predict_score(h, fixed_items)\n            under enable_grad:\n                h_local = detach(h).requires_grad_(True)\n                reproduce scorer with detached learned scoring parameters\n                verify logits against reference_logits\n                if verification fails:\n                    record derivative metrics unavailable\n                else:\n                    form baseline-equivalent pair data losses\n                    preserve actual masks, weights, reduction and scaling\n                    average pair losses using valid sampling weights\n                    obtain unreduced derivatives and weighted coefficients separately\n                    obtain per-pair and averaged local feature-gradient contributions\n                    compute norms, defined cosines and cancellation ratios\n                    do not call backward or optimizer.step\n            report BCE threshold fractions only for ordinary unweighted BCE\n            aggregate logits, margins, derivative tails, norm controls and finite counts\n            report user-level summaries and declared frequency/length strata\n            distinguish coordinate-dependent local gradients from encoder gradients\n    finally:\n        restore every original module mode and global RNG state\n        synchronize and record diagnostic runtime\n    return {'metrics': measurements_or_null_with_reasons,\n            'metric_definitions': populations_normalization_scope_and_limitations}\n\ndiagnosis_interpreter_prompt(raw_diagnosis):\n    include measured metrics, definitions, counts and unavailable fields\n    distinguish fitted-training discrimination, candidate competition and local gradients\n    explain that BCE/BPR derivatives are functions of logits/margins\n    distinguish contribution cancellation from derivative saturation\n    prohibit claims of optimizer behavior, validation gains or proven sampling failure\n    prohibit inferred latent intent, ownership or compatibility\n    propose at most one bounded NextItNet training intervention for later validation",
+    "originality": {
+      "score": 3,
+      "positive": "Integrates baseline-equivalent candidate averaging, explicit sampling fidelity and local contribution-cancellation controls into the existing NextItNet audit.",
+      "negative": "The estimators follow established loss definitions and gradient algebra; BCE and BPR saturation summaries largely re-express logits or margins."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "Can expose diagnostic weighting mistakes and characterize negative difficulty and cancellation before committing scarce training budget.",
+      "negative": "No supplied evidence shows incremental prediction of sampling gains beyond logits and ranks; fitted-training measurements may mainly reflect memorization."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "Needs no retraining, extra checkpoint or production architecture change, and detached features bound autograd cost.",
+      "negative": "Exact sampler/loss fidelity, scorer verification, unreduced versus weighted derivatives, cancellation accounting and state restoration require more integration than the earlier rating implied."
+    }
+  },
+  "related_work": [
+    {
+      "title": "gSASRec",
+      "link": "https://arxiv.org/abs/2308.07192",
+      "contributions": [
+        "Analyzes overconfidence arising from inflated positive prevalence under negative-sampled BCE.",
+        "Combines more negatives with generalized BCE and evaluates ranking outcomes."
+      ],
+      "limitations": [
+        "Overconfidence is distinct from easy-negative gradient saturation.",
+        "Does not validate saturation as a predictor of subsequent semi-hard-sampling gains or demonstrate the mechanism in the supplied NextItNet."
+      ]
+    },
+    {
+      "title": "Evaluating Performance and Bias of Negative Sampling",
+      "link": "https://arxiv.org/abs/2410.17276",
+      "contributions": [
+        "Compares negative samplers and reports accuracy/popularity tradeoffs.",
+        "Motivates training-frequency strata and matched sampling comparisons."
+      ],
+      "limitations": [
+        "Full-catalog evaluation differs from pinned 99-negative HR@10.",
+        "Sampler outcome comparisons do not establish that gradient saturation predicts gains.",
+        "History exclusion does not certify remaining items as true negatives."
+      ]
+    },
+    {
+      "title": "Long-Sequence Recommendation Models Need Decoupled Embeddings",
+      "link": "https://ise.thss.tsinghua.edu.cn/~mlong/doc/Long-Sequence-Recommendation-ICLR25.pdf",
+      "contributions": [
+        "Measures directional disagreement and magnitude imbalance between embedding-gradient pathways in attention-based recommendation.",
+        "Motivates directly examining optimization pathways instead of inferring failure from representation concentration."
+      ],
+      "limitations": [
+        "Its attention-specific mechanism is not established for NextItNet.",
+        "Detached-feature diagnostics do not reproduce full parameter-gradient conflict analysis."
+      ]
+    },
+    {
+      "title": "Simplify and Robustify Negative Sampling for Implicit Collaborative Filtering",
+      "link": "https://papers.nips.cc/paper_files/paper/2020/hash/0c7119e3a6a2209da6a5b90e5b5b75bd-Abstract.html",
+      "contributions": [
+        "Proposes robust negative sampling using prediction behavior and variance.",
+        "Motivates accounting for false-negative risks when selecting informative negatives."
+      ],
+      "limitations": [
+        "Does not establish saturation's incremental predictive value beyond logits, margins or ranks.",
+        "Results do not guarantee benefits for NextItNet under the pinned evaluator."
+      ]
+    },
+    {
+      "title": "The Impact of Neural Network Overparameterization on Gradient Confusion and Stochastic Gradient Descent",
+      "link": "https://proceedings.mlr.press/v119/sankararaman20a.html",
+      "contributions": [
+        "Studies gradient confusion and relationships between gradient directions.",
+        "Supports distinguishing substantial opposing contributions from small individual derivatives."
+      ],
+      "limitations": [
+        "Does not validate the proposed recommender diagnostic or establish that observed cancellation harms ranking.",
+        "Local scorer cancellation differs from full-network sample-gradient confusion."
+      ]
+    },
+    {
+      "title": "Using the Output Embedding to Improve Language Models",
+      "link": "https://aclanthology.org/E17-2025/",
+      "contributions": [
+        "Analyzes input/output embedding tying and associated updates.",
+        "Motivates distinguishing scoring and input/encoder pathways when parameters are shared."
+      ],
+      "limitations": [
+        "Language-model evidence does not establish a NextItNet optimization failure.",
+        "Detached scoring gradients omit the shared embedding's encoder contribution."
+      ]
+    },
+    {
+      "title": "PyTorch autograd documentation",
+      "link": "https://docs.pytorch.org/docs/stable/autograd.html",
+      "contributions": [
+        "Documents automatic differentiation and gradient computation APIs.",
+        "Supports local derivative extraction without accumulating model parameter gradients."
+      ],
+      "limitations": [
+        "API correctness alone does not ensure faithful scorer, loss or sampling reproduction."
+      ]
+    },
+    {
+      "title": "PyTorch Adam documentation",
+      "link": "https://docs.pytorch.org/docs/stable/generated/torch.optim.Adam.html",
+      "contributions": [
+        "Specifies moment estimates, normalization, epsilon and weight-decay behavior governing updates.",
+        "Explains why raw gradient magnitude alone cannot determine optimizer step magnitude."
+      ],
+      "limitations": [
+        "The proposed audit does not measure actual optimizer steps or reconstruct training-time optimizer dynamics."
+      ]
+    }
+  ]
+}

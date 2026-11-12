@@ -1,0 +1,37 @@
+{
+  "category_edits": [
+    {
+      "category": "interaction_mechanism",
+      "rationale": "Learn residual bilinear compatibility s(h,e)=hᵀ(I+W)e with W initialized to zero. Preserve the Transformer, history readout, score scale and BCE loss, and use the same trained compatibility matrix during validation and inference.",
+      "edits": [
+        {
+          "find": "        self.last_layernorm = nn.LayerNorm(hidden_units, eps=1e-8)",
+          "replace": "        self.last_layernorm = nn.LayerNorm(hidden_units, eps=1e-8)\n        self.bilinear_residual = nn.Parameter(torch.zeros(hidden_units, hidden_units))"
+        },
+        {
+          "find": "        pos_logits = (log_feats * pos_embs).sum(dim=-1)\n        neg_logits = (log_feats * neg_embs).sum(dim=-1)",
+          "replace": "        score_feats = log_feats + log_feats.matmul(self.bilinear_residual)\n        pos_logits = (score_feats * pos_embs).sum(dim=-1)\n        neg_logits = (score_feats * neg_embs).sum(dim=-1)"
+        },
+        {
+          "find": "        final_feat = log_feats[:, -1, :]\n        item_embs = self.item_emb(candidates)",
+          "replace": "        final_feat = log_feats[:, -1, :]\n        final_feat = final_feat + final_feat.matmul(self.bilinear_residual)\n        item_embs = self.item_emb(candidates)"
+        },
+        {
+          "find": "        m.load_state_dict(torch.load(ckpt_path, map_location=_device, weights_only=True))",
+          "replace": "        state = torch.load(ckpt_path, map_location=_device, weights_only=True)\n        if \"bilinear_residual\" not in state:\n            raise RuntimeError(f\"Missing trained bilinear compatibility matrix: {ckpt_path}\")\n        m.load_state_dict(state, strict=True)"
+        }
+      ]
+    },
+    {
+      "category": "training_strategy",
+      "rationale": "Reduce the bound peak learning rate to 0.7 times the incumbent value to stabilize joint adaptation of bilinear compatibility and the Transformer. Retain Adam, 5% warmup, cosine decay, batch size, seeds and the 200-epoch cap.",
+      "edits": [
+        {
+          "find": "_hpo_os.environ['SASREC_LR'] = '0.0008271288698095746'",
+          "replace": "_hpo_os.environ['SASREC_LR'] = '0.0005789902088667022'"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Add zero-initialized residual bilinear scoring and reduce peak learning rate by 30%. Preserve one jointly trained SASRec checkpoint per category, all four dataset routes, and existing evaluation."
+}

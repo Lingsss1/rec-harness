@@ -1,0 +1,142 @@
+--- g2-r0011-recent_occupied/model.py
++++ g2-r0012-recent_reverse/model.py
+@@ -1,15 +1,16 @@
+-"""Prospective temporal partition x scorer-population factorial.
+-
+-Only occupied summaries enter the scorer's existing Dice/BatchNorm in the
+-occupied cells. Dense cells replay the inherited operator. Means, exact mass,
+-all 100 visible events, scorer/tower parameters, initialization order and
+-auxiliary gradient ownership remain inherited. Empty-slot target copies can
+-otherwise affect the normalization of occupied slots, even though their own
+-pooled contributions have zero mass. This study tests that confound; it does
+-not assume that the observed recent-partition advantage is an information
+-retention effect. No novelty or new empirical result is claimed.
+-
+-All numerical checks and training are host-only. Boolean compaction can incur
+-GPU synchronization and must be charged in measured wall time and latency.
++"""Count-matched attribution of temporal compression resolution.
++
++A 2x2 factorial crosses recent/equal widths with chronological/stratum_reverse
++content placement. Reversal moves complete item/action vectors only among valid
++positions in the SAME inherited auxiliary-union stratum. Padding, every stratum
++mask, and all 30 per-sample summary counts are exactly unchanged. This tests
++content recency conditional on that stratum schedule, not every effect of time.
++
++The rank lookup executes in chronological cells too, matching operator overhead.
++A reversal is an involution, so gathering the assignment columns routes original
++values without materializing a second B x 100 x value_width tensor. No events
++are discarded. Occupied Dice, parameters, initialization and source gates are
++inherited. Identity cells are same-seed replays, not independent repetitions.
++Host numerical validation and training remain required. No novelty claim.
+ """
+ import torch
+@@ -31,4 +32,5 @@
+     'history_partition': 'recent',
+     'scorer_population': 'occupied',
++    'content_order': 'stratum_reverse',
+ }
+ 
+@@ -73,10 +75,11 @@
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='OccupiedSummaryCompression', gpu=-1,
++    def __init__(self, feature_map, model_id='CountMatchedTemporalCompression', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+                  compression_routes='uf', block_aux_scorer_grad=True,
+                  block_aux_context_grad=False, block_aux_item_grad=True,
+-                 history_partition='recent', scorer_population='occupied', num_tasks=None,
++                 history_partition='recent', scorer_population='occupied',
++                 content_order='stratum_reverse', num_tasks=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -100,14 +103,15 @@
+         if block_aux_context_grad or not block_aux_item_grad:
+             raise ValueError('Incumbent auxiliary source gates are fixed')
+-        if history_partition not in ('recent', 'early', 'equal', 'full'):
++        if history_partition not in ('recent', 'equal'):
+             raise ValueError('Unknown temporal partition')
+         self.history_partition = history_partition
+-        if scorer_population not in ('dense', 'occupied'):
++        if scorer_population != 'occupied':
+             raise ValueError('Unknown scorer population')
+         self.scorer_population = scorer_population
++        if content_order not in ('chronological', 'stratum_reverse'):
++            raise ValueError('Unknown content order')
++        self.content_order = content_order
+         widths = (20, 20, 20, 20, 10, 5, 2, 1, 1, 1)
+-        if history_partition == 'early':
+-            widths = tuple(reversed(widths))
+-        elif history_partition == 'equal':
++        if history_partition == 'equal':
+             widths = (10,) * 10
+         # Constants consume no RNG and add no trainable parameters. This
+@@ -189,4 +193,22 @@
+         return context, target, values, mask, auxiliary
+ 
++    def _content_permutation(self, valid, auxiliary):
++        # Build a per-sample bijection; no cross-sample input or random choice.
++        # Within each stratum, chronological rank r maps to r or n-1-r.
++        # Invalid positions are fixed, including arbitrary holes in the mask.
++        length = valid.shape[1]
++        positions = torch.arange(length, device=valid.device).unsqueeze(0).expand_as(valid)
++        permutation = positions
++        for member in (valid & ~auxiliary, valid & auxiliary):
++            rank = member.long().cumsum(dim=1) - 1
++            count = member.long().sum(dim=1, keepdim=True)
++            ordered = torch.where(member, positions, torch.full_like(positions, length))
++            ordered = ordered.sort(dim=1).values
++            source_rank = count - 1 - rank if self.content_order == 'stratum_reverse' else rank
++            selected = ordered.gather(1, source_rank.clamp(min=0, max=length - 1))
++            # Only active ranks are used, hence selected < length on members.
++            permutation = torch.where(member, selected, permutation)
++        return permutation
++
+     def _compress_both(self, values, mask, auxiliary):
+         batch, length, width = values.shape
+@@ -196,17 +218,15 @@
+         auxiliary = auxiliary & valid
+         clean = torch.where(valid.unsqueeze(-1), values, torch.zeros_like(values))
+-        if self.history_partition == 'full':
+-            # Score each actual event once. Feedback strata are applied AFTER
+-            # nonlinear scoring, so their sum equals the all-history readout.
+-            membership = torch.stack((valid, valid & ~auxiliary, auxiliary), dim=-1)
+-            return clean, membership
+         valid_blocks = self.partition.unsqueeze(0) & valid.unsqueeze(1)
+         member = auxiliary.unsqueeze(1) & valid_blocks
+         assignment = torch.stack((valid_blocks, valid_blocks & ~member, member), dim=2)
+         assignment = assignment.reshape(batch, 30, 100).to(clean.dtype)
++        permutation = self._content_permutation(valid, auxiliary)
++        # Both permitted permutations are involutions. Reindex assignments,
++        # not values: new_assignment[source] = old_assignment[perm[source]].
++        assignment = assignment.gather(2, permutation[:, None, :].expand(-1, 30, -1))
+         counts = assignment.sum(dim=-1)
+-        # Identical dense operator shapes for recent/early/equal, including
+-        # the uniform control. Measured cost includes this general assignment
+-        # implementation; it may exceed the original reshape/block kernel.
++        # Content order preserves these counts exactly within a partition.
++        # Partition widths themselves still change counts and mean variance.
+         sums = torch.bmm(assignment, clean)
+         means = sums / counts.clamp_min(1).unsqueeze(-1)
+@@ -239,7 +259,4 @@
+         batch, slots, _ = values.shape
+         weights = weights.reshape(batch, slots)
+-        if self.history_partition == 'full':
+-            weighted = weights.unsqueeze(-1) * values
+-            return torch.bmm(counts.transpose(1, 2).to(weighted.dtype), weighted)
+         weights = weights * counts.to(weights.dtype)
+         weighted = (weights.unsqueeze(-1) * values).reshape(batch, 10, 3, self.value_width)
+@@ -249,10 +266,7 @@
+         context, target, values, mask, auxiliary = self._represent(inputs)
+         values, counts = self._compress_both(values, mask, auxiliary)
+-        # Compressed variants score all 30 slots. Full history scores 100
+-        # positions. These Dice populations differ, so full versus compressed
+-        # is an architectural replacement control, not pure information loss.
+-        active = None
+-        if self.scorer_population == 'occupied':
+-            active = (counts[:, :, 0] if self.history_partition == 'full' else counts) > 0
++        # Within each partition, both content orders score the exact same
++        # occupied rows, although their input distributions may differ.
++        active = counts > 0
+         primary_weights = self.local_activation(self._interactions(target, values), active)
+         primary_strata = self._pool(primary_weights, values, counts)

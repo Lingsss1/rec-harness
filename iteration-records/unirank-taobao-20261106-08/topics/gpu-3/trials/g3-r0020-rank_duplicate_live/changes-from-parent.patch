@@ -1,0 +1,67 @@
+--- g3-r0019-rank_collapsed_duplicate/model.py
++++ g3-r0020-rank_duplicate_live/model.py
+@@ -25,5 +25,5 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary', 'rank_evidence_scope': 'event', 'rank_evidence_location': 'route', 'rank_feedback_identity': False, 'retain_position_route': True}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary', 'rank_evidence_scope': 'event', 'rank_evidence_location': 'route', 'rank_feedback_identity': False, 'retain_position_route': True, 'rank_primary_gain': 1.0, 'rank_aux_gradient': 'joint'}
+ 
+ 
+@@ -43,4 +43,5 @@
+                  rank_evidence_scope='event', rank_evidence_location='route',
+                  rank_feedback_identity=False, retain_position_route=True,
++                 rank_primary_gain=1.0, rank_aux_gradient='joint',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+@@ -128,4 +129,12 @@
+         if not isinstance(rank_feedback_identity, bool) or not isinstance(retain_position_route, bool):
+             raise ValueError('Identity and route-retention switches must be boolean')
++        if rank_feedback_identity:
++            raise ValueError('This study fixes collapsed rank feedback features')
++        if isinstance(rank_primary_gain, bool) or rank_primary_gain not in (1.0, 2.0):
++            raise ValueError('Click rank gain must be one or two')
++        if rank_aux_gradient not in ('joint', 'primary'):
++            raise ValueError('Rank gradient ownership must be joint or primary')
++        self.rank_primary_gain = float(rank_primary_gain)
++        self.rank_aux_gradient = rank_aux_gradient
+         self.rank_feedback_identity = rank_feedback_identity
+         self.retain_position_route = retain_position_route
+@@ -354,9 +363,8 @@
+         """Return task-private route [B,L,T] and readout [B,T] logits.
+ 
+-        The new identity switch acts only here. Both resolved/collapsed input
+-        tensors and event/marginal kernel projections are computed in every
+-        cell. These features have no gradient to an embedding table. The old
+-        primary-owned position route is independently retained/replaced by the
+-        caller. All four cells select event alignment and routing placement.
++        The new ownership switch stops auxiliary derivatives through only
++        this input-only positional correction. At a fixed parameter state it
++        preserves forward values. Click derivatives and all other auxiliary
++        paths remain live. Task rows are selected by label, never by index.
+         """
+         with torch.autocast(device_type=mask.device.type, enabled=False):
+@@ -390,4 +398,7 @@
+                         else marginal_logits)
+             selected = selected.masked_fill(~valid.unsqueeze(-1), 0)
++            if self.rank_aux_gradient == 'primary':
++                selected = torch.where(self._primary_channel,
++                                       selected, selected.detach())
+             # A valid-event average gives a bounded linear statistic per task,
+             # without a learned bias; zero-length/all-empty histories are zero.
+@@ -422,7 +433,13 @@
+             position_factor = 1.0 if self.retain_position_route else 0.0
+             gate_logits = gate_logits + position_factor * inherited_position
+-            # Each new row is task-private. The fixed self donor below cannot
+-            # make another task's loss update this row directly.
+-            gate_logits = gate_logits + rank_route
++            # Gain changes only the click positional correction, before the
++            # inherited live self-donor factor and bounded modulation. All
++            # auxiliary forward routes retain unit gain. A single route with
++            # gain two matches the duplicate click function span, not its raw
++            # parameter gradient norm or necessarily its optimization path.
++            applied_rank = torch.where(self._primary_channel,
++                                       self.rank_primary_gain * rank_route,
++                                       rank_route)
++            gate_logits = gate_logits + applied_rank
+             # Both donor alternatives are calculated in every variant. The
+             # contracted four labels may be ordered arbitrarily by FeatureMap.

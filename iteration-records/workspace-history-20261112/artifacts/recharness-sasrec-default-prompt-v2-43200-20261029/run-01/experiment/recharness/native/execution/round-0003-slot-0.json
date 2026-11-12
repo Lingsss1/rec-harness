@@ -1,0 +1,465 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "proposal": {
+        "category_edits": [
+          {
+            "category": "feature_construction",
+            "rationale": "Scale input item embeddings using training-only frequency features to reduce frequent-item dominance. Preserve learned embeddings, Transformer topology and candidate scoring. Save counts and scaling in each category checkpoint and reconstruct them through the predictor writer. Enforce the required data environment and 200-epoch cap.",
+            "edits": [
+              {
+                "find": "NUM_EPOCHS   = int(os.environ.get(\"SASREC_EPOCHS\",    \"300\"))",
+                "replace": "NUM_EPOCHS   = min(200, int(os.environ.get(\"SASREC_EPOCHS\", \"200\")))"
+              },
+              {
+                "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+                "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+              },
+              {
+                "find": "                 num_heads: int = 1, dropout_rate: float = 0.5, maxlen: int = 128):\n        super().__init__()\n        self.hidden_units = hidden_units\n        self.maxlen = maxlen\n        self.itemnum = itemnum",
+                "replace": "                 num_heads: int = 1, dropout_rate: float = 0.5, maxlen: int = 128,\n                 item_counts=None):\n        super().__init__()\n        self.hidden_units = hidden_units\n        self.maxlen = maxlen\n        self.itemnum = itemnum\n\n        counts = (np.ones(itemnum + 1, dtype=np.float32) if item_counts is None\n                  else np.asarray(item_counts, dtype=np.float32).copy())\n        counts[0] = 0.0\n        observed_counts = counts[counts > 0]\n        median_count = float(np.median(observed_counts)) if observed_counts.size else 1.0\n        input_scale = np.clip(\n            (median_count / np.maximum(counts, 1.0)) ** 0.1, 0.75, 1.25\n        ).astype(np.float32)\n        input_scale[0] = 0.0\n        self.register_buffer(\"item_counts\", torch.from_numpy(counts))\n        self.register_buffer(\"input_scale\", torch.from_numpy(input_scale))"
+              },
+              {
+                "find": "        seq_emb = self.item_emb(seq) * (self.hidden_units ** 0.5)",
+                "replace": "        seq_emb = self.item_emb(seq) * self.input_scale[seq].unsqueeze(-1)\n        seq_emb = seq_emb * (self.hidden_units ** 0.5)"
+              },
+              {
+                "find": "    user_train, user_valid, itemnum = load_dataset(dataset_name, data_dir)\n    print(f\"  [{dataset_name}] users={len(user_train)}  items={itemnum}\", flush=True)",
+                "replace": "    user_train, user_valid, itemnum = load_dataset(dataset_name, data_dir)\n    item_counts = np.zeros(itemnum + 1, dtype=np.float32)\n    for history in user_train.values():\n        np.add.at(item_counts, np.asarray(history, dtype=np.int64), 1.0)\n    item_counts[0] = 0.0\n    print(f\"  [{dataset_name}] users={len(user_train)}  items={itemnum}\", flush=True)"
+              },
+              {
+                "find": "        maxlen=MAXLEN,\n    ).to(device)",
+                "replace": "        maxlen=MAXLEN,\n        item_counts=item_counts,\n    ).to(device)"
+              },
+              {
+                "find": "            \"maxlen\": MAXLEN,\n        }, f)",
+                "replace": "            \"maxlen\": MAXLEN,\n            \"item_counts\": item_counts.tolist(),\n        }, f)"
+              },
+              {
+                "find": "            maxlen=meta[\"maxlen\"],\n        ).to(_device)",
+                "replace": "            maxlen=meta[\"maxlen\"],\n            item_counts=meta[\"item_counts\"],\n        ).to(_device)"
+              }
+            ]
+          },
+          {
+            "category": "learning_objective",
+            "rationale": "Coordinate frequency-scaled inputs with frequency-balanced supervision: mix 75% baseline positive/negative BCE with 25% pairwise softplus ranking loss, then weight valid positions by clipped inverse target frequency normalized to mean one. Preserve sampling, optimizer, schedule and readout.",
+            "edits": [
+              {
+                "find": "    bce_criterion = nn.BCEWithLogitsLoss()",
+                "replace": "    bce_criterion = nn.BCEWithLogitsLoss(reduction=\"none\")\n    observed_counts = item_counts[item_counts > 0]\n    median_count = float(np.median(observed_counts)) if observed_counts.size else 1.0\n    target_loss_weights = torch.clamp(\n        (median_count / model.item_counts.clamp_min(1.0)).pow(0.25),\n        min=0.5, max=2.0,\n    )\n    target_loss_weights[0] = 0.0"
+              },
+              {
+                "find": "            pos_labels = torch.ones(pos_logits[indices].shape, device=device)\n            neg_labels = torch.zeros(neg_logits[indices].shape, device=device)\n            loss = bce_criterion(pos_logits[indices], pos_labels)\n            loss = loss + bce_criterion(neg_logits[indices], neg_labels)",
+                "replace": "            positive_logits = pos_logits[indices]\n            negative_logits = neg_logits[indices]\n            pos_labels = torch.ones_like(positive_logits)\n            neg_labels = torch.zeros_like(negative_logits)\n            baseline_loss = (\n                bce_criterion(positive_logits, pos_labels)\n                + bce_criterion(negative_logits, neg_labels)\n            )\n            ranking_loss = torch.nn.functional.softplus(negative_logits - positive_logits)\n            weights = target_loss_weights[pos_t[indices]]\n            weights = weights / weights.mean().clamp_min(1e-8)\n            loss = (weights * (0.75 * baseline_loss + 0.25 * ranking_loss)).mean()"
+              }
+            ]
+          }
+        ],
+        "change_summary": "Apply training-frequency input scaling and frequency-balanced BCE/ranking supervision to one SASRec model per category. Persist feature state and update the embedded predictor writer; preserve routing, seeds, splits and training configuration with a 200-epoch cap.",
+        "edits": [
+          {
+            "find": "NUM_EPOCHS   = int(os.environ.get(\"SASREC_EPOCHS\",    \"300\"))",
+            "replace": "NUM_EPOCHS   = min(200, int(os.environ.get(\"SASREC_EPOCHS\", \"200\")))"
+          },
+          {
+            "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+            "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+          },
+          {
+            "find": "                 num_heads: int = 1, dropout_rate: float = 0.5, maxlen: int = 128):\n        super().__init__()\n        self.hidden_units = hidden_units\n        self.maxlen = maxlen\n        self.itemnum = itemnum",
+            "replace": "                 num_heads: int = 1, dropout_rate: float = 0.5, maxlen: int = 128,\n                 item_counts=None):\n        super().__init__()\n        self.hidden_units = hidden_units\n        self.maxlen = maxlen\n        self.itemnum = itemnum\n\n        counts = (np.ones(itemnum + 1, dtype=np.float32) if item_counts is None\n                  else np.asarray(item_counts, dtype=np.float32).copy())\n        counts[0] = 0.0\n        observed_counts = counts[counts > 0]\n        median_count = float(np.median(observed_counts)) if observed_counts.size else 1.0\n        input_scale = np.clip(\n            (median_count / np.maximum(counts, 1.0)) ** 0.1, 0.75, 1.25\n        ).astype(np.float32)\n        input_scale[0] = 0.0\n        self.register_buffer(\"item_counts\", torch.from_numpy(counts))\n        self.register_buffer(\"input_scale\", torch.from_numpy(input_scale))"
+          },
+          {
+            "find": "        seq_emb = self.item_emb(seq) * (self.hidden_units ** 0.5)",
+            "replace": "        seq_emb = self.item_emb(seq) * self.input_scale[seq].unsqueeze(-1)\n        seq_emb = seq_emb * (self.hidden_units ** 0.5)"
+          },
+          {
+            "find": "    user_train, user_valid, itemnum = load_dataset(dataset_name, data_dir)\n    print(f\"  [{dataset_name}] users={len(user_train)}  items={itemnum}\", flush=True)",
+            "replace": "    user_train, user_valid, itemnum = load_dataset(dataset_name, data_dir)\n    item_counts = np.zeros(itemnum + 1, dtype=np.float32)\n    for history in user_train.values():\n        np.add.at(item_counts, np.asarray(history, dtype=np.int64), 1.0)\n    item_counts[0] = 0.0\n    print(f\"  [{dataset_name}] users={len(user_train)}  items={itemnum}\", flush=True)"
+          },
+          {
+            "find": "        maxlen=MAXLEN,\n    ).to(device)",
+            "replace": "        maxlen=MAXLEN,\n        item_counts=item_counts,\n    ).to(device)"
+          },
+          {
+            "find": "            \"maxlen\": MAXLEN,\n        }, f)",
+            "replace": "            \"maxlen\": MAXLEN,\n            \"item_counts\": item_counts.tolist(),\n        }, f)"
+          },
+          {
+            "find": "            maxlen=meta[\"maxlen\"],\n        ).to(_device)",
+            "replace": "            maxlen=meta[\"maxlen\"],\n            item_counts=meta[\"item_counts\"],\n        ).to(_device)"
+          },
+          {
+            "find": "    bce_criterion = nn.BCEWithLogitsLoss()",
+            "replace": "    bce_criterion = nn.BCEWithLogitsLoss(reduction=\"none\")\n    observed_counts = item_counts[item_counts > 0]\n    median_count = float(np.median(observed_counts)) if observed_counts.size else 1.0\n    target_loss_weights = torch.clamp(\n        (median_count / model.item_counts.clamp_min(1.0)).pow(0.25),\n        min=0.5, max=2.0,\n    )\n    target_loss_weights[0] = 0.0"
+          },
+          {
+            "find": "            pos_labels = torch.ones(pos_logits[indices].shape, device=device)\n            neg_labels = torch.zeros(neg_logits[indices].shape, device=device)\n            loss = bce_criterion(pos_logits[indices], pos_labels)\n            loss = loss + bce_criterion(neg_logits[indices], neg_labels)",
+            "replace": "            positive_logits = pos_logits[indices]\n            negative_logits = neg_logits[indices]\n            pos_labels = torch.ones_like(positive_logits)\n            neg_labels = torch.zeros_like(negative_logits)\n            baseline_loss = (\n                bce_criterion(positive_logits, pos_labels)\n                + bce_criterion(negative_logits, neg_labels)\n            )\n            ranking_loss = torch.nn.functional.softplus(negative_logits - positive_logits)\n            weights = target_loss_weights[pos_t[indices]]\n            weights = weights / weights.mean().clamp_min(1e-8)\n            loss = (weights * (0.75 * baseline_loss + 0.25 * ranking_loss)).mean()"
+          }
+        ],
+        "scope_validation": "exact categories and nontrivial AST changes; semantic labels prompt-enforced"
+      }
+    }
+  ],
+  "receipt": {
+    "id": "round-0003-slot-0-attempt-1",
+    "status": "success",
+    "gpu": 0,
+    "allocated_gpu_seconds": 1588.2082063257694,
+    "output": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-sasrec-default-prompt-v2-43200-20261029/run-01/experiment/recharness/trials/round-0003-slot-0-attempt-1",
+    "source_sha256": "4cc19722d23d72b87aeacbb2f9c222bfa80a2caef3819729597cc8be92c1b56b",
+    "score": 0.4662,
+    "aggregate": {
+      "HR@5": 0.32,
+      "HR@10": 0.4662,
+      "HR@20": 0.6338,
+      "NDCG@5": 0.2298,
+      "NDCG@10": 0.277,
+      "NDCG@20": 0.3194,
+      "Movies_and_TV/HR@5": 0.425,
+      "Movies_and_TV/HR@10": 0.58,
+      "Movies_and_TV/HR@20": 0.715,
+      "Movies_and_TV/NDCG@5": 0.3151,
+      "Movies_and_TV/NDCG@10": 0.3655,
+      "Movies_and_TV/NDCG@20": 0.399,
+      "Industrial_and_Scientific/HR@5": 0.32,
+      "Industrial_and_Scientific/HR@10": 0.485,
+      "Industrial_and_Scientific/HR@20": 0.68,
+      "Industrial_and_Scientific/NDCG@5": 0.2312,
+      "Industrial_and_Scientific/NDCG@10": 0.2834,
+      "Industrial_and_Scientific/NDCG@20": 0.3336,
+      "Electronics/HR@5": 0.225,
+      "Electronics/HR@10": 0.355,
+      "Electronics/HR@20": 0.505,
+      "Electronics/NDCG@5": 0.1659,
+      "Electronics/NDCG@10": 0.2072,
+      "Electronics/NDCG@20": 0.2458,
+      "CDs_and_Vinyl/HR@5": 0.31,
+      "CDs_and_Vinyl/HR@10": 0.445,
+      "CDs_and_Vinyl/HR@20": 0.635,
+      "CDs_and_Vinyl/NDCG@5": 0.207,
+      "CDs_and_Vinyl/NDCG@10": 0.2517,
+      "CDs_and_Vinyl/NDCG@20": 0.2992
+    },
+    "per_dataset": {
+      "Movies_and_TV": {
+        "metrics": {
+          "HR@5": 0.425,
+          "HR@10": 0.58,
+          "HR@20": 0.715,
+          "NDCG@5": 0.3151,
+          "NDCG@10": 0.3655,
+          "NDCG@20": 0.399
+        },
+        "n_users": 200
+      },
+      "Industrial_and_Scientific": {
+        "metrics": {
+          "HR@5": 0.32,
+          "HR@10": 0.485,
+          "HR@20": 0.68,
+          "NDCG@5": 0.2312,
+          "NDCG@10": 0.2834,
+          "NDCG@20": 0.3336
+        },
+        "n_users": 200
+      },
+      "Electronics": {
+        "metrics": {
+          "HR@5": 0.225,
+          "HR@10": 0.355,
+          "HR@20": 0.505,
+          "NDCG@5": 0.1659,
+          "NDCG@10": 0.2072,
+          "NDCG@20": 0.2458
+        },
+        "n_users": 200
+      },
+      "CDs_and_Vinyl": {
+        "metrics": {
+          "HR@5": 0.31,
+          "HR@10": 0.445,
+          "HR@20": 0.635,
+          "NDCG@5": 0.207,
+          "NDCG@10": 0.2517,
+          "NDCG@20": 0.2992
+        },
+        "n_users": 200
+      }
+    },
+    "evaluation_seconds": 3.113983541727066,
+    "predictor_sha256": "5a7b65d60152fd51eb988a76754443f9f12310ee18239cd560bc7d8d90116c65"
+  },
+  "native_result": {
+    "spec": {
+      "dimension": "combination_jump",
+      "delta": 1.0,
+      "estimated_cost_secs": 2343.0,
+      "code_diff": "",
+      "code_edits": [],
+      "code_content": "",
+      "arm": "combination_jump",
+      "composite_dims": [
+        "combination_jump"
+      ],
+      "strategy_arm": null,
+      "round_role": "lowlevel_routing",
+      "parallel_group_estimated_wall_secs": 2343.0,
+      "budget_safe_if_global_budget_gte": 2343.0,
+      "budget_accounting": "Parallel group cost is sum(estimated_cost_secs) across the selected candidates.",
+      "code_hint": "COMBINATION JUMP: make a substantive, coordinated change in EACH selected direction. 学习目标: Ranking/prediction loss, loss weighting and jointly trained auxiliary objectives. Preserve feature definitions, embeddings, SASRec topology, scoring/readout, optimizer, sampling, scheduler and batch/epoch settings.\n特征构造: Construct input features solely from supplied training interactions, such as frequency or recency indicators. No external metadata, independent scorer or score fusion. Keep learned embedding design, SASRec topology, readout, loss and optimizer fixed.\nMaintain shape, checkpoint and predictor consistency for changes in the selected directions; preserve the registered direction boundaries.",
+      "hypothesis": "Memory available in state; agent should write a short arm-specific hypothesis; Agent hypothesis: For all four datasets, jointly add popularity-normalized input features and frequency-balanced ranking supervision. Compute item counts from training interactions only; multiply existing input item embeddings by clip((median_count/count_i)^0.1, 0.75, 1.25), keeping padding zero. Use 0.75×baseline loss + 0.25×softplus(negative_logit−positive_logit), weighting valid positions by clip((median_count/count_positive)^0.25, 0.5, 2), normalized to mean one. Input attenuation reduces frequent-item dominance while weighted ranking strengthens learning for rarer targets. Preserve SASRec topology, learned embeddings, readout, sampling, optimizer and schedule; save counts and reproduce scaling in the predictor. Train one model per category.",
+      "is_jumping": true,
+      "implementation_backend": "claude_code",
+      "implementation_prompt": "COMBINATION JUMP: make a substantive, coordinated change in EACH selected direction. 学习目标: Ranking/prediction loss, loss weighting and jointly trained auxiliary objectives. Preserve feature definitions, embeddings, SASRec topology, scoring/readout, optimizer, sampling, scheduler and batch/epoch settings.\n特征构造: Construct input features solely from supplied training interactions, such as frequency or recency indicators. No external metadata, independent scorer or score fusion. Keep learned embedding design, SASRec topology, readout, loss and optimizer fixed.\nMaintain shape, checkpoint and predictor consistency for changes in the selected directions; preserve the registered direction boundaries.",
+      "allowed_files": [
+        "train.py",
+        "predict.py"
+      ],
+      "claude_attempts": 3,
+      "arm_design": "eight_directions_v3",
+      "selected_categories": [
+        "learning_objective",
+        "feature_construction"
+      ],
+      "hypothesis_key": "slot-0",
+      "sampling_draw": {
+        "slot": 0,
+        "arm": "combination_jump",
+        "selected_directions": [
+          "learning_objective",
+          "feature_construction"
+        ],
+        "sampled_values": {
+          "feature_construction": 0.4524065358796303,
+          "embedding_representation": 0.1535201307459,
+          "interaction_mechanism": 0.412060315886027,
+          "network_architecture": 0.0845632237822648,
+          "sequence_modeling": 0.16098761036962733,
+          "interest_aggregation": 0.10730105890381357,
+          "learning_objective": 0.6263963709503264,
+          "training_strategy": 0.6205029965505814
+        },
+        "selection": "highest draw plus highest compatible cross-category draw"
+      },
+      "max_trial_gpu_seconds": 2343.0,
+      "protected_gpu_seconds": 15119.999999999998,
+      "jump_trigger": "plateau",
+      "jump_budget_plan": {
+        "trial_cap_secs": 2343.0,
+        "retune_group_size": 1,
+        "retune_rounds": 4,
+        "retune_reserved_secs": 9372.0,
+        "total_reserved_secs": 11715.0,
+        "protected_envelope_secs": 15119.999999999998,
+        "cost_source": "p75 measured trial cost * safety + teardown margin"
+      },
+      "predict_code_edits": [],
+      "predict_code_content": "",
+      "agent_hypothesis": "For all four datasets, jointly add popularity-normalized input features and frequency-balanced ranking supervision. Compute item counts from training interactions only; multiply existing input item embeddings by clip((median_count/count_i)^0.1, 0.75, 1.25), keeping padding zero. Use 0.75×baseline loss + 0.25×softplus(negative_logit−positive_logit), weighting valid positions by clip((median_count/count_positive)^0.25, 0.5, 2), normalized to mean one. Input attenuation reduces frequent-item dominance while weighted ranking strengthens learning for rarer targets. Preserve SASRec topology, learned embeddings, readout, sampling, optimizer and schedule; save counts and reproduce scaling in the predictor. Train one model per category.",
+      "gagc_memory_context": {
+        "experiment_skill": "# RecHarness Experiment Skill\n\n## Objective\nUse benchmark val_score as the search and winner criterion.\nDo not use held-out test metrics during search.\nThompson Sampling chooses arms; this skill only guides how to edit code within selected arms.\n\n## Recent Patch Lessons\n- Round 1 winner established the benchmark reference using baseline/baseline ↓.\n\n## Concrete Avoids\nNo concrete patch-level avoids yet.\n",
+        "recent_text_gradients": [
+          "Round 1 winner established the benchmark reference using baseline/baseline ↓."
+        ],
+        "failure_memory": [],
+        "skill_notes": "Round 3: best_ever=0.5050, recent=0.5050, trend=plateau. Top arms: feature_construction, interaction_mechanism, network_architecture."
+      },
+      "trial_group_id": "trialgrp_1793253596606_1644482",
+      "trial_id": 0
+    },
+    "wall_time_secs": 1588.2082063257694,
+    "timed_out": false,
+    "oom": false,
+    "val_score": 0.4662,
+    "val_metrics": {
+      "Movies_and_TV": {
+        "HR@5": 0.425,
+        "HR@10": 0.58,
+        "HR@20": 0.715,
+        "NDCG@5": 0.3151,
+        "NDCG@10": 0.3655,
+        "NDCG@20": 0.399
+      },
+      "Industrial_and_Scientific": {
+        "HR@5": 0.32,
+        "HR@10": 0.485,
+        "HR@20": 0.68,
+        "NDCG@5": 0.2312,
+        "NDCG@10": 0.2834,
+        "NDCG@20": 0.3336
+      },
+      "Electronics": {
+        "HR@5": 0.225,
+        "HR@10": 0.355,
+        "HR@20": 0.505,
+        "NDCG@5": 0.1659,
+        "NDCG@10": 0.2072,
+        "NDCG@20": 0.2458
+      },
+      "CDs_and_Vinyl": {
+        "HR@5": 0.31,
+        "HR@10": 0.445,
+        "HR@20": 0.635,
+        "NDCG@5": 0.207,
+        "NDCG@10": 0.2517,
+        "NDCG@20": 0.2992
+      }
+    },
+    "test_score": null,
+    "test_metrics": null,
+    "convergence_trace": [
+      0.275,
+      0.375,
+      0.37,
+      0.385,
+      0.385,
+      0.395,
+      0.435,
+      0.44,
+      0.455,
+      0.48,
+      0.505,
+      0.485,
+      0.49,
+      0.475,
+      0.485,
+      0.485,
+      0.48,
+      0.495,
+      0.495,
+      0.505,
+      0.51,
+      0.505,
+      0.535,
+      0.52,
+      0.51,
+      0.515,
+      0.53,
+      0.54,
+      0.555,
+      0.555,
+      0.555,
+      0.54,
+      0.56,
+      0.56,
+      0.57,
+      0.555,
+      0.57,
+      0.565,
+      0.575,
+      0.57,
+      0.205,
+      0.365,
+      0.42,
+      0.44,
+      0.45,
+      0.46,
+      0.455,
+      0.445,
+      0.46,
+      0.46,
+      0.46,
+      0.475,
+      0.46,
+      0.44,
+      0.455,
+      0.485,
+      0.47,
+      0.465,
+      0.475,
+      0.5,
+      0.48,
+      0.485,
+      0.485,
+      0.5,
+      0.49,
+      0.49,
+      0.485,
+      0.495,
+      0.515,
+      0.5,
+      0.51,
+      0.505,
+      0.505,
+      0.51,
+      0.515,
+      0.53,
+      0.52,
+      0.535,
+      0.525,
+      0.52,
+      0.2,
+      0.325,
+      0.37,
+      0.385,
+      0.38,
+      0.365,
+      0.36,
+      0.38,
+      0.355,
+      0.33,
+      0.345,
+      0.35,
+      0.34,
+      0.325,
+      0.345,
+      0.35,
+      0.335,
+      0.34,
+      0.365,
+      0.355,
+      0.355,
+      0.34,
+      0.37,
+      0.355,
+      0.145,
+      0.27,
+      0.295,
+      0.305,
+      0.295,
+      0.29,
+      0.285,
+      0.28,
+      0.3,
+      0.325,
+      0.31,
+      0.34,
+      0.335,
+      0.365,
+      0.345,
+      0.385,
+      0.4,
+      0.41,
+      0.445,
+      0.415,
+      0.42,
+      0.425,
+      0.4,
+      0.435,
+      0.44,
+      0.415,
+      0.43,
+      0.44,
+      0.425,
+      0.43,
+      0.44,
+      0.45,
+      0.44,
+      0.44,
+      0.435,
+      0.44,
+      0.45,
+      0.46,
+      0.455,
+      0.455
+    ],
+    "error_message": null,
+    "stdout_tail": "epoch  70/200  loss=0.9862  val_score: 0.3650  HR@20=0.4600  NDCG@10=0.1877\n  [CDs_and_Vinyl] epoch  75/200  loss=0.9686  val_score: 0.3450  HR@20=0.4950  NDCG@10=0.1852\n  [CDs_and_Vinyl] epoch  80/200  loss=0.9513  val_score: 0.3850  HR@20=0.5200  NDCG@10=0.1983\n  [CDs_and_Vinyl] epoch  85/200  loss=0.9349  val_score: 0.4000  HR@20=0.5300  NDCG@10=0.2029\n  [CDs_and_Vinyl] epoch  90/200  loss=0.9192  val_score: 0.4100  HR@20=0.5400  NDCG@10=0.2165\n  [CDs_and_Vinyl] epoch  95/200  loss=0.9042  val_score: 0.4450  HR@20=0.5800  NDCG@10=0.2313\n  [CDs_and_Vinyl] epoch 100/200  loss=0.8894  val_score: 0.4150  HR@20=0.5600  NDCG@10=0.2229\n  [CDs_and_Vinyl] epoch 105/200  loss=0.8735  val_score: 0.4200  HR@20=0.5550  NDCG@10=0.2208\n  [CDs_and_Vinyl] epoch 110/200  loss=0.8600  val_score: 0.4250  HR@20=0.5750  NDCG@10=0.2269\n  [CDs_and_Vinyl] epoch 115/200  loss=0.8437  val_score: 0.4000  HR@20=0.5800  NDCG@10=0.2239\n  [CDs_and_Vinyl] epoch 120/200  loss=0.8211  val_score: 0.4350  HR@20=0.6250  NDCG@10=0.2388\n  [CDs_and_Vinyl] epoch 125/200  loss=0.7975  val_score: 0.4400  HR@20=0.6200  NDCG@10=0.2436\n  [CDs_and_Vinyl] epoch 130/200  loss=0.7773  val_score: 0.4150  HR@20=0.6050  NDCG@10=0.2261\n  [CDs_and_Vinyl] epoch 135/200  loss=0.7573  val_score: 0.4300  HR@20=0.6100  NDCG@10=0.2321\n  [CDs_and_Vinyl] epoch 140/200  loss=0.7369  val_score: 0.4400  HR@20=0.6150  NDCG@10=0.2441\n  [CDs_and_Vinyl] epoch 145/200  loss=0.7166  val_score: 0.4250  HR@20=0.6100  NDCG@10=0.2328\n  [CDs_and_Vinyl] epoch 150/200  loss=0.6970  val_score: 0.4300  HR@20=0.6000  NDCG@10=0.2361\n  [CDs_and_Vinyl] epoch 155/200  loss=0.6755  val_score: 0.4400  HR@20=0.6200  NDCG@10=0.2404\n  [CDs_and_Vinyl] epoch 160/200  loss=0.6565  val_score: 0.4500  HR@20=0.6100  NDCG@10=0.2456\n  [CDs_and_Vinyl] epoch 165/200  loss=0.6380  val_score: 0.4400  HR@20=0.6250  NDCG@10=0.2410\n  [CDs_and_Vinyl] epoch 170/200  loss=0.6193  val_score: 0.4400  HR@20=0.6200  NDCG@10=0.2441\n  [CDs_and_Vinyl] epoch 175/200  loss=0.6014  val_score: 0.4350  HR@20=0.6250  NDCG@10=0.2373\n  [CDs_and_Vinyl] epoch 180/200  loss=0.5831  val_score: 0.4400  HR@20=0.6300  NDCG@10=0.2447\n  [CDs_and_Vinyl] epoch 185/200  loss=0.5636  val_score: 0.4500  HR@20=0.6500  NDCG@10=0.2479\n  [CDs_and_Vinyl] epoch 190/200  loss=0.5480  val_score: 0.4600  HR@20=0.6450  NDCG@10=0.2530\n  [CDs_and_Vinyl] epoch 195/200  loss=0.5325  val_score: 0.4550  HR@20=0.6200  NDCG@10=0.2546\n  [CDs_and_Vinyl] epoch 200/200  loss=0.5175  val_score: 0.4550  HR@20=0.6250  NDCG@10=0.2531\n  [CDs_and_Vinyl] Best val HR@10=0.4600  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-sasrec-default-prompt-v2-43200-20261029/run-01/experiment/recharness/trials/round-0003-slot-0-attempt-1/working/CDs_and_Vinyl_model.pt\npredict.py written → /home/liuzhishan/lhr/rec-harness/artifacts/recharness-sasrec-default-prompt-v2-43200-20261029/run-01/experiment/recharness/trials/round-0003-slot-0-attempt-1/working/predict.py\n\nAll datasets done. Average val HR@10 = 0.4887\n",
+    "stderr_tail": ""
+  },
+  "gpu_seconds_all_attempts": 1588.2082063257694
+}

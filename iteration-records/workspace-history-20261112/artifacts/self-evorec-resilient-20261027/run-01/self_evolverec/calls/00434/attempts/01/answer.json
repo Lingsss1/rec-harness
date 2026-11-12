@@ -1,0 +1,82 @@
+{
+  "markdown_report": "At 10% progress, prioritize a small, controlled extension: **recent-conditioned SASRec with 32-negative cross-entropy**. Its benefits remain hypotheses; the supplied 0.5050 score describes the earlier baseline.\n\n**Insights from the starting point**\n\n1. Users report stale interests crowding out current purposes. A recent-history residual offers a direct intervention while preserving learned long-term preferences.\n2. Broad similarity produces weak task or content connections. Learning directed recent-to-next-item associations could sharpen these connections, although histories cannot establish equipment compatibility.\n3. Electronics has an 8.42% training negative-win rate and 0.210 tenth-percentile margin. These motivate stronger candidate discrimination, but neither establishes the cause of validation errors.\n\n**Insights from related work**\n\n1. Sampled softmax emphasizes high-scoring negatives [Wu et al.](https://arxiv.org/abs/2201.02327). Thirty-two uniform alternatives provide a simple candidate-competition experiment without dynamic mining.\n2. gSASRec addresses sampling-induced overconfidence through generalized BCE [gSASRec](https://arxiv.org/abs/2308.07192). It supplies an objective comparator rather than evidence that CE will win.\n3. ICSRec learns intents from subsequences without intent labels [ICSRec](https://doi.org/10.1145/3616855.3635773). This supports using observable recent prefixes, while leaving explicit intent boundaries unverified.\n\n**Framework and candidate assessment**\n\nOrganize experiments along three directions: temporal representation, candidate discrimination, and candidate-specific evidence. Each assessment below gives a score followed by a positive/negative reason; O=originality, P=potential, U=user alignment, M=model alignment, D=implementation difficulty, where higher D means harder.\n\n| Idea | O | P | U | M | D |\n|---|---|---|---|---|---|\n| 32-negative CE only | 2: established/simple | 6: scalable/limited novelty | 4: sharper competition/no recency | 8: targets separation/cause uncertain | 3: local change/masking required |\n| **Gated recent residual + CE** | 4: useful combination/familiar components | 8: extensible/extra tuning | 8: recency and specific transitions/no compatibility labels | 8: competing negatives/no guaranteed HR gain | 4: compact branch/predictor coordination |\n| Candidate-conditioned attention, inspired by [DIN](https://arxiv.org/abs/1706.06978) | 4: targeted adaptation/established attention | 7: candidate evidence/catalog cost | 8: specific connections/redundancy unresolved | 6: discrimination hypothesis/indirect evidence | 7: expressive/chunked scoring |\n\n**Selected algorithm**\n\nFor every causal prefix, pool its last five nonpadding item embeddings with exponential recency weights. Project this summary through a separate matrix and add it to SASRec features through a prefix-dependent sigmoid gate and a zero-initialized scalar. Separate projection and target embeddings allow asymmetric transition associations.\n\nTrain masked next-item CE against 32 unique uniform negatives, excluding the target and known training-history positives. This targets outdated-interest dominance and loose historical connections; it does not infer compatibility or treat uncertain simulator judgments as dislikes.\n\nCompare baseline, CE-only, residual-only, and combined variants within the shared budget. Select exclusively by pinned four-category macro validation HR@10. Preserve seeds, splits, routing, environment paths, and the 200-epoch environment default. Update predictor generation and diagnostics together; report measured deployed margins, counts, and exclusions without equating training separation or embedding alignment with recommendation quality.",
+  "idea": {
+    "description": "Add a small causal recent-history residual to each per-dataset SASRec model and train candidate cross-entropy with 32 uniform negatives. The residual uses the last five observed items, exponential recency weighting, a directed projection, a prefix-dependent gate, and a zero-initialized scalar multiplier.",
+    "motivation": "The user diagnosis identifies two eligible targets: older interests overpowering recent activity, and broadly related recommendations lacking a specific current connection. Recent conditioning and directed next-item learning explicitly target these patterns. Multi-negative competition also targets the observed weak Electronics training-pair separation. These mechanisms are hypotheses; available histories do not establish functional compatibility, immediate demand, or dislike.",
+    "implementation_notes": "Retain all four category models and routing. Use preprocessing seed 0, training seed 42, DATA_DIR=os.environ['GAGC_DATA_DIR'], trial-local artifacts, and int(os.environ.get('SASREC_EPOCHS', '200')). Compute recent summaries causally at every training position; mask padding and normalize weights over valid entries. Initialize the residual scalar to zero but initialize its projection normally so the scalar can receive gradients. Draw 32 unique negatives per target from valid nonpadding items, excluding the target and known training-history positives; never inspect held-out interactions to filter negatives. Vectorize rejection sampling and handle catalogs with fewer eligible items using masked candidate slots. Reuse the same scoring function during training and inference. The predictor writer must serialize the architecture configuration, gate, residual projection, scalar, and weights, and generate working/predict.py accordingly. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). Expose actual fused features through log2feats and actual deployed neural scoring through predict_score; retain the original SASRec item_emb compatibility accessor. Report finite observation counts, exclusions, margin definitions and embedding sampling details; unavailable metadata remains unavailable. Run the baseline, objective-only, residual-only and combined comparisons with comparable budgets, selecting only by pinned macro validation HR@10. No improvement is claimed before measurement.",
+    "pseudocode": "For each of the four unchanged category datasets:\n    initialize SASRec, projection W, gate G, and scalar a = 0\n    for each training batch and valid causal position t:\n        h_t = SASRec(sequence)[t]\n        recent = last five nonpadding items in sequence[:t+1]\n        r_t = normalized exponential_recency_pool(item_emb(recent))\n        g_t = sigmoid(G(concat(h_t, r_t, h_t - r_t)))\n        z_t = h_t + tanh(a) * g_t * W(r_t)\n        negatives = unique_uniform_items_excluding(target, training_history, padding, count=32)\n        candidates = concat(target, negatives)\n        logits = dot(z_t, item_emb(candidates))\n        loss += cross_entropy(logits, target_index=0), masking invalid positions/candidates\n    save architecture configuration and weights beneath the trial directory\n    generate matching predictor code with category routing\nCompare baseline, CE-only, residual-only and combined variants using pinned validation.\nSelect by macro-average validation HR@10; record category HR@10 and consumed GPU time.\nRun compatible diagnostics using the trained model and measured finite observations.",
+    "originality": {
+      "score": 4,
+      "positive": "Combines an initially inactive recent-history correction with candidate competition in a compact, testable SASRec extension.",
+      "negative": "Recency pooling, residual gating and sampled cross-entropy are established components; novelty lies mainly in their controlled combination."
+    },
+    "future_potential": {
+      "score": 8,
+      "positive": "Provides a practical foundation for testing whether observable recent context improves ranking across product and entertainment domains.",
+      "negative": "It cannot establish compatibility, complementarity or immediate demand from interaction sequences alone, and validation gains remain unmeasured."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Adds a small representation branch and a vectorized candidate loss while retaining the SASRec backbone.",
+      "negative": "Correct causal pooling, negative exclusion, checkpoint loading, predictor generation and diagnostic consistency require coordinated changes."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Uses causal self-attention to represent sequential interaction histories.",
+        "Provides the existing per-dataset SASRec backbone."
+      ],
+      "limitations": [
+        "Does not itself establish product compatibility or current demand.",
+        "Its architecture alone does not demonstrate performance on this pinned evaluation."
+      ]
+    },
+    {
+      "title": "Revisiting Recommendation from a Sampled Softmax Perspective",
+      "link": "https://arxiv.org/abs/2201.02327",
+      "contributions": [
+        "Analyzes how sampled softmax emphasizes high-scoring negatives and how temperature affects that emphasis."
+      ],
+      "limitations": [
+        "General recommendation findings require verification in this SASRec benchmark.",
+        "Does not establish that easy negatives caused the observed Electronics weakness."
+      ]
+    },
+    {
+      "title": "gSASRec",
+      "link": "https://arxiv.org/abs/2308.07192",
+      "contributions": [
+        "Combines increased negative sampling with generalized BCE to address sampling-induced overconfidence."
+      ],
+      "limitations": [
+        "Does not directly resolve stale-interest dominance or verify specific item usefulness.",
+        "Requires a controlled comparison against the proposed CE objective."
+      ]
+    },
+    {
+      "title": "Intent Contrastive Learning for Sequential Recommendation",
+      "link": "https://doi.org/10.1145/3616855.3635773",
+      "contributions": [
+        "Learns latent intents from subsequences using contrastive objectives without explicit intent labels."
+      ],
+      "limitations": [
+        "Does not establish observed session boundaries or functional compatibility.",
+        "Its additional objectives are more involved than the proposed early-stage residual."
+      ]
+    },
+    {
+      "title": "Deep Interest Network for Click-Through Rate Prediction",
+      "link": "https://arxiv.org/abs/1706.06978",
+      "contributions": [
+        "Uses candidate-conditioned history weighting to model candidate-specific interests."
+      ],
+      "limitations": [
+        "Adapting candidate-dependent history scoring increases full-catalog inference cost.",
+        "Attention weights do not verify compatibility, complementarity or dislike."
+      ]
+    }
+  ]
+}

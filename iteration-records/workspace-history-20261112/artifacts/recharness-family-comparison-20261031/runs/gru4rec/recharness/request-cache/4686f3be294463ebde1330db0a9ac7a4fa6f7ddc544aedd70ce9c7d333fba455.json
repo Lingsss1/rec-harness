@@ -1,0 +1,35 @@
+{
+  "request_sha256": "4686f3be294463ebde1330db0a9ac7a4fa6f7ddc544aedd70ce9c7d333fba455",
+  "response": {
+    "category_edits": [
+      {
+        "category": "feature_construction",
+        "rationale": "Across all four datasets, add a bounded causal frequency-change feature to history inputs: 1+0.05*tanh(log1p(previous training count)-log1p(current training count)). The first real position uses scale 1. Counts come exclusively from training interactions and persist in each model checkpoint. Candidate embeddings, GRU, readout, loss and optimizer remain fixed.",
+        "edits": [
+          {
+            "find": "        self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)\n        dropout = dropout_rate if num_layers > 1 else 0.0",
+            "replace": "        self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)\n        self.register_buffer(\"training_item_counts\", torch.zeros(itemnum + 1, dtype=torch.float32))\n        dropout = dropout_rate if num_layers > 1 else 0.0"
+          },
+          {
+            "find": "        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)",
+            "replace": "        log_counts = torch.log1p(self.training_item_counts[seq])\n        previous_log_counts = torch.cat((log_counts[:, :1], log_counts[:, :-1]), dim=1)\n        previous_real = torch.cat((torch.zeros_like(seq[:, :1], dtype=torch.bool), seq[:, :-1].ne(0)), dim=1)\n        has_previous = seq.ne(0) & previous_real\n        frequency_scale = 1.0 + 0.05 * torch.tanh(previous_log_counts - log_counts) * has_previous.to(log_counts.dtype)\n        emb = self.dropout(self.item_emb(seq) * frequency_scale.unsqueeze(-1))\n        out, _ = self.gru(emb)"
+          },
+          {
+            "find": "    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)",
+            "replace": "    training_item_counts = np.zeros(itemnum + 1, dtype=np.float32)\n    for items in user_train.values():\n        np.add.at(training_item_counts, np.asarray(items, dtype=np.int64), 1.0)\n    training_item_counts[0] = 0.0\n    with torch.no_grad():\n        model.training_item_counts.copy_(torch.as_tensor(training_item_counts, device=device))\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)"
+          },
+          {
+            "find": "            \"sequence_readout\": \"gru_0.8_causal_mean_0.2_half_life_3\",\n",
+            "replace": "            \"sequence_readout\": \"gru_0.8_causal_mean_0.2_half_life_3\",\n            \"input_feature\": \"training_frequency_change_tanh_0.05\",\n"
+          },
+          {
+            "find": "        if meta.get(\"sequence_readout\") != \"gru_0.8_causal_mean_0.2_half_life_3\":\n            raise RuntimeError(f\"Incompatible GRU sequence readout for {ds}\")\n        model = ModelClass(",
+            "replace": "        if meta.get(\"sequence_readout\") != \"gru_0.8_causal_mean_0.2_half_life_3\":\n            raise RuntimeError(f\"Incompatible GRU sequence readout for {ds}\")\n        if meta.get(\"input_feature\") != \"training_frequency_change_tanh_0.05\":\n            raise RuntimeError(f\"Incompatible GRU input feature for {ds}\")\n        model = ModelClass("
+          }
+        ]
+      }
+    ],
+    "change_summary": "Add training-count frequency-change scaling to history embeddings, with checkpointed counts and matching predictor metadata validation. Preserve one GRU4Rec model per category and existing training settings."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/gru4rec/recharness/calls/00083"
+}

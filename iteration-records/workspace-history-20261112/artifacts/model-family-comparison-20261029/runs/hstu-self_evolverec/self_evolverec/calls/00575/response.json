@@ -1,0 +1,76 @@
+{
+  "markdown_report": "### Insights\n\n**Starting point.** (1) Existing margins measure discrimination against supplied negatives. They cannot establish useful next purchases or compatibility. (2) User feedback suggests that broad associations sometimes outweigh specific recent interests. Treat this as a hypothesis because intent and fulfilled needs are unobserved. (3) The compatibility interface already exposes sequence features and candidate scores. Controlled probes can therefore examine HSTU without changing its backbone or fitting another predictor.\n\n**Related work.** (1) *Does It Look Sequential?* motivates frozen-model history perturbations. Comparing recent and older removals can distinguish positional sensitivity, although neither establishes intent. (2) TREC relationship definitions separate unknown compatibility from demonstrated incompatibility. Attribute judgments therefore require explicit title/description evidence, with unsupported cases marked unknown. (3) Prakash et al. motivate examining popularity-dependent outcomes. Ekstrand et al. support reporting heterogeneous effects and uncertainty alongside averages.\n\n### Framework and directions\n\n| Direction | Observable evidence | Unresolved gap |\n|---|---|---|\n| Temporal dependence | Paired score/rank changes | Whether sensitivity helps prediction |\n| Relationship evidence | Source-backed text attributes | Sparse or ambiguous compatibility |\n| Ranking heterogeneity | Training-frequency and history-length strata | Benefits hidden by macro averages |\n\n### Candidate ideas\n\nScores are originality/potential/difficulty, each out of 10; higher difficulty means harder implementation. Each assessment includes a positive and negative reason.\n\n| Idea | Originality | Potential | Difficulty |\n|---|---|---|---|\n| Paired recent-versus-older removal probe [HSTU; sequentiality study] | **4:** controlled adaptation; established ablations | **8:** tests a concrete hypothesis; cannot prove intent | **3:** existing hooks suffice; padding requires care |\n| Evidence-backed compatibility audit [TREC] | **5:** links ranking to explicit conflicts; familiar extraction | **7:** interpretable failures; limited text coverage | **6:** deterministic rules feasible; normalization needs auditing |\n| Popularity-stratified margin probe [Prakash; Ekstrand] | **3:** exposes hidden disparities; standard stratification | **6:** guides later sampling changes; sampled margins may mislead | **2:** training counts suffice; small strata are noisy |\n\n### Selected idea: paired temporal-dependence probe\n\nAt 0% progress, prioritize a cheap, falsifiable diagnostic before changing training. For each eligible history, remove the latest event and, separately, one seeded older event. Retain chronological order and left padding; reuse identical positive/negative targets for both comparisons. Record paired changes in positive score and positive–negative margin, together with sample counts.\n\n```text\nfreeze HSTU; save evaluation state\nfor eligible history, positive, negative:\n    base = score(history, positive, negative)\n    recent = score(remove_latest(history), positive, negative)\n    older = score(remove_seeded_older(history), positive, negative)\n    record (base - recent) - (base - older)\naggregate by user, then category; report macro effects\nrestore model state\n```\n\nPositive differences indicate greater recent-event dependence, not better recommendations. Preserve `DiagnosisProbe`, both required callables, and existing metrics; add definitions and explicit unavailable statuses. Training-loader probes must not be labeled validation HR@10. Any later intervention must earn selection through the unchanged host evaluator. Keep seed 42, four routed category models, one checkpoint each, and identical predictor semantics.",
+  "idea": {
+    "description": "Add a paired recent-versus-older event removal diagnostic to the supplied HSTU compatibility interface. Measure how removing the latest event changes a fixed target's score and sampled positive–negative margin relative to removing one older event from the same history.",
+    "motivation": "Qualitative feedback suggests weak alignment with specific current interests, but current diagnostics only measure embedding alignment and sampled ranking separation. A controlled paired probe tests whether model scores depend more on recent than older evidence without asserting that recency dependence represents true intent or improves recommendation quality.",
+    "implementation_notes": "Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). Use view.model as the trained module, view.log2feats and view.predict_score for scoring, and retain existing metric keys. Run without gradients, temporarily set evaluation mode, and restore the prior mode afterward. For each row, select its final valid positive-target position and use only the history prefix available at that position, preventing future-context leakage. Require at least two nonpadding history events. Remove one latest event versus one uniformly selected older event using a local seed-42 generator, compact in chronological order, then left-pad to the original length. Read features at the final nonpadding position using masked position indices, never count-1. Keep positive and negative items identical across all three conditions. Define score dependence as s_original minus s_removed and margin dependence analogously; report recent dependence minus older dependence. Aggregate paired observations by user when stable user identifiers are available; the specified loader provides None, so otherwise report row-level descriptive statistics without claiming user-bootstrap intervals. Return eligible/skipped counts and unavailable statuses for empty measurements. Keep metadata-category breakdowns empty because item category metadata is unavailable. Existing and new diagnostic metrics are supplementary; do not modify evaluator inputs or compute replacement selection metrics. No architecture or inference change is required, and each category retains exactly one trained HSTU checkpoint. No experiments or measured improvements are claimed.",
+    "pseudocode": "save model.training; model.eval()\nwith no_grad():\n    for _, sequence, positive, negative in bounded_batches(train_loader):\n        for row in batch:\n            t = final position with a valid positive target\n            history = nonpadding events in sequence[row, :t+1]\n            if len(history) < 2: increment skipped; continue\n            p, n = positive[row, t], negative[row, t]\n            original = left_pad(history)\n            recent_removed = left_pad(history[:-1])\n            j = local_seed42_rng.choice(range(len(history)-1))\n            older_removed = left_pad(history with event j removed)\n            for condition in [original, recent_removed, older_removed]:\n                features = view.log2feats(condition)\n                h = features[final_nonpadding_position(condition)]\n                score[condition] = view.predict_score(h, p)\n                margin[condition] = score[condition] - view.predict_score(h, n)\n            record score[older_removed] - score[recent_removed]\n            record margin[older_removed] - margin[recent_removed]\nrestore saved training mode\nreturn {'metrics': existing_and_new_metrics_with_counts,\n        'metric_definitions': explicit_definitions_and_limitations}",
+    "originality": {
+      "score": 4,
+      "positive": "Pairs equal-size recent and older removals within the actual HSTU diagnostic contract, directly testing a hypothesis suggested by user feedback.",
+      "negative": "History ablations and recency comparisons are established techniques; the contribution is a careful task-specific diagnostic."
+    },
+    "future_potential": {
+      "score": 8,
+      "positive": "Provides a low-cost basis for deciding whether later temporal interventions merit spending the limited training budget.",
+      "negative": "Sensitivity alone cannot identify intent, fulfilled needs, compatibility, or the direction of a beneficial training change."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Uses existing scoring hooks and requires neither retraining nor predictor changes.",
+      "negative": "Correct prefix construction, padding, eligibility accounting, and aggregation require care; the loader does not expose user identities."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Actions Speak Louder than Words: Trillion-Parameter Sequential Transducers for Generative Recommendations",
+      "link": "https://arxiv.org/abs/2402.17152",
+      "contributions": [
+        "Introduces the HSTU sequential-transduction backbone that must remain the model family."
+      ],
+      "limitations": [
+        "Does not establish that history sensitivity measures recent intent or product compatibility."
+      ]
+    },
+    {
+      "title": "Does It Look Sequential?",
+      "link": "https://github.com/Antondfger/Does-It-Look-Sequential/",
+      "contributions": [
+        "Motivates evaluating sequential dependence through controlled history perturbations."
+      ],
+      "limitations": [
+        "Perturbation effects describe model behavior and can vary across datasets; they do not establish causal user preferences."
+      ]
+    },
+    {
+      "title": "TREC 2025 Product Recommendation Guidelines",
+      "link": "https://trec-product-search.github.io/recommendations.html",
+      "contributions": [
+        "Distinguishes substitutes, complements, unknown compatibility, and incompatible complements."
+      ],
+      "limitations": [
+        "Applying these distinctions requires evidence that may be missing from available titles and descriptions."
+      ]
+    },
+    {
+      "title": "Prakash et al. (2024): Sequential Recommendation and Negative Sampling",
+      "link": "https://arxiv.org/abs/2410.17276",
+      "contributions": [
+        "Motivates examining popularity-dependent trade-offs when interpreting negative-sampling results."
+      ],
+      "limitations": [
+        "Reported sampling trade-offs do not establish that a particular unobserved item is a false negative."
+      ]
+    },
+    {
+      "title": "Ekstrand et al. (2024): Distributional Evaluation",
+      "link": "https://doi.org/10.1145/3613455",
+      "contributions": [
+        "Supports examining heterogeneous outcomes and uncertainty beyond aggregate ranking metrics."
+      ],
+      "limitations": [
+        "User-level uncertainty estimates require identifiable user observations and do not capture training variability from a single fixed-seed run."
+      ]
+    }
+  ]
+}

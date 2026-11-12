@@ -1,0 +1,71 @@
+{
+  "markdown_report": "At 20% progress, prioritize **uniform multi-negative candidate cross-entropy on corrected NextItNet**, before adding gates or mining. This is a training-objective experiment; no improvement is claimed.\n\nThree starting-point insights guide selection. First, the supplied baseline inspiration scores 0.5300 versus 0.5163–0.5175 for gate proposals; these observations favor a simpler next experiment without proving architectural inferiority. Second, Electronics has 6.84% sampled training wrong ranks and a 0.4512 tenth-percentile margin, motivating stronger candidate discrimination. Third, terminal-preserving permutations worsen training-target ranks, showing earlier-history dependence; sparse replacement support prevents concluding that this dependence is excessive.\n\nRelated work supplies three complementary insights. [NextItNet](https://arxiv.org/abs/1808.05163) supports sampled-softmax training, making objective changes family-compatible. [Wu et al.](https://wujcan.github.io/papers/tois-ssm.pdf) explain softmax’s implicit emphasis on competitive negatives, motivating an objective comparison. [Hard-negative theory](https://doi.org/10.1145/3543507.3583223) and [UFNRec](https://arxiv.org/abs/2208.04116) motivate controlled hardness and caution about false negatives, respectively; neither establishes this proposal’s effectiveness.\n\nThe conceptual framework separates **candidate discrimination** (objective), **historical evidence selection** (causal gates), and **candidate exposure** (sampling). Test these directions separately to preserve attribution.\n\nScores below use originality/future potential/user alignment/model alignment/difficulty, each 0–10; higher difficulty means harder implementation.\n\n| Atomic idea | Scores | Positive assessment | Negative assessment |\n|---|---|---|---|\n| Uniform multi-negative cross-entropy | 3/7/6/8/3 | Established, inexpensive route to competitive ranking | No explicit recency mechanism |\n| Recent-summary residual gate | 4/6/8/6/4 | Conditions updates on recent evidence | Shortcuts retain older information |\n| Moderate-hard negative curriculum | 4/6/6/7/5 | Exposes competitive distractors | Adds selection bias and false-negative risk |\n\n**Selected experiment.** Keep the ungated corrected backbone and score one positive against 32 distinct uniform negatives at each valid training position. Compare candidate cross-entropy with multi-negative BCE using identical candidate sets and matched negative reduction. This explicitly targets two user failures as hypotheses: broadly associated candidates displacing specific matches, and candidates associated with isolated older interests displacing current matches. Relative candidate competition may improve both, but cannot identify recency, compatibility, or unmet need. Its measured model-facing target is Electronics’ weak sampled separation.\n\nLogical steps: sample eligible negatives → compute existing logits → apply candidate cross-entropy → update one network. Preserve all four routes, prescribed seeds, training limits and host selection. Track margins alongside host macro HR@10; repeat the prescribed qualitative assessment to establish whether either user-facing failure actually improves. Defer gates and mining until this comparison is measured. Load exactly one selected checkpoint per category.",
+  "idea": {
+    "description": "Test uniform multi-negative candidate cross-entropy on the supplied corrected, ungated NextItNet, using a matched multi-negative BCE comparison. Preserve one independently trained network and one selected checkpoint per category.",
+    "motivation": "Electronics has a measured 6.84% sampled training negative-beats-positive rate and a 0.4512 tenth-percentile margin, substantially weaker separation than the other categories. Candidate competition offers a practical hypothesis for reducing broadly associated recommendations and recommendations linked to isolated older interests that outrank specific current matches. These are explicit behavioral targets, not established effects: the objective supplies neither a recency mechanism nor evidence about compatibility or replacement needs. The supplied gate inspirations also have lower reported scores than the baseline inspiration, supporting an objective-first experiment without establishing why those differences occurred.",
+    "implementation_notes": "Retain the corrected baseline's causal dilated-convolution backbone, item embeddings, scoring head, optimizer, initialization, family-specific sample_batch, splits and routing. Do not carry forward an experimental gate as the cold start. Record inherited settings rather than inventing missing baseline details.\n\nFor each valid aligned next-item training position, draw K=32 distinct uniform negative item IDs. Exclude padding, the target and that user's known training-history positives; never consult validation or test labels for exclusion. If fewer than K eligible items exist, use all eligible items with an explicit candidate mask. An empty eligible set contributes no candidate loss and must be counted in diagnostics. Generate candidates in bounded chunks to avoid materializing a B x L x K x d embedding tensor for the entire batch. Keep all valid supervised positions and normalize loss over valid positions.\n\nCompute unnormalized baseline logits, with the positive in candidate column zero. Use temperature 1 and cross-entropy over the positive plus eligible negatives. This is an uncorrected candidate-ranking objective, not an unbiased estimate of full-catalog likelihood, especially because eligible sampling pools vary by user. Do not add cosine normalization, an auxiliary fitted scorer, text features, gates or mining in this experiment.\n\nIf budget permits the matched comparison, multi-negative BCE uses softplus(-positive_logit) plus the mean softplus(negative_logits) per valid position. Match candidate sets using a dedicated seed-42 sampling stream and retain shared initialization and training settings. Report the inherited baseline separately if its negative count differs. Controls are independent experimental trials whose predictions are never combined. Count every attempted training run and diagnostic against the shared 43,200 GPU-second allowance; do not promise a trial count without runtime evidence.\n\nPreserve preprocessing seed 0, training seed 42, at most 200 epochs, exactly 200 batches per epoch, single-GPU execution and the supplied validation/checkpoint schedule. Select using only pinned host macro validation HR@10 across Movies_and_TV, Industrial_and_Scientific, Electronics and CDs_and_Vinyl. Keep DATA_DIR = os.environ['GAGC_DATA_DIR'] and trial-local artifacts. Do not inspect other trials, reuse their checkpoints, access test files or modify the evaluator.\n\nInference architecture remains the corrected baseline. Preserve the predictor writer and verify that its saved configuration, state loading, padding behavior and scores match the trained network. Gather the maximum nonpadding positional index for left-padded histories, never count-1; retain the supplied empty-history convention. Each category loads exactly one selected checkpoint.\n\nKeep DiagnosisProbe(view, device), run_full_diagnosis(train_loader), diagnosis_interpreter_prompt(raw_diagnosis), the actual view.model, item_emb, log2feats(sequence), predict_score(features, items) and host ModelView interfaces. The loader remains (None, sequence, positive, negative), each tensor B x L; additional training negatives need not change this interface. Preserve the original fixed diagnostic negative protocol for cross-trial comparability. Report measured metrics and definitions, sampled margins, wrong-rank rates and score norms. Treat embedding cosine as alignment rather than proof of collapse. Sparse replacement support cannot establish excessive historical influence. Use only the prescribed twenty training users for qualitative follow-up, separately tracking specific current matches, older-interest displacement and uncertain item identity. No execution or validation gain is claimed.",
+    "pseudocode": "DATA_DIR = os.environ['GAGC_DATA_DIR']\n# Apply inside the host-supplied corrected NextItNet training scaffold.\nfor category in FOUR_SUPPLIED_CATEGORIES:\n    set_training_seed(42)\n    model = corrected_ungated_nextitnet(inherited_config)\n    for epoch in range(min(configured_epochs, 200)):\n        for batch_index in range(200):\n            _, sequence, positive, original_negative = sample_batch(...)\n            features = model.log2feats(sequence)\n            valid = (sequence != 0) & (positive != 0)\n            position_losses = []\n            for chunk in bounded_chunks(valid_positions(valid)):\n                negatives, candidate_mask = sample_distinct_uniform_negatives(\n                    K=32,\n                    exclude={padding, chunk.positive, user_known_training_positives},\n                    rng=dedicated_seed_42_stream)\n                candidates = concatenate([chunk.positive[:, None], negatives], dim=1)\n                logits = existing_candidate_scores(model, features[chunk], candidates)\n                logits = mask_ineligible_candidates(logits, candidate_mask)\n                # Skip and count positions with no eligible negatives.\n                position_losses.append(cross_entropy(logits, target_column=0, reduction='none'))\n            loss = mean_over_eligible_valid_positions(position_losses)\n            inherited_optimizer_step(loss)\n        inherited_validation_and_checkpoint_selection()\n    save_one_selected_checkpoint(category, model, inherited_config)\nwrite_baseline_consistent_predictor_with_four_category_routing()\n# Predictor reads features at max(index where sequence[index] != 0).\n# Preserve baseline empty-history handling; load one checkpoint/category.\n# Optional matched BCE is a separate trial, never inference fusion.",
+    "originality": {
+      "score": 3,
+      "positive": "Provides a focused, diagnosis-driven comparison of candidate competition within the required NextItNet family.",
+      "negative": "Multi-negative cross-entropy is established, including sampled-softmax precedent in NextItNet; this is an experimental refinement rather than a new model class."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Establishes a useful objective control before attributing improvements to contextual gates or negative-mining curricula.",
+      "negative": "Training separation may improve without validation or full-catalog gains, and candidate competition cannot directly resolve unavailable compatibility or unmet-need evidence."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Changes training candidate construction and loss while retaining architecture, checkpoint format and inference interfaces.",
+      "negative": "Distinct per-user sampling, bounded-memory scoring, reproducible matched candidates and fair loss reduction require careful implementation."
+    }
+  },
+  "related_work": [
+    {
+      "title": "NextItNet: A Simple Convolutional Generative Network for Next Item Recommendation",
+      "link": "https://arxiv.org/abs/1808.05163",
+      "contributions": [
+        "Establishes the residual causal dilated-convolution backbone retained in this proposal.",
+        "Provides sampled-softmax precedent for a family-preserving objective experiment."
+      ],
+      "limitations": [
+        "Does not establish that the proposed candidate count or objective improves this pinned four-category benchmark."
+      ]
+    },
+    {
+      "title": "Wu et al., TOIS 2024: sampled-softmax analysis",
+      "link": "https://wujcan.github.io/papers/tois-ssm.pdf",
+      "contributions": [
+        "The supplied search summary describes implicit hard-negative weighting and ranking benefits of sampled softmax.",
+        "Motivates comparing candidate competition while retaining baseline unnormalized logits."
+      ],
+      "limitations": [
+        "Does not identify the actual bottleneck in the supplied Electronics model.",
+        "Its findings do not guarantee transfer to this NextItNet configuration."
+      ]
+    },
+    {
+      "title": "Hard-negative sampling theory",
+      "link": "https://doi.org/10.1145/3543507.3583223",
+      "contributions": [
+        "Supports treating negative hardness as a controllable experimental choice."
+      ],
+      "limitations": [
+        "Does not establish a moderate-hard curriculum as superior for this task.",
+        "Mining changes the training distribution and requires a separate controlled experiment."
+      ]
+    },
+    {
+      "title": "UFNRec",
+      "link": "https://arxiv.org/abs/2208.04116",
+      "contributions": [
+        "Documents false-negative risks relevant to competitive negative sampling."
+      ],
+      "limitations": [
+        "Excluding known training positives does not eliminate latent false negatives.",
+        "Its teacher-based remedy is not adopted under the single-model experiment constraint."
+      ]
+    }
+  ]
+}

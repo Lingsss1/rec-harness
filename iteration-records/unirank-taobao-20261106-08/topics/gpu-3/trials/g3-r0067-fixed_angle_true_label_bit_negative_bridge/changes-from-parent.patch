@@ -1,0 +1,135 @@
+--- g3-r0066-fixed_angle_true_label_bit_negative_bridge/model.py
++++ g3-r0067-fixed_angle_true_label_bit_negative_bridge/model.py
+@@ -1,10 +1,10 @@
+-"""Label-correspondence replacement for the auxiliary orientation bit.
+-
+-Compute counterfactual auxiliary cotangents at the recipient's unchanged
+-probabilities/features using occupied-cycle-permuted training label triples.
+-Only the Q bit uses these cotangents. The real true-label cotangents still
+-set the radius, line and support; private learning uses true-label BCE.
+-Native-bit bridges execute the same extra VJP work. This is a first-order
+-row-space surrogate, not the gradient of the reported BCE. No novelty claim.
++"""Occupied-population soft labels for the auxiliary orientation bit.
++
++At the unchanged recipient probability graph, replace each occupied row's
++auxiliary label by that task's occupied-batch mean ONLY for the bit-source
++VJP. Keep empty-row source labels, real true-label radius/line/support and
++all private true-label learning. Cross source choice with external sign.
++Native bridges run the same extra VJP. This first-order row-space surrogate
++is not the ordinary derivative of joint BCE. No novelty claim is made.
+ """
+ import torch
+@@ -701,9 +701,38 @@
+ 
+ 
++def _occupied_mean_label_targets(train_labels, occupied):
++    """Mean targets for a training-only source VJP; never used in forward.
++
++    For each task t and occupied row i, ybar_it = sum_j m_j*y_jt / sum_j m_j.
++    Empty rows keep their own true labels, matching the old permutation's
++    domain. All-empty and singleton-occupied batches therefore keep labels.
++    No labels, statistics, parameters or RNG state persist across batches.
++
++    At fixed probabilities and recipient graph, BCE's VJP is affine in its
++    target, so this is the uniform-permutation-average auxiliary VJP before
++    nonlinear Q/pivot extraction (up to arithmetic rounding). It is NOT the
++    average orientation bit. Batch prevalence, empty-row labels, true native
++    radius/support and learned state still carry auxiliary-label information.
++    Float32 matches the inherited BCE path; source precision is not altered.
++    """
++    if train_labels.ndim != 2:
++        raise ValueError('Expected training labels [B,T]')
++    if (occupied.shape != (train_labels.shape[0], 1)
++            or occupied.dtype != torch.bool):
++        raise ValueError('Expected history occupancy bool[B,1]')
++    with torch.autocast(device_type=train_labels.device.type, enabled=False):
++        truth = train_labels.detach().to(dtype=torch.float32)
++        count = occupied.to(dtype=torch.float32).sum().clamp_min(1.0)
++        totals = torch.where(occupied, truth, torch.zeros_like(truth)).sum(
++            dim=0, keepdim=True)
++        means = totals / count
++        return torch.where(occupied, means.expand_as(truth), truth)
++
++
+ def _label_source_orientation_bit(click_gradient, gradients, occupied):
+     """Q's sign from counterfactual labels at fixed recipient computation.
+ 
+ Unlike moving a precomputed cotangent, the caller differentiates BCE with
+-permuted labels through the original recipient probability graph. Only
++occupied-mean labels through the original recipient probability graph. Only
+ this summary uses that alternate VJP; the native geometry is kept separate.
+ Exact-zero Q maps to +1 without an additional validity gate. The helper
+@@ -737,5 +766,5 @@
+     if orthogonal_orientation not in ('aligned', 'reversed'):
+         raise ValueError('Unknown orthogonal orientation')
+-    if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit', 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'nuisance_line_fixed_angle_label_cycle_bit'):
++    if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit', 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'nuisance_line_fixed_angle_label_mean_bit'):
+         raise ValueError('Unknown orthogonal assignment')
+     centered, parallel, orthogonal = _click_relative_components(
+@@ -823,5 +852,5 @@
+             transfer = (fixed_angle_click_oriented if orthogonal_orientation == 'aligned'
+                         else fixed_angle_click_negative)
+-        elif orthogonal_assignment == 'nuisance_line_fixed_angle_label_cycle_bit':
++        elif orthogonal_assignment == 'nuisance_line_fixed_angle_label_mean_bit':
+             transfer = (label_source_oriented if orthogonal_orientation == 'aligned'
+                         else label_source_negative)
+@@ -873,9 +902,9 @@
+         replacement_total = _reduce_context_transfer(
+             click_gradient, true_gradients, occupied, 'aligned', 'reversed',
+-            'orthogonal_native', 'nuisance_line_fixed_angle_label_cycle_bit',
++            'orthogonal_native', 'nuisance_line_fixed_angle_label_mean_bit',
+             source_gradients)
+         return {
+             'native_bit': native_bit,
+-            'label_replaced_bit': source_bit,
++            'mean_target_bit': source_bit,
+             'bit_disagreement': native_bit != source_bit,
+             'native_transfer_active': native_transfer.abs().amax() > 0,
+@@ -919,5 +948,5 @@
+         if click_relative_transfer != 'orthogonal_native':
+             raise ValueError('Assignment study requires orthogonal-only transfer')
+-        if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit', 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'nuisance_line_fixed_angle_label_cycle_bit'):
++        if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit', 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'nuisance_line_fixed_angle_label_mean_bit'):
+             raise ValueError('Unknown orthogonal assignment')
+         ctx.orthogonal_assignment = orthogonal_assignment
+@@ -1030,5 +1059,5 @@
+         if click_relative_transfer != 'orthogonal_native':
+             raise ValueError('Assignment study requires orthogonal-only transfer')
+-        if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit', 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'nuisance_line_fixed_angle_label_cycle_bit'):
++        if orthogonal_assignment not in ('native', 'paired_reprojected', 'paired_tangent', 'canonical_tangent', 'fixed_line_oriented', 'fixed_line_canonical', 'click_line_oriented', 'nuisance_line_oriented', 'nuisance_line_fixed_angle', 'nuisance_line_fixed_angle_canonical', 'nuisance_line_fixed_angle_click_bit', 'nuisance_line_fixed_angle_without_cart_bit', 'nuisance_line_fixed_angle_without_fav_bit', 'nuisance_line_fixed_angle_without_buy_bit', 'nuisance_line_fixed_angle_fav_only_bit', 'nuisance_line_fixed_angle_paired_source_bit', 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'nuisance_line_fixed_angle_label_mean_bit'):
+             raise ValueError('Unknown orthogonal assignment')
+         self.orthogonal_assignment = orthogonal_assignment
+@@ -1866,10 +1895,12 @@
+         for the bit; ordinary true-label private gradients remain intact.
+ 
+-        One common occupied-cycle permutation preserves auxiliary label
+-        triples and their occupied-population prevalence. Probabilities and
+-        all recipient feature computations stay fixed. This deterministic
+-        permutation is not proof of independence, and labels still enter the
+-        native radius/gates and subsequent learned state. All cells execute
+-        the extra VJP, including native-bit controls. First derivatives only.
++        Only the source BCE uses occupied-population mean soft labels.
++        Empty-row targets remain true. This removes row-specific occupied
++        outcomes from this source VJP without injecting permutation noise;
++        it retains task prevalence and the recipient prediction/Jacobian.
++        Native radius/gates and private learning still use true labels.
++        The bit of the mean VJP is not a mean of permutation bits. All cells
++        execute this same extra VJP, including native-bit controls.
++        First derivatives only; no population statistics persist.
+         """
+         if (probabilities.ndim != 2 or train_labels.ndim != 2
+@@ -1891,6 +1922,5 @@
+         with torch.autocast(device_type=probabilities.device.type, enabled=False):
+             truth = train_labels.detach().to(dtype=torch.float32)
+-            donor_rows = _occupied_cycle_donor_rows(occupied)
+-            shifted = truth.index_select(0, donor_rows)
++            source_targets = _occupied_mean_label_targets(truth, occupied)
+             losses = []
+             source_losses = []
+@@ -1901,5 +1931,5 @@
+                 if label != 'is_click':
+                     source_losses.append(nn.functional.binary_cross_entropy(
+-                        probabilities[:, index].float(), shifted[:, index], reduction='mean'))
++                        probabilities[:, index].float(), source_targets[:, index], reduction='mean'))
+             source_loss = torch.stack(source_losses).sum()
+             source_gradients = torch.autograd.grad(

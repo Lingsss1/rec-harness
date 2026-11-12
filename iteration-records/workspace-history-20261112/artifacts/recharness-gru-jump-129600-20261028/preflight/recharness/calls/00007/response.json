@@ -1,0 +1,41 @@
+{
+  "category_edits": [
+    {
+      "category": "interaction_mechanism",
+      "rationale": "Learn bilinear compatibility h^T W e with W initialized to identity. Preserve the GRU topology, history readout and BPR loss. The generated predictor imports this model class and strictly loads its state dictionary, including W, so training and inference use the same interaction.",
+      "edits": [
+        {
+          "find": "        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)\n        self.gru",
+          "replace": "        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)\n        self.compatibility = nn.Parameter(torch.eye(hidden_units))\n        self.gru"
+        },
+        {
+          "find": "        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)",
+          "replace": "        interaction = torch.matmul(out, self.compatibility)\n        pos_scores = (interaction * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (interaction * self.item_emb(neg)).sum(dim=-1)"
+        },
+        {
+          "find": "        user_emb = self.encode(seq)[0]\n        cand_emb = self.item_emb(candidates)",
+          "replace": "        user_emb = torch.matmul(self.encode(seq)[0], self.compatibility)\n        cand_emb = self.item_emb(candidates)"
+        }
+      ]
+    },
+    {
+      "category": "training_strategy",
+      "rationale": "Keep Adam and its peak learning rate, adding per-step linear warmup for the first 5% of the training horizon followed by cosine decay to 10% of peak. This moderates early updates to the learned compatibility matrix and stabilizes later optimization while retaining the 200-epoch cap.",
+      "edits": [
+        {
+          "find": "NUM_EPOCHS    = int(os.environ.get(\"GRU4REC_EPOCHS\", \"200\"))",
+          "replace": "NUM_EPOCHS    = min(200, int(os.environ.get(\"GRU4REC_EPOCHS\", \"200\")))"
+        },
+        {
+          "find": "    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)\n",
+          "replace": "    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)\n    total_steps = max(1, NUM_EPOCHS * NUM_BATCHES)\n    warmup_steps = max(1, math.ceil(0.05 * total_steps))\n\n    def lr_factor(step: int) -> float:\n        if step < warmup_steps:\n            return float(step + 1) / warmup_steps\n        progress = min(1.0, max(0.0, float(step + 1 - warmup_steps) / max(1, total_steps - warmup_steps)))\n        return 0.1 + 0.45 * (1.0 + math.cos(math.pi * progress))\n\n    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_factor)\n"
+        },
+        {
+          "find": "            optimizer.step()\n            total_loss += float(loss.item())",
+          "replace": "            optimizer.step()\n            scheduler.step()\n            total_loss += float(loss.item())"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Add identity-initialized bilinear scoring and coordinated warmup/cosine scheduling to each category's single GRU model. Preserve routing, recurrent topology, loss, seeds and evaluation."
+}

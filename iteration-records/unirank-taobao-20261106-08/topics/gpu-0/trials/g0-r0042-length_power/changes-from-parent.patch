@@ -1,0 +1,93 @@
+--- g0-r0039-context_product/model.py
++++ g0-r0042-length_power/model.py
+@@ -1,11 +1,12 @@
+-"""Prospective context/history fusion study on the frozen compressed-history model.
+-
+-Append rank-16 task-specific context and compressed-history projections to the
+-incumbent. Product versus sum fusion is crossed with the existing auxiliary
+-adapter-context gradient gate. All four cells have identical learned capacity,
+-initialization order and native Dice populations. New zero output matrices
+-preserve the parent's initial predictions, not its subsequent training path.
+-Fusion uses ordinary differentiable FP32 arithmetic, not a surrogate gradient.
+-No novelty or predictive benefit is established. Host tensor checks are required.
++"""Exploratory history-length conditioned salience after history compression.
++
++The signed product endpoint is the frozen incumbent. A smooth power endpoint
++helped short-history validation slices but lost overall. This proposal tests
++whether a fixed per-impression schedule can retain both endpoint strengths.
++The reverse schedule and constant halfway exponent are replacement controls;
++the signed replay checks the execution bridge. No mechanism or benefit is
++established by this source. Thresholds reuse exploratory validation bins.
++All learned modules, initialization, ownership gates, Dice populations and
++compression operations are inherited unchanged. Host tensor checks required.
+ """
+ import torch
+@@ -16,5 +17,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'salience_schedule': 'aligned'}
+ 
+ 
+@@ -35,5 +36,5 @@
+                  block_aux_tower_context_grad=True,
+                  block_aux_adapter_context_grad=False,
+-                 context_fusion='product', interaction_rank=16,
++                 context_fusion='product', interaction_rank=16, salience_schedule='aligned',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -62,6 +63,9 @@
+         self.block_aux_tower_context_grad = block_aux_tower_context_grad
+         self.block_aux_adapter_context_grad = block_aux_adapter_context_grad
+-        if context_fusion not in ('product', 'sum'):
+-            raise ValueError('Unknown context/history fusion operator')
++        if context_fusion != 'product':
++            raise ValueError('This salience study freezes signed-product fusion')
++        if salience_schedule not in ('aligned', 'reverse', 'half', 'signed'):
++            raise ValueError('Unknown history-length salience schedule')
++        self.salience_schedule = salience_schedule
+         if (not isinstance(interaction_rank, int) or isinstance(interaction_rank, bool)
+                 or interaction_rank < 1):
+@@ -676,15 +680,26 @@
+         return weighted.sum(dim=1)
+ 
+-    def _context_history_correction(self, index, context, history):
+-        # Only supplied context and already-masked compressed history enter.
+-        # FP32 bounded projections and a shared RMS denominator reduce gross
+-        # scale confounding between product and sum. Their geometry and
+-        # optimization still differ; equal norms do not imply equal capacity.
++    def _context_history_correction(self, index, context, history, history_count):
++        # history_count is the number of visible valid exposures, obtained
++        # from the inherited uniform compression counts. It contains no label,
++        # elapsed time, user identity, batch position or cross-row statistic.
++        # The same exposure-length rule is applied to every task; auxiliary
++        # feedback counts do not change the gate. No gradient edge is gated.
+         query = torch.tanh(self.context_queries[index](context).float())
+         summary = torch.tanh(self.history_projections[index](history).float())
+-        if self.context_fusion == 'product':
+-            fused = query * summary
+-        else:
+-            fused = (query + summary) * (2.0 ** -0.5)
++        fused = query * summary
++        power_weight = ((64.0 - history_count.float()) / 48.0).clamp(0.0, 1.0)
++        if self.salience_schedule == 'reverse':
++            power_weight = 1.0 - power_weight
++        elif self.salience_schedule == 'half':
++            power_weight = torch.full_like(power_weight, 0.5)
++        elif self.salience_schedule == 'signed':
++            power_weight = torch.zeros_like(power_weight)
++        # p*(p^2+1e-4)^(-a/4) exactly recovers the earlier smooth signed
++        # power at a=1 and the signed product at a=0 in real arithmetic.
++        # Finite ordinary derivatives, no surrogate gradient or detach.
++        # FP32 is inherited from the endpoint implementation. Every variant
++        # executes this same power and RMS path, including the signed replay.
++        fused = fused * (fused.square() + 1e-4).pow(-0.25 * power_weight)
+         fused = fused * torch.rsqrt(fused.square().mean(dim=-1, keepdim=True) + 1e-4)
+         return self.interaction_outputs[index](fused.to(history.dtype))
+@@ -833,5 +848,5 @@
+             history_features = torch.cat([base, match_counts.to(base.dtype), signal], dim=-1)
+             correction = correction + self._context_history_correction(
+-                index, adapter_context, history_features)
++                index, adapter_context, history_features, total_count)
+             pooled = base + has_history * correction
+             features = torch.cat([tower_context, task_target, pooled], dim=-1)

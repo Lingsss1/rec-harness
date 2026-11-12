@@ -1,0 +1,80 @@
+--- g1-r0078-membership_full/model.py
++++ g1-r0079-membership_full_balanced/model.py
+@@ -1,10 +1,8 @@
+-"""Occupied-cycle auxiliary bit source at fixed forward architecture.
+-
+-Cross a cyclic permutation of occupied auxiliary cotangent triples with
+-native-source bridges and both external signs. Only the Q orientation bit
+-uses donors; native full-task radius, canonical fixed-angle line, support,
+-true-label joint BCE and all private learning are inherited. Every helper
+-runs in every arm. This is a first-order row-space surrogate VJP, not the
+-ordinary gradient of the reported scalar BCE. No novelty claim is made.
++"""Prospective membership-content by feedback-weighting factorial.
++
++Balanced weights are applied after native content means and any counts-only
++replacement. Empty strata and valid-event mass remain fixed. Learned modules,
++initialization and the inherited context surrogate VJP are unchanged; the VJP
++is not the ordinary derivative of the reported joint BCE. No novelty claim.
+ """
+ import torch
+@@ -15,5 +13,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'block_aux_residual_context_grad': True, 'block_aux_product_context_grad': False, 'product_context_assignment': 'aligned', 'product_context_component': 'centered', 'product_context_magnitude': 'native', 'product_context_orientation': 'aligned', 'parallel_orientation': 'aligned', 'orthogonal_orientation': 'reversed', 'centering_scope': 'aggregate', 'click_context_collection': 'joint', 'auxiliary_reduction_precision': 'float64', 'click_relative_transfer': 'orthogonal_native', 'orthogonal_assignment': 'nuisance_line_fixed_angle_occupied_cycle_source_bit', 'membership_weighting': 'balanced'}
+ 
+ # Identical true-label joint loss hook inherited from g3-r0032 sources.
+@@ -886,4 +884,5 @@
+                  click_relative_transfer='orthogonal_native',
+                  orthogonal_assignment='nuisance_line_fixed_angle_occupied_cycle_source_bit',
++                 membership_weighting='balanced',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -897,4 +896,7 @@
+         super().__init__(feature_map, model_id=model_id, gpu=gpu,
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
++        if membership_weighting != 'balanced':
++            raise ValueError('This module requires balanced feedback readout weights')
++        self.membership_weighting = membership_weighting
+         self.compression_routes = compression_routes
+         if block_aux_scorer_grad is not True:
+@@ -1401,4 +1403,21 @@
+         return residual, residual.square().sum(dim=(1, 2), keepdim=True)
+ 
++    @staticmethod
++    def _balance_feedback_weights(counts):
++        """Equal mass per occupied feedback stratum, after native means.
++
++        For each real temporal block, retain the uniform and target-match
++        support counts. Feedback counts become n/k on each originally
++        nonempty feedback row, where n is valid-event count and k is the
++        number of occupied feedback rows (0, 1 or 2). Thus feedback mass
++        sums to n and no empty stratum becomes occupied. This changes
++        readout weighting, never the events used to compute any mean or
++        the rows entering Dice. No parameters, state or RNG are added.
++        """
++        occupied = (counts[:, 1:3] > 0).to(counts.dtype)
++        strata = occupied.sum(dim=-1, keepdim=True)
++        balanced = occupied * (counts[:, :1] / strata.clamp_min(1))
++        return torch.cat((counts[:, :1], balanced, counts[:, 3:]), dim=-1)
++
+     def _compress_both(self, values, mask, auxiliary):
+         batch, length, width = values.shape
+@@ -1416,4 +1435,5 @@
+         sums = torch.bmm(assignment, grouped)
+         means = sums / counts.clamp_min(1).unsqueeze(-1)
++        counts = self._balance_feedback_weights(counts)
+         return means.reshape(batch, groups * 3, width), counts.reshape(batch, groups * 3)
+ 
+@@ -1446,4 +1466,5 @@
+         sums = torch.bmm(assignment, values.reshape(batch * 10, 10, width))
+         means = sums / counts.clamp_min(1).unsqueeze(-1)
++        counts = self._balance_feedback_weights(counts)
+         return means.reshape(batch, 70, width), counts.reshape(batch, 70)
+ 
+@@ -1467,4 +1488,5 @@
+         sums = torch.bmm(assignment, values.reshape(batch * 10, 10, width))
+         means = sums / counts.clamp_min(1).unsqueeze(-1)
++        counts = self._balance_feedback_weights(counts)
+         return means.reshape(batch, 50, width), counts.reshape(batch, 50)
+ 

@@ -1,0 +1,151 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting point.** (1) SASRec already learns recency weighting; stale-interest errors motivate testing explicit recent context, not assuming attention lacks it. (2) Recent averaging could strengthen repeated preferences but also amplify incidental purchases; histories cannot establish compatibility, redundancy, or purchase purpose. (3) Electronics’ 14.95% sampled wrong ranks and −0.4812 margin tenth percentile motivate separation experiments. Embedding similarity near 0.54–0.56 does not establish severe collapse or its causality.\n\n**Related work.** (1) LSIDN and TLSTSRec motivate recent/persistent fusion; HGN and LS4SRec support pooling controls, not guaranteed gains. (2) gSASRec motivates a separate calibrated multi-negative objective ablation. (3) TGCL4SR motivates training-only directional associations, without certifying complementarity. (4) ReZero motivates zero-initialized residual gating; normalization placement must preserve baseline scores.\n\n### Framework and candidate assessment\n\nThe framework separates **context selection** (recent/full history), **ranking supervision** (negative sampling), and **association evidence** (directed transitions). Test axes separately before combining them.\n\nScores are 0–10; higher difficulty means harder implementation. Each cell supplies a positive and a limitation. Alignment scores describe hypotheses.\n\n| Idea | Originality | Potential | User alignment | Model alignment | Difficulty |\n|---|---|---|---|---|---|\n| A. Residual recent-context SASRec | 2: targeted combination; established components | 6: extensible; SASRec already models recency | 7: targets stale interests and broad matches; purpose remains unobserved | 5: may resolve confusion; margins need not improve | 4: small branch; controls and integration require care |\n| B. 32-negative calibrated BCE | 2: established objective; little novelty | 7: stronger comparisons; added cost | 4: sharper ranking; no explicit intent mechanism | 8: targets weak separation; sampled margins differ from HR | 4: vectorizable; calibration requires testing |\n| C. Directed-transition late fusion | 3: useful adaptation; familiar signal | 6: captures order; sparse transitions | 6: next-action associations; redundancy remains unidentified | 6: complementary scores; noisy counts | 4: sparse implementation; normalization needed |\n\n### Selected idea: gated recent/full SASRec\n\nAt 0% progress, retain **A**, revised to preserve baseline initialization. It explicitly targets **historical-interest persistence** and **broad associations outranking specific recent matches**; neither improvement is established. Its model-facing target is weak positive–negative separation, especially Electronics. Keep B and C as subsequent independent experiments.\n\nReplace convex fusion plus outer LayerNorm with an additive residual. The original formulation changes baseline features even with a disabled branch. Use a nonzero projection and a zero-initialized global scalar; a zero sigmoid logit would instead yield 0.5. Do not zero both gate and projection.\n\n```text\nh = SASRec(prefix)\nr, count = mean(last_5_valid_embeddings(prefix)), valid_count\nb = project(concat(LN(h), r, count/5))\nz = h + tanh(alpha)*b              # alpha initialized to zero\nscore(item) = dot(z, item_embedding[item])\n```\n\nRetain baseline BCE. Copy baseline weights exactly and verify initial evaluation-mode features and candidate scores match; seeds alone do not ensure equality. The scalar learns first; branch gradients begin after it moves from zero.\n\nPredefine controls: unchanged SASRec; shorter-history SASRec; recent-average-only scoring; fixed fusion; learned global residual gate; history-conditioned residual gate. Use identical branches for fixed/global/conditional comparisons, causal nonpadding windows, and no future targets. Start with k=5 and fixed residual strengths {0, 0.1}; register any expanded search and comparable training budgets before execution. Adaptive gating merits adoption only if it beats the simpler controls.\n\nPreserve four-category routing, splits, seeds, and 200-epoch environment default. Update predictor generation and diagnostic scoring consistently; retain diagnostic interfaces and omit unavailable category attribution. Select exclusively by pinned **100-candidate macro validation HR@10**, reporting category scores, trial/checkpoint counts, and GPU cost. Track margins on fixed diagnostic samples; no gains have been measured.\n\nRecent-item and popularity shortcuts remain risks. Report paired per-user hit differences against a predefined baseline; optionally bootstrap 10,000 paired within-category resamples. Intervals condition on fixed candidates/models and do not correct selection bias, training variability, or sampled-metric bias [Krichene–Rendle; Koehn; Cawley–Talbot]. Use no unavailable review attributes, pretrained weights, or hidden test data.",
+  "idea": {
+    "description": "Add a zero-initialized residual recent-context branch to SASRec, then test whether history-conditioned gating provides value beyond recent pooling, truncation, fixed fusion, and a global scalar.",
+    "motivation": "Explicit recent context targets stale historical interests and broadly related recommendations displacing specific recent matches. The quantitative hypothesis is improved positive–negative separation, particularly in Electronics. These are testable hypotheses; recent pooling cannot establish equipment compatibility, satisfied demand, or actual purchase purpose.",
+    "implementation_notes": "Keep baseline BCE and shared item embeddings. At every causal training position, average embeddings of up to five valid prefix items, including the current input item and excluding future targets and padding. Concatenate the recent mean, branch-internal LayerNorm of the baseline feature, and valid count divided by five; project to the baseline feature dimension using a normally initialized affine layer with zero bias. Add this branch through tanh(alpha), where alpha is a learned per-dataset scalar initialized to zero. Do not apply an additional normalization after residual addition. Keep the branch output nonzero initially so alpha can receive gradients. Instantiate the baseline before auxiliary modules or explicitly copy all baseline parameters; assert initial evaluation-mode feature and candidate-score equivalence against the unchanged model. The initial scalar gradient may be nonzero while projection gradients are initially zero. For the conditional variant, replace alpha with an affine function of the same context, initialized with zero weights and bias; retain the same residual branch. Compare unchanged SASRec, a predefined shorter-history control, recent-average-only scoring, fixed residual strengths 0 and 0.1, a learned global scalar, and the conditional gate. Distinguish fixed residual addition from the original convex-fusion control and document the exact formula used. Begin with k=5; prerecord any additional window sizes, checkpoint evaluation cadence, and trial counts rather than expanding searches after favorable results. Use the baseline's unchanged preprocessing and validation protocol, preprocessing seed 0, training seed 42, and SASREC_EPOCHS environment default 200. Retain all four dataset routes. DATA_DIR remains os.environ['GAGC_DATA_DIR']; save artifacts and generated working/predict.py beneath the trial directory. Store architecture type, window size, projection, normalization, and gate parameters in each checkpoint and reproduce the identical scoring path in the predictor writer. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis); view.model remains the actual trained module and log2feats/predict_score must expose its fused features and scores. Return measured metrics and definitions; do not infer unavailable category attribution. Use fixed diagnostic samples for margin comparisons. Select only by the pinned macro validation HR@10 across four categories, describing it explicitly as 100-candidate validation HR@10. Report category results, evaluated trial/checkpoint counts, and all GPU costs within the shared 43,200 GPU-second budget. If per-user validation hits are available, compute 10,000 paired bootstrap resamples within each category, preserving 200 users/category and averaging category differences equally; report percentile intervals as descriptive uncertainty conditional on models and candidates. Bootstrap intervals do not correct winner-selection bias or quantify training-seed and candidate-sampling variability. Simulator judgments concern full-catalog unseen recommendations and must not be equated with sampled validation performance. The proposed experiment has not been trained or evaluated.",
+    "pseudocode": "base = instantiate_original_sasrec()\n# Copy the reference baseline state exactly before testing equivalence.\nbranch_norm = LayerNorm(hidden_dim)\nbranch_projection = Linear(2 * hidden_dim + 1, hidden_dim)  # nonzero weights, zero bias\nalpha = Parameter(0.0)\n\nh = base.log2feats(sequence)\nr, count = causal_recent_mean(base.item_emb(sequence), window=5, exclude_padding=True)\nx = concat(branch_norm(h), r, count / 5)\nb = branch_projection(x)\nz = h + tanh(alpha) * b\npos_logits = dot(z, base.item_emb(positive))\nneg_logits = dot(z, base.item_emb(negative))\nloss = original_masked_bce(pos_logits, neg_logits, positive != 0)\n\n# Before training, in evaluation mode with identical baseline parameters:\nassert_close(z, h)\nassert_close(candidate_scores(z), candidate_scores(h))\n# For conditional gating, use tanh(Linear(x)) with that gate's weights/bias zero.\n# Inference, predictor generation, and diagnostics use the same z and scoring.\n# Compare controls using fixed validation users/candidates; select by macro HR@10.",
+    "originality": {
+      "score": 2,
+      "positive": "Combines recent-context pooling with exact baseline-preserving residual initialization in a diagnosis-driven experiment.",
+      "negative": "Pooling, long/short fusion, and zero-initialized residual gates are established techniques; methodological care does not establish architectural novelty."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "Offers a compact basis for testing whether explicit context selection adds value and for later timestamp-conditioned extensions.",
+      "negative": "SASRec already learns recency, and pooling can amplify incidental or already-satisfied interests; improvements remain unverified."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "The core change requires only causal pooling, a projection, branch normalization, and a scalar gate.",
+      "negative": "Reliable baseline equivalence, fair controls, predictor serialization, causal masking, diagnostics, and budget accounting require more work than the branch alone."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Uses causal self-attention for next-item recommendation.",
+        "Provides evidence that learned attention can emphasize recent interactions on sparse Amazon data."
+      ],
+      "limitations": [
+        "Does not establish that an added recent-context branch improves this pinned benchmark.",
+        "History truncation can remove useful longer-term information."
+      ]
+    },
+    {
+      "title": "LSIDN",
+      "link": "https://arxiv.org/abs/2407.14743",
+      "contributions": [
+        "Separates long- and short-term interests through distinct encoders and denoising strategies."
+      ],
+      "limitations": [
+        "The supplied evidence does not establish improvements under this RecHarness protocol."
+      ]
+    },
+    {
+      "title": "TLSTSRec",
+      "link": "https://doi.org/10.3233/IDA-240051",
+      "contributions": [
+        "Models temporal duration and spectrum and adaptively fuses long- and short-term representations."
+      ],
+      "limitations": [
+        "Its temporal architecture is more involved than the proposed initial residual experiment."
+      ]
+    },
+    {
+      "title": "gSASRec — IJCAI 2024 extended abstract",
+      "link": "https://www.ijcai.org/proceedings/2024/0939.pdf",
+      "contributions": [
+        "Combines multiple negatives with generalized BCE to address sampling-induced overconfidence."
+      ],
+      "limitations": [
+        "Additional negatives increase computation and memory; gains on these four datasets remain unverified."
+      ]
+    },
+    {
+      "title": "TGCL4SR",
+      "link": "https://ojs.aaai.org/index.php/AAAI/article/view/28789",
+      "contributions": [
+        "Combines global temporal transition graphs with local sequence encoding."
+      ],
+      "limitations": [
+        "Does not establish that simple transition-score fusion improves this baseline or identifies true complementarity."
+      ]
+    },
+    {
+      "title": "ReZero is All You Need: Fast Convergence at Large Depth",
+      "link": "https://arxiv.org/abs/2003.04887",
+      "contributions": [
+        "Uses learnable zero-initialized residual scalars to obtain identity mappings at initialization."
+      ],
+      "limitations": [
+        "The original Transformer also changes normalization; adopting it wholesale would confound the proposed branch experiment.",
+        "A disabled branch initially receives zero branch-weight gradients."
+      ]
+    },
+    {
+      "title": "On Layer Normalization in the Transformer Architecture",
+      "link": "https://arxiv.org/abs/2002.04745",
+      "contributions": [
+        "Analyzes consequences of normalization placement in Transformers."
+      ],
+      "limitations": [
+        "Does not directly evaluate the proposed recommender; exact baseline preservation follows from the residual formula."
+      ]
+    },
+    {
+      "title": "Hierarchical Gating Networks for Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1906.09217",
+      "contributions": [
+        "Combines feature gating, instance gating, and item–item interactions.",
+        "Provides aggregation and component ablations relevant to control design."
+      ],
+      "limitations": [
+        "Does not establish that adaptive recent/full SASRec fusion outperforms tuned fixed fusion here."
+      ]
+    },
+    {
+      "title": "LS4SRec",
+      "link": "https://doi.org/10.1145/3723173",
+      "contributions": [
+        "Uses recent-item embedding averages as a short-term supervision target."
+      ],
+      "limitations": [
+        "This use does not prove standalone ranking gains from recent averaging."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled recommendation metrics can reverse model comparisons."
+      ],
+      "limitations": [
+        "Does not provide a basis to replace the required pinned evaluator; results must retain their sampled-candidate interpretation."
+      ]
+    },
+    {
+      "title": "Statistical Significance Tests for Machine Translation Evaluation",
+      "link": "https://aclanthology.org/W04-3250/",
+      "contributions": [
+        "Provides paired-bootstrap methodology motivating paired per-user recommendation comparisons."
+      ],
+      "limitations": [
+        "The within-category HR bootstrap is an adaptation.",
+        "It does not capture training or candidate variability or correct validation selection bias."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/beta/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how repeated model selection can overfit finite validation data and bias reported performance."
+      ],
+      "limitations": [
+        "Reporting search counts and descriptive intervals exposes but does not eliminate selection bias."
+      ]
+    }
+  ]
+}

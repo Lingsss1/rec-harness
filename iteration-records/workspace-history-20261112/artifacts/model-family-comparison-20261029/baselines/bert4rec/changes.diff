@@ -1,0 +1,90 @@
+--- artifacts/RecHarness-6lyc/gagc/templates/bert4rec_perdataset/train.py
++++ artifacts/model-family-comparison-20261029/baselines/bert4rec/train.py
+@@ -79,31 +79,34 @@
+ 
+ 
+ def sample_batch(user_train: dict[int, list[int]], itemnum: int, batch_size: int, maxlen: int):
++    # Cloze training: masked targets are not exposed as unmasked shifted inputs.
+     users = [u for u, items in user_train.items() if len(items) >= 2]
+     if not users:
+         raise RuntimeError("no users with at least two training interactions")
+     batch_seq, batch_pos, batch_neg = [], [], []
+     for _ in range(batch_size):
+-        user = random.choice(users)
+-        history = user_train[user]
++        history = user_train[random.choice(users)]
++        items = history[-maxlen:]
+         seq = np.zeros(maxlen, dtype=np.int64)
+         pos = np.zeros(maxlen, dtype=np.int64)
+         neg = np.zeros(maxlen, dtype=np.int64)
+-        nxt = history[-1]
+-        idx = maxlen - 1
++        seq[-len(items):] = items
++        eligible = list(range(maxlen-len(items), maxlen))
++        selected = [i for i in eligible if random.random() < 0.2]
++        if not selected:
++            selected = [random.choice(eligible)]
++        if random.random() < 0.5 and maxlen-1 not in selected:
++            selected.append(maxlen-1)
+         interacted = set(history)
+-        for item in reversed(history[:-1]):
+-            seq[idx] = item
+-            pos[idx] = nxt
+-            if nxt != 0:
+-                neg_item = random.randint(1, itemnum)
+-                while neg_item in interacted:
+-                    neg_item = random.randint(1, itemnum)
+-                neg[idx] = neg_item
+-            nxt = item
+-            idx -= 1
+-            if idx < 0:
+-                break
++        if len(interacted) >= itemnum:
++            raise RuntimeError("no unobserved negative item available")
++        for i in selected:
++            pos[i] = seq[i]
++            seq[i] = itemnum + 1  # reserved mask token, never a recommendation
++            item = random.randint(1, itemnum)
++            while item in interacted:
++                item = random.randint(1, itemnum)
++            neg[i] = item
+         batch_seq.append(seq)
+         batch_pos.append(pos)
+         batch_neg.append(neg)
+@@ -181,7 +184,8 @@
+         self.itemnum = itemnum
+         self.hidden_units = hidden_units
+         self.maxlen = maxlen
+-        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)
++        self.mask_token = itemnum + 1
++        self.item_emb = nn.Embedding(itemnum + 2, hidden_units, padding_idx=0)
+         self.pos_emb = nn.Embedding(maxlen + 1, hidden_units, padding_idx=0)
+         encoder_layer = nn.TransformerEncoderLayer(
+             d_model=hidden_units,
+@@ -207,7 +211,10 @@
+         pos = pos * (seq != 0).long()
+         x = self.item_emb(seq) * (self.hidden_units ** 0.5) + self.pos_emb(pos)
+         x = self.dropout(x)
+-        x = self.encoder(x, src_key_padding_mask=(seq == 0))
++        padding = seq == 0
++        safe_padding = padding.clone()
++        safe_padding[padding.all(dim=1), -1] = False
++        x = self.encoder(x, src_key_padding_mask=safe_padding)
+         return self.norm(x)
+ 
+     def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):
+@@ -217,9 +224,11 @@
+         return pos_scores, neg_scores
+ 
+     def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:
+-        out = self.encode_sequence(seq)
+-        lengths = (seq != 0).sum(dim=1).clamp(min=1) - 1
+-        user_emb = out[0, lengths[0]]
++        prediction_seq = torch.zeros_like(seq)
++        prediction_seq[:, :-1] = seq[:, 1:]
++        prediction_seq[:, -1] = self.mask_token
++        out = self.encode_sequence(prediction_seq)
++        user_emb = out[0, -1]
+         cand_emb = self.item_emb(candidates)
+         return torch.matmul(cand_emb, user_emb)
+ 

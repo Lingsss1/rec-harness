@@ -1,0 +1,76 @@
+{
+  "markdown_report": "**Proposal: candidate-difficulty diagnostics for the existing single HSTU model.** At 0% research progress, prioritize a small diagnostic extension before changing training.\n\n**Starting insights.** First, training margins average 9.64–10.94, with negative-wins rates below 0.2%. These measurements establish separation against supplied training negatives; validation ranking remains unmeasured.\n\nSecond, final-event deletion reduces mean margins by 3.10–4.06, whereas prefix shuffling changes them by at most approximately 0.01. This suggests endpoint-sensitive scoring on sampled histories, although deletion changes the readout event and introduces coordinate confounding.\n\nThird, qualitative feedback distinguishes broad relatedness from current usefulness and adequate evidence. Histories alone cannot establish ownership, fulfilled needs, or compatibility, so those judgments require separate evidence or an unknown outcome.\n\n**Related-work insights.** Negative-sampling studies show that candidate construction can change model comparisons [1,2]. Therefore, easy-pair separation warrants a candidate-difficulty audit without replacing the pinned evaluator.\n\nActivation-patching research shows that corruption and scoring choices affect conclusions [3]. Mechanistic probes should follow identity controls and verified intervention sites; the supplied backbone differs from reference HSTU internals.\n\nTREC’s product rubric distinguishes substitutes, complements, and unknown compatibility [4]. Evidence-sufficiency research supports reporting coverage alongside definite judgments [5], motivating an evidence audit rather than inferred rejection labels.\n\n| Direction | Existing evidence | Minimal next step | Remaining gap |\n|---|---|---|---|\n| Ranking competition | Strong training-pair margins | Equal-size candidate panels | Generalization |\n| Sequence mechanisms | Endpoint sensitivity | Verified activation interventions | Causal interpretation |\n| Recommendation evidence | Qualitative usefulness concerns | Span-supported rubric | Human calibration |\n\n**Atomic ideas and assessments.** Scores are originality/potential/difficulty, each 0–10; higher difficulty means harder implementation.\n\n| Idea | Scores | Originality: positive; negative | Potential: positive; negative | Difficulty: positive; negative |\n|---|---|---|---|---|\n| Candidate-panel audit [1,2] | 4/7/3 | Task-specific integration; established sampling | Exposes competition; training-only evidence | Reuses scoring; catalog scoring costs |\n| Exact gate patching [3] | 5/6/7 | Mechanism-specific contrasts; established patching | Localizes sensitivity; intervention dependence | No retraining; backbone instrumentation |\n| Evidence-coverage audit [4,5] | 4/6/5 | Task-specific rubric; established abstention | Separates unknowns; needs human labels | Public text suffices; annotation burden |\n\n**Selected algorithm.** Freeze the fitted HSTU and inspect at most 128 eligible rows/category. Hold each original final-position positive fixed; construct 32-candidate uniform, training-frequency-matched, local TF-IDF-neighbor, and model-high-score panels. Exclude padding, the target, and visible-history items; retain unique candidates and explicitly report insufficient pools.\n\nCompute positive rank, positive-minus-maximum-alternative margin, and alternative-outranking fraction. Report counts and descriptive strata by training frequency and history length; loader identities cannot support user-level confidence intervals. Unobserved alternatives remain ambiguous, not confirmed dislikes.\n\nPreserve the diagnostic interface and interpretation prompt. This proposal changes neither inference nor checkpoints; future training changes require unchanged four-category macro validation HR@10 selection. No validation improvement is claimed.",
+  "idea": {
+    "description": "Extend DiagnosisProbe with fixed, equal-size candidate panels that measure how the existing HSTU ranks observed training positives against alternatives selected by four different constructions. Use one existing trained model per category, with no auxiliary fitted scoring model or inference fusion.",
+    "motivation": "The supplied diagnostics show excellent separation against sampled training negatives but provide no validation ranks. Candidate panels can test whether that separation persists against more competitive alternatives while keeping qualitative usefulness and compatibility claims separate from measurable ranking behavior.",
+    "implementation_notes": "Retain DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). Return metrics and metric_definitions alongside existing probes. Preserve view.model and all ModelView hooks. Use view.model.eval() and torch.no_grad(), restoring the original training mode in finally. Cache no more than ten batches and select at most 128 eligible rows per category using a local seed-42 generator. Locate final nonpadding positions with masked physical indices, never count-1; require nonzero positive targets and finite features. Retain original final-position targets across panels. Derive item frequencies exclusively from public training histories. Fit local TF-IDF on available catalog titles/descriptions without external weights; record missing or empty target text. For each row, exclude its visible-history items and target from alternatives; without verified identities, describe eligibility as unseen relative to the visible prefix. Build 32 unique candidates per panel. Frequency matching uses the target's training-frequency quartile with documented tie handling; insufficient pools produce null measurements with reasons rather than silent fallback. Other panels may overlap, and overlap should be reported. Model-high-score alternatives come from the same frozen HSTU using chunked catalog scoring and deterministic item-ID tie breaking. Bound this computation to the stated row cap and include its cost in the shared GPU budget. Report raw score margins as scale-dependent. Stratify descriptively by training-only frequency quartiles and visible-history length, with explicit counts. Do not report user confidence intervals because loader identities are None. Do not consume review text, ratings, categories, prices, stores, or simulator traits. Keep all four dataset routes, DATA_DIR = os.environ['GAGC_DATA_DIR'], trial-local artifacts, preprocessing seed 0, training seed 42, maximum 200 epochs, and 200 batches per epoch. No retraining, checkpoint changes, or predictor changes are required for this diagnostic-only proposal. Any subsequent training experiment must preserve one HSTU checkpoint per category and update the predictor writer if architecture changes.",
+    "pseudocode": "def run_full_diagnosis(self, train_loader):\n    original_mode = self.view.model.training\n    self.view.model.eval()\n    try:\n        with torch.no_grad():\n            rows = select_eligible_rows(train_loader, max_batches=10,\n                                        max_rows=128, local_seed=42)\n            for sequence, positive in rows:\n                end = masked_physical_indices(sequence).max()\n                target = positive[end]\n                feature = self.view.log2feats(sequence)[end]\n                allowed = real_catalog_ids - set(sequence) - {target}\n                panels = {\n                    'uniform': sample_unique(allowed, 32),\n                    'frequency_matched': sample_unique(\n                        allowed_in_target_frequency_quartile(allowed, target), 32),\n                    'text_neighbors': top_tfidf_neighbors(target, allowed, 32),\n                    'model_high_score': chunked_top_items(\n                        self.view, feature, allowed, 32)\n                }\n                for name, panel in panels.items():\n                    if panel_is_unavailable_or_short(panel):\n                        record_missing(name, reason=panel.reason)\n                        continue\n                    scores = score_with_modelview_shapes(\n                        self.view, feature, [target] + panel)\n                    if not all_finite(scores):\n                        record_missing(name, reason='nonfinite scores')\n                        continue\n                    outrank = scores[1:] > scores[0]\n                    record(name,\n                           positive_rank=1 + outrank.sum(),\n                           max_alternative_margin=scores[0] - scores[1:].max(),\n                           outranking_fraction=outrank.float().mean(),\n                           tie_count=(scores[1:] == scores[0]).sum())\n            return {'metrics': descriptive_summaries_with_counts_and_missingness(),\n                    'metric_definitions': explicit_panel_and_tie_definitions()}\n    finally:\n        self.view.model.train(original_mode)\n\n# diagnosis_interpreter_prompt(raw_diagnosis) embeds measured values,\n# definitions, counts, missingness and training-only scope; it requests\n# hypotheses without causal, dislike, compatibility or uplift claims.",
+    "originality": {
+      "score": 4,
+      "positive": "Integrates candidate difficulty, missingness, and family-compatible scoring into the existing diagnostic contract.",
+      "negative": "Uniform, frequency-based, text-based, and model-based candidate construction are established techniques."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Can identify where easy training-pair margins conceal competition and motivate a small, controlled subsequent training ablation.",
+      "negative": "Training-history diagnostics cannot establish generalization, usefulness, or expected validation improvement."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Reuses the trained HSTU, existing scoring hooks, and locally available libraries without changing inference.",
+      "negative": "Chunked catalog scoring, candidate eligibility, metadata missingness, and adapter tensor shapes require careful implementation."
+    }
+  },
+  "related_work": [
+    {
+      "title": "[1] Dallmann et al.: study of sampling strategies for recommendation evaluation",
+      "link": "https://arxiv.org/abs/2107.13045",
+      "contributions": [
+        "Investigates how sampled evaluation can alter model comparisons relative to full-catalog evaluation."
+      ],
+      "limitations": [
+        "Does not establish that the proposed diagnostic predicts improvement on the pinned RecHarness evaluator."
+      ]
+    },
+    {
+      "title": "[2] Prakash et al. (2024): comparison of negative-sampling approaches in sequential recommendation",
+      "link": "https://arxiv.org/abs/2410.17276",
+      "contributions": [
+        "Examines sampling-dependent aggregate performance and head, middle, and tail item disparities."
+      ],
+      "limitations": [
+        "Findings do not imply a universally best sampler or make difficult unobserved items confirmed negatives."
+      ]
+    },
+    {
+      "title": "[3] ICLR 2024 study of activation-patching methodological choices",
+      "link": "https://proceedings.iclr.cc/paper_files/paper/2024/file/06a52a54c8ee03cd86771136bc91eb1f-Paper-Conference.pdf",
+      "contributions": [
+        "Shows that corruption choices and scoring metrics affect activation-patching conclusions."
+      ],
+      "limitations": [
+        "Application to the supplied HSTU requires verified architecture-specific intervention sites."
+      ]
+    },
+    {
+      "title": "[4] TREC 2025 Product Recommendation track guidelines",
+      "link": "https://huggingface.co/datasets/trec-product-search/product-recommendation-2025/discussions/1/files",
+      "contributions": [
+        "Distinguishes functional substitutes, complements, and unknown compatibility."
+      ],
+      "limitations": [
+        "A rubric alone cannot establish current user need or compatibility when specifications are missing."
+      ]
+    },
+    {
+      "title": "[5] Sufficient Context",
+      "link": "https://arxiv.org/abs/2411.06037",
+      "contributions": [
+        "Separates relevant information from sufficient evidence and studies guided abstention."
+      ],
+      "limitations": [
+        "Recommendation-specific judgment reliability requires separate calibration."
+      ]
+    }
+  ]
+}

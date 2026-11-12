@@ -1,0 +1,31 @@
+{
+  "category_edits": [
+    {
+      "category": "feature_construction",
+      "rationale": "Across all four datasets, attenuate history input embeddings using training-only item counts: 1-0.1*log1p(count)/log1p(max_count). This tests whether reducing frequent items' influence improves recurrent context. Preserve candidate embeddings, GRU topology, readout, loss, optimizer and sampling. Store counts in each model checkpoint and validate the feature configuration during prediction.",
+      "edits": [
+        {
+          "find": "        self.hidden_units = hidden_units\n        self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)",
+          "replace": "        self.hidden_units = hidden_units\n        self.register_buffer(\"item_counts\", torch.zeros(itemnum + 1, dtype=torch.float32))\n        self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)"
+        },
+        {
+          "find": "    def _interest_states(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)",
+          "replace": "    def _interest_states(self, seq: torch.Tensor) -> torch.Tensor:\n        log_counts = torch.log1p(self.item_counts)\n        denominator = log_counts.max().clamp(min=1e-12)\n        input_scale = 1.0 - 0.1 * log_counts[seq] / denominator\n        input_scale = input_scale.masked_fill(seq.eq(0), 0.0)\n        emb = self.dropout(self.item_emb(seq) * input_scale.unsqueeze(-1))\n        out, _ = self.gru(emb)"
+        },
+        {
+          "find": "        dropout_rate=DROPOUT_RATE,\n    ).to(device)\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)",
+          "replace": "        dropout_rate=DROPOUT_RATE,\n    ).to(device)\n    training_items = torch.tensor(\n        [item for history in user_train.values() for item in history],\n        dtype=torch.long, device=device,\n    )\n    with torch.no_grad():\n        counts = torch.bincount(training_items, minlength=itemnum + 1)\n        model.item_counts.copy_(counts.to(model.item_counts.dtype))\n        model.item_counts[0] = 0.0\n    del training_items, counts\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)"
+        },
+        {
+          "find": "            \"sequence_readout\": \"gru_0.8_causal_mean_0.2_half_life_3\",\n        }, f)",
+          "replace": "            \"sequence_readout\": \"gru_0.8_causal_mean_0.2_half_life_3\",\n            \"input_feature\": \"training_log_frequency_attenuation_0.1\",\n        }, f)"
+        },
+        {
+          "find": "        if meta.get(\"sequence_readout\") != \"gru_0.8_causal_mean_0.2_half_life_3\":\n            raise RuntimeError(f\"Incompatible GRU sequence readout for {ds}\")\n        model = ModelClass(",
+          "replace": "        if meta.get(\"sequence_readout\") != \"gru_0.8_causal_mean_0.2_half_life_3\":\n            raise RuntimeError(f\"Incompatible GRU sequence readout for {ds}\")\n        if meta.get(\"input_feature\") != \"training_log_frequency_attenuation_0.1\":\n            raise RuntimeError(f\"Incompatible GRU input feature for {ds}\")\n        model = ModelClass("
+        }
+      ]
+    }
+  ],
+  "change_summary": "Add training-frequency attenuation exclusively to history inputs, checkpoint its counts, and synchronize predictor validation. Preserve one GRU4Rec model per category and existing training settings."
+}

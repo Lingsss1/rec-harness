@@ -1,0 +1,95 @@
+--- g2-r0053-joint_partition_semantic/model.py
++++ g2-r0054-joint_context_partition_reference/model.py
+@@ -1,8 +1,9 @@
+-"""Shared-context sparse direct connectivity in the buy first affine.
++"""Test duplication of context connections in the buy first affine.
+ 
+ The parent construction/reset/RNG sequence finishes before any intervention.
+-Packed branches physically discard selected direct first-affine connections,
+-retain all112 nonlinear channels and share every context input. The full-input
+-buy residual still precedes this layer. No priority or measured-utility claim.
++Packed branches retain all112 nonlinear channels. Context can be shared or
++partitioned across the two branches; every context coordinate remains in at
++least one branch. The full-input buy residual and second dense layer remain.
++No priority, numerical-equivalence or measured-utility claim.
+ """
+ import torch
+@@ -13,5 +14,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [44, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'removed'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 2}, 'private_hidden_scale': 'inherited', 'private_readout_scale': 'inherited', 'owner_initialization_scale': 'inherited', 'owner_affine_rank': 0, 'owner_factor_balance': 'balanced', 'owner_input_partition': 'semantic', 'owner_context_partition': 'shared'}
+ 
+ 
+@@ -74,5 +75,5 @@
+ 
+ class _PartitionedAffine(nn.Module):
+-    """Two packed affine row groups with common context and local inputs.
++    """Two packed affine row groups with shared or disjoint context inputs.
+ 
+     Parameter slices come only from a freshly initialized parent. Constructor
+@@ -83,5 +84,5 @@
+     """
+     def __init__(self, linear, context_width, key_width, value_width,
+-                 embedding_dim, partition):
++                 embedding_dim, partition, context_partition='shared'):
+         super().__init__()
+         if not isinstance(linear, nn.Linear) or linear.bias is None:
+@@ -89,4 +90,6 @@
+         if partition not in ('semantic', 'mixed'):
+             raise ValueError('Unknown packed input partition')
++        if context_partition not in ('shared', 'split'):
++            raise ValueError('Unknown packed context partition')
+         if linear.in_features != context_width + key_width + value_width:
+             raise ValueError('First affine inputs must be context,target,pooled')
+@@ -120,7 +123,26 @@
+             raise ValueError('Local groups must exactly partition target and pool')
+         common = list(range(context_width))
+-        first_columns = torch.tensor(common + local_first, dtype=torch.long,
++        if context_partition == 'shared':
++            # Exact original column order and index tensors in bridge mode.
++            first_context, second_context = common, common
++        else:
++            if context_width <= 0 or context_width % embedding_dim:
++                raise ValueError('Context must consist of complete embedding fields')
++            # Every field remains represented in each branch, with disjoint
++            # coordinate halves. This fixed allocation uses no data or RNG.
++            first_context = [field + coordinate
++                             for field in range(0, context_width, embedding_dim)
++                             for coordinate in range(embedding_dim // 2)]
++            first_context_set = set(first_context)
++            second_context = [index for index in common
++                              if index not in first_context_set]
++            if (len(first_context) != context_width // 2
++                    or len(second_context) != context_width // 2
++                    or first_context_set.intersection(second_context)
++                    or first_context_set.union(second_context) != set(common)):
++                raise ValueError('Context halves must exactly partition all coordinates')
++        first_columns = torch.tensor(first_context + local_first, dtype=torch.long,
+                                      device=linear.weight.device)
+-        second_columns = torch.tensor(common + local_second, dtype=torch.long,
++        second_columns = torch.tensor(second_context + local_second, dtype=torch.long,
+                                       device=linear.weight.device)
+         self.register_buffer('first_columns', first_columns)
+@@ -173,4 +195,5 @@
+                  owner_affine_rank=0, owner_factor_balance='balanced',
+                  owner_input_partition='dense',
++                 owner_context_partition='shared',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -187,4 +210,8 @@
+         if owner_input_partition not in ('dense', 'semantic', 'mixed'):
+             raise ValueError('Unknown owner input partition')
++        if owner_context_partition not in ('shared', 'split'):
++            raise ValueError('Unknown owner context partition')
++        if owner_context_partition != 'shared' and owner_input_partition == 'dense':
++            raise ValueError('Split context requires a packed input partition')
+         if owner_input_partition != 'dense' and owner_affine_rank != 0:
+             raise ValueError('Partition and rank interventions cannot be combined')
+@@ -494,5 +521,5 @@
+                         tower[0], len(self.user_fields) * embedding_dim,
+                         self.key_width, self.value_width, embedding_dim,
+-                        owner_input_partition)
++                        owner_input_partition, owner_context_partition)
+         self.model_to_device()
+ 

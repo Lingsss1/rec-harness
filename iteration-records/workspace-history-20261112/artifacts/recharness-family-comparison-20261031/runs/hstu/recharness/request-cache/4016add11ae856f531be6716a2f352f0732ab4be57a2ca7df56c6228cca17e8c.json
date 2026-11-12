@@ -1,0 +1,29 @@
+{
+  "request_sha256": "4016add11ae856f531be6716a2f352f0732ab4be57a2ca7df56c6228cca17e8c",
+  "response": {
+    "category_edits": [
+      {
+        "category": "sequence_interest",
+        "rationale": "Across all four category models, retain newest-128 truncation and cumulative observed positions while making causal pooling content-sensitive: exp(cos(h_t,h_j)-(t-j)/4), with readout 0.75*h_t+0.25*pool_t. The generated predictor imports this same HSTURec class, so inference automatically uses the identical readout without checkpoint shape changes.",
+        "edits": [
+          {
+            "find": "        weights = torch.exp(-distance.clamp_min(0).to(states.dtype) / 4.0)\n        weights = weights.masked_fill(distance < 0, 0.0)\n        pooled_sum = torch.matmul(weights, states)\n        pooled_mass = torch.matmul(weights, valid.to(states.dtype).unsqueeze(-1))\n        pooled = pooled_sum / pooled_mass.clamp_min(1e-8)",
+            "replace": "        normalized_states = F.normalize(states, p=2, dim=-1, eps=1e-8)\n        similarity = torch.matmul(normalized_states, normalized_states.transpose(1, 2))\n        logits = similarity - distance.clamp_min(0).to(states.dtype).unsqueeze(0) / 4.0\n        allowed = (distance >= 0).unsqueeze(0) & valid.unsqueeze(1)\n        weights = torch.exp(logits).masked_fill(~allowed, 0.0)\n        pooled_sum = torch.matmul(weights, states)\n        pooled_mass = weights.sum(dim=-1, keepdim=True)\n        pooled = pooled_sum / pooled_mass.clamp_min(1e-8)"
+          }
+        ]
+      },
+      {
+        "category": "learning_objective",
+        "rationale": "Coordinate content-sensitive readout with recent-target emphasis: weight valid BPR positions by exp(-(last_valid-t)/8), normalize within each sampled user's history, then average users equally. Preserve negative sampling, optimizer and the training budget settings.",
+        "edits": [
+          {
+            "find": "            loss = F.softplus(-(pos_scores - neg_scores))\n            loss = (loss * mask).sum() / mask.sum().clamp(min=1.0)",
+            "replace": "            position_loss = F.softplus(-(pos_scores - neg_scores))\n            target_positions = torch.arange(pos_t.size(1), device=device).unsqueeze(0)\n            last_valid = target_positions.expand_as(pos_t).masked_fill(pos_t == 0, -1).amax(dim=1, keepdim=True)\n            target_age = (last_valid - target_positions).clamp_min(0).to(position_loss.dtype)\n            target_weights = torch.exp(-target_age / 8.0) * mask\n            user_loss = (position_loss * target_weights).sum(dim=1) / target_weights.sum(dim=1).clamp_min(1e-8)\n            active_users = mask.any(dim=1).to(user_loss.dtype)\n            loss = (user_loss * active_users).sum() / active_users.sum().clamp_min(1.0)"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Replace fixed recency pooling with causal cosine-similarity pooling and train with recent-position, equal-user BPR weighting across all four independent HSTU category models. Predictor architecture stays consistent through its existing import of HSTURec."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/hstu/recharness/calls/00029"
+}

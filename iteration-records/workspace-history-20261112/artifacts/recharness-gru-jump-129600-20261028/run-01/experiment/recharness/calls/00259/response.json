@@ -1,0 +1,15 @@
+{
+  "category_edits": [
+    {
+      "category": "interest_aggregation",
+      "rationale": "Replace prefix-wide pooling with a causal four-state readout weighted 1, 2, 4, 8 from oldest to newest, normalized over nonpadding states. This smooths recent recurrent states while emphasizing current intent. Applies to all four datasets; the generated predictor imports the updated model class, preserving identical inference readout.",
+      "edits": [
+        {
+          "find": "    def aggregate_states(self, out: torch.Tensor, seq: torch.Tensor) -> torch.Tensor:\n        # Prefix normalization yields weight 2**(-age/5) at every valid step.\n        positions = torch.arange(seq.size(1), device=out.device, dtype=torch.float32)\n        weights = torch.exp2((positions - (seq.size(1) - 1)) / 5.0)\n        weights = weights.unsqueeze(0) * seq.ne(0).float()\n        numerator = torch.cumsum(out.float() * weights.unsqueeze(-1), dim=1)\n        denominator = torch.cumsum(weights, dim=1).unsqueeze(-1)\n        pooled = numerator / denominator.clamp_min(torch.finfo(torch.float32).tiny)\n        return pooled.to(out.dtype)",
+          "replace": "    def aggregate_states(self, out: torch.Tensor, seq: torch.Tensor) -> torch.Tensor:\n        # Histories are contiguous and left-padded. Pool only current/past states.\n        valid = seq.ne(0).float()\n        masked_states = out.float() * valid.unsqueeze(-1)\n        numerator = 8.0 * masked_states\n        denominator = 8.0 * valid\n        for lag, weight in ((1, 4.0), (2, 2.0), (3, 1.0)):\n            if lag >= seq.size(1):\n                continue\n            past_states = torch.nn.functional.pad(\n                masked_states[:, :-lag, :], (0, 0, lag, 0)\n            )\n            past_valid = torch.nn.functional.pad(valid[:, :-lag], (lag, 0))\n            numerator = numerator + weight * past_states\n            denominator = denominator + weight * past_valid\n        pooled = numerator / denominator.clamp_min(1.0).unsqueeze(-1)\n        return pooled.to(out.dtype)"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Change only interest aggregation to normalized causal pooling of the latest four GRU states. Preserve the backbone, scoring, training configuration, routing, and predictor compatibility."
+}

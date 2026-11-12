@@ -1,0 +1,59 @@
+{
+  "request_sha256": "903794cec6b4236b67c0b15d0ac62b001005af1ea93ef809697f4f69cf3eda35",
+  "response": {
+    "category_edits": [
+      {
+        "category": "feature_construction",
+        "rationale": "Scale each existing input embedding by 1 + 0.1*tanh(log1p(c)), where c counts earlier occurrences of that item in the supplied causal history, including occurrences before truncation. Padding receives no repeat feature. Apply the same feature during training, validation and generated prediction across all four datasets, preserving embedding parameters, GRU topology, readout, loss and optimizer.",
+        "edits": [
+          {
+            "find": "def sample_batch(user_train: dict[int, list[int]], itemnum: int, batch_size: int, maxlen: int):",
+            "replace": "def _history_repeat_counts(history: list[int], maxlen: int) -> np.ndarray:\n    counts = np.zeros(maxlen, dtype=np.float32)\n    seen = defaultdict(int)\n    start = max(0, len(history) - maxlen)\n    offset = max(0, maxlen - len(history))\n    for index, item in enumerate(history):\n        if item != 0:\n            if index >= start:\n                counts[offset + index - start] = seen[item]\n            seen[item] += 1\n    return counts\n\n\ndef sample_batch(user_train: dict[int, list[int]], itemnum: int, batch_size: int, maxlen: int):"
+          },
+          {
+            "find": "    batch_seq, batch_pos, batch_neg = [], [], []",
+            "replace": "    batch_seq, batch_pos, batch_neg, batch_counts = [], [], [], []"
+          },
+          {
+            "find": "        batch_neg.append(neg)\n    return np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg)",
+            "replace": "        batch_neg.append(neg)\n        batch_counts.append(_history_repeat_counts(history[:-1], maxlen))\n    return np.asarray(batch_seq), np.asarray(batch_pos), np.asarray(batch_neg), np.asarray(batch_counts)"
+          },
+          {
+            "find": "            scores = model.score_candidates(seq_t, cand_t).detach().cpu().tolist()",
+            "replace": "            repeat_t = torch.as_tensor(\n                _history_repeat_counts(history, maxlen), dtype=torch.float32, device=device\n            ).unsqueeze(0)\n            scores = model.score_candidates(seq_t, cand_t, repeat_t).detach().cpu().tolist()"
+          },
+          {
+            "find": "def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:\n    pos_scores, neg_scores = model(seq, pos, neg)",
+            "replace": "def bpr_sequence_loss(model: nn.Module, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor,\n                      repeat_counts: torch.Tensor) -> torch.Tensor:\n    pos_scores, neg_scores = model(seq, pos, neg, repeat_counts)"
+          },
+          {
+            "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))",
+            "replace": "    def input_embeddings(self, seq: torch.Tensor, repeat_counts: torch.Tensor) -> torch.Tensor:\n        scale = 1.0 + 0.1 * torch.tanh(torch.log1p(repeat_counts.float()))\n        scale = torch.where(seq.ne(0), scale, torch.ones_like(scale))\n        emb = self.item_emb(seq)\n        return self.dropout(emb * scale.to(emb.dtype).unsqueeze(-1))\n\n    def encode(self, seq: torch.Tensor, repeat_counts: torch.Tensor) -> torch.Tensor:\n        emb = self.input_embeddings(seq, repeat_counts)"
+          },
+          {
+            "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))",
+            "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor,\n                repeat_counts: torch.Tensor):\n        emb = self.input_embeddings(seq, repeat_counts)"
+          },
+          {
+            "find": "    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:\n        user_emb = self.encode(seq)[0]",
+            "replace": "    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor,\n                         repeat_counts: torch.Tensor) -> torch.Tensor:\n        user_emb = self.encode(seq, repeat_counts)[0]"
+          },
+          {
+            "find": "            seq, pos, neg = sample_batch(user_train, itemnum, BATCH_SIZE, MAXLEN)",
+            "replace": "            seq, pos, neg, repeat_counts = sample_batch(user_train, itemnum, BATCH_SIZE, MAXLEN)"
+          },
+          {
+            "find": "            loss = bpr_sequence_loss(model, seq_t, pos_t, neg_t)",
+            "replace": "            repeat_t = torch.as_tensor(repeat_counts, dtype=torch.float32, device=device)\n            loss = bpr_sequence_loss(model, seq_t, pos_t, neg_t, repeat_t)"
+          },
+          {
+            "find": "    seq_t = torch.tensor([seq_arr], dtype=torch.long, device=_device)\n    cand_t = torch.tensor(candidates, dtype=torch.long, device=_device)\n    with torch.no_grad():\n        scores = model.score_candidates(seq_t, cand_t).detach().cpu().tolist()",
+            "replace": "    repeat_arr = [0.0] * maxlen\n    seen = {}\n    start = max(0, len(history) - maxlen)\n    offset = max(0, maxlen - len(history))\n    for index, item in enumerate(history):\n        if item != 0:\n            if index >= start:\n                repeat_arr[offset + index - start] = float(seen.get(item, 0))\n            seen[item] = seen.get(item, 0) + 1\n    seq_t = torch.tensor([seq_arr], dtype=torch.long, device=_device)\n    repeat_t = torch.tensor([repeat_arr], dtype=torch.float32, device=_device)\n    cand_t = torch.tensor(candidates, dtype=torch.long, device=_device)\n    with torch.no_grad():\n        scores = model.score_candidates(seq_t, cand_t, repeat_t).detach().cpu().tolist()"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Add bounded causal repeat-count input scaling with consistent training, validation and predictor generation. Retain one GRU checkpoint per category and the existing 200-epoch default."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/run-01/experiment/recharness/calls/00201"
+}

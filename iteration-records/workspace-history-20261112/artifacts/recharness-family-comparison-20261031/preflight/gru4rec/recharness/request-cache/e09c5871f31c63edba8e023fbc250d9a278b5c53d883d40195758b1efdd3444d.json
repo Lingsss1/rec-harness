@@ -1,0 +1,81 @@
+{
+  "request_sha256": "e09c5871f31c63edba8e023fbc250d9a278b5c53d883d40195758b1efdd3444d",
+  "response": {
+    "category_edits": [
+      {
+        "category": "architecture_interaction",
+        "rationale": "Use stacked residual GRU blocks in one jointly trained recurrent model. Residual paths and layer normalization support the deeper recurrence while preserving causal next-item training.",
+        "edits": [
+          {
+            "find": "        dropout = dropout_rate if num_layers > 1 else 0.0\n        self.gru = nn.GRU(hidden_units, hidden_units, num_layers=num_layers,\n                          batch_first=True, dropout=dropout)\n        self.dropout = nn.Dropout(dropout_rate)\n        with torch.no_grad():\n            nn.init.xavier_uniform_(self.item_emb.weight)\n            self.item_emb.weight[0].zero_()\n",
+            "replace": "        self.gru = nn.ModuleList([\n            nn.GRU(hidden_units, hidden_units, batch_first=True)\n            for _ in range(num_layers)\n        ])\n        self.block_norms = nn.ModuleList([\n            nn.LayerNorm(hidden_units) for _ in range(num_layers)\n        ])\n        self.dropout = nn.Dropout(dropout_rate)\n        with torch.no_grad():\n            nn.init.xavier_uniform_(self.item_emb.weight)\n            self.item_emb.weight[0].zero_()\n\n    def _backbone(self, emb: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:\n        out = emb\n        for gru, norm in zip(self.gru, self.block_norms):\n            recurrent, _ = gru(out)\n            out = norm(out + self.dropout(recurrent))\n            out = out * valid.unsqueeze(-1)\n        return out\n"
+          }
+        ]
+      },
+      {
+        "category": "hyperparameter_tuning",
+        "rationale": "Couple two 128-dimensional residual blocks with dropout 0.2, a shorter 64-item window, Adam learning rate 0.0005 and weight decay 0.00001. Keep seed 42, 200 batches per epoch and the 200-epoch cap.",
+        "edits": [
+          {
+            "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+            "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+          },
+          {
+            "find": "SEED = int(os.environ.get(\"GAGC_SEED\", \"42\"))",
+            "replace": "SEED = 42"
+          },
+          {
+            "find": "MAXLEN        = int(os.environ.get(\"GRU4REC_MAXLEN\", \"128\"))\nHIDDEN_UNITS  = int(os.environ.get(\"GRU4REC_HIDDEN\", \"128\"))\nNUM_LAYERS    = int(os.environ.get(\"GRU4REC_LAYERS\", \"1\"))\nDROPOUT_RATE  = float(os.environ.get(\"GRU4REC_DROPOUT\", \"0.1\"))\nLR            = float(os.environ.get(\"GRU4REC_LR\", \"1e-3\"))\nWEIGHT_DECAY  = float(os.environ.get(\"GRU4REC_WD\", \"0.0\"))\nBATCH_SIZE    = int(os.environ.get(\"GRU4REC_BATCH\", \"128\"))\nNUM_BATCHES   = int(os.environ.get(\"GRU4REC_BATCHES\", \"200\"))\nNUM_EPOCHS    = int(os.environ.get(\"GRU4REC_EPOCHS\", \"200\"))",
+            "replace": "MAXLEN        = int(os.environ.get(\"GRU4REC_MAXLEN\", \"64\"))\nHIDDEN_UNITS  = int(os.environ.get(\"GRU4REC_HIDDEN\", \"128\"))\nNUM_LAYERS    = int(os.environ.get(\"GRU4REC_LAYERS\", \"2\"))\nDROPOUT_RATE  = float(os.environ.get(\"GRU4REC_DROPOUT\", \"0.2\"))\nLR            = float(os.environ.get(\"GRU4REC_LR\", \"0.0005\"))\nWEIGHT_DECAY  = float(os.environ.get(\"GRU4REC_WD\", \"0.00001\"))\nBATCH_SIZE    = int(os.environ.get(\"GRU4REC_BATCH\", \"128\"))\nNUM_BATCHES   = 200\nNUM_EPOCHS    = min(200, int(os.environ.get(\"GRU4REC_EPOCHS\", \"200\")))"
+          }
+        ]
+      },
+      {
+        "category": "embedding_representation",
+        "rationale": "Factor item representations into one shared 64-dimensional table and separate learned input/output projections to the recurrent width. Training and candidate scoring use the same output projection; the generated predictor imports the changed class and restores its saved configuration.",
+        "edits": [
+          {
+            "find": "        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)",
+            "replace": "        self.item_emb = nn.Embedding(itemnum + 1, 64, padding_idx=0)\n        self.input_projection = nn.Linear(64, hidden_units, bias=False)\n        self.output_projection = nn.Linear(64, hidden_units, bias=False)"
+          },
+          {
+            "find": "        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)",
+            "replace": "        pos_scores = (out * self._output_embeddings(pos)).sum(dim=-1)\n        neg_scores = (out * self._output_embeddings(neg)).sum(dim=-1)"
+          },
+          {
+            "find": "    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:",
+            "replace": "    def _input_embeddings(self, items: torch.Tensor) -> torch.Tensor:\n        return self.input_projection(self.item_emb(items))\n\n    def _output_embeddings(self, items: torch.Tensor) -> torch.Tensor:\n        return self.output_projection(self.item_emb(items))\n\n    def score_candidates(self, seq: torch.Tensor, candidates: torch.Tensor) -> torch.Tensor:"
+          },
+          {
+            "find": "        cand_emb = self.item_emb(candidates)",
+            "replace": "        cand_emb = self._output_embeddings(candidates)"
+          },
+          {
+            "find": "            num_layers=meta[\"num_layers\"],\n            dropout_rate=0.0,",
+            "replace": "            num_layers=meta[\"num_layers\"],\n            dropout_rate=meta[\"dropout_rate\"],"
+          }
+        ]
+      },
+      {
+        "category": "sequence_interest",
+        "rationale": "Gate each recurrent state with attention over its observed prefix, using a learned nonnegative recency penalty. Pooling excludes padding and future positions at every supervised step. Inference selects the final real position, and empty histories produce a zero representation.",
+        "edits": [
+          {
+            "find": "        self.hidden_units = hidden_units",
+            "replace": "        self.hidden_units = hidden_units\n        self.interest_key = nn.Linear(hidden_units, 1, bias=False)\n        self.interest_gate = nn.Linear(2 * hidden_units, hidden_units)\n        self.recency_raw = nn.Parameter(torch.tensor(-2.0))"
+          },
+          {
+            "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        # Histories are LEFT padded; count-1 indexes padding on short histories.\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]",
+            "replace": "    def _sequence_states(self, seq: torch.Tensor) -> torch.Tensor:\n        valid = seq.ne(0)\n        emb = self.dropout(self._input_embeddings(seq))\n        emb = emb * valid.unsqueeze(-1)\n        out = self._backbone(emb, valid)\n        width = seq.size(1)\n        positions = torch.arange(width, device=seq.device)\n        distance = positions[:, None] - positions[None, :]\n        allowed = (distance >= 0).unsqueeze(0) & valid.unsqueeze(1)\n        content = self.interest_key(out).squeeze(-1)\n        recency = torch.nn.functional.softplus(self.recency_raw)\n        logits = content.unsqueeze(1) - recency * distance.clamp(min=0).to(out.dtype).unsqueeze(0)\n        weights = torch.softmax(logits.masked_fill(~allowed, -1e4), dim=-1)\n        weights = weights * allowed.to(weights.dtype)\n        weights = weights / weights.sum(dim=-1, keepdim=True).clamp(min=1e-8)\n        pooled = torch.bmm(weights, out)\n        gate = torch.sigmoid(self.interest_gate(torch.cat([out, pooled], dim=-1)))\n        return (gate * out + (1.0 - gate) * pooled) * valid.unsqueeze(-1)\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        out = self._sequence_states(seq)\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]"
+          },
+          {
+            "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)",
+            "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        out = self._sequence_states(seq)"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Apply the coordinated jump across all four category models: factorized item embeddings, two residual GRU blocks, causal gated recency pooling, and coupled hyperparameter changes. Preserve BPR, sampling, splits and dataset routing, with one checkpoint per category and matching generated inference."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/preflight/gru4rec/recharness/calls/00008"
+}

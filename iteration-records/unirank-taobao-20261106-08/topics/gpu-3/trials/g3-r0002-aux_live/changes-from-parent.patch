@@ -1,0 +1,89 @@
+--- g3-r0001-primary_feedback/model.py
++++ g3-r0002-aux_live/model.py
+@@ -1,10 +1,10 @@
+-"""Prospective primary-anchored history-selector gradient routing.
++"""Two-group history selectors: click-owned trunk and auxiliary-owned trunk.
+ 
+-Parent: g3-r0000-task_item_retrieval (same embeddings, pooling and towers).
+-Only the selector's backward information flow is changed. Auxiliary tasks
+-retain trainable score rows and shared value/context/target embedding paths.
+-Related stop-gradient precedent: STEM, arXiv:2308.13537v2, Method Eq. (4).
+-This is a local adaptation study; no original mechanism claim is made.
++Local adaptation of task-specific representation and stop-gradient ideas;
++not a STEM/INFNet reproduction or an original-mechanism claim.
++Auxiliary variants isolate learned selector capacity and embedding gradients.
++All label, masking, pooling, tower, optimizer and data contracts stay fixed.
+ """
++import copy
+ import torch
+ from torch import nn
+@@ -13,12 +13,13 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'live'}
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='SelectorGradientRouting', gpu=-1,
++    def __init__(self, feature_map, model_id='TwoGroupHistorySelector', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), routing='task',
+-                 feedback_in_score=True, selector_gradient='primary', num_tasks=None,
++                 feedback_in_score=True, selector_gradient='primary',
++                 auxiliary_selector='live', num_tasks=None,
+                  task='binary_classification', **kwargs):
+         labels = list(feature_map.labels)
+@@ -35,4 +36,9 @@
+         if 'is_click' not in labels:
+             raise ValueError('The primary task is_click is required')
++        if auxiliary_selector not in ('none', 'detached', 'live', 'frozen'):
++            raise ValueError('Unknown auxiliary_selector')
++        if auxiliary_selector != 'none' and (routing != 'task' or selector_gradient != 'primary'):
++            raise ValueError('Private auxiliary selectors require primary task routing')
++        self.auxiliary_selector = auxiliary_selector
+         self.selector_gradient = selector_gradient
+         self.register_buffer('_primary_channel', torch.tensor(
+@@ -77,12 +83,28 @@
+             self.score_readout.weight.copy_(initial_weight.expand_as(self.score_readout.weight))
+             self.score_readout.bias.copy_(initial_bias.expand_as(self.score_readout.bias))
++        # Copy after the inherited reset and row tying: the original trunk,
++        # embeddings, readout and towers keep exactly the parent's RNG stream.
++        # Each copy has separate parameters AND Dice/BatchNorm buffers.
++        self.aux_score_trunk = (copy.deepcopy(self.score_trunk)
++                                if auxiliary_selector != 'none' else None)
+         self.model_to_device()
+ 
+-    def _history_scores(self, hidden):
++    def _history_scores(self, hidden, interactions):
+         scores = self.score_readout(hidden)
++        if self.aux_score_trunk is not None:
++            if self.auxiliary_selector == 'frozen':
++                # Same cloned weights and label-free BN updates, but no label
++                # gradients into this trunk or its embedding inputs.
++                with torch.no_grad():
++                    auxiliary_hidden = self.aux_score_trunk(interactions.detach())
++            else:
++                auxiliary_inputs = (interactions if self.auxiliary_selector == 'live'
++                                    else interactions.detach())
++                auxiliary_hidden = self.aux_score_trunk(auxiliary_inputs)
++            auxiliary_scores = self.score_readout(auxiliary_hidden)
++            # Click learns only its trunk; auxiliaries share their own trunk.
++            # Readout rows are still trained by their corresponding task loss.
++            return torch.where(self._primary_channel, scores, auxiliary_scores)
+         if self.selector_gradient == 'primary' and torch.is_grad_enabled():
+-            # Identical forward values. Auxiliary score rows still learn, but
+-            # their losses cannot update the shared trunk or its input paths.
+-            # Values, target and context remain differentiable for every task.
+             auxiliary_scores = self.score_readout(hidden.detach())
+             scores = torch.where(self._primary_channel, scores, auxiliary_scores)
+@@ -114,6 +136,7 @@
+             # cannot influence other rows through training-mode BatchNorm.
+             interactions = interactions.masked_fill(~valid, 0)
+-            hidden = self.score_trunk(interactions.reshape(batch * length, -1))
+-            scores = self._history_scores(hidden).reshape(batch, length, -1)
++            flat_interactions = interactions.reshape(batch * length, -1)
++            hidden = self.score_trunk(flat_interactions)
++            scores = self._history_scores(hidden, flat_interactions).reshape(batch, length, -1)
+             if self.routing == 'shared':
+                 scores = scores.mean(dim=-1, keepdim=True).expand(-1, -1, len(self.towers))

@@ -1,0 +1,71 @@
+--- g1-r0031-align_match_task/model.py
++++ g1-r0032-keep_scaled_match_task/model.py
+@@ -1,11 +1,10 @@
+-"""Factorial action-alignment controls for redundant target-match summaries.
+-
+-Raw row 0 and rescaled/gated row 4 select aligned or valid-rank-rotated
+-historical action coordinates independently. Ordinal action coordinates and
+-all item coordinates retain their inherited inputs. Four fresh cells cover
+-neither/raw/scaled/both rotations with task-specific residual routing fixed.
+-This tests alignment rescue by a surviving copy, not total feedback removal.
+-Both contractions, gathering, learned modules, masks and ownership are inherited.
+-Tensor, gradient, BF16, optimizer and measured-cost checks require the host.
++"""Availability factorial for two redundant target-match action summaries.
++
++Only raw row 0 and scaled/gated row 4 action coordinates can be erased.
++All item coordinates, ordinal action rows, observed direct pools, original
++history/task masks, learned modules, initialization and ownership are inherited.
++Both contractions and the gather run in every cell. This conditional probe
++cannot remove all feedback information or estimate a routing interaction.
++Tensor, BF16, gradient, optimizer and measured-cost checks require the host.
+ """
+ import torch
+@@ -16,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'none'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'action_in_scorer': False, 'action_in_pool': True, 'action_in_summaries': True, 'summary_action_group': 'all', 'summary_action_alignment': 'rotated', 'summary_rotation_group': 'none', 'match_action_availability': 'scaled'}
+ 
+ 
+@@ -33,5 +32,5 @@
+                  action_in_pool=True, action_in_summaries=True,
+                  summary_action_group='all', summary_action_alignment='rotated',
+-                 summary_rotation_group='none',
++                 summary_rotation_group='none', match_action_availability='scaled',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -93,4 +92,7 @@
+             raise ValueError('Unknown rotated summary action family')
+         self.summary_rotation_group = summary_rotation_group
++        if match_action_availability not in ('both', 'raw', 'scaled', 'none'):
++            raise ValueError('Unknown match-summary action availability')
++        self.match_action_availability = match_action_availability
+         self.residual_input = residual_input
+         self.residual_routing = residual_routing
+@@ -363,5 +365,8 @@
+ 
+     def _select_summary_alignment(self, rotated, aligned):
+-        """Select action alignment by family without removing any channel.
++        """Select alignment, then gate only raw/scaled match action rows.
++
++        The availability switch is independent of the legacy alignment
++        switch. Submitted cells retain alignment and vary availability.
+ 
+         Raw row 0 and scaled/gated row 4 can be rotated independently.
+@@ -388,4 +393,16 @@
+         actions = torch.where(active, rotated[:, :, self.key_width:],
+                               aligned[:, :, self.key_width:])
++        # Zero only the selected match-action inputs after both full-width
++        # contractions. Item and ordinal paths and observed pool values stay
++        # intact. Identical gate shapes execute even for the all-kept cell.
++        keep = {
++            'both': (True, True, True, True, True),
++            'raw': (True, True, True, True, False),
++            'scaled': (False, True, True, True, True),
++            'none': (False, True, True, True, False),
++        }
++        available = torch.tensor(keep[self.match_action_availability],
++                                 device=actions.device, dtype=torch.bool).view(1, 5, 1)
++        actions = torch.where(available, actions, torch.zeros_like(actions))
+         return torch.cat([rotated[:, :, :self.key_width], actions], dim=-1)
+ 

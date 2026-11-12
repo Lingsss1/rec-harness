@@ -1,0 +1,15 @@
+{
+  "category_edits": [
+    {
+      "category": "interest_aggregation",
+      "rationale": "Use masked exponential pooling with a five-interaction half-life, counting age in valid interactions. Prefix normalization preserves causality during training. The generated predictor imports this same model class, so training and inference share the readout without checkpoint changes.",
+      "edits": [
+        {
+          "find": "    def aggregate_states(self, out: torch.Tensor, seq: torch.Tensor) -> torch.Tensor:\n        # Prefix normalization yields weight 2**(-age/5) at every valid step.\n        positions = torch.arange(seq.size(1), device=out.device, dtype=torch.float32)\n        weights = torch.exp2((positions - (seq.size(1) - 1)) / 5.0)\n        weights = weights.unsqueeze(0) * seq.ne(0).float()\n        numerator = torch.cumsum(out.float() * weights.unsqueeze(-1), dim=1)\n        denominator = torch.cumsum(weights, dim=1).unsqueeze(-1)\n        pooled = numerator / denominator.clamp_min(torch.finfo(torch.float32).tiny)\n        return pooled.to(out.dtype)",
+          "replace": "    def aggregate_states(self, out: torch.Tensor, seq: torch.Tensor) -> torch.Tensor:\n        valid = seq.ne(0)\n        interaction_index = valid.cumsum(dim=1)\n        age = interaction_index[:, -1:] - interaction_index\n        weights = torch.exp2(-age.to(torch.float32) / 5.0)\n        weights = weights * valid.to(torch.float32)\n        states = out.float().masked_fill(~valid.unsqueeze(-1), 0.0)\n        numerator = (states * weights.unsqueeze(-1)).cumsum(dim=1)\n        denominator = weights.cumsum(dim=1).unsqueeze(-1)\n        pooled = numerator / denominator.clamp_min(torch.finfo(torch.float32).tiny)\n        return pooled.masked_fill(~valid.unsqueeze(-1), 0.0).to(out.dtype)"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Refine causal exponential GRU-state pooling to measure recency in valid interactions and explicitly mask padded states. Preserve the GRU, scoring, loss, optimizer, routing, and one checkpoint per category."
+}

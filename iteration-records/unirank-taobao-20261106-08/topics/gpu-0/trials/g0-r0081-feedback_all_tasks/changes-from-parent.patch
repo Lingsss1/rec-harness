@@ -1,0 +1,59 @@
+--- g0-r0080-feedback_context_allowed/model.py
++++ g0-r0081-feedback_all_tasks/model.py
+@@ -1,12 +1,11 @@
+-"""Prospective source-by-context-gradient factorial on the r0079 extension.
+-
+-Keep every learned module and forward representation. During training only,
+-optionally detach the auxiliary extension context input BEFORE its context
+-query projection. The task-specific query weights stay trainable; original
+-adapter, history-product and tower context paths retain their original gates.
+-Cross feedback/match summary source with allowed/blocked context gradients.
+-No new parameters, buffers, RNG, labels, loss, optimizer or data are added.
+-This tests one local transfer edge; gradient conflict and useful feedback
+-complementarity remain unmeasured. Host tensor/BF16 checks are required.
++"""Prospective source-by-primary-readout factorial.
++
++Retain the r0080 additive branch and its auxiliary context gradients.
++Cross task-feedback versus match-duplicate summaries with inclusion of
++that branch in the click readout. Auxiliary predictions keep the branch
++in every cell. The click-disabled cell still computes the branch and
++multiplies its output by zero in both training and evaluation. All learned
++modules, initialization, support masks and inherited paths are unchanged.
++No measured outcome, original-paper reproduction or novelty is claimed.
+ """
+ import torch
+@@ -17,5 +16,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'primary_summary_vjp': 'native', 'cartfav_summary_vjp': 'native', 'buy_summary_vjp': 'removed_restored', 'extension_source': 'task_aligned', 'block_aux_extension_context_grad': False}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'primary_summary_vjp': 'native', 'cartfav_summary_vjp': 'native', 'buy_summary_vjp': 'removed_restored', 'extension_source': 'task_aligned', 'block_aux_extension_context_grad': False, 'primary_extension_readout': True}
+ 
+ class _SummaryProductVJP(torch.autograd.Function):
+@@ -100,4 +99,5 @@
+                  extension_source='task_aligned',
+                  block_aux_extension_context_grad=False,
++                 primary_extension_readout=True,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -154,4 +154,7 @@
+             raise ValueError('Extension context gate must be boolean')
+         self.block_aux_extension_context_grad = block_aux_extension_context_grad
++        if not isinstance(primary_extension_readout, bool):
++            raise ValueError('Primary extension readout must be boolean')
++        self.primary_extension_readout = primary_extension_readout
+         if context_fusion != 'product':
+             raise ValueError('This placement study fixes product fusion')
+@@ -1089,6 +1092,12 @@
+             if self.training and label != 'is_click':
+                 extension_summary = extension_summary.detach()
+-            correction = correction + self._feedback_extension_correction(
++            # Execute the same summary/query/projection/output in every
++            # cell. Suppress only the new click readout, in train AND eval;
++            # auxiliary readouts and their context gradients remain live.
++            extension_correction = self._feedback_extension_correction(
+                 index, adapter_context, extension_summary)
++            if label == 'is_click' and not self.primary_extension_readout:
++                extension_correction = extension_correction * 0.0
++            correction = correction + extension_correction
+             pooled = base + has_history * correction
+             features = torch.cat([tower_context, task_target, pooled], dim=-1)

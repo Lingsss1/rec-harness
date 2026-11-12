@@ -1,0 +1,35 @@
+{
+  "request_sha256": "fd7fe2c428498b623d448526e64ec2eb72193abb7afb2c38ad39e09e42197aa0",
+  "response": {
+    "category_edits": [
+      {
+        "category": "feature_construction",
+        "rationale": "Test fixed training-frequency scaling of history embeddings across all four categories. Counts use training interactions only; unseen items retain scale 1 and padding stays zero. Candidate embeddings, learned parameters, GRU, readout, loss and optimizer remain unchanged. The registered buffer is saved in each category checkpoint and restored by the generated predictor, which imports the updated model class.",
+        "edits": [
+          {
+            "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+            "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+          },
+          {
+            "find": "        self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)\n        dropout = dropout_rate if num_layers > 1 else 0.0",
+            "replace": "        self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)\n        self.register_buffer(\"history_item_scale\", torch.ones(itemnum + 1))\n        self.history_item_scale[0] = 0.0\n        dropout = dropout_rate if num_layers > 1 else 0.0"
+          },
+          {
+            "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))",
+            "replace": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq) * self.history_item_scale[seq].unsqueeze(-1))"
+          },
+          {
+            "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))",
+            "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq) * self.history_item_scale[seq].unsqueeze(-1))"
+          },
+          {
+            "find": "    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)",
+            "replace": "    counts = np.zeros(itemnum + 1, dtype=np.int64)\n    for items in user_train.values():\n        np.add.at(counts, np.asarray(items, dtype=np.int64), 1)\n    observed = counts > 0\n    observed[0] = False\n    scales = np.ones(itemnum + 1, dtype=np.float32)\n    if observed.any():\n        median_count = float(np.median(counts[observed]))\n        scales[observed] = np.clip(\n            (median_count / counts[observed].astype(np.float64)) ** 0.25,\n            0.5, 2.0,\n        ).astype(np.float32)\n    scales[0] = 0.0\n    with torch.no_grad():\n        model.history_item_scale.copy_(torch.as_tensor(scales, device=device))\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Add checkpointed training-frequency history scales to each category’s single GRU4Rec model, with matching inference through the existing predictor writer. Require GAGC_DATA_DIR."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/gru4rec/recharness/calls/00057"
+}

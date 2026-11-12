@@ -1,0 +1,1342 @@
+UniDot: A Unified Network for Sequence Modeling and Feature Interaction in Large-scale Recommendation
+Report GitHub Issue
+×
+Title:
+Content selection saved. Describe the issue below:
+Description:
+Submit without GitHub
+Submit in GitHub
+arXiv is now an independent nonprofit!
+Learn more
+×
+Back to arXiv
+Why HTML?
+Report Issue
+Back to Abstract
+Download PDF
+Abstract.
+1 Introduction
+2 Related Work
+Feature interaction.
+Sequential user-interest modeling.
+Unifying feature interaction and sequence modeling.
+3 Problem Formulation
+4 Method: UniDot
+4.1 Overview
+Unified tokenization.
+4.2 Tokenizers
+Categorical (fid) features.
+Multi-value fids: FAFE.
+Pre-trained embedding features.
+4.3 Sequence Encoder
+Merged cross-domain sequence.
+Local mixing: depthwise Conv1d.
+Information filtering: DIN-style conditional SwiGLU.
+Token dependency: causal Transformer.
+4.4 Per-layer computation
+Token-mixing bus.
+MultiChannelSeqPool.
+Sequence-retrieval bus.
+Bus-level fusion (FuseFFN, canonical MLP-Mixer (Tolstikhin et al., 2021)).
+4.5 Classifier readout
+4.6 Multi-path mutual learning
+Mutual objective.
+Serving.
+5 Experiments
+5.1 Main results
+5.2 Incremental improvements
+5.3 Component ablations
+5.4 Scaling study
+6 Conclusion
+References
+A Dataset
+A.1 Dataset
+B Experimental Setup
+Training and evaluation modes.
+C Implementation and Training Details
+C.1 Active configuration
+C.2 Per-position weights (user_dense pairing)
+C.3 Field-aware feature embedding (FAFE)
+C.4 Pre-trained embedding projection and normalization
+Structured sub-vector embeddings.
+C.5 High-cardinality skip embeddings
+C.6 Auxiliary conversion-delay head
+C.7 Optimization and training
+D Data-scaling study
+License: CC BY 4.0
+arXiv:2608.16797v1 [cs.IR] 17 Aug 2026
+UniDot: A Unified Network for Sequence Modeling and Feature Interaction in Large-scale Recommendation
+Conference: KDD Cup 2026 Tencent UniRec Challenge Workshop; August 12, 2026; Jeju, Korea
+Rongcheng Lin
+Affiliation: Meta, Menlo Park, USA
+email: linrongc@meta.com
+,
+Yan Sun
+Affiliation: Meta, Menlo Park, USA
+email: yansun@meta.com
+,
+Jamey Zhang
+Affiliation: Meta, Menlo Park, USA
+email: jameyz@meta.com
+,
+Guanglei Xiong
+Affiliation: Meta, Menlo Park, USA
+email: glx@meta.com
+,
+Ivan Ji
+Affiliation: Meta, Menlo Park, USA
+email: ivanji@meta.com
+,
+Xianjie Chen
+Affiliation: Meta, Menlo Park, USA
+email: cxj@meta.com
+and
+Shujian Bu
+Affiliation: Meta, Menlo Park, USA
+email: shujian@meta.com
+2026
+Abstract.
+Industrial recommenders rely on two model families that have evolved largely
+independently: feature-interaction models over multi-field user/item features,
+and sequential models over user-behavior histories. Production systems couple
+them only loosely. To unify the two, we present
+UniDot, a novel architecture for
+post-click conversion prediction built from the factorization-machine (FM)
+point of view: the embedding inner product—which powers collaborative
+filtering and lets a recommender generalize to unseen user–item pairs—is the
+same primitive as attention’s query⋅\cdotkey scoring, so a single
+dot-product of tokens can underlie both feature interaction and sequence
+modeling. UniDot tokenizes non-sequential fields and multi-domain behavioral
+sequences into one shared token space and stacks a single macro-block in which a
+token-mixing bus and a sequence-retrieval bus (item tokens
+cross-attending the histories) run in parallel and exchange state each
+layer through an MLP-Mixer fusion, while an FM Highway carries explicit
+per-layer dot-product interactions around the residual stack directly to
+the classifier. The sequence side is embedded once per forward pass and shared by
+all consumers, bounding inference latency. Trained with a dual sparse/dense
+(Adagrad + Muon) optimizer, an auxiliary conversion-delay head, and multi-path
+mutual learning, UniDot finished as the runner-up on the
+Industrial track of the TAAC ×\times KDD Cup 2026.
+Keywords: recommender systems, feature interaction, sequence modeling,
+CTR/CVR prediction, token mixing, factorization machines
+††footnotetext: KDD Cup 2026 Tencent UniRec Challenge Workshop, August 12, 2026, Jeju, Korea.
+Competition website: https://algo.qq.com/.
+All experiments, data collection, and processing activities were conducted on
+the competition host’s infrastructure. No experiments, data collection or
+processing activities were conducted on Meta infrastructure.
+1. Introduction
+Large-scale recommendation systems rank enormous candidate sets in real time and
+underpin modern content and advertising platforms. Their predictive models have
+matured along two largely separate traditions.
+(1) Feature-interaction models—Wide&Deep (Cheng et al., 2016),
+DeepFM (Guo et al., 2017), xDeepFM (Lian et al., 2018),
+DCN/DCN-v2 (Wang et al., 2017; Wang et al., 2021), FiBiNet (Huang et al., 2019),
+AutoInt (Song et al., 2019), Wukong (Zhang et al., 2024),
+DHEN (Zhang et al., 2022)—learn explicit and implicit crosses among a wide,
+mostly static feature set (user profile ×\times item attributes).
+(2) Sequential user-interest models, e.g. DIN (Zhou et al., 2018),
+DIEN (Zhou et al., 2019), DSIN (Feng et al., 2019), SIM (Pi et al., 2020),
+ETA (Chen et al., 2021), TWIN (Chang et al., 2023), LONGER (Chai et al., 2025),
+and TIN (Zhou et al., 2024), model the dynamics of user behavior, typically
+with target-aware attention over a single behavior history.
+The TAAC ×\times KDD Cup 2026 (Tencent Uni-Rec Challenge)—“Towards
+Unifying Sequence Modeling and Feature Interaction for Large-scale
+Recommendation”—targets exactly this gap, asking for a unified
+tokenization scheme and a homogeneous, stackable backbone that models
+sequential and non-sequential features in one architecture for large-scale
+recommendation, ranked by AUC under an inference-latency budget (§A
+describes the data). Following the recently introduced SlimPer
+framework (Wang et al., 2026), we designed UniDot. It is a direct answer to this
+brief: one stackable block, one shared token space, unifying both families. The
+name abbreviates
+Unified modeling via Dot-products Of
+Tokens—cross-attention (sequence retrieval) and factorization machines
+(feature interaction) are both dot-products of tokens, the single primitive the
+whole model is built on.
+This vantage point is deliberate. The FM inner product
+⟨vu,vi⟩\langle v_{u},v_{i}\rangle is the engine of collaborative filtering: user
+and item meet through latent factors estimated from all observed
+co-occurrences, so the score generalizes to user–item pairs never seen together
+in training (Rendle, 2010)—and in advertising conversion data, with sparse
+positives over a large, fast-moving ad inventory, most candidate pairs at serving
+time are effectively new. Prior unification work makes this inner product
+implicit—an emergent property of a deep interaction stack or
+transformer. UniDot keeps it explicit wherever signal crosses the user–item or
+candidate–history boundary, using the deeper machinery (token mixing, gated
+MLPs, attention) to refine the operands of those dot-products rather than
+replace the operation.
+user / itemprofile fids+ pre-trained embsbehavioraldomains S1..S4S_{1}..S_{4}tokenizers (§4.2)𝐔,𝐈,𝐈h\mathbf{U},\mathbf{I},\mathbf{I}_{h}seq pipeline (§4.3)embed once, share𝐇(1)..𝐇(S)\mathbf{H}^{(1)}..\mathbf{H}^{(S)}token-mixing busWukong / TokenMixer ×W\times WMultiChannelSeqPoolMLP-Mixer fusion(FuseFFN)sequence-retrieval bus𝐈h\mathbf{I}_{h} cross-attends each 𝐇(s)\mathbf{H}^{(s)} + fusion FFN
+macro-block ×L\times Lclassifierρ\rho + MLP →y^\to\hat{y}+ aux delay head[𝐔;𝐈][\mathbf{U};\mathbf{I}]𝐈h\mathbf{I}_{h}viewspooledZmixLZ^{L}_{\text{mix}}ZseqLZ^{L}_{\text{seq}}FM Highway: [ϕ1;…;ϕL][\phi^{1};\dots;\phi^{L}] (dots + Gram + cross-dots), bypasses fusionemb-skip signal eskipe_{\text{skip}}
+Figure 1. UniDot architecture (§4): two buses co-evolve through
+LL macro-blocks, exchange state via the per-layer MLP-Mixer fusion, and the FM
+Highway routes explicit per-layer dot-products past the fuser to the classifier.
+UniDot stacks one homogeneous block LL times: two buses—a token-mixing
+bus over user/item profile tokens and a sequence-retrieval bus whose
+item tokens cross-attend the behavioral histories—exchange state each layer
+through an MLP-Mixer fuser, while an FM Highway routes explicit
+dot-product interactions straight to the classifier. Everything else
+(§4) is how these pieces are made cheap, candidate-aware,
+and scalable. Around this design—plus the training recipe behind our final
+entry—we contribute four ideas.
+(1) A dual-path, per-layer-parallel block: rather than cascading a
+sequence module into an interaction backbone, each block runs two paths
+concurrently—a non-sequential token-mixing path (a swappable
+mixer slot: Wukong’s parallel LCB + FMB by default, a TokenMixer-style block as a
+drop-in) and a sequence-retrieval path (item tokens cross-attend the
+behavioral sequences)—which exchange state every layer via a canonical
+MLP-Mixer fusion (§4.4), so profile and sequence signal co-evolve;
+this interleaving is inspired by InterFormer (Zeng et al., 2025) and
+Kunlun (Hou et al., 2026), from which UniDot differs in keeping the cross-boundary
+signal an explicit dot-product.
+(2) A shared, candidate-aware, multi-domain sequence pipeline: all
+behavioral domains are embedded once and reshaped to a uniform per-position
+width by a position-local fid-axis compression (§4.2); a DIN-style
+conditionally gated SwiGLU injects candidate context into only the
+gate, and a timestamp-interleaved merged stream models cross-domain
+temporal patterns (§4.3).
+(3) The FM Highway for explicit feature interaction: per-domain
+query–key dot products, an aggregated Gram matrix, and cross-bus user–item dots
+are concatenated across layers and fed directly to the classifier
+(§4.4), bypassing the residual fusion path and preserving the
+FM-style second-order signal a deep residual stack tends to wash out, at
+negligible cost.
+(4) Multi-path mutual learning over shared embeddings: we train
+two UniDot paths jointly on one shared (and dominant) embedding table,
+each regularized toward the other’s predictions (§4.6), pulling even a
+single served path to a better minimum—a 1×\times-cost model that would
+itself place as runner-up (Table 1)—while the two-path mean
+recovers the small remainder.
+UniDot
+finished as the runner-up on the Industrial track of the TAAC ×\times KDD Cup
+2026 challenge under the official AUC metric,
+reaching a final-leaderboard AUC of 0.83217 (Table 1). This result came from
+architecture and scale rather than heavy feature engineering: we add no
+hand-crafted cross features beyond the released schema.
+Table 1. Final Industrial-track leaderboard (round 2, top 10). ⋆Serving a
+single path of our all-data DML model (1×\times inference cost) would
+still rank second—multi-path training pulls even a single model to a better
+minimum (§4.6).
+Rank
+AUC ↑\uparrow
+Gap to #1
+1
+0.83254
+—
+2 (UniDot, ours)
+0.83217
+0.037%0.037\%
+(UniDot, single path)⋆
+0.83184
+0.070%0.070\%
+3
+0.83145
+0.109%0.109\%
+4
+0.83080
+0.174%0.174\%
+5
+0.83073
+0.181%0.181\%
+6
+0.83036
+0.218%0.218\%
+7
+0.82915
+0.339%0.339\%
+8
+0.82888
+0.366%0.366\%
+9
+0.82881
+0.373%0.373\%
+10
+0.82854
+0.400%0.400\%
+2. Related Work
+Feature interaction.
+Latent-factor collaborative filtering is the historical core of recommendation:
+matrix factorization represents users and items as latent vectors whose
+inner product predicts affinity (Koren et al., 2009), and Factorization
+Machines (Rendle, 2010) generalized it to arbitrary multi-field
+features—subsuming MF and its variants as special cases while retaining the
+factorized generalization to unseen feature pairs; field-aware
+variants (Juan et al., 2016) refined the factorization. The deep era kept the inner
+product central rather than replacing it: DeepFM (Guo et al., 2017) runs an FM and
+a DNN on shared embeddings, Wide&Deep (Cheng et al., 2016),
+xDeepFM (Lian et al., 2018), DCN-v2 (Wang et al., 2021), AutoInt (Song et al., 2019), and
+FiBiNet (Huang et al., 2019) extend explicit crosses in deeper or attention-based
+forms. Wukong (Zhang et al., 2024) scales interaction
+modeling with stacked factorization-machine and linear-compression blocks, and
+DHEN (Zhang et al., 2022) composes heterogeneous interaction experts.
+Sequential user-interest modeling.
+DIN (Zhou et al., 2018) introduced target-aware attention pooling; DIEN, DSIN, and
+BST (Chen et al., 2019) added evolution and self-attention; long-sequence
+methods such as SIM (Pi et al., 2020), ETA, TWIN (Chang et al., 2023), and
+LONGER (Chai et al., 2025)
+retrieve or compress very long histories. Our conditionally gated SwiGLU is a
+DIN-style mechanism: candidate context steers which positions matter, but
+enters only the gate, leaving the value path content-pure—a design that composes
+cleanly with position-local compression.
+Unifying feature interaction and sequence modeling.
+A fast-growing line of work brings the two branches into a single backbone.
+HSTU (Zhai et al., 2024) recasts
+ranking/retrieval as a generative sequence task over a unified transformer.
+InterFormer (Zeng et al., 2025) interleaves sequence learning and
+feature-interaction learning so the two refine each other layer by layer rather
+than in sequence. HyFormer (Huang et al., 2026) pairs a feature-interaction
+module with a transformer that cross-attends behavioral history; our
+sequence bus extends this to multiple domains plus a merged cross-domain stream,
+routing explicit per-sequence dot products to the FM Highway (§4.4).
+OneTrans (Zhang et al., 2025) and TokenFormer (Zhou et al., 2026)
+fuse all attributes, behaviors, and the target into one homogeneous
+(decoder-only) stream; the latter must counter sequential collapse, which
+UniDot’s two-bus separation avoids by construction. UniMixer (Ha et al., 2026) and TokenMixer
+(Jiang et al., 2026) pursue a single stackable token-mixing backbone (the latter
+also probing scaling), Kunlun (Hou et al., 2026) scales such ideas to
+production, and Semantic-ID methods like TIGER (Rajput et al., 2023) map
+collaborative and content signals into a shared discrete-token space. The
+TAAC ×\times KDD Cup 2026 challenge (TAAC × KDD Cup 2026, 2026) formalizes this direction.
+SlimPer (Wang et al., 2026) frames ranking as iterative refinement of a
+compact, fixed-size ⟨\langleuser, item⟩\rangle knowledge base that is re-read
+against the full raw token set at every layer; UniDot is a preliminary
+public-dataset test of this framework.
+What distinguishes UniDot is its starting point. Prior work unifies either
+by scaling up feature mixing and treating behavior as more features (Zeng et al., 2025; Ha et al., 2026; Jiang et al., 2026) or by embedding every feature as one more token in a
+sequence model (Zhai et al., 2024; Zhang et al., 2025; Hou et al., 2026); in both the
+collaborative-filtering inner product becomes implicit. UniDot instead keeps it
+explicit: cross-attention is read as FM scoring between query and key tokens, and
+a dedicated FM Highway (§4.4) carries these low-order
+interactions past the residual mixer (Rendle, 2010).
+3. Problem Formulation
+We address post-click conversion prediction. An example is
+x=(u,i,𝒮)x=(u,i,\mathcal{S}) with binary label y∈{0,1}y\in\{0,1\} (y=1y{=}1 denotes
+conversion), where uu is the user profile (user_int IDs, aligned
+per-position weights, pre-trained user embeddings), ii the candidate item
+(item_int IDs, item embeddings), and 𝒮={Ss}s=14\mathcal{S}=\{S_{s}\}_{s=1}^{4} the
+four behavioral domains. The model predicts a conversion probability and is trained
+with binary cross-entropy. We now fix notation used throughout
+§4; we write dd for dmodeld_{\text{model}}.
+(1) Tokenization maps raw inputs to dd-dimensional tokens
+(§4.2–4.3):
+(1)
+𝐔=Toku(u)∈ℝTu×d,𝐈=Toki(i)∈ℝTi×d,\displaystyle\mathbf{U}=\mathrm{Tok}_{u}(u)\in\mathbb{R}^{T_{u}\times d},\quad\mathbf{I}=\mathrm{Tok}_{i}(i)\in\mathbb{R}^{T_{i}\times d},
+𝐈h=Tokih(i)∈ℝTi​h×d,𝐇(s)=Seq(Ss)∈ℝLs×d.\displaystyle\mathbf{I}_{h}=\mathrm{Tok}_{i}^{h}(i)\in\mathbb{R}^{T_{ih}\times d},\quad\mathbf{H}^{(s)}=\mathrm{Seq}(S_{s})\in\mathbb{R}^{L_{s}\times d}.
+(2) Stackable block. Two token states are initialized from the
+tokenizers, Zmix0=[𝐔;𝐈]Z^{0}_{\text{mix}}=[\mathbf{U};\mathbf{I}] (token-mixing bus) and
+Zseq0=𝐈hZ^{0}_{\text{seq}}=\mathbf{I}_{h} (sequence-retrieval bus). For ℓ=1,…,L\ell=1,\dots,L
+identical blocks:
+(2)
+(Zmixℓ,Zseqℓ,ϕℓ)=Blockℓ​(Zmixℓ−1,Zseqℓ−1,{𝐇(s)}s=1S),\big(Z^{\ell}_{\text{mix}},\,Z^{\ell}_{\text{seq}},\,\phi^{\ell}\big)=\mathrm{Block}_{\ell}\big(Z^{\ell-1}_{\text{mix}},\,Z^{\ell-1}_{\text{seq}},\,\{\mathbf{H}^{(s)}\}_{s=1}^{S}\big),
+where ϕℓ\phi^{\ell} is the layer’s FM Highway signal (token dot-products
+and Gram; §4.4).
+(3) Readout. The classifier consumes a compressed readout
+ρ\rho of the final states (§4.5), the highway signals of every
+layer, and the skip-embedding signal eskipe_{\text{skip}} (§C.5):
+(3)
+y^=σ⁡(MLP⁡[ρ⁡(ZmixL,ZseqL);ϕ1;…;ϕL;eskip]).\hat{y}=\sigma\!\Big(\mathrm{MLP}\big[\,\rho\big(Z^{L}_{\text{mix}},Z^{L}_{\text{seq}}\big);\,\phi^{1};\dots;\phi^{L};\,e_{\text{skip}}\,\big]\Big).
+The per-layer highway signals are concatenated, not summed, so every
+layer’s explicit interactions reach the classifier undiluted.
+(4) Objective. Binary cross-entropy plus an auxiliary delay
+loss:
+(4)
+ℒ=−y​log⁡y^−(1−y)​log⁡(1−y^)+λ​ℒdelay,\mathcal{L}=-y\log\hat{y}-(1-y)\log(1-\hat{y})+\lambda\,\mathcal{L}_{\text{delay}},
+where ℒdelay\mathcal{L}_{\text{delay}} is an MSE regression of the log time-to-next-action
+log⁡(1+(tlabel−tevent))\log\!\big(1+(t_{\text{label}}-t_{\text{event}})\big) over every row that has a
+next action (clicks and conversions, not only positives), detailed in
+§C.6.
+4. Method: UniDot
+4.1. Overview
+Unified tokenization.
+Every input—non-sequential user/item multi-field features and per-position
+behavioral-sequence events—is embedded into the same dmodeld_{\text{model}} space and
+represented as tokens (§4.2–4.3). A single
+stackable macro-block then processes them; stacking LL identical blocks
+is the only depth knob, which makes the design simple to scale in depth and width.
+The two buses co-evolve through LL macro-layers (each with WW token-mixing
+sub-layers); the MLP-Mixer fusion exchanges information between them each
+layer, and the FM Highway runs alongside (Figure 1). A
+shared sequence pipeline (§4.3) feeds both the cross-attention and a
+per-layer multi-channel pool that injects pooled sequence tokens into the
+non-sequential bus. We keep §4 symbolic
+(L,W,Tu,Ti,Ti​h,S,w,dL,W,T_{u},T_{i},T_{ih},S,w,d); concrete values are in §C
+(Table 8).
+4.2. Tokenizers
+Tokenization maps the model’s heterogeneous inputs (categorical fids,
+multi-value ID lists, pre-trained embeddings, and behavioral sequences) into one
+shared dd-dimensional token space the macro-block can process
+uniformly. Each multi-field input becomes a few dd-dim tokens
+(Toku,Toki\mathrm{Tok}_{u},\mathrm{Tok}_{i} in Eq. (1)) by compression along the
+token axis. Two primitives recur throughout the model, both mapping
+ℝT×d→ℝT′×d\mathbb{R}^{T\times d}\!\to\!\mathbb{R}^{T^{\prime}\times d} with a LayerNorm tail:
+LCB, a one-layer token-axis MLP-mixer (a single linear), and
+NCB, its two-layer version (two linears with a GELU between).
+Categorical (fid) features.
+Every fid is embedded per position and the position bundle is compressed to
+the token budget by a single learnable NCB along the token axis.
+Because the NCB is learned, the data decides which
+feature combinations form each token, rather than a fixed pooling rule that
+averages position-level salience away. This yields the user tokens 𝐔\mathbf{U}
+(TuT_{u}) and, from two separate item tables, a compact view 𝐈\mathbf{I} (TiT_{i},
+token-mixing bus) and a richer 𝐈h\mathbf{I}_{h} (Ti​hT_{ih}, sequence-retrieval bus,
+whose tokens drive the cross-attention queries). Behavioral sequences are
+tokenized the same way (per-fid embedding then a position-local fid-axis
+NCB to a uniform per-position width; §4.3), once per forward and
+shared by all consumers.
+Multi-value fids: FAFE.
+A few high-value fids are lists of behavioral IDs whose order carries no
+meaning—they are position-invariant. For these, the static NCB is
+replaced by a candidate-aware DIN-style attention pool against the ranking
+candidate, so the field’s token is a different combination of its values for each
+candidate (FAFE, §C.3): a special case of the same
+compress-to-tokens step where the pooling weights are candidate-dependent.
+Pre-trained embedding features.
+Dense pre-trained vectors (user SUM, LMF4Ads, …; item embeddings) are
+normalized, projected by a small MLP into extra tokens, and appended to the
+matching token set (§C.4). Separately, a few paired
+user_dense arrays are not features but per-position multipliers on the
+fid embeddings (§C.2).
+4.3. Sequence Encoder
+The sequence encoder (the Seq⁡(⋅)\mathrm{Seq}(\cdot) of Eq. (1))
+takes the per-position sequence tokens from §4.2 and turns them into the
+views 𝐇(s)\mathbf{H}^{(s)} consumed downstream, once per forward, shared by every
+consumer. It is a pipeline of four stages, each chosen to model a different
+structure in the behavior stream: a cross-domain merge (one timeline
+across domains), a depthwise conv (local / N-gram structure), a
+DIN-style conditional SwiGLU (candidate-aware filtering and enhancement),
+and a causal Transformer (long-range token dependency).
+Figure 2 sketches one trunk.
+behavior events of one domainper-fid embed ++ concat →(L,nfids⋅D)\to(L,\,n_{\text{fids}}{\cdot}D)fid-axis NCB (position-local)uniform width per position →(L, 4​D)\to(L,\,4D)depthwise Conv1dlocal N-gram mixing over a short windowCondGatedSwiGLUvalue path == pure seq content;gate =σ⁡(W⁡[seq;cond;seq⊙cond])=\sigma(W[\,\text{seq};\,\text{cond};\,\text{seq}{\odot}\text{cond}\,])
+cond vector
+user ++ item ++ embs
+(NCB-fused)
+causal Transformer (RoPE)windowed attention, window wwper-consumer view projectors (Linear→\toLN→\toGELU)one fresh view every view-stride layersgate only
+merged stream
+interleave domains
+by timestamp
+→\to own trunk, same shape
+𝐇(s)\mathbf{H}^{(s)} cross-attn viewspool views
+Figure 2. One sequence trunk (§4.3).
+Merged cross-domain sequence.
+A subset of domains is interleaved by timestamp into an extra cross-domain
+stream, so the downstream module can learn cross-domain interactions more easily.
+The real domains plus the merged stream give the downstream sequence count SS.
+Local mixing: depthwise Conv1d.
+A lightweight depthwise Conv1d mixes each channel over a local window,
+cheaply capturing N-gram patterns (bursts, adjacent-event motifs) that
+self-attention would otherwise spend capacity to relearn.
+Information filtering: DIN-style conditional SwiGLU.
+A composite per-sample cond vector (user + item LCB tokens + emb-cond,
+NCB-fused) enters only the gate of a SwiGLU; the value path stays a pure
+function of the sequence. The gate selects positions by candidate relevance
+(DIN-style) without altering their content.
+Token dependency: causal Transformer.
+The global encoder is a shallow Transformer with RoPE and
+causal, windowed attention (window ww), modeling token dependencies in
+time order through a fused-attention kernel (SDPA / FlashAttention). Per-consumer
+view projectors (Linear→LN→GELU\text{Linear}\to\text{LN}\to\text{GELU}) then emit the
+DD-dim views 𝐇(s)\mathbf{H}^{(s)}, refreshed every view-stride layers.
+4.4. Per-layer computation
+Each macro-layer runs the two buses in parallel and then fuses them.
+Token-mixing bus.
+The bus state (the user, item, and pooled tokens concatenated) passes through
+WW cross-token blocks. The block is a swappable slot; we use
+Wukong (parallel LCB + FMB with residual, the FMB contributing
+explicit pairwise dot-products). We also evaluated a TokenMixer-style
+block (Jiang et al., 2026) and UniMixer (Ha et al., 2026) in this slot, but neither
+beat Wukong at our data scale—both likely need more data to converge. This is a
+controlled slot-swap within UniDot, not a matched end-to-end retrain of
+those architectures (out of scope under the competition budget), so we read it as
+indicative at our scale, not a definitive ranking. Pooled tokens are sliced off
+between layers so the persistent state stays at (Tu+Ti,D)(T_{u}+T_{i},D).
+…\dotsitems hℓh_{\ell}wℓ​c=σ⁡(MLP⁡[hℓ;summary⁡(Zmix)])w_{\ell c}=\sigma\big(\mathrm{MLP}[\,h_{\ell};\,\mathrm{summary}(Z_{\text{mix}})\,]\big)  (per-channel sigmoid gate)Σ\SigmaΣ\SigmaΣ\SigmaΣ\Sigmap1p_{1}p2p_{2}p3p_{3}p4p_{4}ℓ2\ell_{2}-normalize each →\to concat over channels & SS seqs →\to LayerNorm →\to bus
+Figure 3. MultiChannelSeqPool (§4.4): positions are gated into
+CC channels by independent state-conditioned sigmoid weights.
+MultiChannelSeqPool.
+For each of the SS sequence views, a multi-channel pool—in the spirit of
+NetVLAD / NeXtVLAD multi-cluster soft-assignment
+aggregation (Arandjelović et al., 2016; Lin et al., 2018)—produces CC pooled
+tokens. Each channel gates every position with an independent sigmoid
+(not a softmax), conditioned on a summary of the current mixing-bus state, so
+channels fire independently rather than competing for a fixed attention mass;
+each pooled token is the gate-weighted sum of positions. Because sigmoid gating
+leaves the magnitude unbounded, each pooled token is ℓ2\ell_{2}-normalized
+over DD to restore unit norm; the S⋅CS{\cdot}C tokens then pass a
+LayerNorm tail before entering the bus, matching the NCB-tailed profile
+tokens so the token-mix does not systematically down-weight them
+(Figure 3).
+Sequence-retrieval bus.
+A single-history, single-layer instance of this bus recovers a standard
+single-history target-attention CTR module (Huang et al., 2026); here we
+generalize it to SS domains (real + merged), per-layer queries, and an
+FM-Highway readout. With item state of Ti​hT_{ih} tokens:
+(i) per-sequence cross-attention—the item state queries each of the
+SS sequence views (no internal residual), giving raw outputs
+A0,…,AS−1∈ℝB×Ti​h×DA_{0},\dots,A_{S-1}\in\mathbb{R}^{B\times T_{ih}\times D};
+(ii) LCB aggregation—attn_agg=LCB​(stack​(A0,…))\text{attn\_agg}=\text{LCB}(\text{stack}(A_{0},\dots)),
+linear because the fusion FFN below already supplies the nonlinearity;
+(iii) per-token fusion FFN—a small FFN mixes each item token with that
+token’s retrieved vectors from all SS sequences into a DD-dim residual delta on
+the item state; and
+(iv) FM Highway signals (bypass fusion, concatenated across layers)—each
+layer contributes per-sequence dots di​[t]=⟨item​[t],Ai​[t]⟩d_{i}[t]=\langle\text{item}[t],A_{i}[t]\rangle
+(the per-token affinity between the candidate and each behavioral domain), a
+learned fused-domain dot (an NCB across the SS outputs, dotted with the
+item state), the aggregated Gram G=item⋅attn_agg⊤G=\text{item}\cdot\text{attn\_agg}^{\top}
+(the full pairwise dot-product matrix), and, computed post-fusion,
+user–item cross-dots (inner products between the user tokens of the mixing
+bus and the item tokens of the retrieval bus). Together these form ϕℓ\phi^{\ell} in
+Eq. (2).
+Bus-level fusion (FuseFFN, canonical MLP-Mixer (Tolstikhin et al., 2021)).
+The three groups woutw_{\text{out}}, pooled, and houth_{\text{out}} are concatenated
+along the token axis, then pass through an NCB token-mix (nonlinear
+mixing across tokens), a token-wise SwiGLU channel-mix (applied to each
+token, weights shared across tokens), and per-side
+zero-initialized projections scaled by per-side learnable gates,
+producing residual deltas on the two buses (Figure 4). Because
+the side projections are zero-init, fusion starts as identity and is learned in.
+woutw_{\text{out}} (Tu+TiT_{u}{+}T_{i})pooled (S⋅CS{\cdot}C)houth_{\text{out}} (Ti​hT_{ih})concatNCB token-mix: 2-layer MLP across the token axis + LNevery token mixes with every other — the cross-bus exchangeSwiGLU: channel-mix over DD, weights shared across tokenspool slice:no write-backprojw\mathrm{proj}_{w} (zero-init) ×sw\times\,s_{w}projh\mathrm{proj}_{h} (zero-init) ×sh\times\,s_{h}++++Δw\Delta_{w}Δh\Delta_{h}ZmixℓZ^{\ell}_{\text{mix}}ZseqℓZ^{\ell}_{\text{seq}}
+Figure 4. FuseFFN (§4.4).
+4.5. Classifier readout
+The readout is Eq. (3). The final bus states are not
+flattened wholesale. The compressed readout ρ\rho has two parts: (i) an NCB
+compresses the (Tu+Ti+Ti​h)(T_{u}{+}T_{i}{+}T_{ih}) concatenated bus tokens to a handful of
+readout tokens,
+which are flattened; and (ii) a cross-dot gram—all pairwise inner
+products between the mixing-bus and retrieval-bus tokens, computed on the
+uncompressed states—is appended, so the compression cannot erase explicit
+second-order signal. The classifier input concatenates ρ\rho, the
+layer-concatenated FM Highway [ϕ1;…;ϕL][\phi^{1};\dots;\phi^{L}] (per-sequence
+dots, fused-domain dots, aggregated Grams, user–item cross-dots; LayerNorm’d),
+and the LayerNorm’d skip-embedding signal eskipe_{\text{skip}}
+(§C.5). This feeds a 2-layer MLP and a linear head;
+logits are clamped to [−20,20][-20,20]. An auxiliary conversion-delay head
+(§C.6) adds a second loss term.
+4.6. Multi-path mutual learning
+We train a single model as two UniDot paths jointly on the same
+batches (Zhang et al., 2018; Yılmaz and Aldemir, 2024), sharing one set of (dominant) sparse
+embeddings, and average their two logits at inference (Figure 5). The
+motivation is the regularization identified in the original deep mutual
+learning work (Zhang et al., 2018): the two paths mimic each other’s predictions
+and converge to a wider, flatter minimum—a robust solution they agree
+on—and such flat minima generalize better to unseen data, exactly the property
+our setting rewards, where the test period is one step ahead of training and most
+candidate user–item pairs are new. We apply it here over a shared
+embedding table. Two paths already capture most of this gain at 2×2\times dense
+cost; we kept that as our submission.
+shared sparse embedding tablesuser / item / sequence IDs — looked up once per batchUniDotdense path 1UniDotdense path 2identicalbase,separateweightsp1p_{1}p2p_{2}mutualD⁡(sg⁡[pi],pn)D(\mathrm{sg}[p_{i}],p_{n})BCE(y,p1)(y,p_{1})BCE(y,p2)(y,p_{2})inference: y^=12​(p1+p2)\hat{y}=\tfrac{1}{2}(p_{1}{+}p_{2})
+Figure 5. Multi-path mutual learning (N=2N{=}2, §4.6).
+Mutual objective.
+Let znz_{n} be path nn’s logit and pn=σ⁡(zn)p_{n}=\sigma(z_{n}). Each path is supervised by
+the task loss on its own prediction and pulled toward the detached
+predictions of the other paths:
+(5)
+ℒ=∑n=1N[ℒtask​(y,pn)+λN−1​∑i≠nD⁡(sg⁡[pi],pn)],\mathcal{L}=\sum_{n=1}^{N}\Big[\,\mathcal{L}_{\text{task}}(y,p_{n})\;+\;\frac{\lambda}{N-1}\sum_{i\neq n}D\big(\,\mathrm{sg}[p_{i}],\,p_{n}\big)\Big],
+where ℒtask\mathcal{L}_{\text{task}} is the BCE (plus auxiliary delay head,
+§C.6), sg⁡[⋅]\mathrm{sg}[\cdot] is the stop-gradient, and
+DD is a squared error on probabilities D⁡(a,b)=(a−b)2D(a,b)=(a-b)^{2}. The submission uses
+N=2N{=}2 paths, mutual weight λ=20\lambda{=}20, with the mutual term
+switched on after the first epoch.
+Serving.
+At inference we average the two paths’ logits. Serving a single path
+instead costs 1×1\times and already scores 0.831840.83184 test AUC—only 0.033%0.033\%
+below the two-path mean (0.832170.83217)—a viable cheap deployment, with the mean
+recovering the small remainder.
+5. Experiments
+The dataset, setup, and implementation details are in
+Appendices A–C; here we report results.
+5.1. Main results
+UniDot finished as the runner-up (Table 1), scoring
+0.83217 test AUC—driven by the unified dual-bus architecture with the
+FM Highway (§4) and by scaling it in depth, width, and multi-path
+mutual learning (§5.4). The final submission retrains on
+all data with EMA weights, peaking at epoch 5 (Table 2).
+Table 2. Training dynamics by epoch of the d=128d{=}128, N=2N{=}2 multi-path run.
+Eval/Test (sel.): the model-selection run (remote, 10%
+held-out). Test (final): the final submission, retrained on
+all data with EMA. LL={=}LogLoss (train over both paths, eval over their
+mean); “—” = not submitted.
+Ep.
+Train AUC
+Eval AUC
+Test (sel.)
+Test (final)
+Train LL
+Eval LL
+1
+0.83193
+0.84181
+0.82772
+—
+0.43395
+0.21259
+2
+0.84232
+0.84441
+0.83031
+0.83036
+0.42422
+0.21113
+3
+0.84606
+0.84558
+0.83136
+0.83143
+0.42072
+0.21058
+4
+0.84962
+0.84607
+0.83193
+0.83195
+0.41750
+0.21029
+5
+0.85485
+0.84629
+0.83196
+0.83217
+0.41288
+0.21048
+6
+0.86199
+0.84568
+—
+0.83212
+0.40679
+0.21116
+5.2. Incremental improvements
+Table 3 traces test AUC from the competition baseline to our
+submission, each row adding one change. The largest single jump is UniDot itself
+(+1.10%+1.10\%); subsequent refinements (FM-Highway dots, depthwise conv, aux loss,
+FAFE, EMA), dense scaling, and multi-path DML add the rest, +1.82%+1.82\% total.
+Table 3. Round-2 incremental improvements.
+#
+Change
+Test AUC
+Δ\Delta
+0
+competition baseline
+0.81398
+—
+1
+++ UniDot
+0.82500
++1.102+1.102
+2
+++ item-id hash embedding
+0.82565
++0.064+0.064
+3
+tune token counts
+0.82609
++0.044+0.044
+4
+tune batch size
+0.82704
++0.095+0.095
+5
+++ more FM-Highway dot products
+0.82722
++0.018+0.018
+6
+++ depthwise-conv pre-trunk
+0.82736
++0.014+0.014
+7
+++ auxiliary delay loss
+0.82812
++0.075+0.075
+8
+++ FAFE
+0.82837
++0.026+0.026
+9
+tune learning rate
+0.82894
++0.056+0.056
+10
+++ EMA weights
+0.82993
++0.099+0.099
+11
+scale dmodeld_{\text{model}} 64→\to96
+0.83024
++0.031+0.031
+12
+scale dmodeld_{\text{model}} 96→\to128
+0.83043
++0.019+0.019
+13
+++ multi-path DML (d=64d{=}64)
+0.83128
++0.085+0.085
+14
+multi-path DML (d=128d{=}128)
+0.83196
++0.068+0.068
+15
+++ all-data retrain
+0.83217
++0.021+0.021
+total over baseline
++1.818\mathbf{+1.818}
+5.3. Component ablations
+Table 4 removes individual components in tiny mode
+(single-path, d=64d{=}64, in-distribution held-out, so only relative gaps
+matter). Depth helps up to our default 6 macro-layers (8–10 overfit the 4M set),
+and removing the FM Highway costs the most (−0.127%-0.127\%); removing the
+sequence cross-attention costs little (−0.053%-0.053\%), as the multi-channel pool
+captures much of the same signal.
+Dropping the FuseFFN bus fusion slightly raises AUC (+0.022%+0.022\%)
+but worsens LogLoss, so the module’s contribution is not fully conclusive. We
+read this not as evidence against cross-bus exchange but as an under-designed
+fuser: its static routing is the weak link, and an input-conditioned
+(second-order) fuser is the clearest open direction.
+Table 4. Component ablations (tiny mode, single-path, d=64d{=}64;
+in-distribution held-out eval). Δ\Delta is AUC vs. the full model.
+Variant
+AUC ↑\uparrow
+LogLoss ↓\downarrow
+Δ\DeltaAUC
+Full UniDot (6 layers)
+0.83657
+0.2151
+—
+2 macro-layers
+0.83600
+0.2157
+−0.057%-0.057\%
+4 macro-layers
+0.83603
+0.2154
+−0.054%-0.054\%
+8 macro-layers
+0.83624
+0.2152
+−0.033%-0.033\%
+10 macro-layers
+0.83615
+0.2152
+−0.042%-0.042\%
+−- FM Highway (all)
+0.83530
+0.2159
+−0.127%-0.127\%
+−- cross-bus dots only
+0.83570
+0.2156
+−0.087%-0.087\%
+−- multi-channel seq pool
+0.83624
+0.2155
+−0.033%-0.033\%
+−- token-mixing bus (identity)
+0.83590
+0.2161
+−0.067%-0.067\%
+−- FuseFFN (no bus fusion)
+0.83679
+0.2154
++0.022%+0.022\%
+−- sequence cross-attention
+0.83604
+0.2153
+−0.053%-0.053\%
+−- merged cross-domain stream
+0.83619
+0.2152
+−0.038%-0.038\%
+5.4. Scaling study
+On this task the productive scaling axis is dense capacity, not sparse
+(Table 5).
+Doubling embedding width alone gave no A/B win—the high-cardinality tables are
+not the bottleneck. Widening the dense path from 6464 to 9696 to 128128 improves
+AUC monotonically with diminishing returns (+0.050%+0.050\% cumulative). A second
+identical path under mutual distillation (§4.6) is a more effective
+use of dense capacity: +0.135%+0.135\% at d=64d{=}64, more than the entire width sweep,
+doubling dense parameters and FLOPs but not the embedding tables. The two axes
+compose: d=128d{=}128 with two paths reaches 0.831960.83196 (+0.203%+0.203\% over the
+d=64d{=}64 single-path baseline), our submission; the all-data retrain then gives
+0.832170.83217.
+Table 5. Scaling study.
+Configuration
+Dense par.
+GFLOP
+Test AUC ↑\uparrow
+Δ\Delta
+d=64d{=}64, sparse fold×\times2
+18.8M
+5.9
+—
+no win
+d=64d{=}64 (baseline)
+18.8M
+5.9
+0.82993
+—
+d=96d{=}96
+36.7M
+12.4
+0.83024
++0.031%+0.031\%
+d=128d{=}128
+60.3M
+21.2
+0.83043
++0.050%+0.050\%
+d=64d{=}64, 2-path
+37.6M
+11.7
+0.83128
++0.135%+0.135\%
+d=128d{=}128, 2-path
+120.6M
+42.5
+0.83196
++0.203%\mathbf{+0.203\%}
+6. Conclusion
+We presented UniDot, a novel architecture that unifies sequence
+modeling and feature interaction in a single stackable block: non-sequential
+fields and multi-domain behavioral sequences become tokens in one shared space,
+processed by a parallel token-mixing bus and a sequence-retrieval bus that
+co-evolve and exchange deltas through a canonical MLP-Mixer each layer. Its
+defining idea, the FM Highway, routes explicit
+dot-product interactions around the fusion path straight to the classifier, keeping
+factorization-machine-style second-order signal alive at negligible cost. UniDot
+finished as the runner-up on the Industrial track of the TAAC ×\times KDD Cup
+2026 challenge, scoring 0.83217 AUC—driven by the unified architecture, by
+scaling the block in depth and width, and by multi-path mutual learning over
+shared embeddings, rather than by feature engineering. Future
+work: deploying UniDot in a real production system and, at that scale, a
+systematic scaling-law study of the unified block.
+References
+Arandjelović et al. (2016)
+R. Arandjelović, P. Gronat, A. Torii, T. Pajdla, and J. Sivic
+NetVLAD: cnn architecture for weakly supervised place recognition.
+In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR),
+Cited by: §4.4.
+Chai et al. (2025)
+Z. Chai, Q. Ren, X. Xu, H. Chen, X. Zhang, Z. Hu, T. Liang, L. Wu, L. Zhou, Z. Yu, Y. Sun, and J. Pan
+LONGER: scaling up long sequence modeling in industrial recommenders.
+In Proceedings of the 19th ACM Conference on Recommender Systems (RecSys),
+Note: arXiv:2505.04421
+Cited by: §1,
+§2.
+Chang et al. (2023)
+J. Chang, C. Zhang, Z. Fu, X. Zang, L. Guan, J. Lu, Y. Hui, D. Leng, Y. Niu, Y. Song, and K. Gai
+TWIN: two-stage interest network for lifelong user behavior modeling in ctr prediction at Kuaishou.
+In Proceedings of the 29th ACM SIGKDD Conference on Knowledge Discovery and Data Mining (KDD),
+Cited by: §1,
+§2.
+Chen et al. (2021)
+Q. Chen, C. Pei, S. Lv, C. Li, J. Ge, and W. Ou
+End-to-end user behavior retrieval in click-through rate prediction model.
+External Links: 2108.04468
+Cited by: §1.
+Chen et al. (2019)
+Q. Chen, H. Zhao, W. Li, P. Huang, and W. Ou
+Behavior sequence transformer for e-commerce recommendation in Alibaba.
+In Proceedings of the 1st International Workshop on Deep Learning Practice for High-Dimensional Sparse Data (DLP-KDD),
+Cited by: §2.
+Cheng et al. (2016)
+H. Cheng, L. Koc, J. Harmsen, T. Shaked, T. Chandra, H. Aradhye, G. Anderson, G. Corrado, W. Chai, M. Ispir, et al.
+Wide & deep learning for recommender systems.
+In Proceedings of the 1st Workshop on Deep Learning for Recommender Systems (DLRS),
+Cited by: §1,
+§2.
+Feng et al. (2019)
+Y. Feng, F. Lv, W. Shen, M. Wang, F. Sun, Y. Zhu, and K. Yang
+Deep session interest network for click-through rate prediction.
+In Proceedings of the 28th International Joint Conference on Artificial Intelligence (IJCAI),
+Note: arXiv:1905.06482
+Cited by: §1.
+Guo et al. (2017)
+H. Guo, R. Tang, Y. Ye, Z. Li, and X. He
+DeepFM: a factorization-machine based neural network for ctr prediction.
+In Proceedings of the 26th International Joint Conference on Artificial Intelligence (IJCAI),
+Cited by: §1,
+§2.
+Ha et al. (2026)
+M. Ha, G. Wang, L. Chen, X. Rao, Y. Shi, T. Ma, Z. Liu, Y. Fan, Z. Lu, Y. Niu, H. Li, and K. Gai
+UniMixer: a unified architecture for scaling laws in recommendation systems.
+Note: arXiv:2604.00590
+Cited by: §2,
+§2,
+§4.4.
+Hou et al. (2026)
+B. Hou, X. Liu, X. Liu, J. Xu, Y. Badr, M. Hang, S. Chanpuriya, et al.
+Kunlun: establishing scaling laws for massive-scale recommendation systems through unified architecture design.
+Note: arXiv:2602.10016
+Cited by: §1,
+§2,
+§2.
+Huang et al. (2019)
+T. Huang, Z. Zhang, and J. Zhang
+FiBiNET: combining feature importance and bilinear feature interaction for click-through rate prediction.
+In Proceedings of the 13th ACM Conference on Recommender Systems (RecSys),
+Cited by: §1,
+§2.
+Huang et al. (2026)
+Y. Huang, S. Hong, X. Xiao, J. Jin, X. Luo, Z. Wang, Z. Chai, S. Wu, Y. Zheng, and J. Lin
+HyFormer: revisiting the roles of sequence modeling and feature interaction in ctr prediction.
+Note: arXiv:2601.12681
+Cited by: §2,
+§4.4.
+Jiang et al. (2026)
+Y. Jiang, J. Zhu, X. Han, H. Lu, K. Bai, M. Yang, S. Wu, R. Zhang, W. Zhao, S. Bai, S. Zhou, H. Yang, T. Liu, W. Liu, Z. Gong, H. Ding, Z. Chai, D. Xie, Z. Chen, Y. Zheng, and P. Xu
+TokenMixer-Large: scaling up large ranking models in industrial recommenders.
+Note: arXiv:2602.06563
+Cited by: §2,
+§2,
+§4.4.
+Jordan et al. (2024)
+K. Jordan, Y. Jin, V. Boza, J. You, F. Cesista, L. Newhouse, and J. Bernstein
+Muon: an optimizer for hidden layers in neural networks.
+Note: Blog post
+External Links: Link
+Cited by: §C.7.
+Juan et al. (2016)
+Y. Juan, Y. Zhuang, W. Chin, and C. Lin
+Field-aware factorization machines for ctr prediction.
+In Proceedings of the 10th ACM Conference on Recommender Systems (RecSys),
+Cited by: §2.
+Koren et al. (2009)
+Y. Koren, R. Bell, and C. Volinsky
+Matrix factorization techniques for recommender systems.
+IEEE Computer 42 (8), pp. 30–37.
+Cited by: §2.
+Lian et al. (2018)
+J. Lian, X. Zhou, F. Zhang, Z. Chen, X. Xie, and G. Sun
+xDeepFM: combining explicit and implicit feature interactions for recommender systems.
+In Proceedings of the 24th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining (KDD),
+Cited by: §1,
+§2.
+Lin et al. (2018)
+R. Lin, J. Xiao, and J. Fan
+NeXtVLAD: an efficient neural network to aggregate frame-level features for large-scale video classification.
+In Proceedings of the European Conference on Computer Vision (ECCV) Workshops,
+Cited by: §4.4.
+Liu et al. (2025)
+J. Liu, J. Su, X. Yao, Z. Jiang, G. Lai, Y. Du, Y. Qin, W. Xu, E. Lu, J. Yan, et al.
+Muon is scalable for LLM training.
+External Links: 2502.16982
+Cited by: §C.7.
+Pi et al. (2020)
+Q. Pi, G. Zhou, Y. Zhang, Z. Wang, L. Ren, Y. Fan, X. Zhu, and K. Gai
+Search-based user interest modeling with lifelong sequential behavior data for click-through rate prediction.
+In Proceedings of the 29th ACM International Conference on Information and Knowledge Management (CIKM),
+Cited by: §1,
+§2.
+Rajput et al. (2023)
+S. Rajput, N. Mehta, A. Singh, R. Keshavan, T. Vu, L. Heldt, L. Hong, Y. Tay, V. Q. Tran, J. Samost, M. Kula, E. H. Chi, and M. Sathiamoorthy
+Recommender systems with generative retrieval.
+In Advances in Neural Information Processing Systems (NeurIPS),
+Cited by: §2.
+Rendle (2010)
+S. Rendle
+Factorization machines.
+In Proceedings of the 10th IEEE International Conference on Data Mining (ICDM),
+Cited by: §1,
+§2,
+§2.
+Song et al. (2019)
+W. Song, C. Shi, Z. Xiao, Z. Duan, Y. Xu, M. Zhang, and J. Tang
+AutoInt: automatic feature interaction learning via self-attentive neural networks.
+In Proceedings of the 28th ACM International Conference on Information and Knowledge Management (CIKM),
+Cited by: §1,
+§2.
+TAAC × KDD Cup 2026 (2026)
+TAAC × KDD Cup 2026
+Tencent uni-rec challenge: towards unifying sequence modeling and feature interaction for large-scale recommendation.
+Note: Competition website
+External Links: Link
+Cited by: §2.
+Tolstikhin et al. (2021)
+I. Tolstikhin, N. Houlsby, A. Kolesnikov, L. Beyer, X. Zhai, T. Unterthiner, J. Yung, A. Steiner, D. Keysers, J. Uszkoreit, M. Lucic, and A. Dosovitskiy
+MLP-Mixer: an all-MLP architecture for vision.
+In Advances in Neural Information Processing Systems (NeurIPS),
+Cited by: §4.4.
+Wang et al. (2017)
+R. Wang, B. Fu, G. Fu, and M. Wang
+Deep & cross network for ad click predictions.
+In Proceedings of the ADKDD’17,
+Note: arXiv:1708.05123
+Cited by: §1.
+Wang et al. (2021)
+R. Wang, R. Shivanna, D. Cheng, S. Jain, D. Lin, L. Hong, and E. Chi
+DCN V2: improved deep & cross network and practical lessons for web-scale learning to rank systems.
+In Proceedings of the Web Conference (WWW),
+Cited by: §1,
+§2.
+Wang et al. (2026)
+S. Wang, X. Chen, S. Deng, A. Chen, et al.
+SlimPer: make personalization model slim and smart.
+External Links: 2607.12281
+Cited by: §1,
+§2.
+Yılmaz and Aldemir (2024)
+İ. C. Yılmaz and S. Aldemir
+Mutual learning for finetuning click-through rate prediction models.
+External Links: 2406.12087
+Cited by: §4.6.
+Zeng et al. (2025)
+Z. Zeng, X. Liu, M. Hang, X. Liu, et al.
+InterFormer: effective heterogeneous interaction learning for click-through rate prediction.
+In Proceedings of the 34th ACM International Conference on Information and Knowledge Management (CIKM),
+Cited by: §1,
+§2,
+§2.
+Zhai et al. (2024)
+J. Zhai, L. Liao, X. Liu, Y. Wang, R. Li, X. Cao, L. Gao, Z. Gong, F. Gu, M. He, Y. Lu, and Y. Shi
+Actions speak louder than words: trillion-parameter sequential transducers for generative recommendations.
+In Proceedings of the 41st International Conference on Machine Learning (ICML),
+Cited by: §2,
+§2.
+Zhang et al. (2024)
+B. Zhang, L. Luo, X. Liu, J. Li, Z. Chen, W. Zhang, X. Wei, Y. Hao, M. Tsang, W. Wang, Y. Liu, H. Li, Y. Badr, J. Park, J. Yang, D. Mudigere, and E. Wen
+Wukong: towards a scaling law for large-scale recommendation.
+In Proceedings of the 41st International Conference on Machine Learning (ICML),
+Cited by: §1,
+§2.
+Zhang et al. (2022)
+B. Zhang, L. Luo, X. Liu, et al.
+DHEN: a deep and hierarchical ensemble network for large-scale ctr prediction.
+Note: arXiv:2203.11014
+Cited by: §1,
+§2.
+Zhang et al. (2018)
+Y. Zhang, T. Xiang, T. M. Hospedales, and H. Lu
+Deep mutual learning.
+In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR),
+Note: arXiv:1706.00384
+Cited by: §4.6.
+Zhang et al. (2025)
+Z. Zhang, H. Pei, J. Guo, T. Wang, Y. Feng, H. Sun, S. Liu, and A. Sun
+OneTrans: unified feature interaction and sequence modeling with one transformer in industrial recommender.
+Note: arXiv:2510.26104
+Cited by: §2,
+§2.
+Zhou et al. (2019)
+G. Zhou, N. Mou, Y. Fan, Q. Pi, W. Bian, C. Zhou, X. Zhu, and K. Gai
+Deep interest evolution network for click-through rate prediction.
+In Proceedings of the 33rd AAAI Conference on Artificial Intelligence (AAAI),
+Note: arXiv:1809.03672
+Cited by: §1.
+Zhou et al. (2018)
+G. Zhou, X. Zhu, C. Song, Y. Fan, H. Zhu, X. Ma, Y. Yan, J. Jin, H. Li, and K. Gai
+Deep interest network for click-through rate prediction.
+In Proceedings of the 24th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining (KDD),
+Cited by: §1,
+§2.
+Zhou et al. (2024)
+H. Zhou, J. Pan, X. Zhou, X. Chen, J. Jiang, X. Gao, and G. Chen
+Temporal interest network for user response prediction.
+In Companion Proceedings of the ACM Web Conference (WWW Companion),
+Note: arXiv:2308.08487
+Cited by: §1.
+Zhou et al. (2026)
+Y. Zhou, Y. Hu, Z. Feng, J. Pan, K. Wu, H. Li, S. Zhang, S. Huang, Z. Zhu, C. Yin, H. Gu, and J. Jiang
+TokenFormer: unify the multi-field and sequential recommendation worlds.
+Note: arXiv:2604.13737
+Cited by: §2.
+Appendix A Dataset
+A.1. Dataset
+The challenge releases a large-scale, fully anonymized advertising dataset built
+from real Tencent ad logs, over two rounds; we compete on the
+Industrial track. All sparse features are anonymized integer IDs and
+all dense features are fixed-length float vectors; no raw content or PII is
+released. Table 6 summarizes the schema.
+Each example is a user–item interaction with two kinds of inputs:
+•
+Non-sequential multi-field features—user_int /
+item_int categorical IDs (single- and multi-valued), and
+user_dense / item_dense continuous vectors that include
+pre-trained embeddings (e.g. SUM and LMF4Ads on the user side; item
+embeddings on the item side).
+•
+Behavioral sequence features from four domains with
+9–14 fields each (seq_a to seq_d): each domain is a
+time-ordered list of events carrying timestamps and action types.
+Two schema properties directly shape the model. First, several user_dense
+arrays are element-aligned with the matching user_int arrays:
+each dense value is a per-element statistic (e.g. a dwell time or score) for that
+ID, not a standalone feature. UniDot consumes them as per-position weights
+on the ID embeddings (§C.2), matching their intended semantics.
+Second, a few IDs have extreme cardinality (fid 116 takes ≈\approx9.4M
+values), motivating the skip-embedding handling in §C.5.
+Table 6. Industrial-track dataset and schema (second round; first round in
+parentheses).
+Quantity
+Industrial track
+Train / test samples
+35M / 12M (2M, r1)
+Columns (categories)
+142 (7)
+User Int / Dense fids
+54 / 17
+Item Int / Dense fids
+17 / 4
+Pre-trained emb fids (u/i)
+7 / 4
+Aligned per-position fids
+10
+Behavioral domains
+4 (9/14/12/10 flds)
+High-card. ID (fid 116)
+≈\approx9.4M
+Label / metric
+Conversion / AUC
+Appendix B Experimental Setup
+Data: TAAC ×\times KDD Cup 2026 Industrial track (35M train / 12M
+test; 2M in round 1), conversion label. Metric: AUC of ROC
+(official); we also report LogLoss.
+Training: effective batch ≈\approx3k (local A/B) / ≈\approx12k
+(online, 4 GPUs), dual Adagrad/Muon (dense LR 4e-4, Muon weight decay 1e-3,
+sparse LR 0.1), 100-step warmup, BCE + aux delay (λ=0.01\lambda{=}0.01), torch.compile
+and bf16 autocast.
+Model: submitted config in Table 8 (≈\approx2.1B params,
+dmodel=128d_{\text{model}}{=}128, N=2N{=}2 multi-path).
+Inference: the served model uses torch.compile and bf16
+autocast. End-to-end inference plus evaluation on the 12M-example test
+set—including the one-time compilation—takes ≈\approx14,500 s for the
+two-path model and ≈\approx7,200 s for a single path (roughly half),
+within the competition’s inference budget. The bf16 autocast costs only a
+slight AUC degradation (<0.0001<0.0001).
+Table 7. Training/evaluation modes.
+Mode
+Data (train / eval)
+GPUs
+Role
+tiny
+4M / 1M, random hold-out
+1
+rapid design A/B
+remote
+35M / 10% random hold-out
+4
+full-scale validation
+final
+35M / no hold-out
+4
+submission (EMA weights)
+Training and evaluation modes.
+We use three modes (Table 7): tiny caps the data
+to a random 4M-train / 1M-eval subset on one GPU for fast A/B of design choices;
+remote promotes the surviving configuration to the full dataset
+on 4 GPUs with a held-out split, confirming the win holds at full scale; and
+final retrains on all data and serves the EMA weights for
+the submission.
+Appendix C Implementation and Training Details
+The components below are largely orthogonal to the core architecture
+(§4)—data-specific feature handling and training machinery—so
+we collect them here. They matter for reproducing the reported numbers.
+Table 8. Submitted configuration behind the reported numbers.
+Group
+Setting
+Macro-layers LL / mix-blocks-per-layer WW
+6 / 2
+dmodeld_{\text{model}}
+128
+Token-mix block
+Wukong (parallel LCB + FMB, rank 32)
+User NS / user emb tokens
+8 / 2 (×\times7 fids) ⇒Tu=22\Rightarrow T_{u}=22
+Item NS tokens (mix / retrieval bus)
+4 / 16 (+ 4 emb fids ×\times2) ⇒Ti=12\Rightarrow T_{i}=12, Ti​h=24T_{ih}=24
+Fuse / classifier hidden mult
+4 / 8
+Seq recent windows
+a:256 b:256 c:512 d:512
+Merged stream
+abcd:512 (⇒S=5\Rightarrow S=5)
+Seq fid-compress tokens
+4 (→\to 512-d/pos)
+DIN cond tokens (u/i/emb/fused)
+2 / 4 / 1 / 4
+Trunk encoder
+Transformer, 1 layer, 4 heads, causal, window w=128w{=}128, RoPE
+Pre-trunk encoder (per-dom. + merged)
+depthwise Conv1d, kernel 21
+View projection
+Linear→\toLN→\toGELU, view stride 1
+FuseFFN delta gates
+sigmoid(⋅\cdot), init 0.5
+Classifier readout
+NCB-compress to 4 tok + cross-dot gram
+Skip-emb threshold / type / slots
+2M / hash / 2M
+Item-id hash table
+2M slots
+Dense optimizer
+Muon (wd 1e-3); sparse: Adagrad
+Loss
+BCE; aux delay (λ=0.01\lambda{=}0.01)
+Multi-path (DML)
+N=2N{=}2 paths, shared sparse emb
+Mutual loss / weight
+MSE / λ=20\lambda{=}20 (from epoch 1)
+Params
+≈\approx2.1B (embedding-dominated)
+C.1. Active configuration
+Table 8 resolves every symbol of §4 to its
+submitted value. The token budgets work out to Tu=8+7⋅2=22T_{u}=8+7{\cdot}2=22
+user-side tokens (8 NS tokens plus 2 per projected user-emb fid),
+Ti=4+4⋅2=12T_{i}=4+4{\cdot}2=12 and Ti​h=16+4⋅2=24T_{ih}=16+4{\cdot}2=24 item-side tokens,
+and S=4+1=5S=4+1=5 sequences (four behavioral domains plus the merged stream);
+the fid-axis compression yields a uniform 4⋅128=5124{\cdot}128=512-d per-position
+width. Parameters total ≈\approx2.1B but are embedding-dominated (sparse
+lookups); the dense compute path is tens of millions of parameters. Because the
+per-fid embedding tables are dmodeld_{\text{model}}-wide, scaling dmodeld_{\text{model}}
+from 64 to 128 roughly doubles the (dominant) embedding parameter count.
+C.2. Per-position weights (user_dense pairing)
+Ten user_dense arrays of §A are not features but
+per-position multipliers. Each is aligned position-by-position with the
+same-numbered multi-value user_int fid (matching length) and
+scales that ID’s embedding before pooling, so every value’s contribution is
+weighted by its paired statistic (e.g. dwell time or interaction count). Two
+classes are handled differently. Count-like fids (62–66,
+118, 121) pass through a fixed log⁡(1+x)/10\log(1+x)/10
+transform—the log tames the heavy tail, the /10/10 lands it in a unit-ish
+range—and multiply the matching embedding. Similarity-like fids
+(89–91, signed cosine / score values) are instead
+clamped to [−1,1][-1,1] and used directly as signed multipliers, so a
+negative affinity can subtract a value’s embedding. Both transforms use fixed (non-learned) constants, so the
+weighting is stable across the cold-restart re-initializations of
+§C.7.
+C.3. Field-aware feature embedding (FAFE)
+A few high-value multi-value user_int fields—fids 15,
+63–66, 115–118, 121, 122
+(lists of behavioral IDs)—are pooled candidate-aware instead of
+statically: a DIN-style attention pool scores each value in the list against the
+ranking candidate
+(Fig. 6), so the field’s pooled embedding is a different
+combination of its values for each candidate. The remaining fields use the
+static NCB pooling of §4.2. This concentrates candidate-awareness on
+the large behavioral ID lists where it pays off, without the regression of making
+the whole tokenizer target-aware.
+ranking candidate 𝐞i\mathbf{e}_{i}field values𝐞1,…,𝐞K\mathbf{e}_{1},\dots,\mathbf{e}_{K}DIN attentionak=softmaxk⁡g⁡(𝐞i,𝐞k)a_{k}=\operatorname{softmax}_{k}g(\mathbf{e}_{i},\mathbf{e}_{k})weighted sum𝐩=∑kak​𝐞k\mathbf{p}=\sum_{k}a_{k}\,\mathbf{e}_{k}candidate-awarefield tokenquerykeysaka_{k}values 𝐞k\mathbf{e}_{k}
+Figure 6. Field-aware feature embedding (FAFE, §C.3): a DIN-style
+attention pool scores each value of a multi-value field against the ranking
+candidate, yielding a candidate-dependent field token; all other fields keep the
+static NCB pooling.
+C.4. Pre-trained embedding projection and normalization
+Pre-trained dense vectors (user: SUM, LMF4Ads, …; item embeddings) enter on
+their own path. Normalization. Their heavy-tailed count
+dimensions are first standardized to zero mean / unit variance with fixed
+statistics estimated once on the training set (not per batch), so inference sees
+the same scaling and the projector is not destabilized by the long tail.
+Projection. Each normalized vector is mapped by a 2-layer
+(Linear–GELU–Linear) MLP into a few dd-dim tokens, which a shared
+per-token LayerNorm then puts at unit scale—matching the
+LayerNorm-tailed NCB tokens (§4.2) so the bus token-mix does not
+systematically down-weight the embedding tokens. The resulting tokens are appended
+to the user / item token sets.
+Structured sub-vector embeddings.
+One pre-trained fid (LMF4Ads, 320320-d) is not a single vector but a concatenation
+of 1010 independently L2-normalized 3232-d sub-vectors, each a unit
+vector or all-zeros (padding). Flattening it into one 320320-d input and applying
+the MLP above would blur this block structure and mix the separately-normalized
+sub-spaces, so this fid gets a structured tokenizer: reshape to
+10×3210\times 32, lift each 3232-d slot to a token with a shared linear map,
+mask out the zero-padded slots (present iff the slot norm is nonzero, so an empty
+slot’s bias cannot leak in), then compress the 1010 slot tokens with an LCB to the
+same per-fid token count as the flat path (its LayerNorm tail giving unit-variance
+tokens). All other emb fids (e.g. SUM, a single whole-vector-normalized 256256-d
+embedding) keep the flat MLP projection.
+C.5. High-cardinality skip embeddings
+Fids above a threshold (2M) are taken off the per-fid path and handled by a shared
+hash (hashing-trick) table. Their pooled signal also feeds the classifier directly
+(eskipe_{\text{skip}} in Eq. (3)), and they are re-initialized on cold
+restart. The item-id fid additionally gets a dedicated 2M-slot
+multiplicative-hash table whose embedding feeds the item tokenizers.
+C.6. Auxiliary conversion-delay head
+A dedicated trunk + head regresses log⁡(1+(tlabel−tevent))\log(1+(t_{\text{label}}-t_{\text{event}})),
+the delay to the user’s next action, under an MSE loss. The mask is
+tlabel>teventt_{\text{label}}>t_{\text{event}} (a next action exists), so it covers
+both next-click-without-conversion and conversion rows—roughly all rows
+rather than the ∼\sim12% positives, ∼\sim8×\times more aux signal. It
+contributes the λ​ℒdelay\lambda\,\mathcal{L}_{\text{delay}} term of Eq. (4)
+(λ=0.01\lambda{=}0.01).
+C.7. Optimization and training
+Dual optimizer. Embedding parameters use Adagrad (sparse
+gradients). Dense parameters are split: the ≥\geq2D matrix weights use
+Muon (Jordan et al., 2024) (Moonshot variant (Liu et al., 2025),
+which adds decoupled weight decay and rescales the orthogonalized update to match
+AdamW’s update RMS so AdamW-tuned learning rates transfer with no separate Muon LR
+search; weight decay 1e-3), while the 1D parameters (LayerNorm scales, biases) go
+to an AdamW auxiliary group (weight decay 0). Both share a linear LR
+warmup, with optional decay at each cold-restart boundary.
+Cold restart: at every epoch boundary after the first, embedding tables
+above a cardinality threshold—all tables in the active config
+(threshold 0)—are re-initialized together with their Adagrad state, while dense
+parameters persist: the backbone trains across epochs while embeddings are
+re-learned each epoch, a regularizer matched to the one-step-ahead train/test
+time gap. After each re-initialization the dense learning rate is warmed
+up afresh (a second warmup schedule), letting the re-learned embeddings settle
+before full-rate updates resume. Time bucketing: continuous deltas
+tnow−teventt_{\text{now}}-t_{\text{event}} map to 64 embedding slots (0 = padding),
+boundaries spanning ≈\approx1 s to ≈\approx1.5 years, with capacity
+concentrated in the 1 h–18 month range (recency-weighted grid).
+Logit clamp: forward logits are clamped to [−20,20][-20,20].
+EMA weights: we track an exponential moving average of the dense
+parameters (decay 0.9990.999); when a held-out split is available we publish, each
+epoch, whichever of the live or EMA weights scores higher on it, and the final
+all-data submission serves the EMA weights. The EMA is reset to the live
+weights over each post-reinit warmup window, so the high-variance re-warm steps
+do not contaminate the average.
+Appendix D Data-scaling study
+Complementing the model-scaling study (§5.4), we grow the
+training data while holding the model at the tiny configuration
+(single-path d=64d{=}64) and changing only the training-example cap. Held-out AUC
+rises log-linearly with data—0.836570.83657 (4M), 0.838990.83899 (8M),
+0.841870.84187 (16M), 0.843960.84396 (32M), about +0.0025+0.0025 AUC per doubling—and LogLoss
+falls in step (0.21510.2151, 0.21390.2139, 0.21250.2125, 0.21150.2115); see
+Figure 7. The clean, unbroken log-linear trend through the
+full 32M suggests the unified block is data-hungry and has not saturated,
+motivating the production / scaling-law follow-up.
+4M8M16M32M0.83600.83600.83800.83800.84000.84000.84200.84200.84400.8440training examples (tiny mode)held-out AUC0.21200.21200.21350.21350.21500.2150LogLoss
+Figure 7. Data scaling (tiny mode, single-path d=64d{=}64): held-out AUC
+(left, blue) and LogLoss (right,
+red) vs. training examples (log2\log_{2} axis). Both
+improve log-linearly across the full 4M–32M range.
+Experimental support, please
+view the build logs
+for errors. Generated by
+L
+A
+T
+E
+xml
+.
+Instructions for reporting errors
+We are continuing to improve HTML versions of papers, and your feedback helps enhance accessibility and mobile
+support. To report errors in the HTML that will help us improve conversion and rendering, choose any of the
+methods listed below:
+Click the "Report Issue" (
+) button, located in the page header.
+Tip: You can select the relevant text first, to include it in your report.
+Our team has already identified the following issues. We appreciate your time reviewing and reporting rendering errors we
+may not have found yet. Your efforts will help us improve the HTML versions for all readers, because disability
+should not be a barrier to accessing research. Thank you for your continued support in championing open access for
+all.
+Have a free development cycle? Help support accessibility at arXiv! Our collaborators at LaTeXML maintain a list of packages that need conversion, and welcome developer contributions.
+We gratefully acknowledge support from
+our major funders,
+member institutions, ,
+and all contributors.
+About
+·
+Help
+·
+Contact
+·
+Subscribe
+·
+Copyright
+·
+Privacy
+·
+Accessibility
+·
+Operational Status (opens in new tab)
+Major funding support from

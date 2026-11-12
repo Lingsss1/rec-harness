@@ -1,0 +1,31 @@
+{
+  "request_sha256": "067553ef48731cf15b0294a5374182a27d66be5bb3391f862abb609e413c4212",
+  "response": {
+    "category_edits": [
+      {
+        "category": "network_architecture",
+        "rationale": "Normalize reset- and update-gate preactivations separately with trainable LayerNorm to stabilize retention. Preserve the GRU candidate equation, width, depth, embeddings, pooling, scoring, loss and optimizer. Precompute input projections and script the recurrence to limit overhead.",
+        "edits": [
+          {
+            "find": "class GRU4RecModel(nn.Module):",
+            "replace": "@torch.jit.script\ndef _normalized_gate_recurrence(\n    projected: torch.Tensor,\n    hidden: torch.Tensor,\n    weight_hh: torch.Tensor,\n    bias_hh: torch.Tensor,\n    reset_weight: torch.Tensor,\n    reset_bias: torch.Tensor,\n    update_weight: torch.Tensor,\n    update_bias: torch.Tensor,\n) -> tuple[torch.Tensor, torch.Tensor]:\n    outputs = torch.jit.annotate(list[torch.Tensor], [])\n    width = hidden.size(1)\n    for step in range(projected.size(1)):\n        input_reset, input_update, input_new = projected[:, step].chunk(3, dim=-1)\n        hidden_reset, hidden_update, hidden_new = torch.nn.functional.linear(\n            hidden, weight_hh, bias_hh\n        ).chunk(3, dim=-1)\n        reset = torch.sigmoid(torch.nn.functional.layer_norm(\n            input_reset + hidden_reset, [width], reset_weight, reset_bias, 1e-5\n        ))\n        update = torch.sigmoid(torch.nn.functional.layer_norm(\n            input_update + hidden_update, [width], update_weight, update_bias, 1e-5\n        ))\n        candidate = torch.tanh(input_new + reset * hidden_new)\n        hidden = (1.0 - update) * candidate + update * hidden\n        outputs.append(hidden)\n    return torch.stack(outputs, dim=1), hidden\n\n\nclass GateNormalizedGRU(nn.GRU):\n    def __init__(self, input_size: int, hidden_size: int, num_layers: int = 1,\n                 batch_first: bool = True, dropout: float = 0.0):\n        super().__init__(input_size, hidden_size, num_layers=num_layers,\n                         batch_first=batch_first, dropout=dropout)\n        self.reset_norms = nn.ModuleList([\n            nn.LayerNorm(hidden_size) for _ in range(num_layers)\n        ])\n        self.update_norms = nn.ModuleList([\n            nn.LayerNorm(hidden_size) for _ in range(num_layers)\n        ])\n\n    def forward(self, inputs: torch.Tensor, hx: torch.Tensor | None = None):\n        out = inputs if self.batch_first else inputs.transpose(0, 1)\n        if hx is None:\n            hx = out.new_zeros(self.num_layers, out.size(0), self.hidden_size)\n        final_states = []\n        for layer in range(self.num_layers):\n            projected = torch.nn.functional.linear(\n                out, getattr(self, f'weight_ih_l{layer}'),\n                getattr(self, f'bias_ih_l{layer}')\n            )\n            reset_norm = self.reset_norms[layer]\n            update_norm = self.update_norms[layer]\n            out, final_hidden = _normalized_gate_recurrence(\n                projected, hx[layer],\n                getattr(self, f'weight_hh_l{layer}'),\n                getattr(self, f'bias_hh_l{layer}'),\n                reset_norm.weight, reset_norm.bias,\n                update_norm.weight, update_norm.bias,\n            )\n            final_states.append(final_hidden)\n            if layer + 1 < self.num_layers and self.dropout > 0.0:\n                out = torch.nn.functional.dropout(\n                    out, p=self.dropout, training=self.training\n                )\n        if not self.batch_first:\n            out = out.transpose(0, 1)\n        return out, torch.stack(final_states, dim=0)\n\n\nclass GRU4RecModel(nn.Module):"
+          },
+          {
+            "find": "        self.gru = nn.GRU(hidden_units, hidden_units, num_layers=num_layers,\n                          batch_first=True, dropout=dropout)",
+            "replace": "        self.gru = GateNormalizedGRU(hidden_units, hidden_units, num_layers=num_layers,\n                                     batch_first=True, dropout=dropout)"
+          },
+          {
+            "find": "            \"itemnum\": itemnum,\n            \"maxlen\": MAXLEN,",
+            "replace": "            \"architecture\": \"gate_layernorm_gru_v1\",\n            \"itemnum\": itemnum,\n            \"maxlen\": MAXLEN,"
+          },
+          {
+            "find": "        with open(meta_path, \"rb\") as f:\n            meta = pickle.load(f)\n        model = ModelClass(",
+            "replace": "        with open(meta_path, \"rb\") as f:\n            meta = pickle.load(f)\n        if meta.get(\"architecture\") != \"gate_layernorm_gru_v1\":\n            raise RuntimeError(f\"Incompatible GRU architecture for {ds}\")\n        model = ModelClass("
+          }
+        ]
+      }
+    ],
+    "change_summary": "Add independently trainable reset/update gate normalization within the existing GRU and update predictor checkpoint compatibility metadata. Retain one model per category and all existing training and scoring behavior."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/run-01/experiment/recharness/calls/00152"
+}

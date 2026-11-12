@@ -1,0 +1,103 @@
+--- g2-r0029-joint_allocation_click14/model.py
++++ g2-r0033-joint_affine_split_hoist/model.py
+@@ -1,8 +1,8 @@
+-"""Task residual capacity allocation under fixed joint representations.
+-
+-Only adapter hidden widths change. Labels select widths explicitly in feature
+-map order. Scorer, compression, masks, gradient ownership, tower architecture,
+-zero output initialization and evaluation-only readout pruning are inherited.
+-This is a capacity allocation study, with no architectural novelty claim.
++"""Evaluation-only affine factoring under the fixed joint model.
++
++All learned Parameters, initialization and training operations are inherited.
++Controls separate splitting, query reuse and signed-weight algebraic merging.
++The rewrite is exact over real arithmetic; BF16 quality/cost need measurement.
++No parameter reduction, weight tying or architectural novelty is claimed.
+ """
+ import torch
+@@ -13,5 +13,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'split_hoist'}
+ 
+ 
+@@ -28,5 +28,6 @@
+                  match_support='available', match_scaling='norm', coarse_extension='duplicate',
+                  primary_partition='uniform', normalization_support='rotated_duplicate',
+-                 support_gradient='attached', task='binary_classification', **kwargs):
++                 support_gradient='attached', evaluation_projection='split_hoist',
++                 task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+@@ -40,4 +41,7 @@
+                          num_tasks=len(feature_map.labels), task=task, **kwargs)
+         self.compression_routes = compression_routes
++        if evaluation_projection not in ('split_repeat', 'split_hoist', 'merged_hoist'):
++            raise ValueError('Unknown evaluation affine factoring control')
++        self.evaluation_projection = evaluation_projection
+         if block_aux_scorer_grad is not True:
+             raise ValueError('Auxiliary scorer parameter gradients must stay blocked')
+@@ -510,4 +514,55 @@
+         return weighted.sum(dim=1)
+ 
++    def _evaluation_activation(self, target, values):
++        """Factor only the evaluation first affine, retaining its Parameters.
++
++        Training never enters this method. For keys k, target q and action a,
++        the original affine is Wq*q + Wk*k + Wd*(q-k) + Wp*(q*k) + Wa*a + b.
++        Merging gives (Wq+Wd)*q + (Wk-Wd)*k + Wp*(q*k) + Wa*a + b.
++        These identities hold over real arithmetic; BF16 evaluation differs
++        in rounding and GEMM shapes. No equality claim is made for BF16.
++        Derived weights and projections are local tensors rebuilt each call,
++        so every update/device move remains visible and no cache is retained.
++        """
++        if self.training:
++            raise ValueError('Affine factoring is evaluation-only')
++        batch, slots, _ = values.shape
++        key_width = self.key_width
++        keys = values[:, :, :key_width]
++        action = values[:, :, key_width:]
++        query = target[:, None, :].expand(-1, slots, -1)
++        first = self.local_activation[0]
++        weight = first.weight
++        if self.evaluation_projection == 'merged_hoist':
++            # Preserve all original Parameter objects and initialization.
++            # These sums are differentiable expressions, not new Parameters.
++            query_weight = weight[:, :key_width] + weight[:, 2 * key_width:3 * key_width]
++            history_weight = torch.cat([
++                weight[:, key_width:2 * key_width] - weight[:, 2 * key_width:3 * key_width],
++                weight[:, 3 * key_width:]], dim=-1)
++            query_projection = torch.nn.functional.linear(target, query_weight)[:, None, :]
++            history_features = torch.cat([keys, query * keys, action], dim=-1)
++        else:
++            # Both split cells have the same decomposition and history GEMM.
++            # Only the query GEMM row count differs: B*slots versus B.
++            query_weight = weight[:, :key_width]
++            history_weight = weight[:, key_width:]
++            if self.evaluation_projection == 'split_repeat':
++                query_projection = torch.nn.functional.linear(
++                    query.reshape(batch * slots, key_width), query_weight).reshape(
++                        batch, slots, first.out_features)
++            else:
++                query_projection = torch.nn.functional.linear(target, query_weight)[:, None, :]
++            history_features = torch.cat([keys, query - keys, query * keys, action], dim=-1)
++        history_projection = torch.nn.functional.linear(
++            history_features.reshape(batch * slots, -1), history_weight, first.bias).reshape(
++                batch, slots, first.out_features)
++        hidden = (query_projection + history_projection).reshape(batch * slots, first.out_features)
++        # Retain each Dice and later affine in the same order, with the same
++        # buffers, masks and 30-row evaluation population as the reference.
++        for index in range(1, len(self.local_activation)):
++            hidden = self.local_activation[index](hidden)
++        return hidden
++
+     def forward(self, inputs):
+         context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._represent(inputs)
+@@ -535,5 +590,5 @@
+             # Keep all three readout strata, including empty rows, in order.
+             values, counts = self._compress_both(values, mask, auxiliary)
+-            primary_weights = self._primary_activation(self._interactions(target, values))
++            primary_weights = self._evaluation_activation(target, values)
+             primary_strata = self._pool(primary_weights, values, counts)
+             uniform = primary_strata[:, 0, :]

@@ -1,0 +1,119 @@
+--- g2-r0004-context_only/model.py
++++ g0-r0008-shared_capacity/model.py
+@@ -1,17 +1,12 @@
+-"""Prospective source-path attribution under fixed compressed UF histories.
+-
+-Auxiliary gradients into the shared scorer are always blocked. Independent
+-switches control auxiliary gradients through supplied context embeddings and
+-through target/history item-and-action embeddings. Four cells keep identical
+-modules, initialization order, 30 summaries, forward values and inference.
+-Neither/both endpoints correspond to the earlier both_blocked/scorer_only
+-operators. Same-seed endpoint replays are consistency checks, not repetition.
+-
+-These are computational path gates: tied target/history tables remain tied,
+-and cross-source aliases must be audited by the host before ownership claims.
+-Persistent Dice state updates only in the primary scorer call. Preparation
+-performs no numerical execution or training; torch.func support and the
+-forward/backward/masking gates in proposal.json remain host prerequisites.
+-No architecture novelty or new predictive improvement is claimed.
++"""Prospective feedback-contrast x task-specific residual factorial.
++
++Retain the incumbent UF compression, scorer, Dice population and gradient
++ownership. A zero-output residual bank modifies the pooled representation.
++Contrast cells expose the centered feedback stratum; capacity controls expose
++only the already consumed pool. Task cells select a task's bank member;
++shared cells average the same four nonlinear members. Every cell executes
++all members per task, with equal allocated parameters and forward shapes.
++New modules are allocated after inherited initialization under fork_rng.
++No numerical validation, predictive gain or originality is asserted here.
+ """
+ import torch
+@@ -22,14 +17,5 @@
+ 
+ 
+-CONFIG = {
+-    'embedding_dim': 16,
+-    'attention_hidden_units': [64, 32],
+-    'tower_hidden_units': [128, 64],
+-    'attention_normalization': 'none',
+-    'compression_routes': 'uf',
+-    'block_aux_scorer_grad': True,
+-    'block_aux_context_grad': False,
+-    'block_aux_item_grad': True,
+-}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'base', 'residual_routing': 'shared', 'residual_hidden': 16}
+ 
+ 
+@@ -40,4 +26,5 @@
+                  compression_routes='uf', block_aux_scorer_grad=True,
+                  block_aux_context_grad=False, block_aux_item_grad=True, num_tasks=None,
++                 residual_input='contrast', residual_routing='task', residual_hidden=16,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -59,4 +46,14 @@
+         self.block_aux_context_grad = block_aux_context_grad
+         self.block_aux_item_grad = block_aux_item_grad
++        if block_aux_context_grad is not False or block_aux_item_grad is not True:
++            raise ValueError('The incumbent source-path ownership is required')
++        if residual_input not in ('contrast', 'base'):
++            raise ValueError('Unknown residual information control')
++        if residual_routing not in ('task', 'shared'):
++            raise ValueError('Unknown residual parameter-sharing control')
++        if not isinstance(residual_hidden, int) or residual_hidden < 1:
++            raise ValueError('Residual width must be a positive integer')
++        self.residual_input = residual_input
++        self.residual_routing = residual_routing
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -94,4 +91,15 @@
+             self.towers.append(nn.Sequential(*tower))
+         self.reset_parameters()
++        # No change to inherited modules, their initialization or host RNG.
++        # Zero final layers give source-equivalent predictions initially.
++        with torch.random.fork_rng(devices=[]):
++            self.residual_bank = nn.ModuleList([
++                nn.Sequential(nn.Linear(input_width, residual_hidden), nn.ReLU(),
++                              nn.Linear(residual_hidden, self.value_width))
++                for _ in feature_map.labels
++            ])
++            for adapter in self.residual_bank:
++                nn.init.zeros_(adapter[-1].weight)
++                nn.init.zeros_(adapter[-1].bias)
+         self.model_to_device()
+ 
+@@ -199,10 +207,32 @@
+             aux_strata = primary_strata
+         feedback = aux_strata[:, 1, :] + aux_strata[:, 2, :]
++        # Center the feedback pool by its unweighted event prevalence.
++        # F = A + N; contrast = A - p*F. Homogeneous histories have zero
++        # contrast. Counts describe only released, mask-valid history.
++        grouped_counts = counts.reshape(counts.shape[0], 10, 3)
++        total_count = grouped_counts[:, :, 0].sum(dim=1, keepdim=True)
++        feedback_count = grouped_counts[:, :, 2].sum(dim=1, keepdim=True)
++        fraction = feedback_count / total_count.clamp_min(1)
++        primary_feedback = primary_strata[:, 1, :] + primary_strata[:, 2, :]
++        primary_contrast = primary_strata[:, 2, :] - fraction * primary_feedback
++        auxiliary_contrast = aux_strata[:, 2, :] - fraction * feedback
++        has_history = (total_count > 0).to(uniform.dtype)
+         predictions = {}
+-        for label, tower in zip(self.feature_map.labels, self.towers):
++        for index, (label, tower) in enumerate(zip(self.feature_map.labels, self.towers)):
+             if label == 'is_click':
+-                features = torch.cat([context, target, uniform], dim=-1)
++                task_context, task_target, base = context, target, uniform
++                contrast = primary_contrast
+             else:
+-                features = torch.cat([aux_context, aux_target, feedback], dim=-1)
++                task_context, task_target, base = aux_context, aux_target, feedback
++                contrast = auxiliary_contrast
++            signal = contrast if self.residual_input == 'contrast' else base
++            residual_features = torch.cat([task_context, task_target, signal], dim=-1)
++            # Equal bank execution in all cells; no task-specific scorer rows
++            # or extra stateful normalization is introduced.
++            bank = torch.stack([adapter(residual_features)
++                                for adapter in self.residual_bank], dim=1)
++            correction = bank[:, index, :] if self.residual_routing == 'task' else bank.mean(dim=1)
++            pooled = base + has_history * correction
++            features = torch.cat([task_context, task_target, pooled], dim=-1)
+             predictions[label + '_pred'] = torch.sigmoid(tower(features))
+         return predictions

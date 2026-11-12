@@ -1,0 +1,66 @@
+{
+  "markdown_report": "At 0% progress, prioritize **support-weighted history pooling with multi-negative training**: a small SASRec extension targeting isolated-purchase overreaction, broad recommendations, and weak lower-tail ranking margins. Improvements remain hypotheses until measured under the pinned evaluator.\n\n**Insights from the starting point.** (1) SASRec already captures recent context. A pooled history residual can test whether repeated interests deserve additional weight. (2) Users report broad relevance and overreaction to occasional purchases. Recurrence-weighted historical evidence directly targets these two failures without claiming to infer equipment ownership. (3) Electronics has 14.95% negative-over-positive rankings and a −0.4812 tenth-percentile margin. These training diagnostics motivate stronger discrimination, but do not establish validation performance or severe embedding collapse.\n\n**Insights from related work.** (1) [IBLSRec](https://ieeexplore.ieee.org/document/10820829/) distinguishes stable relationships from transient associations. This motivates testing separate persistent and recent signals. (2) [gSASRec](https://www.ijcai.org/proceedings/2024/0939.pdf) supports multiple negatives and calibrated BCE. It provides a practical objective alternative without extra metadata. (3) [R²NS](https://renzhaochun.github.io/assets/pdf/WWW_2026_Camera_Ready.pdf) identifies instability and false-negative risks from aggressive mining. Uniform negatives are therefore the appropriate first experiment.\n\n**Framework and candidate directions.** Organize changes along evidence aggregation, ranking discrimination, and negative difficulty. Scores below are Originality / Potential / User alignment / Model alignment / Difficulty; higher difficulty means harder implementation.\n\n| Idea | Scores | Positive / negative assessment for each axis |\n|---|---|---|\n| A: Support-weighted pooling + gBCE | 5/7/8/8/4 | O: targeted combination / familiar components; P: reusable residual / may oversmooth; U: reinforces recurring intent / cannot establish compatibility; M: strengthens separation / margins may mislead; D: small extension / prefix masking needs care |\n| B: Training-transition graph residual | 5/6/6/6/6 | O: directional evidence / established graph approach; P: sparse associations / rare transitions; U: concrete behavioral links / associations lack purpose; M: adds ranking evidence / noisy edges; D: sparse implementation / predictor integration |\n| C: Warmed-up stochastic hard negatives | 3/7/4/9/4 | O: established recipe / little novelty; P: targeted discrimination / false negatives; U: removes confusing candidates / weak preference support; M: targets lower tail / training overfit; D: unchanged inference / sampling overhead |\n\n**Selected algorithm: A.** For each causal prefix, pool item embeddings with weights combining recency and similarity support from other prefix items. Learn a scalar residual gate and score candidates with the resulting feature. Repeated coherent interests receive more support than isolated purchases, addressing broad relevance and occasional-purchase overreaction; multi-negative gBCE targets weak separation. Similarity is only a preference proxy, not proof of functional compatibility or satisfied needs.\n\n**Implementation and evaluation.** Start with pooling-only and gBCE-only ablations, then combine them. Preserve all four datasets, seeds, routing, diagnostic adapter, and predictor writer. Select solely by pinned macro validation HR@10; report category results and lower-tail margins separately. No experiments or gains are claimed.",
+  "idea": {
+    "description": "Extend per-dataset SASRec with a causal, support-weighted history residual and multi-negative generalized BCE. Repeated, coherent historical interests strengthen the sequence representation, while the objective improves discrimination against multiple sampled alternatives.",
+    "motivation": "The user diagnosis identifies overly broad recommendations and excessive influence from occasional purchases. A support-weighted residual explicitly targets both. Electronics also exhibits weak lower-tail training separation, motivating a multi-negative objective. Neither mechanism establishes compatibility, ownership, or whether a need has been satisfied.",
+    "implementation_notes": "Keep DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, all four category routes, and the existing SASREC_EPOCHS environment behavior with default 200. Compute support causally from normalized prefix item embeddings, using detached similarities and excluding padding and self-similarity. Use bounded positive weights, a learned sigmoid scalar residual gate initialized near zero, and trainable pooling projection. Start with 128 uniform negatives and gBCE calibration t=0.75; exclude the current positive and observed training-history items, without consulting validation or test labels. Implement gBCE using its published sampling correction and stable log-space arithmetic. Compare baseline, pooling-only, gBCE-only, and combined configurations within the remaining shared budget. Save architecture configuration and parameters beneath the trial directory, and update the predictor writer to reconstruct the same model. Preserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. The view must expose the actual model, its item embeddings, augmented log2feats, consistent predict_score, and permitted history/metadata. Remove unavailable category breakdowns or explicitly mark them unavailable; do not fabricate review fields. Tune exclusively with the pinned macro validation HR@10.",
+    "pseudocode": "class SupportedSASRec:\n    log2feats(sequence):\n        h = sasrec.log2feats(sequence)\n        e = item_emb(sequence)\n        z = normalize(e.detach(), dim=-1)\n        for each valid position t:\n            prefix = valid_positions_up_to(t)\n            sim = z[prefix] @ z[prefix].T\n            support[j] = mean(relu(sim[j, k]) for k != j)\n            # Singleton support is zero; all operations exclude padding.\n            weight[j] = exp(-decay * (t-j)) * (1 + support[j])\n            pooled = sum(weight[j] * e[j]) / sum(weight)\n            output[t] = h[t] + sigmoid(gate) * projection(pooled)\n        return output\n\nfor dataset in FOUR_DATASETS:\n    model = SupportedSASRec(dataset)\n    for epoch in configured_epochs:\n        for _, sequence, positive, _ in train_loader:\n            features = model.log2feats(sequence)\n            negatives = sample_uniform_unseen_training_items(K=128)\n            loss = published_stable_gBCE(\n                score(features, positive),\n                score(features, negatives),\n                calibration_t=0.75,\n                catalog_size=dataset.item_count)\n            optimizer.zero_grad()\n            loss.backward()\n            optimizer.step()\n    save_model_configuration_and_weights_under_trial_directory()\nwrite_predictor_with_identical_architecture_and_dataset_routing()\nselect_configuration_by_pinned_macro_validation_HR_at_10()",
+    "originality": {
+      "score": 5,
+      "positive": "Connects recurrence support, a gated SASRec residual, and calibrated multi-negative learning to specific observed failures.",
+      "negative": "Pooling, residual gates, and generalized BCE are established components; novelty lies primarily in their targeted combination."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides a small, ablatable foundation for separating persistent preference support from recent context.",
+      "negative": "Embedding similarity may reproduce broad associations, and pooling can obscure multiple distinct interests."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Retains SASRec, item-dot-product scoring, and the existing dataset routes; inference requires only a pooled residual.",
+      "negative": "Causal support weighting, stable gBCE, negative exclusions, and synchronized predictor serialization require careful implementation."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Introduces causal self-attention over interaction histories for next-item recommendation."
+      ],
+      "limitations": [
+        "The supplied diagnosis shows that this baseline can overemphasize broad associations and has uneven training-pair separation across the four datasets."
+      ]
+    },
+    {
+      "title": "IBLSRec",
+      "link": "https://ieeexplore.ieee.org/document/10820829/",
+      "contributions": [
+        "Distinguishes stable item relationships from short-lived associations and uses latent intent to refine preferences, according to the supplied search summary."
+      ],
+      "limitations": [
+        "The supplied evidence does not establish gains under the pinned RecHarness evaluation."
+      ]
+    },
+    {
+      "title": "gSASRec: IJCAI 2024 summary",
+      "link": "https://www.ijcai.org/proceedings/2024/0939.pdf",
+      "contributions": [
+        "Combines multiple negatives with generalized BCE to address sampling-induced overconfidence."
+      ],
+      "limitations": [
+        "Its published findings do not establish improvements for this exact four-category, 99-negative benchmark."
+      ]
+    },
+    {
+      "title": "R²NS",
+      "link": "https://renzhaochun.github.io/assets/pdf/WWW_2026_Camera_Ready.pdf",
+      "contributions": [
+        "Uses warm-start training, progressive negative difficulty, and stochastic selection to moderate hard-negative mining."
+      ],
+      "limitations": [
+        "Mining adds training cost and retains false-negative risk."
+      ]
+    }
+  ]
+}

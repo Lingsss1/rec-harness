@@ -1,0 +1,89 @@
+--- g1-r0063-reversal_average/model.py
++++ g1-r0064-supplied_per_view/model.py
+@@ -1,7 +1,8 @@
+-"""Prospective shared-weight two-view history-order diagnostic.
+-
+-One internal 2B-view network call returns B probability averages. Learned
+-components, external batch and default loss are inherited. Native checks
+-and measured quality/cost belong to the host; no novelty/result claimed.
++"""Prospective supervision contrast for the history reversal penalty.
++
++Inherited shared-weight2B predictor and probability average are unchanged.
++The loss hook compares BCE of the average with average BCE of each view.
++A supplied/supplied pair is the objective-null control. No result is claimed.
++Native tensor checks and measured quality/cost belong to the host.
+ """
+ import torch
+@@ -12,5 +13,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'pair_treatment': 'reversal'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'pair_treatment': 'supplied', 'view_objective': 'per_view'}
+ 
+ 
+@@ -32,5 +33,6 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16, summary_placement='block',
+-                 pair_treatment='reversal', task='binary_classification', **kwargs):
++                 pair_treatment='supplied', view_objective='per_view',
++                 task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+@@ -46,4 +48,10 @@
+             raise ValueError('Unknown two-view history treatment')
+         self.pair_treatment = pair_treatment
++        if pair_treatment not in ('reversal', 'supplied'):
++            raise ValueError('This objective study uses reversal or supplied pairs')
++        if view_objective not in ('mean', 'per_view'):
++            raise ValueError('Unknown view supervision objective')
++        self.view_objective = view_objective
++        self._loss_views = None
+         self.compression_routes = compression_routes
+         if block_aux_scorer_grad is not True:
+@@ -345,6 +353,46 @@
+         batch = inputs[2].shape[0]
+         probabilities = self._single_orientation(self._paired_inputs(inputs))
++        # Transient current-forward graph only; no labels/sample IDs,
++        # registered buffers or checkpoint state enter this cache.
++        first = torch.cat([probabilities[label + '_pred'][:batch].float()
++                           for label in self.feature_map.labels], dim=1)
++        second = torch.cat([probabilities[label + '_pred'][batch:].float()
++                            for label in self.feature_map.labels], dim=1)
++        self._loss_views = (first, second) if self.training else None
+         return {name: (value[:batch].float() + value[batch:].float()) * 0.5
+                 for name, value in probabilities.items()}
++
++    def training_loss(self, inputs, probabilities, train_labels):
++        """Sum four task BCE means; each view receives half weight.
++
++        Both losses and backward graphs execute in every factorial cell.
++        No extra network forward, normalization update or inference change.
++        Labels enter only this authorized training hook, never forward.
++        """
++        views = self._loss_views
++        self._loss_views = None
++        if views is None:
++            raise RuntimeError('training_loss requires the immediately preceding training forward')
++        first, second = views
++        if (probabilities.shape != first.shape or train_labels.shape != first.shape
++                or first.ndim != 2 or first.shape[1] != self.num_tasks):
++            raise ValueError('Expected aligned probabilities and labels [B,4]')
++        # BCE must run outside autocast. All cells use identical clipping;
++        # host native preflight must check agreement with its default BCE.
++        with torch.autocast(device_type=probabilities.device.type, enabled=False):
++            labels = train_labels.float()
++            average = probabilities.float().clamp(1e-7, 1.0 - 1e-7)
++            first = first.float().clamp(1e-7, 1.0 - 1e-7)
++            second = second.float().clamp(1e-7, 1.0 - 1e-7)
++            mean_loss = torch.nn.functional.binary_cross_entropy(
++                average, labels, reduction='none').mean(dim=0).sum()
++            first_loss = torch.nn.functional.binary_cross_entropy(
++                first, labels, reduction='none').mean(dim=0).sum()
++            second_loss = torch.nn.functional.binary_cross_entropy(
++                second, labels, reduction='none').mean(dim=0).sum()
++            view_loss = 0.5 * (first_loss + second_loss)
++            if self.view_objective == 'per_view':
++                return view_loss + 0.0 * mean_loss
++            return mean_loss + 0.0 * view_loss
+ 
+     def _represent(self, inputs):

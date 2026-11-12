@@ -1,0 +1,137 @@
+--- g3-r0021-aux_private_detached/model.py
++++ g3-r0022-selector_disabled/model.py
+@@ -1,25 +1,17 @@
+-"""Prospective auxiliary selector geometry x input-gradient factorial.
+-
+-Parent: g3-r0020-rank_gain_single_blocked, SHA256
+-3219fa863c54e8d71e5437f8d5571d6588182f79011fb15403081fd1625340c2.
+-An independent auxiliary score trunk is cloned after inherited initialization,
+-including independent Dice/BatchNorm buffers, without new random draws. Three
+-auxiliary tasks share this clone and their inherited private value tables.
+-The click trunk, gates, evidence, readout rows and towers remain inherited.
+-
+-Factor 1 chooses primary or auxiliary-private target/history/action embeddings
+-for the auxiliary selector. Factor 2 stops or allows gradients into ONLY these
+-selector inputs. The clone and auxiliary readout rows learn in all cells. Live
+-primary inputs deliberately reopen auxiliary gradients into primary item/action
+-tables; live private inputs update only auxiliary-private tables. Value/target
+-prediction paths, context sharing and host dense clipping retain their original
+-ownership. No cross-task donor feature is added to click.
+-
+-All cells allocate and evaluate one extra trunk of identical size, and start
+-with the same function because embedding and trunk clones initially coincide.
+-After training, Dice buffers can diverge; this is part of the intervention.
+-Matching parameters/forward operations does not match backward cost or the
+-number of active gradient paths. The host must measure cost and verify dynamic
+-invariants. No local training, performance result or novelty claim is implied.
++"""Prospective selector-score transfer, initialized to the inherited function.
++
++Parent: g3-r0021-aux_private_detached. The auxiliary selector uses detached
++private embeddings; its trunk and readout rows still learn from auxiliary BCE.
++Transfer only centered, bounded per-event selector scores into the click
++pooling coefficients. Donor values and predicted task probabilities are never
++transferred. Three zero-initialized coefficients add no random draws. The
++positive modulation preserves click coefficient signs and absolute mass.
++
++Matched controls select auxiliary/self/disabled donors, with detached/live
++auxiliary-score derivatives. All cells allocate the same modules and calculate
++the same score statistics. Live transfer lets click update the auxiliary trunk
++and readout rows, while private selector-input detachment remains inherited.
++Self donor columns coincide: allocated capacity matches, effective rank does
++not. No claim of improvement or novelty precedes host validation.
+ """
+ import copy
+@@ -31,5 +23,5 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary', 'rank_evidence_scope': 'event', 'rank_evidence_location': 'route', 'rank_feedback_identity': False, 'retain_position_route': False, 'rank_primary_gain': 2.0, 'rank_aux_gradient': 'primary', 'selector_input_space': 'private', 'selector_input_gradient': 'detached'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'event', 'position_feedback_identity': False, 'position_sharing': 'task', 'position_aux_gradient': 'primary', 'rank_evidence_scope': 'event', 'rank_evidence_location': 'route', 'rank_feedback_identity': False, 'retain_position_route': False, 'rank_primary_gain': 2.0, 'rank_aux_gradient': 'primary', 'selector_input_space': 'private', 'selector_input_gradient': 'detached', 'selector_transfer_source': 'none', 'selector_transfer_gradient': 'detached'}
+ 
+ 
+@@ -51,4 +43,6 @@
+                  rank_primary_gain=2.0, rank_aux_gradient='primary',
+                  selector_input_space='private', selector_input_gradient='detached',
++                 selector_transfer_source='none',
++                 selector_transfer_gradient='detached',
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+@@ -146,4 +140,13 @@
+         if selector_input_gradient not in ('detached', 'live'):
+             raise ValueError('Selector input gradient must be detached or live')
++        if selector_transfer_source not in ('auxiliary', 'self', 'none'):
++            raise ValueError('Unknown selector transfer source')
++        if selector_transfer_gradient not in ('detached', 'live'):
++            raise ValueError('Unknown selector transfer gradient')
++        if selector_input_space != 'private' or selector_input_gradient != 'detached':
++            raise ValueError('Transfer study fixes detached private selector inputs')
++        self.selector_transfer_source = selector_transfer_source
++        self.selector_transfer_gradient = selector_transfer_gradient
++        self.transfer_aux_indices = [labels.index(name) for name in ('cart', 'fav', 'buy')]
+         self.selector_input_space = selector_input_space
+         self.selector_input_gradient = selector_input_gradient
+@@ -254,4 +257,6 @@
+         # deepcopy draws no RNG; parameters and Dice buffers are independent.
+         self.aligned_aux_score_trunk = copy.deepcopy(self.score_trunk)
++        # Appended after inherited initialization; dense, zero and RNG-neutral.
++        self.selector_transfer_weight = nn.Parameter(torch.zeros(3))
+         self.model_to_device()
+ 
+@@ -549,4 +554,46 @@
+         scores = torch.where(self._primary_channel, scores, auxiliary_scores)
+         return scores
++
++    def _apply_selector_transfer(self, scores, raw_scores, mask):
++        """Click-only score transfer with within-example, padding-aware statistics.
++
++        Raw donor scores precede all event gates and coefficient mass controls.
++        No batch-level normalization is introduced. Both donor alternatives
++        are calculated in every cell, with no extra learned representation.
++        The correction is exactly zero at the common zero initialization.
++        """
++        with torch.autocast(device_type=mask.device.type, enabled=False):
++            valid = mask.bool().unsqueeze(-1)
++            count = valid.float().sum(dim=1, keepdim=True).clamp_min(1.0)
++            raw = raw_scores.float().masked_fill(~valid, 0)
++            mean = raw.sum(dim=1, keepdim=True) / count
++            centered = (raw - mean).masked_fill(~valid, 0)
++            rms = (centered.square().sum(dim=1, keepdim=True) / count + 1e-6).sqrt()
++            normalized = torch.tanh(centered / rms).masked_fill(~valid, 0)
++            auxiliary = torch.stack([normalized[:, :, i]
++                                     for i in self.transfer_aux_indices], dim=-1)
++            primary_donor = (normalized * self._primary_channel).sum(dim=-1, keepdim=True)
++            self_donor = primary_donor.expand_as(auxiliary)
++            donor = self_donor if self.selector_transfer_source == 'self' else auxiliary
++            if self.selector_transfer_gradient == 'detached':
++                donor = donor.detach()
++            correction = torch.nn.functional.linear(
++                donor, torch.tanh(self.selector_transfer_weight).unsqueeze(0)) / 3.0
++            enabled = 0.0 if self.selector_transfer_source == 'none' else 1.0
++            # Range [0.5,1.5] prevents sign flips or a zero denominator for
++            # nonzero coefficients. The disabled cell retains a zero gradient
++            # tensor on the three new parameters, rather than unused state.
++            gain = 1.0 + enabled * 0.5 * correction
++            primary = (scores.float() * self._primary_channel).sum(dim=-1, keepdim=True)
++            modulated = primary * gain
++            mass = primary.abs().sum(dim=1, keepdim=True)
++            modulated_mass = modulated.abs().sum(dim=1, keepdim=True)
++            safe_mass = torch.where(mass > 0, mass, torch.ones_like(mass))
++            safe_modulated = torch.where(modulated_mass > 0, modulated_mass,
++                                         torch.ones_like(modulated_mass))
++            # Residual form keeps an exactly zero correction at unit gain.
++            residual = mass * (modulated / safe_modulated - primary / safe_mass)
++            result = scores.float() + residual * self._primary_channel
++            return result.masked_fill(~valid, 0).to(dtype=scores.dtype)
+ 
+     def _private_item_embeddings(self, item):
+@@ -621,4 +668,5 @@
+                 scores = scores.mean(dim=-1, keepdim=True).expand(-1, -1, len(self.towers))
+             scores = scores.masked_fill(~valid, 0)
++            raw_selector_scores = scores
+             gain = self._event_route_gain(channels, matches, mask, rank_route)
+             # Factor only click's gate. Private item tables, auxiliary gates,
+@@ -626,4 +674,5 @@
+             # Shared context and host clipping still couple the four losses.
+             scores = self._apply_gate_components(scores, gain, mask)
++            scores = self._apply_selector_transfer(scores, raw_selector_scores, mask)
+             pooled = torch.bmm(scores.transpose(1, 2), values)
+             # Detach the representation, if requested, before pooling; never

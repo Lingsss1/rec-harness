@@ -1,0 +1,465 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "proposal": {
+        "category_edits": [
+          {
+            "category": "learning_objective",
+            "rationale": "Weight positive and negative BCE by 0.5+0.5r, normalized to mean one over valid positions within each sequence, to emphasize recent contexts while preserving the baseline loss and sampling.",
+            "edits": [
+              {
+                "find": "    bce_criterion = nn.BCEWithLogitsLoss()",
+                "replace": "    bce_criterion = nn.BCEWithLogitsLoss(reduction=\"none\")"
+              },
+              {
+                "find": "            loss = bce_criterion(pos_logits[indices], pos_labels)\n            loss = loss + bce_criterion(neg_logits[indices], neg_labels)",
+                "replace": "            weights = (0.5 + 0.5 * _relative_recency(pos_t)) * indices\n            valid_counts = indices.sum(dim=1, keepdim=True)\n            weights = weights * (valid_counts / weights.sum(dim=1, keepdim=True).clamp_min(1e-8))\n            position_loss = bce_criterion(pos_logits[indices], pos_labels)\n            position_loss = position_loss + bce_criterion(neg_logits[indices], neg_labels)\n            loss = (position_loss * weights[indices]).mean()"
+              }
+            ]
+          },
+          {
+            "category": "feature_construction",
+            "rationale": "Expose deterministic relative recency by scaling input item embeddings from 0.8 at the oldest valid position to 1.2 at the newest, with singleton recency equal to one. No learned parameters are added. The predictor writer restores the same scaling for each category's single checkpoint.",
+            "edits": [
+              {
+                "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+                "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+              },
+              {
+                "find": "class SASRec(nn.Module):",
+                "replace": "def _relative_recency(seq: torch.Tensor) -> torch.Tensor:\n    valid = seq != 0\n    counts = valid.sum(dim=1, keepdim=True)\n    ranks = (valid.long().cumsum(dim=1) - 1).clamp_min(0).float()\n    recency = ranks / (counts - 1).clamp_min(1).float()\n    recency = torch.where(counts == 1, torch.ones_like(recency), recency)\n    return recency * valid\n\n\nclass SASRec(nn.Module):"
+              },
+              {
+                "find": "                 num_heads: int = 1, dropout_rate: float = 0.5, maxlen: int = 128):",
+                "replace": "                 num_heads: int = 1, dropout_rate: float = 0.5, maxlen: int = 128,\n                 recency_scale: float = 0.4):"
+              },
+              {
+                "find": "        self.itemnum = itemnum\n",
+                "replace": "        self.itemnum = itemnum\n        self.recency_scale = recency_scale\n"
+              },
+              {
+                "find": "        seq_emb = self.item_emb(seq) * (self.hidden_units ** 0.5)\n",
+                "replace": "        seq_emb = self.item_emb(seq) * (self.hidden_units ** 0.5)\n        recency = _relative_recency(seq)\n        input_scale = 1.0 + self.recency_scale * (recency - 0.5)\n        seq_emb = seq_emb * input_scale.unsqueeze(-1)\n"
+              },
+              {
+                "find": "            \"maxlen\": MAXLEN,\n",
+                "replace": "            \"maxlen\": MAXLEN,\n            \"recency_scale\": model.recency_scale,\n"
+              },
+              {
+                "find": "            maxlen=meta[\"maxlen\"],\n",
+                "replace": "            maxlen=meta[\"maxlen\"],\n            recency_scale=meta[\"recency_scale\"],\n"
+              }
+            ]
+          }
+        ],
+        "change_summary": "Combine deterministic recency input scaling with sequence-normalized recency-weighted BCE across all four categories. Preserve the SASRec backbone, single-checkpoint routing, seeds, optimizer, sampling, and 200-epoch cap.",
+        "edits": [
+          {
+            "find": "    bce_criterion = nn.BCEWithLogitsLoss()",
+            "replace": "    bce_criterion = nn.BCEWithLogitsLoss(reduction=\"none\")"
+          },
+          {
+            "find": "            loss = bce_criterion(pos_logits[indices], pos_labels)\n            loss = loss + bce_criterion(neg_logits[indices], neg_labels)",
+            "replace": "            weights = (0.5 + 0.5 * _relative_recency(pos_t)) * indices\n            valid_counts = indices.sum(dim=1, keepdim=True)\n            weights = weights * (valid_counts / weights.sum(dim=1, keepdim=True).clamp_min(1e-8))\n            position_loss = bce_criterion(pos_logits[indices], pos_labels)\n            position_loss = position_loss + bce_criterion(neg_logits[indices], neg_labels)\n            loss = (position_loss * weights[indices]).mean()"
+          },
+          {
+            "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+            "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+          },
+          {
+            "find": "class SASRec(nn.Module):",
+            "replace": "def _relative_recency(seq: torch.Tensor) -> torch.Tensor:\n    valid = seq != 0\n    counts = valid.sum(dim=1, keepdim=True)\n    ranks = (valid.long().cumsum(dim=1) - 1).clamp_min(0).float()\n    recency = ranks / (counts - 1).clamp_min(1).float()\n    recency = torch.where(counts == 1, torch.ones_like(recency), recency)\n    return recency * valid\n\n\nclass SASRec(nn.Module):"
+          },
+          {
+            "find": "                 num_heads: int = 1, dropout_rate: float = 0.5, maxlen: int = 128):",
+            "replace": "                 num_heads: int = 1, dropout_rate: float = 0.5, maxlen: int = 128,\n                 recency_scale: float = 0.4):"
+          },
+          {
+            "find": "        self.itemnum = itemnum\n",
+            "replace": "        self.itemnum = itemnum\n        self.recency_scale = recency_scale\n"
+          },
+          {
+            "find": "        seq_emb = self.item_emb(seq) * (self.hidden_units ** 0.5)\n",
+            "replace": "        seq_emb = self.item_emb(seq) * (self.hidden_units ** 0.5)\n        recency = _relative_recency(seq)\n        input_scale = 1.0 + self.recency_scale * (recency - 0.5)\n        seq_emb = seq_emb * input_scale.unsqueeze(-1)\n"
+          },
+          {
+            "find": "            \"maxlen\": MAXLEN,\n",
+            "replace": "            \"maxlen\": MAXLEN,\n            \"recency_scale\": model.recency_scale,\n"
+          },
+          {
+            "find": "            maxlen=meta[\"maxlen\"],\n",
+            "replace": "            maxlen=meta[\"maxlen\"],\n            recency_scale=meta[\"recency_scale\"],\n"
+          }
+        ],
+        "scope_validation": "exact categories and nontrivial AST changes; semantic labels prompt-enforced"
+      }
+    }
+  ],
+  "receipt": {
+    "id": "round-0003-slot-0-attempt-1",
+    "status": "success",
+    "gpu": 0,
+    "allocated_gpu_seconds": 2106.772855371237,
+    "output": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-sasrec-tpebest-jump-43200-20261028/run-01/experiment/recharness/trials/round-0003-slot-0-attempt-1",
+    "source_sha256": "81371e25b2772d1135cb05be0ad7924cfacf086727e347fd0d4b489fca1b3eaa",
+    "score": 0.6,
+    "aggregate": {
+      "HR@5": 0.445,
+      "HR@10": 0.6,
+      "HR@20": 0.735,
+      "NDCG@5": 0.3324,
+      "NDCG@10": 0.3832,
+      "NDCG@20": 0.4172,
+      "Movies_and_TV/HR@5": 0.53,
+      "Movies_and_TV/HR@10": 0.69,
+      "Movies_and_TV/HR@20": 0.795,
+      "Movies_and_TV/NDCG@5": 0.406,
+      "Movies_and_TV/NDCG@10": 0.4585,
+      "Movies_and_TV/NDCG@20": 0.4851,
+      "Industrial_and_Scientific/HR@5": 0.43,
+      "Industrial_and_Scientific/HR@10": 0.57,
+      "Industrial_and_Scientific/HR@20": 0.735,
+      "Industrial_and_Scientific/NDCG@5": 0.3177,
+      "Industrial_and_Scientific/NDCG@10": 0.3638,
+      "Industrial_and_Scientific/NDCG@20": 0.4057,
+      "Electronics/HR@5": 0.29,
+      "Electronics/HR@10": 0.425,
+      "Electronics/HR@20": 0.57,
+      "Electronics/NDCG@5": 0.2078,
+      "Electronics/NDCG@10": 0.2517,
+      "Electronics/NDCG@20": 0.2886,
+      "CDs_and_Vinyl/HR@5": 0.53,
+      "CDs_and_Vinyl/HR@10": 0.715,
+      "CDs_and_Vinyl/HR@20": 0.84,
+      "CDs_and_Vinyl/NDCG@5": 0.3981,
+      "CDs_and_Vinyl/NDCG@10": 0.4587,
+      "CDs_and_Vinyl/NDCG@20": 0.4895
+    },
+    "per_dataset": {
+      "Movies_and_TV": {
+        "metrics": {
+          "HR@5": 0.53,
+          "HR@10": 0.69,
+          "HR@20": 0.795,
+          "NDCG@5": 0.406,
+          "NDCG@10": 0.4585,
+          "NDCG@20": 0.4851
+        },
+        "n_users": 200
+      },
+      "Industrial_and_Scientific": {
+        "metrics": {
+          "HR@5": 0.43,
+          "HR@10": 0.57,
+          "HR@20": 0.735,
+          "NDCG@5": 0.3177,
+          "NDCG@10": 0.3638,
+          "NDCG@20": 0.4057
+        },
+        "n_users": 200
+      },
+      "Electronics": {
+        "metrics": {
+          "HR@5": 0.29,
+          "HR@10": 0.425,
+          "HR@20": 0.57,
+          "NDCG@5": 0.2078,
+          "NDCG@10": 0.2517,
+          "NDCG@20": 0.2886
+        },
+        "n_users": 200
+      },
+      "CDs_and_Vinyl": {
+        "metrics": {
+          "HR@5": 0.53,
+          "HR@10": 0.715,
+          "HR@20": 0.84,
+          "NDCG@5": 0.3981,
+          "NDCG@10": 0.4587,
+          "NDCG@20": 0.4895
+        },
+        "n_users": 200
+      }
+    },
+    "evaluation_seconds": 3.7281014025211334,
+    "predictor_sha256": "ef452c8d6a022dc1d93617984b3a8e236501644897ec4ec64c7b9162b35cba4d"
+  },
+  "native_result": {
+    "spec": {
+      "dimension": "combination_jump",
+      "delta": 1.0,
+      "estimated_cost_secs": 2506.0,
+      "code_diff": "",
+      "code_edits": [],
+      "code_content": "",
+      "arm": "combination_jump",
+      "composite_dims": [
+        "combination_jump"
+      ],
+      "strategy_arm": null,
+      "round_role": "lowlevel_routing",
+      "parallel_group_estimated_wall_secs": 2506.0,
+      "budget_safe_if_global_budget_gte": 2506.0,
+      "budget_accounting": "Parallel group cost is sum(estimated_cost_secs) across the selected candidates.",
+      "code_hint": "COMBINATION JUMP: make a substantive, coordinated change in EACH selected direction. 学习目标: Ranking/prediction loss, loss weighting and jointly trained auxiliary objectives. Preserve feature definitions, embeddings, SASRec topology, scoring/readout, optimizer, sampling, scheduler and batch/epoch settings.\n特征构造: Construct input features solely from supplied training interactions, such as frequency or recency indicators. No external metadata, independent scorer or score fusion. Keep learned embedding design, SASRec topology, readout, loss and optimizer fixed.\nOnly minimal shape/checkpoint/predictor consistency edits outside the chosen directions are allowed; they must not introduce another modeling or training change.",
+      "hypothesis": "Memory available in state; agent should write a short arm-specific hypothesis; Agent hypothesis: Slot-0 hypothesis: combine deterministic recency features with recency-weighted supervision. Scale each nonpadding input embedding by 0.8+0.4r, where r runs from 0 at the oldest valid position to 1 at the newest (singleton r=1), without adding embedding parameters. Weight the baseline loss at each valid position by 0.5+0.5r, normalized to mean one per sequence. Recency features expose proximity to the prediction boundary, while loss weighting emphasizes learning from those recent contexts; together they may improve next-item HR@10. Start from TPE-best SASRec, preserve topology, readout, sampling, optimizer and schedule, and apply to all four categories with one trained checkpoint each. Update the predictor writer to reproduce feature scaling.",
+      "is_jumping": true,
+      "implementation_backend": "claude_code",
+      "implementation_prompt": "COMBINATION JUMP: make a substantive, coordinated change in EACH selected direction. 学习目标: Ranking/prediction loss, loss weighting and jointly trained auxiliary objectives. Preserve feature definitions, embeddings, SASRec topology, scoring/readout, optimizer, sampling, scheduler and batch/epoch settings.\n特征构造: Construct input features solely from supplied training interactions, such as frequency or recency indicators. No external metadata, independent scorer or score fusion. Keep learned embedding design, SASRec topology, readout, loss and optimizer fixed.\nOnly minimal shape/checkpoint/predictor consistency edits outside the chosen directions are allowed; they must not introduce another modeling or training change.",
+      "allowed_files": [
+        "train.py",
+        "predict.py"
+      ],
+      "claude_attempts": 3,
+      "arm_design": "eight_directions_v3",
+      "selected_categories": [
+        "learning_objective",
+        "feature_construction"
+      ],
+      "hypothesis_key": "slot-0",
+      "sampling_draw": {
+        "slot": 0,
+        "arm": "combination_jump",
+        "selected_directions": [
+          "learning_objective",
+          "feature_construction"
+        ],
+        "sampled_values": {
+          "feature_construction": 0.4524065358796303,
+          "embedding_representation": 0.1535201307459,
+          "interaction_mechanism": 0.412060315886027,
+          "network_architecture": 0.0845632237822648,
+          "sequence_modeling": 0.16098761036962733,
+          "interest_aggregation": 0.10730105890381357,
+          "learning_objective": 0.6263963709503264,
+          "training_strategy": 0.6205029965505814
+        },
+        "selection": "highest draw plus highest compatible cross-category draw"
+      },
+      "max_trial_gpu_seconds": 2506.0,
+      "protected_gpu_seconds": 15119.999999999998,
+      "jump_trigger": "reserved_exploration_phase",
+      "jump_budget_plan": {
+        "trial_cap_secs": 2506.0,
+        "retune_group_size": 1,
+        "retune_rounds": 4,
+        "retune_reserved_secs": 10024.0,
+        "total_reserved_secs": 12530.0,
+        "protected_envelope_secs": 15119.999999999998,
+        "cost_source": "p75 measured trial cost * safety + teardown margin"
+      },
+      "predict_code_edits": [],
+      "predict_code_content": "",
+      "agent_hypothesis": "Slot-0 hypothesis: combine deterministic recency features with recency-weighted supervision. Scale each nonpadding input embedding by 0.8+0.4r, where r runs from 0 at the oldest valid position to 1 at the newest (singleton r=1), without adding embedding parameters. Weight the baseline loss at each valid position by 0.5+0.5r, normalized to mean one per sequence. Recency features expose proximity to the prediction boundary, while loss weighting emphasizes learning from those recent contexts; together they may improve next-item HR@10. Start from TPE-best SASRec, preserve topology, readout, sampling, optimizer and schedule, and apply to all four categories with one trained checkpoint each. Update the predictor writer to reproduce feature scaling.",
+      "gagc_memory_context": {
+        "experiment_skill": "# RecHarness Experiment Skill\n\n## Objective\nUse benchmark val_score as the search and winner criterion.\nDo not use held-out test metrics during search.\nThompson Sampling chooses arms; this skill only guides how to edit code within selected arms.\n\n## Recent Patch Lessons\n- Round 1 winner established the benchmark reference using baseline/baseline ↓. Per-dataset HR@10 was imbalanced; prefer follow-ups that preserve weaker datasets, not only aggregate gain.\n\n## Concrete Avoids\nNo concrete patch-level avoids yet.\n",
+        "recent_text_gradients": [
+          "Round 1 winner established the benchmark reference using baseline/baseline ↓. Per-dataset HR@10 was imbalanced; prefer follow-ups that preserve weaker datasets, not only aggregate gain."
+        ],
+        "failure_memory": [],
+        "skill_notes": "Round 3: best_ever=0.6300, recent=0.6300, trend=plateau. Top arms: feature_construction, interaction_mechanism, network_architecture."
+      },
+      "trial_group_id": "trialgrp_1793197272681_1543190",
+      "trial_id": 0
+    },
+    "wall_time_secs": 2106.772855371237,
+    "timed_out": false,
+    "oom": false,
+    "val_score": 0.6,
+    "val_metrics": {
+      "Movies_and_TV": {
+        "HR@5": 0.53,
+        "HR@10": 0.69,
+        "HR@20": 0.795,
+        "NDCG@5": 0.406,
+        "NDCG@10": 0.4585,
+        "NDCG@20": 0.4851
+      },
+      "Industrial_and_Scientific": {
+        "HR@5": 0.43,
+        "HR@10": 0.57,
+        "HR@20": 0.735,
+        "NDCG@5": 0.3177,
+        "NDCG@10": 0.3638,
+        "NDCG@20": 0.4057
+      },
+      "Electronics": {
+        "HR@5": 0.29,
+        "HR@10": 0.425,
+        "HR@20": 0.57,
+        "NDCG@5": 0.2078,
+        "NDCG@10": 0.2517,
+        "NDCG@20": 0.2886
+      },
+      "CDs_and_Vinyl": {
+        "HR@5": 0.53,
+        "HR@10": 0.715,
+        "HR@20": 0.84,
+        "NDCG@5": 0.3981,
+        "NDCG@10": 0.4587,
+        "NDCG@20": 0.4895
+      }
+    },
+    "test_score": null,
+    "test_metrics": null,
+    "convergence_trace": [
+      0.215,
+      0.405,
+      0.385,
+      0.43,
+      0.48,
+      0.525,
+      0.56,
+      0.565,
+      0.57,
+      0.595,
+      0.62,
+      0.64,
+      0.635,
+      0.65,
+      0.635,
+      0.64,
+      0.67,
+      0.68,
+      0.67,
+      0.695,
+      0.67,
+      0.685,
+      0.685,
+      0.685,
+      0.66,
+      0.68,
+      0.675,
+      0.69,
+      0.7,
+      0.685,
+      0.695,
+      0.695,
+      0.69,
+      0.675,
+      0.69,
+      0.68,
+      0.675,
+      0.645,
+      0.645,
+      0.645,
+      0.155,
+      0.395,
+      0.445,
+      0.43,
+      0.465,
+      0.51,
+      0.54,
+      0.555,
+      0.585,
+      0.56,
+      0.595,
+      0.6,
+      0.59,
+      0.595,
+      0.585,
+      0.595,
+      0.58,
+      0.595,
+      0.585,
+      0.59,
+      0.59,
+      0.575,
+      0.575,
+      0.575,
+      0.58,
+      0.585,
+      0.575,
+      0.59,
+      0.58,
+      0.56,
+      0.56,
+      0.545,
+      0.155,
+      0.295,
+      0.375,
+      0.38,
+      0.36,
+      0.37,
+      0.44,
+      0.435,
+      0.46,
+      0.455,
+      0.43,
+      0.415,
+      0.41,
+      0.415,
+      0.42,
+      0.43,
+      0.42,
+      0.445,
+      0.46,
+      0.465,
+      0.42,
+      0.415,
+      0.42,
+      0.42,
+      0.4,
+      0.42,
+      0.385,
+      0.42,
+      0.41,
+      0.41,
+      0.425,
+      0.395,
+      0.42,
+      0.4,
+      0.425,
+      0.395,
+      0.395,
+      0.405,
+      0.4,
+      0.4,
+      0.11,
+      0.215,
+      0.31,
+      0.3,
+      0.41,
+      0.47,
+      0.505,
+      0.58,
+      0.575,
+      0.635,
+      0.65,
+      0.67,
+      0.68,
+      0.675,
+      0.685,
+      0.685,
+      0.7,
+      0.695,
+      0.695,
+      0.68,
+      0.69,
+      0.665,
+      0.67,
+      0.685,
+      0.71,
+      0.685,
+      0.695,
+      0.685,
+      0.705,
+      0.69,
+      0.68,
+      0.69,
+      0.685,
+      0.7,
+      0.7,
+      0.69,
+      0.705,
+      0.685,
+      0.69,
+      0.7
+    ],
+    "error_message": null,
+    "stdout_tail": "nd_Vinyl] epoch  70/200  loss=0.5249  val_score: 0.6750  HR@20=0.8050  NDCG@10=0.4203\n  [CDs_and_Vinyl] epoch  75/200  loss=0.5111  val_score: 0.6850  HR@20=0.8200  NDCG@10=0.4331\n  [CDs_and_Vinyl] epoch  80/200  loss=0.4980  val_score: 0.6850  HR@20=0.8350  NDCG@10=0.4375\n  [CDs_and_Vinyl] epoch  85/200  loss=0.4892  val_score: 0.7000  HR@20=0.8450  NDCG@10=0.4381\n  [CDs_and_Vinyl] epoch  90/200  loss=0.4798  val_score: 0.6950  HR@20=0.8300  NDCG@10=0.4504\n  [CDs_and_Vinyl] epoch  95/200  loss=0.4713  val_score: 0.6950  HR@20=0.8450  NDCG@10=0.4357\n  [CDs_and_Vinyl] epoch 100/200  loss=0.4657  val_score: 0.6800  HR@20=0.8600  NDCG@10=0.4475\n  [CDs_and_Vinyl] epoch 105/200  loss=0.4584  val_score: 0.6900  HR@20=0.8500  NDCG@10=0.4413\n  [CDs_and_Vinyl] epoch 110/200  loss=0.4522  val_score: 0.6650  HR@20=0.8300  NDCG@10=0.4289\n  [CDs_and_Vinyl] epoch 115/200  loss=0.4477  val_score: 0.6700  HR@20=0.8300  NDCG@10=0.4317\n  [CDs_and_Vinyl] epoch 120/200  loss=0.4421  val_score: 0.6850  HR@20=0.8300  NDCG@10=0.4239\n  [CDs_and_Vinyl] epoch 125/200  loss=0.4387  val_score: 0.7100  HR@20=0.8450  NDCG@10=0.4343\n  [CDs_and_Vinyl] epoch 130/200  loss=0.4340  val_score: 0.6850  HR@20=0.8550  NDCG@10=0.4329\n  [CDs_and_Vinyl] epoch 135/200  loss=0.4301  val_score: 0.6950  HR@20=0.8100  NDCG@10=0.4418\n  [CDs_and_Vinyl] epoch 140/200  loss=0.4275  val_score: 0.6850  HR@20=0.8300  NDCG@10=0.4359\n  [CDs_and_Vinyl] epoch 145/200  loss=0.4219  val_score: 0.7050  HR@20=0.8400  NDCG@10=0.4511\n  [CDs_and_Vinyl] epoch 150/200  loss=0.4205  val_score: 0.6900  HR@20=0.8300  NDCG@10=0.4386\n  [CDs_and_Vinyl] epoch 155/200  loss=0.4163  val_score: 0.6800  HR@20=0.8200  NDCG@10=0.4390\n  [CDs_and_Vinyl] epoch 160/200  loss=0.4146  val_score: 0.6900  HR@20=0.8250  NDCG@10=0.4467\n  [CDs_and_Vinyl] epoch 165/200  loss=0.4102  val_score: 0.6850  HR@20=0.8150  NDCG@10=0.4442\n  [CDs_and_Vinyl] epoch 170/200  loss=0.4100  val_score: 0.7000  HR@20=0.8100  NDCG@10=0.4425\n  [CDs_and_Vinyl] epoch 175/200  loss=0.4058  val_score: 0.7000  HR@20=0.8200  NDCG@10=0.4419\n  [CDs_and_Vinyl] epoch 180/200  loss=0.4047  val_score: 0.6900  HR@20=0.8450  NDCG@10=0.4436\n  [CDs_and_Vinyl] epoch 185/200  loss=0.4023  val_score: 0.7050  HR@20=0.8250  NDCG@10=0.4429\n  [CDs_and_Vinyl] epoch 190/200  loss=0.4025  val_score: 0.6850  HR@20=0.8200  NDCG@10=0.4446\n  [CDs_and_Vinyl] epoch 195/200  loss=0.3994  val_score: 0.6900  HR@20=0.8200  NDCG@10=0.4403\n  [CDs_and_Vinyl] epoch 200/200  loss=0.3976  val_score: 0.7000  HR@20=0.7950  NDCG@10=0.4502\n  [CDs_and_Vinyl] Best val HR@10=0.7100  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-sasrec-tpebest-jump-43200-20261028/run-01/experiment/recharness/trials/round-0003-slot-0-attempt-1/working/CDs_and_Vinyl_model.pt\npredict.py written → /home/liuzhishan/lhr/rec-harness/artifacts/recharness-sasrec-tpebest-jump-43200-20261028/run-01/experiment/recharness/trials/round-0003-slot-0-attempt-1/working/predict.py\n\nAll datasets done. Average val HR@10 = 0.6187\n",
+    "stderr_tail": ""
+  },
+  "gpu_seconds_all_attempts": 2106.772855371237
+}

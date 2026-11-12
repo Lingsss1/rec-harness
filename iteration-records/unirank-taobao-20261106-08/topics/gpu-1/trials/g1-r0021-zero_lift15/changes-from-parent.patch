@@ -1,0 +1,101 @@
+--- g1-r0020-uniform15_replay/model.py
++++ g1-r0021-zero_lift15/model.py
+@@ -1,14 +1,13 @@
+-"""Prospective two-factor deletion of item coordinate fifteen.
+-
+-ID and item-attribute widths vary independently between fifteen and sixteen.
+-Context/action widths, UF compression, Dice, heads and gradient gates remain
+-inherited. Copy exact prefix coordinates from a scratch full16 source, including
+-semantic scorer/tower columns, and preserve its ending CPU RNG stream. No
+-checkpoint, labels, scoring, data access or trained teacher enters construction.
+-Numerical parity and host cost/quality evaluation remain pending. Same-seed
+-replays are consistency controls, not independent repetitions or novelty proof.
++"""Prospective separation of effective item capacity from arithmetic layout.
++
++Native15, zero-lifted15 and masked16 retain exactly the same fifteen item
++coordinates in real arithmetic, while table storage and dense contraction
++widths differ. All active initial coordinates come from the unchanged full16
++source. Padding is constant, has no learnable map, and precedes compression.
++The full16 cell retains all coordinates. BF16 trajectories need not agree.
++No numerical equivalence, predictive benefit or novelty is asserted here.
+ """
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'id_embedding_dim': 15, 'attribute_embedding_dim': 15, 'action_embedding_dim': 16, 'source_coupled_initialization': True}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'id_embedding_dim': 15, 'attribute_embedding_dim': 15, 'action_embedding_dim': 16, 'source_coupled_initialization': True, 'item_coordinate_mode': 'zero_lift16'}
+ 
+ import copy
+@@ -61,5 +60,5 @@
+     def __init__(self, feature_map, model_id='ItemActionCapacity', gpu=-1,
+                  embedding_dim=16, id_embedding_dim=16, attribute_embedding_dim=16,
+-                 action_embedding_dim=16,
++                 action_embedding_dim=16, item_coordinate_mode='native',
+                  attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+@@ -87,4 +86,10 @@
+         if embedding_dim != 16:
+             raise ValueError('Keep fallback embedding_dim=16; use ID/attribute capacity factors')
++        if item_coordinate_mode not in ('native', 'zero_lift16', 'mask16'):
++            raise ValueError('Unknown item coordinate mode')
++        expected = 15 if item_coordinate_mode == 'zero_lift16' else 16
++        if item_coordinate_mode != 'native' and (id_embedding_dim != expected or attribute_embedding_dim != expected):
++            raise ValueError('Lift requires uniform15 tables; masking requires uniform16 tables')
++        self.item_coordinate_mode = item_coordinate_mode
+         local_map, self.table_widths = _capacity_layout(
+             feature_map, id_embedding_dim, attribute_embedding_dim, action_embedding_dim)
+@@ -112,5 +117,7 @@
+         self.auxiliary_indices = [list(feature_map.labels).index(label)
+                                   for label in ('cart', 'fav', 'buy')]
+-        self.key_width = sum(self.table_widths[name] for name in self.item_fields)
++        self.key_width = (sum(self.table_widths[name] for name in self.item_fields)
++                          if self.item_coordinate_mode == 'native'
++                          else 16 * len(self.item_fields))
+         self.action_width = self.table_widths[self.action_field]
+         self.value_width = self.key_width + self.action_width
+@@ -119,5 +126,5 @@
+         # Field-specific native widths feed scorer and towers. Hidden widths, Dice,
+         # module order, compression and gradient gates remain inherited.
+-        # No expansion maps, repeated coordinates or unused map parameters.
++        # Fixed padding adds no map; zero-input dense columns remain counted.
+         layers = []
+         width = 4 * self.key_width + self.action_width
+@@ -165,4 +172,12 @@
+         user_emb = self.embedding_layer(user)
+         item_emb = self.embedding_layer(item)
++        if self.item_coordinate_mode != 'native':
++            # Fixed zero insertion, identical for current target and history.
++            # Source coordinate fifteen has no output or gradient path.
++            item_emb = dict(item_emb)
++            for name in self.item_fields:
++                embedded = item_emb[name]
++                item_emb[name] = torch.cat(
++                    (embedded[..., :15], embedded.new_zeros(embedded.shape[:-1] + (1,))), dim=-1)
+         target = torch.cat([item_emb[name][:, -1] for name in self.item_fields], dim=-1)
+         keys = torch.cat([item_emb[name][:, :-1] for name in self.item_fields], dim=-1)
+@@ -274,7 +289,8 @@
+ 
+ class Model(_NativeModel):
+-    def __init__(self, feature_map, model_id='IDAttributeCapacity', gpu=-1,
++    def __init__(self, feature_map, model_id='ItemCapacityLayout', gpu=-1,
+                  id_embedding_dim=15, attribute_embedding_dim=15,
+-                 action_embedding_dim=16, source_coupled_initialization=True, **kwargs):
++                 action_embedding_dim=16, source_coupled_initialization=True,
++                 item_coordinate_mode='zero_lift16', **kwargs):
+         if not isinstance(source_coupled_initialization, bool):
+             raise ValueError('Initialization coupling must be boolean')
+@@ -295,5 +311,6 @@
+                 id_embedding_dim=id_embedding_dim,
+                 attribute_embedding_dim=attribute_embedding_dim,
+-                action_embedding_dim=action_embedding_dim, **kwargs)
++                action_embedding_dim=action_embedding_dim,
++                item_coordinate_mode=item_coordinate_mode, **kwargs)
+         if source_coupled_initialization:
+             self._copy_source_initialization(reference)
+@@ -301,5 +318,7 @@
+ 
+     def _copy_source_initialization(self, reference):
+-        item_widths = [self.table_widths[field] for field in self.item_fields]
++        item_widths = ([self.table_widths[field] for field in self.item_fields]
++                       if self.item_coordinate_mode == 'native'
++                       else [16] * len(self.item_fields))
+         scorer_columns, tower_columns = _source_columns(
+             item_widths, len(self.user_fields), self.action_width)

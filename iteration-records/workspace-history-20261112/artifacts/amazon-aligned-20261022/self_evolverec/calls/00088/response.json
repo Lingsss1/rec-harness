@@ -1,0 +1,148 @@
+{
+  "markdown_report": "At 0% progress, prioritize **support-weighted history pooling with multi-negative training**, with simple pooling and gBCE as essential ablations. The extension targets isolated-purchase overreaction, broad recommendations, and weak lower-tail ranking margins. Improvements remain hypotheses; the cosine-support mechanism has no direct empirical validation here.\n\n**Insights from the starting point.** (1) SASRec captures recent context; a pooled residual tests whether persistent interests add useful evidence. (2) Users report broad relevance and excessive influence from occasional purchases; support weighting targets both, but embedding similarity need not identify specific tasks. (3) Electronics has 14.95% negative-over-positive rankings and a −0.4812 tenth-percentile margin, motivating stronger discrimination. These training statistics establish neither validation gains nor severe collapse; collapse scores near 0.5 do not justify collapse-focused regularization.\n\n**Insights from related work.** (1) [IBLSRec](https://ieeexplore.ieee.org/document/10820829/) separates stable and transient associations, motivating distinct history and recent-context signals. (2) [gSASRec](https://www.ijcai.org/proceedings/2024/0939.pdf) motivates calibrated multi-negative training; its exact loss and sampler matter. (3) [R²NS](https://renzhaochun.github.io/assets/pdf/WWW_2026_Camera_Ready.pdf) motivates postponing aggressive mining because of instability and false negatives. (4) [HAM](https://pmc.ncbi.nlm.nih.gov/articles/PMC10034966/) supports testing simple pooling, without validating cosine support. (5) [Popularity-bias research](https://arxiv.org/abs/1907.13286) motivates checking whether dense similarity clusters suppress minority interests.\n\n**Framework and candidate directions.** Organize changes along evidence aggregation, ranking discrimination, and negative difficulty. Scores are Originality / Potential / User alignment / Model alignment / Difficulty; higher difficulty means harder implementation. These are judgments, not measured outcomes.\n\n| Idea | Scores | Positive / negative assessment for each axis |\n|---|---|---|\n| A: Support-weighted pooling + gBCE | 3/6/7/8/5 | O: diagnosis-specific combination / established components; P: reusable residual / support hypothesis unverified; U: reinforces coherent interests / may suppress niche interests; M: targets separation / margins may mislead; D: compact extension / causal pooling, sampling and serialization need care |\n| B: Training-transition graph residual | 5/6/6/6/6 | O: directional evidence / established graph approach; P: sparse associations / rare transitions; U: behavioral links / associations lack purpose; M: added ranking evidence / noisy edges; D: sparse implementation / predictor integration |\n| C: Warmed-up stochastic hard negatives | 3/7/4/9/4 | O: established recipe / little novelty; P: targeted discrimination / false negatives; U: confusing alternatives / weak preference support; M: lower-tail focus / training overfit; D: unchanged inference / sampling overhead |\n\n**Selected algorithm: A.** Retain SASRec and add a projected, gated pool of causal prefix embeddings. Bound support to [0,1] using mean positive cosine similarity, then multiply 1+support by exponential recency weights. This targets broad recommendations and occasional-purchase overreaction; gBCE targets weak separation. Similarity establishes neither recurrence of a real-world need nor compatibility, ownership, complementarity, or satisfaction. Detached support still evolves with learned embeddings and can reinforce popularity shortcuts.\n\n**Implementation and evaluation.** Specify the vectorized causal construction, exact gBCE, sampler, defaults, and writer in the implementation notes below. Compare baseline, gBCE-only, uniform-pooling-only, recency-pooling-only, support-pooling-only, and combined models with identical evaluator settings. These comparisons identify component contributions but do not establish interactions. Preserve all four routes, seeds, diagnostics, and predictor reconstruction. Predeclare checkpoints, stopping and tie rules; cap total charged compute at 43,200 GPU-seconds. Report every validation query, four category HRs, macro HR, paired hit differences and conditional bootstrap intervals. [Sampled-metric limitations](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/) restrict claims to this protocol; [selection bias](https://jmlr.csail.mit.edu/beta/papers/v11/cawley10a.html) limits winner interpretation. No experiments or gains are claimed.",
+  "idea": {
+    "description": "Extend per-dataset SASRec with a causal, support-weighted history residual and exact multi-negative generalized BCE. Compare this combination against simpler pooling variants and gBCE alone before attributing any benefit to similarity support.",
+    "motivation": "The user diagnosis identifies overly broad recommendations and excessive influence from occasional purchases. Support-weighted pooling explicitly targets these two failures by reinforcing coherent historical evidence, although learned similarity may reproduce broad associations rather than resolve them. Electronics exhibits weak lower-tail training separation, motivating multi-negative learning. Neither mechanism establishes physical compatibility, equipment ownership, functional complementarity, or whether a need has been satisfied. Early research progress favors this small, ablatable extension over graph construction or aggressive hard-negative mining.",
+    "implementation_notes": "Preserve DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, all four dataset routes, original splits and SASREC_EPOCHS environment behavior with fallback 200. Write all artifacts beneath the trial directory and run each trial on one GPU. Retain baseline architecture, optimizer, batch size and sequence length unless a change is explicitly recorded; no pretrained weights or external data are required.\n\nPooling specification: let e be static item embeddings before positional embeddings or dropout, and z = normalize(e.detach(), eps=1e-8). Form A = relu(z @ z.transpose(-1,-2)), zero padding pairs and the positional diagonal, then cumulative-sum along the final axis. C[b,j,t] is the sum of similarities between position j and valid positions k<=t, excluding k=j. Do not triangular-mask A before this cumulative sum. With n_t valid prefix items, set s_j(t)=C[j,t]/max(n_t-1,1), and zero weights for padding or j>t. Singleton support is zero. Set w_tj=exp(-0.05*(t-j))*(1+s_j(t)); normalize across valid j. This decay uses sequence positions, not timestamps. Use a d-by-d linear projection without bias, initialized to identity, and a single scalar gate per dataset initialized to -3, giving h'_t=h_t+sigmoid(gate)*projection(pool_t). Return zero for invalid positions. Compute similarities and normalization in FP32. This construction costs O(BL²d) time and O(BL²) additional storage; benchmark its actual cost before allocating long runs. The all-prefix training pool and final-prefix inference pool must implement the same equation.\n\nObjective specification: start with k=128 independent uniform replacement draws over real catalog IDs, excluding padding but applying no history or current-positive rejection, matching the supplied official sampler description. Count duplicates as separate draws, record collisions with known positives, and retain the paper's alpha=k/(N-1), beta=1-t+t*alpha with t=0.75 and N the number of real items. For each valid position use (beta*softplus(-positive_logit)+softplus(negative_logits).sum(-1))/(k+1), then average over valid positions in FP32. Skip an all-padding batch. Do not replace beta*log(sigmoid(s)) with log(sigmoid(beta*s)), and do not independently average positive and negative losses. The direct softplus expression avoids fragile sigmoid powers and transformed logits. The previously proposed history/current-positive exclusion is a separate sampler ablation, not an equivalent reproduction: exclusions change exposure probabilities and invalidate an unqualified global-calibration claim. If tested, document that deviation, retain alpha=128/(N-1) as a stated heuristic, sample with replacement from eligible items, and skip positions with no eligible items. Never inspect validation or test labels for exclusions.\n\nPredeclare six configurations: baseline; gBCE-only; uniform-pooling-only; recency-pooling-only; support-pooling-only; combined support-times-recency pooling plus gBCE. Pooling-only variants retain baseline BCE. Use identical residual projection and gate for all pooling variants; their weights are respectively 1, exp(-0.05*(t-j)), and 1+s_j(t). The combined variant uses the product above. These controls isolate changes relative to baseline but are not a complete factorial design; do not claim a measured interaction without the missing combinations. No additional hyperparameter search is included initially. Keep baseline optimizer settings explicit in the saved manifest.\n\nCap each configuration at 7,200 aggregate GPU-seconds across its four categories, including its diagnostics and failures; six caps sum to 43,200 GPU-seconds, and concurrent slots do not increase this limit. Divide each cap equally across categories. Stop at the earliest of the category cap or configured epochs, finishing and saving only completed epochs. Use a fixed checkpoint schedule of epoch 1, every tenth epoch, and the final completed epoch; record every evaluation, including final and failed queries. For each configuration select each category checkpoint by category validation HR@10, breaking ties by the earliest epoch, then compare the resulting routed configurations by equal-weight macro HR@10. Declare this category-level checkpoint tuning explicitly. Break configuration ties by fewer added components, then lower charged compute. Record actual compute and completed epochs, because equal time can yield unequal optimization steps. Freeze the final configuration before host evaluation.\n\nUse only the pinned 200 users/category and fixed 99 unique negative candidates, evaluation seed 42, for authoritative selection. Retain paired per-user hits only if exposed by the existing evaluator; do not modify it to obtain them. Where available, report discordant wins/losses and a 10,000-replicate paired bootstrap, resampling users within each category with bootstrap seed 42 and recomputing macro differences. These intervals condition on fixed candidates and checkpoints, exclude training and candidate variability, and remain descriptive after selection. One changed hit changes category HR by 0.5 percentage points and macro HR by 0.125 points. Seed 42 alone does not demonstrate training robustness.\n\nTrack original lower-tail margins with the same diagnostic sampling protocol and clearly separate them from validation selection. From training frequencies, define tail items as the lowest-frequency 80% of catalog items, breaking frequency ties by item ID, and report their share of the twenty users' full-catalog unseen-item top-10 lists. As a limited minority-interest proxy, report the mean, across those users, of the fraction of their last ten valid history positions whose item has at least one recommendation with TF-IDF title/description cosine >=0.2; use permitted text only and disclose missing-text coverage. This proxy measures lexical coverage, not true minority-interest retention or user satisfaction. Keep it descriptive and do not claim it identifies functional compatibility. Report qualitative user feedback separately; simulator diversity and conformity traits are unobserved.\n\nSave architecture configuration and parameters beneath the trial directory and update the predictor writer to reconstruct identical pooling, scoring and four-category routing. Preserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. view.model must be the actual trained nn.Module; expose its item_emb, augmented log2feats(sequence), matching predict_score(features, items), user_train, and permitted metadata. The loader remains (None, sequence, positive, negative), B x L; diagnostic negatives need not change when training adds multiple negatives. Mark category breakdowns and review-dependent probes unavailable because those fields are not provided; do not fabricate them. Required checks are padding invariance, prefix causality, singleton support, vectorized-versus-reference pooling agreement, loss-formula agreement, and saved-model-versus-generated-predictor score agreement. Training, checks and diagnostics charged by the host remain within the shared budget.",
+    "pseudocode": "class SupportedSASRec:\n    log2feats(sequence):\n        h = sasrec.log2feats(sequence)\n        valid = sequence != 0\n        e = item_emb(sequence)\n        z = normalize(e.detach().float(), eps=1e-8)\n        A = relu(z @ transpose_last_two(z))\n        A *= valid_pair_mask(valid)\n        A = zero_positional_diagonal(A)\n        C = A.cumsum(dim=-1)  # C[b,j,t]; no triangular mask yet\n        n = valid.cumsum(dim=-1)\n        support = transpose_last_two(C) / clamp(n[..., None] - 1, min=1)\n        mask = valid_query_and_key_mask(valid) & causal_mask()\n        age = query_position_minus_key_position()\n        weights = exp(-0.05 * clamp(age, min=0)) * (1 + support)\n        weights = weights * mask\n        weights /= clamp(weights.sum(-1, keepdim=True), min=1e-8)\n        pooled = weights.to(e.dtype) @ e\n        return (h + sigmoid(gate) * projection(pooled)) * valid[..., None]\n\nfor configuration in PREDECLARED_SIX_CONFIGURATIONS:\n    for dataset in FOUR_DATASETS:\n        restore_baseline_preprocessing_seed_0_and_training_seed_42()\n        initialize_model_and_record_configuration()\n        for epoch in configured_epochs_with_category_compute_cap:\n            for _, sequence, positive, _ in train_loader:\n                features = model.log2feats(sequence)\n                if configuration.uses_gBCE:\n                    negatives = uniform_real_catalog_draws_with_replacement(\n                        shape=positive.shape + (128,))\n                    pos = score(features, positive).float()\n                    neg = score(features, negatives).float()\n                    beta = 1 - 0.75 + 0.75 * 128 / (dataset.item_count - 1)\n                    per_position = (beta * softplus(-pos)\n                                    + softplus(neg).sum(-1)) / 129\n                    loss = mean_over_valid_positive_positions(per_position)\n                else:\n                    loss = unchanged_baseline_BCE(...)\n                optimizer.zero_grad()\n                loss.backward()\n                optimizer.step()\n            save_completed_epoch_checkpoint_under_trial_directory()\n            evaluate_only_on_predeclared_schedule_using_pinned_protocol()\n        select_category_checkpoint_by_validation_HR10_then_earliest_epoch()\n    record_four_category_HRs_and_equal_weight_macro()\nselect_configuration_by_macro_HR10_then_declared_tie_rules()\nwrite_predictor_with_identical_architecture_and_dataset_routing()\nverify_reloaded_predictor_score_agreement()\nfreeze_configuration_before_host_held_out_evaluation()",
+    "originality": {
+      "score": 3,
+      "positive": "The specific bounded cosine-support residual connects persistent evidence aggregation to two observed user failures and remains cleanly ablatable.",
+      "negative": "Pooling, residual gates and gBCE are established; combining them offers limited methodological novelty, and cosine similarity is not demonstrated to measure recurring intent."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "A small controlled extension can establish whether persistent history support warrants later work on multiple interests, temporal gating or separate behavioral evidence.",
+      "negative": "Dense-cluster and popularity shortcuts could suppress minority interests, and simple pooling or gBCE alone may explain any gain."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "Retains SASRec, dot-product scoring, existing routes and permitted inputs; stable gBCE itself requires little code.",
+      "negative": "Vectorized causal support, quadratic pooling cost, exact masking, sampler documentation, diagnostic adaptation and synchronized predictor serialization require meaningful implementation and verification."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Introduces causal self-attention over interaction histories for next-item recommendation."
+      ],
+      "limitations": [
+        "The supplied baseline diagnosis reports broad associations and uneven training-pair separation; these observations do not establish a universal limitation of SASRec."
+      ]
+    },
+    {
+      "title": "IBLSRec",
+      "link": "https://ieeexplore.ieee.org/document/10820829/",
+      "contributions": [
+        "Distinguishes stable item relationships from short-lived associations and uses latent intent to refine preferences, according to the supplied search summary."
+      ],
+      "limitations": [
+        "The supplied evidence establishes neither gains under this benchmark nor validation of cosine-support pooling."
+      ]
+    },
+    {
+      "title": "gSASRec: IJCAI 2024 summary",
+      "link": "https://www.ijcai.org/proceedings/2024/0939.pdf",
+      "contributions": [
+        "Combines multiple negatives with generalized BCE to address sampling-induced overconfidence."
+      ],
+      "limitations": [
+        "Published findings do not establish improvements for the exact four-category, 99-negative benchmark.",
+        "Changing negative exclusions changes the sampling assumptions underlying calibration."
+      ]
+    },
+    {
+      "title": "gSASRec paper",
+      "link": "https://eprints.gla.ac.uk/301348/3/301348.pdf",
+      "contributions": [
+        "Defines alpha=k/(N−1) and beta=1−t+t*alpha for the calibrated positive probability exponent.",
+        "Supports the direct stable loss using beta times positive softplus and the sum of negative softplus terms."
+      ],
+      "limitations": [
+        "Calibration depends on the sampling setup; history-excluding negatives do not preserve the original exposure assumptions."
+      ]
+    },
+    {
+      "title": "Official gSASRec training implementation",
+      "link": "https://github.com/asash/gSASRec-pytorch/blob/main/train_gsasrec.py",
+      "contributions": [
+        "Provides the positive-logit transformation and averaging over k+1 logits and valid positions."
+      ],
+      "limitations": [
+        "Its transformed-logit numerical implementation is more involved than the equivalent direct softplus objective."
+      ]
+    },
+    {
+      "title": "Official gSASRec sampler",
+      "link": "https://github.com/asash/gSASRec-pytorch/blob/main/dataset_utils.py",
+      "contributions": [
+        "Samples real catalog items with replacement without history exclusion, according to the supplied source summary."
+      ],
+      "limitations": [
+        "Draws can collide with observed positives; removing those collisions changes the sampler."
+      ]
+    },
+    {
+      "title": "R²NS",
+      "link": "https://renzhaochun.github.io/assets/pdf/WWW_2026_Camera_Ready.pdf",
+      "contributions": [
+        "Uses warm-start training, progressive negative difficulty and stochastic selection to moderate hard-negative mining."
+      ],
+      "limitations": [
+        "Mining adds training cost and retains false-negative risk."
+      ]
+    },
+    {
+      "title": "HAM",
+      "link": "https://pmc.ncbi.nlm.nih.gov/articles/PMC10034966/",
+      "contributions": [
+        "Provides adjacent evidence for effective history aggregation and recent-window mean pooling."
+      ],
+      "limitations": [
+        "Does not establish that positive-cosine support outperforms uniform or recency pooling under this benchmark."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled ranking metrics can reverse model ordering, including in expectation."
+      ],
+      "limitations": [
+        "Does not invalidate comparison under a fixed benchmark, but limits extrapolation to full-catalog superiority."
+      ]
+    },
+    {
+      "title": "A Comparison of Statistical Significance Tests for Information Retrieval Evaluation",
+      "link": "https://maroo.cs.umass.edu/getpdf.php?id=744",
+      "contributions": [
+        "Provides retrieval-evaluation context for paired resampling and uncertainty assessment."
+      ],
+      "limitations": [
+        "User bootstrap intervals do not cover training variability, candidate variability or adaptive model selection."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://jmlr.csail.mit.edu/beta/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains overfitting of model-selection criteria and resulting performance-estimation bias."
+      ],
+      "limitations": [
+        "A fixed search plan reduces tuning opportunities but does not make a selected validation winner independently confirmed."
+      ]
+    },
+    {
+      "title": "The Unfairness of Popularity Bias in Recommendation",
+      "link": "https://arxiv.org/abs/1907.13286",
+      "contributions": [
+        "Documents disproportionate popularity exposure for niche users."
+      ],
+      "limitations": [
+        "Does not directly test this sequential residual or prove that cosine-support weighting suppresses minority interests."
+      ]
+    }
+  ]
+}

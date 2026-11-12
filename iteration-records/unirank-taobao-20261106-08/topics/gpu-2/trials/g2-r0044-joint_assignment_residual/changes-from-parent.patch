@@ -1,0 +1,75 @@
+--- g2-r0043-joint_budget_residual/model.py
++++ g2-r0044-joint_assignment_residual/model.py
+@@ -15,5 +15,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [42, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 14, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'auxiliary_residual_hidden': 10, 'evaluation_projection': 'merged_hoist', 'evaluation_dice': 'both', 'click_tower_hidden_units': [128, 64], 'auxiliary_tower_hidden_units': [112, 64], 'auxiliary_context_tasks': ['buy'], 'auxiliary_tower_overrides': {'cart': [42, 32], 'fav': [42, 32]}, 'auxiliary_residual_overrides': {'cart': 2, 'fav': 2}, 'nonowner_residual': 'retained', 'nonowner_tower_depth': 1, 'nonowner_residual_overrides': {'cart': 'retained', 'fav': 'retained'}, 'nonowner_tower_depth_overrides': {'cart': 1, 'fav': 1}}
+ 
+ 
+@@ -38,4 +38,6 @@
+                  auxiliary_context_tasks=('buy',),
+                  nonowner_residual='retained', nonowner_tower_depth=2,
++                 nonowner_residual_overrides=None,
++                 nonowner_tower_depth_overrides=None,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -58,4 +60,32 @@
+         self.nonowner_residual = nonowner_residual
+         self.nonowner_tower_depth = nonowner_tower_depth
++        # Only the two context-detached private heads can override stages.
++        # Resolve maps before learned construction: no RNG/tensor operations.
++        if nonowner_residual_overrides is None:
++            nonowner_residual_overrides = {}
++        if nonowner_tower_depth_overrides is None:
++            nonowner_tower_depth_overrides = {}
++        if not isinstance(nonowner_residual_overrides, dict):
++            raise ValueError('Private residual overrides must be a task-to-mode dict')
++        if not isinstance(nonowner_tower_depth_overrides, dict):
++            raise ValueError('Private depth overrides must be a task-to-depth dict')
++        if any(label not in ('cart', 'fav') for label in nonowner_residual_overrides):
++            raise ValueError('Residual-stage overrides are limited to cart/fav')
++        if any(label not in ('cart', 'fav') for label in nonowner_tower_depth_overrides):
++            raise ValueError('Depth-stage overrides are limited to cart/fav')
++        if any(mode not in ('retained', 'removed')
++               for mode in nonowner_residual_overrides.values()):
++            raise ValueError('Unknown private residual-stage mode')
++        if any(isinstance(depth, bool) or not isinstance(depth, int) or depth not in (1, 2)
++               for depth in nonowner_tower_depth_overrides.values()):
++            raise ValueError('Private tower depths must be integers 1 or 2')
++        self.nonowner_residual_modes = {
++            label: nonowner_residual_overrides.get(label, nonowner_residual)
++            for label in ('cart', 'fav')
++        }
++        nonowner_tower_depths = {
++            label: nonowner_tower_depth_overrides.get(label, nonowner_tower_depth)
++            for label in ('cart', 'fav')
++        }
+         # The full-width template fixes the common initialization draws.
+         # Effective widths are architecture choices; host training is unchanged.
+@@ -235,5 +265,5 @@
+             widths = (click_tower_hidden_units if label == 'is_click'
+                       else auxiliary_tower_overrides.get(label, auxiliary_tower_hidden_units))
+-            if label in ('cart', 'fav') and nonowner_tower_depth == 1:
++            if label in ('cart', 'fav') and nonowner_tower_depths[label] == 1:
+                 # The full template output has 64 inputs. Retain its first
+                 # h1 coefficients as a direct readout of the first hidden
+@@ -277,8 +307,7 @@
+         # Remove storage and optimizer parameters, not merely output values.
+         # Identity is a parameterless slot marker and is never invoked below.
+-        if nonowner_residual == 'removed':
+-            for index, label in enumerate(feature_map.labels):
+-                if label in ('cart', 'fav'):
+-                    self.residual_bank[index] = nn.Identity()
++        for index, label in enumerate(feature_map.labels):
++            if label in ('cart', 'fav') and self.nonowner_residual_modes[label] == 'removed':
++                self.residual_bank[index] = nn.Identity()
+         self.model_to_device()
+ 
+@@ -828,5 +857,5 @@
+                 task_curvature_detail = aux_curvature_detail
+                 task_joint_detail = aux_joint_detail
+-            if label in ('cart', 'fav') and self.nonowner_residual == 'removed':
++            if label in ('cart', 'fav') and self.nonowner_residual_modes[label] == 'removed':
+                 # These branches retain the inherited feedback-stratified
+                 # base, context and target, with their original detach gates.

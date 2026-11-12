@@ -1,0 +1,189 @@
+--- g0-r0052-block_nonlinear_transfer/model.py
++++ g0-r0060-broadcast_bridge/model.py
+@@ -16,5 +16,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'detail_locality': 'broadcast'}
+ 
+ 
+@@ -36,4 +36,5 @@
+                  block_aux_adapter_context_grad=False,
+                  context_fusion='product', interaction_rank=16, summary_placement='block',
++                 detail_locality='broadcast',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -72,4 +73,9 @@
+             raise ValueError('Unknown history projection placement')
+         self.summary_placement = summary_placement
++        if summary_placement != 'block':
++            raise ValueError('Detail alignment study fixes blockwise projection')
++        if detail_locality not in ('aligned', 'permuted', 'broadcast'):
++            raise ValueError('Unknown block-detail assignment')
++        self.detail_locality = detail_locality
+         if context_fusion != 'product':
+             raise ValueError('This placement study fixes product fusion')
+@@ -258,7 +264,7 @@
+         values = torch.cat([keys, item_emb[self.action_field][:, :-1]], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
+-        detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._target_match_summary(
++        detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union, detail_blocks = self._target_match_summary(
+             item, values, mask)
+-        return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union
++        return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union, detail_blocks
+ 
+     def _target_match_summary(self, item, values, mask):
+@@ -351,9 +357,15 @@
+             coefficients.to(values.dtype).reshape(batch * 10, 5, 10),
+             values.reshape(batch * 10, 10, width))
+-        summaries = summaries.reshape(batch, 10, 5, width).sum(dim=1)
++        # Keep the inherited global reduction/division EXACTLY as written.
++        # Expose its already-computed block contributions without recomputing
++        # coefficients or changing any global adapter input. Local centering
++        # below corrects finite-precision sum/division order differences.
++        detail_blocks = summaries.reshape(batch, 10, 5, width)
++        summaries = detail_blocks.sum(dim=1)
+         summaries = summaries / total.sqrt().unsqueeze(-1).to(summaries.dtype)
++        detail_blocks = detail_blocks / total.sqrt().view(batch, 1, 1, 1).to(detail_blocks.dtype)
+         return (summaries[:, 0, :], summaries[:, 1, :], summaries[:, 2, :],
+                 summaries[:, 3, :], summaries[:, 4, :], match_counts,
+-                match_matrix.bool().any(dim=-1))
++                match_matrix.bool().any(dim=-1), detail_blocks)
+ 
+     def _coarse_extension_coefficients(self, incumbent, position, quadratic,
+@@ -681,14 +693,33 @@
+         return weighted if return_blocks else weighted.sum(dim=1)
+ 
+-    def _context_history_correction(self, index, context, history, block_base, block_counts):
+-        """Test tied nonlinear projection before versus after block aggregation.
+-
+-        b_j is the existing signed target-scored contribution of block j;
+-        r contains the original global counts and five detail summaries.
+-        For M occupied blocks, the mean of [M*b_j, r] is [sum(b_j), r].
+-        Only the location of tanh relative to this averaging is changed.
+-        No softmax, new learned matrix, target label or unmasked event enters.
+-        Both paths execute in every cell, including backward via an algebraic
+-        zero. This is a work-matched diagnostic, with actual costs host-measured.
++    @staticmethod
++    def _permute_occupied_details(details, occupied):
++        """Shift detail tuples by floor(M/2) among the M occupied blocks.
++
++        A bijection for any support, including holes; empty and singleton
++        histories are identities. No details move into padded block slots.
++        """
++        batch, blocks, width = details.shape
++        positions = torch.arange(blocks, device=details.device).unsqueeze(0).expand(batch, -1)
++        ordered = torch.where(occupied, positions, torch.full_like(positions, blocks))
++        ordered = ordered.sort(dim=1).values
++        number = occupied.long().sum(dim=1, keepdim=True)
++        rank = occupied.long().cumsum(dim=1) - 1
++        source_rank = (rank + number // 2).remainder(number.clamp_min(1))
++        source = ordered.gather(1, source_rank).clamp_max(blocks - 1)
++        permuted = details.gather(1, source.unsqueeze(-1).expand(-1, -1, width))
++        return torch.where(occupied.unsqueeze(-1), permuted, torch.zeros_like(permuted))
++
++    def _context_history_correction(self, index, context, history, block_base,
++                                    block_counts, detail_blocks):
++        """Keep global marginals, change only local content/detail pairing.
++
++        Write history=[base, log_counts, global_detail]. For occupied block j
++        with original detail contribution d_j, set delta_j=M*d_j-sum_k d_k.
++        The aligned input is [M*b_j, log_counts, global_detail+delta_j].
++        Permuting delta among occupied blocks keeps every detail marginal,
++        support and count fixed. Broadcast sets delta=0. In exact arithmetic
++        each input population has mean history; FP32 centering limits drift.
++        All five detail channels move together. No new learned weights enter.
+         """
+         query = torch.tanh(self.context_queries[index](context).float())
+@@ -697,31 +728,43 @@
+         support = occupied.to(torch.float32)
+         number = support.sum(dim=1, keepdim=True)
+-        # Mask before projection as well as after it: invalid block values
+-        # cannot affect the local input, even in a noncontiguous support case.
+         safe_blocks = torch.where(occupied.unsqueeze(-1), block_base,
+                                   torch.zeros_like(block_base))
+         local_base = (safe_blocks.float() * number.unsqueeze(-1)).to(history.dtype)
+-        shared_detail = history[:, self.value_width:].unsqueeze(1).expand(
+-            -1, block_base.shape[1], -1)
+-        local_inputs = torch.cat([local_base, shared_detail], dim=-1)
++        raw_details = detail_blocks.flatten(start_dim=2).float()
++        safe_details = torch.where(occupied.unsqueeze(-1), raw_details,
++                                   torch.zeros_like(raw_details))
++        aligned_delta = (number.unsqueeze(-1) * safe_details
++                         - safe_details.sum(dim=1, keepdim=True))
++        aligned_delta = torch.where(occupied.unsqueeze(-1), aligned_delta,
++                                    torch.zeros_like(aligned_delta))
++        permuted_delta = self._permute_occupied_details(aligned_delta, occupied)
++        # Both assignments participate in every graph. Major projection work
++        # and parameter shapes are identical; host measures actual cost.
++        if self.detail_locality == 'aligned':
++            delta = aligned_delta + 0.0 * permuted_delta
++        elif self.detail_locality == 'permuted':
++            delta = permuted_delta + 0.0 * aligned_delta
++        else:
++            delta = 0.0 * aligned_delta + 0.0 * permuted_delta
++        global_detail = history[:, self.value_width + len(self.match_fields):]
++        local_detail = (global_detail.float().unsqueeze(1) + delta).to(history.dtype)
++        shared_counts = history[:, self.value_width:self.value_width + len(self.match_fields)]
++        shared_counts = shared_counts.unsqueeze(1).expand(-1, block_base.shape[1], -1)
++        local_inputs = torch.cat([local_base, shared_counts, local_detail], dim=-1)
++        # Mask BEFORE projection and after activation. The original base and
++        # global residual paths remain untouched for all histories.
++        local_inputs = torch.where(occupied.unsqueeze(-1), local_inputs,
++                                   torch.zeros_like(local_inputs))
+         local_hidden = torch.tanh(self.history_projections[index](local_inputs).float())
+         local_hidden = torch.where(occupied.unsqueeze(-1), local_hidden,
+                                    torch.zeros_like(local_hidden))
+         local = local_hidden.sum(dim=1) / number.clamp_min(1.0)
+-        if self.summary_placement == 'block':
+-            summary = local + 0.0 * aggregate
+-        else:
+-            summary = aggregate + 0.0 * local
+-        # Same product and RMS normalization as the incumbent. Global base,
+-        # residual adapter and all five moment paths outside this branch stay.
+-        if self.context_fusion == 'product':
+-            fused = query * summary
+-        else:
+-            fused = (query + summary) * (2.0 ** -0.5)
++        summary = local + 0.0 * aggregate
++        fused = query * summary
+         fused = fused * torch.rsqrt(fused.square().mean(dim=-1, keepdim=True) + 1e-4)
+         return self.interaction_outputs[index](fused.to(history.dtype))
+ 
+     def forward(self, inputs):
+-        context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._represent(inputs)
++        context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union, detail_blocks = self._represent(inputs)
+         batch = values.shape[0]
+         if (self.training and self.training_support == 'full') or self.inference_support == 'full':
+@@ -801,4 +844,5 @@
+             aux_values = values.detach() if self.block_aux_item_grad else values
+             aux_detail = detail.detach() if self.block_aux_item_grad else detail
++            aux_detail_blocks = detail_blocks.detach() if self.block_aux_item_grad else detail_blocks
+             aux_position_detail = position_detail.detach() if self.block_aux_item_grad else position_detail
+             aux_block_detail = block_detail.detach() if self.block_aux_item_grad else block_detail
+@@ -824,4 +868,5 @@
+             aux_context, aux_target = context, target
+             aux_detail = detail
++            aux_detail_blocks = detail_blocks
+             aux_position_detail = position_detail
+             aux_block_detail = block_detail
+@@ -847,4 +892,5 @@
+                 task_blocks = primary_block_strata[:, :, 0, :]
+                 task_detail = detail
++                task_detail_blocks = detail_blocks
+                 task_position_detail = position_detail
+                 task_block_detail = block_detail
+@@ -855,4 +901,5 @@
+                 task_blocks = aux_block_strata[:, :, 1, :] + aux_block_strata[:, :, 2, :]
+                 task_detail = aux_detail
++                task_detail_blocks = aux_detail_blocks
+                 task_position_detail = aux_position_detail
+                 task_block_detail = aux_block_detail
+@@ -885,5 +932,6 @@
+             history_features = torch.cat([base, match_counts.to(base.dtype), signal], dim=-1)
+             correction = correction + self._context_history_correction(
+-                index, adapter_context, history_features, task_blocks, block_counts)
++                index, adapter_context, history_features, task_blocks, block_counts,
++                task_detail_blocks)
+             pooled = base + has_history * correction
+             features = torch.cat([tower_context, task_target, pooled], dim=-1)

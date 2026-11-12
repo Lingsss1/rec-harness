@@ -1,0 +1,197 @@
+--- g0-r0014-curvature_task/model.py
++++ g0-r0016-duplicate_match/model.py
+@@ -1,10 +1,8 @@
+-"""Prospective orthogonal coarse-curvature information replacement study.
+-
+-Preserve the incumbent match, local-ordinal and coarse-linear summaries.
+-A fourth channel exposes a centered quadratic block-rank/value moment,
+-a duplicate linear moment, or a scrambled-order residual. All cells build
+-all coefficient systems with identical support and matched coefficient norm.
+-Only released masked ordinals are used; no elapsed times or labels enter.
+-No measured improvement or original-method priority is asserted.
++"""Prospective target-match by block-order interaction replacement study.
++
++Keep all four incumbent summaries and append one residualized joint moment.
++Ordered/scrambled interactions and two duplicate directions share support,
++coefficient norm, allocation and contraction shape. Ordinals are released
++array positions, not elapsed time. Performance and novelty remain unverified.
+ """
+ import torch
+@@ -15,9 +13,9 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match'}
+ 
+ 
+ class Model(MultiTaskModel):
+-    def __init__(self, feature_map, model_id='OrthogonalCoarseCurvature', gpu=-1,
++    def __init__(self, feature_map, model_id='TargetMatchOrderMoment', gpu=-1,
+                  embedding_dim=16, attention_hidden_units=(64, 32),
+                  tower_hidden_units=(128, 64), attention_normalization='none',
+@@ -26,5 +24,5 @@
+                  residual_input='match_detail', residual_routing='task', residual_hidden=16,
+                  temporal_detail='position', block_detail='ordinal',
+-                 curvature_detail='quadratic',
++                 curvature_detail='quadratic', joint_detail='duplicate_match',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -54,6 +52,8 @@
+         if block_detail != 'ordinal':
+             raise ValueError('The incumbent coarse-linear summary is frozen')
+-        if curvature_detail not in ('quadratic', 'duplicate', 'scrambled'):
+-            raise ValueError('Unknown fourth-summary replacement')
++        if curvature_detail != 'quadratic':
++            raise ValueError('The incumbent quadratic fourth summary is frozen')
++        if joint_detail not in ('ordered', 'scrambled', 'duplicate_match', 'duplicate_curvature'):
++            raise ValueError('Unknown fifth-summary replacement')
+         if residual_routing != 'task':
+             raise ValueError('This replacement study freezes task-specific routing')
+@@ -67,4 +67,5 @@
+         self.block_detail = block_detail
+         self.curvature_detail = curvature_detail
++        self.joint_detail = joint_detail
+         self.embedding_layer = FeatureEmbeddingDict(feature_map, embedding_dim)
+         self.item_fields = [name for name, spec in feature_map.features.items()
+@@ -119,5 +120,5 @@
+         with torch.random.fork_rng(devices=[]):
+             self.residual_bank = nn.ModuleList([
+-                nn.Sequential(nn.Linear(input_width + len(self.match_fields) + 4 * self.value_width,
++                nn.Sequential(nn.Linear(input_width + len(self.match_fields) + 5 * self.value_width,
+                                         residual_hidden), nn.ReLU(),
+                               nn.Linear(residual_hidden, self.value_width))
+@@ -159,10 +160,10 @@
+         values = torch.cat([keys, item_emb[self.action_field][:, :-1]], dim=-1)
+         context = torch.cat([user_emb[name] for name in self.user_fields], dim=-1)
+-        detail, position_detail, block_detail, curvature_detail, match_counts = self._target_match_summary(
++        detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts = self._target_match_summary(
+             item, values, mask)
+-        return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, match_counts
++        return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts
+ 
+     def _target_match_summary(self, item, values, mask):
+-        """Four masked value summaries; only the fourth varies across cells.
++        """Five masked value summaries; only the fifth varies across cells.
+ 
+         Quadratic/scrambled coefficients are orthogonal to valid constants
+@@ -241,13 +242,82 @@
+         else:
+             fourth = duplicate
++        fifth = self._joint_coefficients(
++            centered, centered_position, fourth, valid, counts,
++            block_rank, scrambled_rank)
+         coefficients = torch.stack(
+-            (centered, centered_position, block_coefficients, fourth), dim=-2)
++            (centered, centered_position, block_coefficients, fourth, fifth), dim=-2)
+         summaries = torch.bmm(
+-            coefficients.to(values.dtype).reshape(batch * 10, 4, 10),
++            coefficients.to(values.dtype).reshape(batch * 10, 5, 10),
+             values.reshape(batch * 10, 10, width))
+-        summaries = summaries.reshape(batch, 10, 4, width).sum(dim=1)
++        summaries = summaries.reshape(batch, 10, 5, width).sum(dim=1)
+         summaries = summaries / total.sqrt().unsqueeze(-1).to(summaries.dtype)
+         return (summaries[:, 0, :], summaries[:, 1, :], summaries[:, 2, :],
+-                summaries[:, 3, :], match_counts)
++                summaries[:, 3, :], summaries[:, 4, :], match_counts)
++
++    def _joint_coefficients(self, affinity, position, fourth, valid, counts,
++                            rank, scrambled_rank):
++        """Explicit match/order cross-moment beyond the marginal coefficients.
++
++        All basis construction is FP32 and independent of learned values.
++        Within-block centering gives orthogonality to every block-constant
++        coefficient, including the inherited linear and quadratic moments.
++        Two projection sweeps reduce finite-precision leakage into the
++        remaining local-ordinal and target-match directions. The common
++        support gate is shared even by duplicates; it can itself carry new
++        availability information, so duplicates isolate direction beyond it.
++        """
++        position_norm2 = position.square().sum(dim=(1, 2), keepdim=True)
++        match_norm2 = affinity.square().sum(dim=(1, 2), keepdim=True)
++        fourth_norm2 = fourth.square().sum(dim=(1, 2), keepdim=True)
++        # Orthogonalize affinity against position first. A zero basis is
++        # harmless; no inverse of a near-singular two-by-two matrix is used.
++        basis = affinity
++        for _ in range(2):
++            slope = ((basis * position).sum(dim=(1, 2), keepdim=True)
++                     / position_norm2.clamp_min(1e-10))
++            basis = valid * (basis - slope * position)
++            basis = valid * (basis - basis.sum(dim=-1, keepdim=True)
++                             / counts.clamp_min(1))
++        basis_norm2 = basis.square().sum(dim=(1, 2), keepdim=True)
++        basis = basis * (basis_norm2 > 1e-10).to(valid.dtype)
++        basis_norm2 = basis.square().sum(dim=(1, 2), keepdim=True)
++
++        ordered = self._joint_residual(
++            affinity * rank, position, position_norm2,
++            basis, basis_norm2, valid, counts)
++        scrambled = self._joint_residual(
++            affinity * scrambled_rank, position, position_norm2,
++            basis, basis_norm2, valid, counts)
++        ordered_norm2 = ordered.square().sum(dim=(1, 2), keepdim=True)
++        scrambled_norm2 = scrambled.square().sum(dim=(1, 2), keepdim=True)
++        support = ((ordered_norm2 > 1e-10) & (scrambled_norm2 > 1e-10)
++                   & (position_norm2 > 1e-10) & (match_norm2 > 1e-10)
++                   & (fourth_norm2 > 1e-10)).to(valid.dtype)
++        ordered = ordered * (position_norm2 / ordered_norm2.clamp_min(1e-10)).sqrt() * support
++        scrambled = scrambled * (position_norm2 / scrambled_norm2.clamp_min(1e-10)).sqrt() * support
++        duplicate_match = affinity * (position_norm2 / match_norm2.clamp_min(1e-10)).sqrt() * support
++        duplicate_curvature = fourth * (position_norm2 / fourth_norm2.clamp_min(1e-10)).sqrt() * support
++        if self.joint_detail == 'ordered':
++            return ordered
++        if self.joint_detail == 'scrambled':
++            return scrambled
++        if self.joint_detail == 'duplicate_match':
++            return duplicate_match
++        return duplicate_curvature
++
++    @staticmethod
++    def _joint_residual(raw, position, position_norm2, basis, basis_norm2, valid, counts):
++        residual = valid * (raw - (raw * valid).sum(dim=-1, keepdim=True)
++                            / counts.clamp_min(1))
++        for _ in range(2):
++            slope = ((residual * position).sum(dim=(1, 2), keepdim=True)
++                     / position_norm2.clamp_min(1e-10))
++            residual = valid * (residual - slope * position)
++            slope = ((residual * basis).sum(dim=(1, 2), keepdim=True)
++                     / basis_norm2.clamp_min(1e-10))
++            residual = valid * (residual - slope * basis)
++            residual = valid * (residual - residual.sum(dim=-1, keepdim=True)
++                                / counts.clamp_min(1))
++        return residual
+ 
+     @staticmethod
+@@ -310,5 +380,5 @@
+ 
+     def forward(self, inputs):
+-        context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, match_counts = self._represent(inputs)
++        context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts = self._represent(inputs)
+         values, counts = self._compress_both(values, mask, auxiliary)
+         # Both scorer calls include all 30 slots: BatchNorm sees the identical
+@@ -330,4 +400,5 @@
+             aux_block_detail = block_detail.detach() if self.block_aux_item_grad else block_detail
+             aux_curvature_detail = curvature_detail.detach() if self.block_aux_item_grad else curvature_detail
++            aux_joint_detail = joint_detail.detach() if self.block_aux_item_grad else joint_detail
+             aux_weights = self._auxiliary_activation(self._interactions(aux_target, aux_values))
+             aux_strata = self._pool(aux_weights, aux_values, counts)
+@@ -340,4 +411,5 @@
+             aux_block_detail = block_detail
+             aux_curvature_detail = curvature_detail
++            aux_joint_detail = joint_detail
+             aux_strata = primary_strata
+         feedback = aux_strata[:, 1, :] + aux_strata[:, 2, :]
+@@ -353,4 +425,5 @@
+                 task_block_detail = block_detail
+                 task_curvature_detail = curvature_detail
++                task_joint_detail = joint_detail
+             else:
+                 task_context, task_target, base = aux_context, aux_target, feedback
+@@ -359,6 +432,7 @@
+                 task_block_detail = aux_block_detail
+                 task_curvature_detail = aux_curvature_detail
++                task_joint_detail = aux_joint_detail
+             signal = torch.cat([task_detail, task_position_detail, task_block_detail,
+-                                task_curvature_detail], dim=-1)
++                                task_curvature_detail, task_joint_detail], dim=-1)
+             residual_features = torch.cat([task_context, task_target, base,
+                                            match_counts.to(base.dtype), signal], dim=-1)

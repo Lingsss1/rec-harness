@@ -1,0 +1,35 @@
+{
+  "category_edits": [
+    {
+      "category": "feature_construction",
+      "rationale": "Test whether a mild positive training-frequency signal improves recurrent history inputs across all four datasets. Scale observed items by 1 + 0.1*clip(log1p(count)-median_positive_log_count, -2, 2), use 1 for unseen items and 0 for padding. Preserve learned embeddings, GRU topology, readout, candidate scoring, loss and optimizer. Checkpoint the fixed feature and restore it during prediction.",
+      "edits": [
+        {
+          "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+          "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+        },
+        {
+          "find": "        self.hidden_units = hidden_units\n        self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)",
+          "replace": "        self.hidden_units = hidden_units\n        self.register_buffer(\"history_scale\", torch.ones(itemnum + 1))\n        self.history_scale[0] = 0.0\n        self.item_emb = UnitNormItemEmbedding(itemnum + 1, hidden_units, padding_idx=0)"
+        },
+        {
+          "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))",
+          "replace": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq) * self.history_scale[seq].unsqueeze(-1))"
+        },
+        {
+          "find": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))",
+          "replace": "    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq) * self.history_scale[seq].unsqueeze(-1))"
+        },
+        {
+          "find": "    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)",
+          "replace": "    counts = np.zeros(itemnum + 1, dtype=np.float64)\n    for history in user_train.values():\n        np.add.at(counts, np.asarray(history, dtype=np.int64), 1.0)\n    counts[0] = 0.0\n    observed = counts > 0\n    history_scale = np.ones(itemnum + 1, dtype=np.float32)\n    if observed.any():\n        positive_log_counts = np.log1p(counts[observed])\n        center = np.median(positive_log_counts)\n        history_scale[observed] = 1.0 + 0.1 * np.clip(positive_log_counts - center, -2.0, 2.0)\n    history_scale[0] = 0.0\n    with torch.no_grad():\n        model.history_scale.copy_(torch.from_numpy(history_scale).to(device))\n    optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)"
+        },
+        {
+          "find": "        model.load_state_dict(torch.load(ckpt_path, map_location=_device, weights_only=True))",
+          "replace": "        state = torch.load(ckpt_path, map_location=_device, weights_only=True)\n        if \"history_scale\" not in state or state[\"history_scale\"].shape != model.history_scale.shape:\n            raise RuntimeError(f\"Missing or incompatible history-frequency feature for {ds}\")\n        model.load_state_dict(state)"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Add fixed training-frequency scaling to history inputs in each category’s single GRU4Rec model, with checkpointed features and matching predictor loading. Preserve training limits, routing and existing model training behavior."
+}

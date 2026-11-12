@@ -1,0 +1,26 @@
+{
+  "passed": true,
+  "idea": {
+    "description": "SASRec uses self-attention to select relevant interactions from a user's history and predict the next item, combining short-range patterns with longer-term preferences. Source: [Self-Attentive Sequential Recommendation](https://arxiv.org/abs/1808.09781). Concrete proposed improvement: retain the per-category SASRec architecture and replace binary positive/negative training with cross-entropy over one positive and 128 unique uniformly sampled negatives at each supervised position.",
+    "motivation": "Candidate ranking requires the positive item to outrank competing items. A multi-negative cross-entropy objective trains that competition directly and exposes each sequence representation to more alternatives per update. Better macro validation HR@10 is a hypothesis to test; no improvement has been measured.",
+    "implementation_notes": "Start from sasrec_perdataset and retain Movies_and_TV, Industrial_and_Scientific, Electronics, and CDs_and_Vinyl with their existing routing. Keep preprocessing seed 0, training seed 42, DATA_DIR=os.environ['GAGC_DATA_DIR'], and the SASREC_EPOCHS environment default of 200. Sample negatives only from the current category's training vocabulary, excluding padding, the target, and items in that example's observed prefix; never consult validation or test interactions for sampling. Use raw tied-embedding dot products and ordinary cross-entropy without sampling correction, since this proposal optimizes sampled candidate discrimination rather than estimating full-catalog likelihood. Chunk supervised positions to control GPU memory, normalizing the accumulated loss by the total number of valid positions. Initially change only the objective; compare against the baseline using the pinned macro validation HR@10 and retain the winning checkpoint. All runs count against the shared 43,200 GPU-second budget. Save configuration and weights beneath the trial directory. The predictor writer must reproduce the selected model and category routing. Preserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions; its loader adapter may ignore supplied single negatives while retaining the required tuple contract. Architecture and scoring remain compatible with view.model, item_emb, log2feats, and predict_score.",
+    "pseudocode": "for category in categories:\n    model = build_baseline_sasrec(category)\n    for epoch in range(int(os.getenv('SASREC_EPOCHS', '200'))):\n        for _, sequence, positive, negative in train_loader:\n            features = model.log2feats(sequence)\n            valid = positive.ne(0)\n            optimizer.zero_grad()\n            total_positions = valid.sum()\n            for chunk in chunk_valid_positions(features, positive, valid):\n                negatives = sample_unique_uniform_items(\n                    count=128,\n                    vocabulary=category_training_vocabulary,\n                    exclude=chunk.observed_prefix_and_target\n                )\n                candidates = concatenate(chunk.positive[:, None], negatives)\n                logits = dot(chunk.features[:, None, :], model.item_emb(candidates))\n                loss = cross_entropy(logits, zeros(len(chunk)), reduction='sum')\n                (loss / total_positions).backward(retain_graph=chunk.has_successor)\n            optimizer.step()\n        evaluate_with_pinned_validation_protocol()\n        save_checkpoint_if_selection_score_improves()\nwrite_predictor_for_selected_checkpoints_and_category_routing()",
+    "originality": {
+      "score": 3,
+      "positive": "A specific, controlled objective change with a clear connection to candidate ranking.",
+      "negative": "Multi-negative cross-entropy is an established technique; this is an engineering hypothesis rather than a novel research contribution."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Can strengthen training signals without changing inference cost or requiring additional data.",
+      "negative": "Benefits remain unverified; more negatives increase training cost and may include unobserved relevant items."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Most changes are confined to negative sampling and loss computation.",
+      "negative": "Efficient unique sampling, prefix exclusions, and memory-safe gradient accumulation require care. Scores use a 1–10 scale, with higher difficulty meaning harder implementation."
+    }
+  },
+  "model": "gpt-6.1-sol",
+  "effort": "medium"
+}

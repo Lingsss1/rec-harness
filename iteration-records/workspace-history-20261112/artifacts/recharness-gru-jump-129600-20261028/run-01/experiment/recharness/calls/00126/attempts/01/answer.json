@@ -1,0 +1,23 @@
+{
+  "category_edits": [
+    {
+      "category": "network_architecture",
+      "rationale": "Normalize reset, update and candidate gate preactivations separately to stabilize recurrent gate scales while preserving GRU width, depth, embeddings, pooling, scoring, loss and optimizer. The scripted recurrence retains PyTorch GRU gate equations. The existing predictor writer dynamically imports the updated model class, ensuring identical checkpoint reconstruction for each category.",
+      "edits": [
+        {
+          "find": "class GRU4RecModel(nn.Module):",
+          "replace": "@torch.jit.script\ndef _normalized_gru_sequence(\n    projected: torch.Tensor,\n    hidden: torch.Tensor,\n    recurrent_weight: torch.Tensor,\n    recurrent_bias: torch.Tensor,\n    reset_weight: torch.Tensor,\n    reset_bias: torch.Tensor,\n    update_weight: torch.Tensor,\n    update_bias: torch.Tensor,\n    candidate_weight: torch.Tensor,\n    candidate_bias: torch.Tensor,\n) -> tuple[torch.Tensor, torch.Tensor]:\n    outputs = torch.jit.annotate(list[torch.Tensor], [])\n    width = hidden.size(1)\n    for timestep in range(projected.size(1)):\n        input_reset, input_update, input_candidate = projected[:, timestep].chunk(3, dim=-1)\n        hidden_reset, hidden_update, hidden_candidate = torch.nn.functional.linear(\n            hidden, recurrent_weight, recurrent_bias\n        ).chunk(3, dim=-1)\n        reset = torch.sigmoid(torch.nn.functional.layer_norm(\n            input_reset + hidden_reset, [width], reset_weight, reset_bias, 1e-5\n        ))\n        update = torch.sigmoid(torch.nn.functional.layer_norm(\n            input_update + hidden_update, [width], update_weight, update_bias, 1e-5\n        ))\n        candidate = torch.tanh(torch.nn.functional.layer_norm(\n            input_candidate + reset * hidden_candidate,\n            [width], candidate_weight, candidate_bias, 1e-5\n        ))\n        hidden = (1.0 - update) * candidate + update * hidden\n        outputs.append(hidden)\n    return torch.stack(outputs, dim=1), hidden\n\n\nclass LayerNormGRU(nn.GRU):\n    def __init__(self, *args, **kwargs):\n        super().__init__(*args, **kwargs)\n        self.gate_norms = nn.ModuleList([\n            nn.ModuleList([nn.LayerNorm(self.hidden_size) for _ in range(3)])\n            for _ in range(self.num_layers)\n        ])\n\n    def forward(self, input: torch.Tensor, hx: torch.Tensor | None = None):\n        layer_input = input if self.batch_first else input.transpose(0, 1)\n        if hx is None:\n            hx = layer_input.new_zeros(\n                self.num_layers, layer_input.size(0), self.hidden_size\n            )\n        final_states = []\n        for layer, norms in enumerate(self.gate_norms):\n            projected = torch.nn.functional.linear(\n                layer_input,\n                getattr(self, f'weight_ih_l{layer}'),\n                getattr(self, f'bias_ih_l{layer}'),\n            )\n            layer_input, final_hidden = _normalized_gru_sequence(\n                projected, hx[layer],\n                getattr(self, f'weight_hh_l{layer}'),\n                getattr(self, f'bias_hh_l{layer}'),\n                norms[0].weight, norms[0].bias,\n                norms[1].weight, norms[1].bias,\n                norms[2].weight, norms[2].bias,\n            )\n            final_states.append(final_hidden)\n            if layer + 1 < self.num_layers and self.dropout > 0.0:\n                layer_input = torch.nn.functional.dropout(\n                    layer_input, p=self.dropout, training=self.training\n                )\n        output = layer_input if self.batch_first else layer_input.transpose(0, 1)\n        return output, torch.stack(final_states, dim=0)\n\n\nclass GRU4RecModel(nn.Module):"
+        },
+        {
+          "find": "self.gru = nn.GRU(hidden_units, hidden_units, num_layers=num_layers,\n                          batch_first=True, dropout=dropout)",
+          "replace": "self.gru = LayerNormGRU(hidden_units, hidden_units, num_layers=num_layers,\n                               batch_first=True, dropout=dropout)"
+        },
+        {
+          "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+          "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Add separate layer normalization to all three GRU gate preactivations. Preserve the existing single-model category routing and predictor reconstruction, with no changes to training settings or readout."
+}

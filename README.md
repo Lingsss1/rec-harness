@@ -226,3 +226,13 @@ bash scripts/validate-core.sh
 This project is released under the [MIT License](LICENSE).
 
 `benchmarks/kuairand-longseq/` 子项目按其 Apache-2.0 LICENSE 和 NOTICE 发布；该子项目的上游归属说明随源码保留。
+
+## 推荐系统研究工作区（2026-11-12 快照）
+
+当前源码、训练和评测入口见 [experiments/](experiments/)，运行器与任务定义见 [rec_harness/](rec_harness/) 和 [task_designs/](task_designs/)。
+
+- [最新完成的 UniRank 泛化与 KuaiRand 对照](iteration-records/unirank-results-20261110-12/README.md)
+- [全部历史文本记录与来源校验](iteration-records/workspace-history-20261112/README.md)
+- [原始迭代记录索引](iteration-records/README.md)
+
+本仓库快照不包含数据集、模型权重、虚拟环境或便携运行时；数据来源、固定版本和下载脚本保留，需在本地另行获取并重建路径。历史绝对路径作为来源证据保留。UniRank 与 benchmark_res 是保留许可证和版本来源的源码快照，不是 Git 子模块。

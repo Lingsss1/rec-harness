@@ -35,8 +35,9 @@ def bootstrap(values):
 def trajectory_summary(state, task, directory):
     records = state["records"]
     curve = [normalized(r["best_metric"], task["baseline_validation"], task) for r in records]
+    budget = state.get("trial_budget", 100)
     final = curve[-1] if curve else 0
-    late = (final - curve[49]) / final if len(curve) == 100 and final > 0 else None
+    late = (final - curve[budget // 2 - 1]) / final if len(curve) == budget and final > 0 else None
     seen, duplicates, optimization_count = set(), 0, 0
     for record in records:
         # Deliberate confirmation is not accidental search redundancy.
@@ -75,14 +76,14 @@ def trajectory_summary(state, task, directory):
                 usage[key] += value
     result = state.get("test") or {}
     metric = result.get("metric") if result.get("status") == "completed" else None
-    complete = len(records) == 100 and state["status"] == "completed" and metric is not None
+    complete = len(records) == budget and state["status"] == "completed" and metric is not None
     elapsed = None
     if state.get("completed_at"):
         elapsed = (dt.datetime.fromisoformat(state["completed_at"]) - dt.datetime.fromisoformat(state["created_at"])).total_seconds()
     return {"task": state["task"], "arm": state["arm"], "replicate": state["replicate"],
             "complete": complete, "status": state["status"], "trials": len(records),
             "test_metric": metric, "normalized_test_improvement": normalized(metric, task["baseline_test"], task),
-            "validation_auc": mean(curve) if len(curve) == 100 else None,
+            "validation_auc": mean(curve) if len(curve) == budget else None,
             "late_gain_fraction": late,
             "invalid_trial_fraction": mean([not r["valid"] for r in records]),
             "exact_repeat_fraction": duplicates / optimization_count if optimization_count else None,
@@ -139,10 +140,10 @@ def report(root, registration, output):
         selected = [r for r in rows if r["arm"] == arm]
         complete = all(r["complete"] for r in selected)
         aggregates.append({"arm": arm, "completed": sum(r["complete"] for r in selected),
-                           "expected": 15, "macro_normalized_test_improvement":
+                           "expected": len(selected), "macro_normalized_test_improvement":
                            mean([r["normalized_test_improvement"] for r in selected]) if complete else None})
     output.mkdir(parents=True, exist_ok=True)
-    summary = {"registration_id": registration["registration_id"], "expected_trajectories": 60,
+    summary = {"registration_id": registration["registration_id"], "expected_trajectories": len(rows),
                "completed_trajectories": sum(r["complete"] for r in rows), "trajectories": rows,
                "comparisons": comparisons, "aggregates": aggregates,
                "limitations": ["Five repetitions give imprecise exploratory bootstrap intervals.",
@@ -160,7 +161,7 @@ def report(root, registration, output):
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         writer.writerows(curves)
-    text = ["# Staged autoresearch results", "", "Completed: %d / 60. Missing and failed cells remain in summary.json." % summary["completed_trajectories"], "",
+    text = ["# Staged autoresearch results", "", "Completed: %d / %d. Missing and failed cells remain in summary.json." % (summary["completed_trajectories"], len(rows)), "",
             "| Task | Contrast | Complete pairs | Mean raw improvement |", "|---|---|---:|---:|"]
     for item in comparisons:
         value = item["mean_raw_improvement"]

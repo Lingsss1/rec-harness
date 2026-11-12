@@ -1,0 +1,139 @@
+--- g0-r0069-buy_summary_direction/model.py
++++ g0-r0078-typed_aligned/model.py
+@@ -1,13 +1,12 @@
+-"""Prospective cart/favorite versus buy summary-gradient factorial.
+-
+-The click summary VJP remains native. Independently choose native or
+-norm-restored mean-removed summary VJPs for cart/favorite and buy. Inherit
+-r0068's product forward, live RMS Jacobian, native query VJP, all learned
+-modules and frozen information/gradient ownership. No new learned state,
+-loss reweighting, optimizer change or current-label routing is introduced.
+-Auxiliary summary inputs remain detached: changed task-specific history
+-projection updates can affect shared context only through later learning
+-and global dense clipping. First-order surrogate; no higher-order claim.
+-Host tensor/autograd/BF16 checks and all new outcomes remain unmeasured.
++"""Prospective task-conditioned feedback/value covariance replacement.
++
++At unchanged learned capacity, replace only the fifth detail with normalized
++within-block centered historical-feedback/value covariance. Cross task-specific
++versus all-task-union masks with aligned versus half-valid-rank rotated event
++membership. All four alternatives execute in every cell. Inherit every learned
++module, initialization, source-gradient gate, Dice population and buy-summary
++VJP. Historical masks are authorized inputs, never current labels. Coefficient
++norm matching does not match summary norms, parameter gradients or compute.
++No local tensor/training/performance/novelty claim; host execution required.
+ """
+ import torch
+@@ -18,5 +17,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'primary_summary_vjp': 'native', 'cartfav_summary_vjp': 'native', 'buy_summary_vjp': 'removed_restored'}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False, 'context_fusion': 'product', 'interaction_rank': 16, 'summary_placement': 'block', 'primary_summary_vjp': 'native', 'cartfav_summary_vjp': 'native', 'buy_summary_vjp': 'removed_restored', 'feedback_detail_scope': 'task', 'feedback_detail_alignment': 'aligned'}
+ 
+ 
+@@ -100,4 +99,6 @@
+                  primary_summary_vjp='native',
+                  cartfav_summary_vjp='native', buy_summary_vjp='removed_restored',
++                 feedback_detail_scope='task',
++                 feedback_detail_alignment='aligned',
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -144,4 +145,10 @@
+         if interaction_rank < 2:
+             raise ValueError('Summary direction study needs rank >= 2')
++        if feedback_detail_scope not in ('task', 'union'):
++            raise ValueError('Unknown feedback-detail scope')
++        if feedback_detail_alignment not in ('aligned', 'rotated'):
++            raise ValueError('Unknown feedback-detail alignment')
++        self.feedback_detail_scope = feedback_detail_scope
++        self.feedback_detail_alignment = feedback_detail_alignment
+         self.primary_summary_vjp = primary_summary_vjp
+         self.cartfav_summary_vjp = cartfav_summary_vjp
+@@ -335,5 +342,68 @@
+         detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._target_match_summary(
+             item, values, mask)
+-        return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union
++        feedback_details = self._feedback_detail_bank(values, mask, task_masks)
++        return context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union, feedback_details
++
++    def _feedback_detail_bank(self, values, mask, task_masks):
++        """One value-width centered feedback summary per prediction task.
++
++        Binary masks can overlap (multi-action history tokens). Each is
++        intersected with validity BEFORE centering or valid-rank rotation.
++        Coefficients have zero sum within each 10-event block and match the
++        whole-history local-position coefficient norm when nondegenerate.
++        Rotation preserves block counts and coefficient norms, not the
++        resulting value-summary norm. All four factorial banks execute in
++        every cell without new learned state, randomness or input access.
++        """
++        batch, length, width = values.shape
++        if length != 100 or len(task_masks) != self.num_tasks:
++            raise ValueError('Frozen history/task schema mismatch')
++        for task_mask in task_masks:
++            if task_mask.shape != mask.shape:
++                raise ValueError('Historical task mask shape mismatch')
++        valid = mask.bool().reshape(batch, 1, 10, 10)
++        typed = torch.stack([m > 0 for m in task_masks], dim=1)
++        typed = typed.reshape(batch, self.num_tasks, 10, 10) & valid
++        union = typed.any(dim=1, keepdim=True)
++        membership = torch.cat([typed, union], dim=1)
++        expanded_valid = valid.expand_as(membership)
++        rotated = self._rotate_valid_membership(membership, expanded_valid)
++        valid_float = valid.to(torch.float32)
++        counts = valid_float.sum(dim=-1, keepdim=True)
++        position = torch.arange(10, device=values.device,
++                                dtype=torch.float32).view(1, 1, 1, 10) / 9.0
++        position_mean = (position * valid_float).sum(
++            dim=-1, keepdim=True) / counts.clamp_min(1.0)
++        position_coefficients = valid_float * (position - position_mean)
++        target_norm2 = position_coefficients.square().sum(
++            dim=(-2, -1), keepdim=True)
++        aligned_coefficients = self._center_feedback_coefficients(
++            membership, valid_float, counts, target_norm2)
++        rotated_coefficients = self._center_feedback_coefficients(
++            rotated, valid_float, counts, target_norm2)
++        # An explicit mask makes finite padding-value perturbations inert.
++        safe_values = torch.where(mask.bool().unsqueeze(-1), values,
++                                  torch.zeros_like(values))
++        aligned_details = torch.bmm(aligned_coefficients.to(values.dtype).reshape(
++            batch, self.num_tasks + 1, length), safe_values)
++        rotated_details = torch.bmm(rotated_coefficients.to(values.dtype).reshape(
++            batch, self.num_tasks + 1, length), safe_values)
++        total = counts.sum(dim=-2).clamp_min(1.0).sqrt().to(aligned_details.dtype)
++        aligned_details = aligned_details / total
++        rotated_details = rotated_details / total
++        selected = (aligned_details if self.feedback_detail_alignment == 'aligned'
++                    else rotated_details)
++        if self.feedback_detail_scope == 'task':
++            return selected[:, :self.num_tasks, :]
++        return selected[:, self.num_tasks:, :].expand(-1, self.num_tasks, -1)
++
++    @staticmethod
++    def _center_feedback_coefficients(membership, valid, counts, target_norm2):
++        binary = membership.to(torch.float32)
++        fraction = binary.sum(dim=-1, keepdim=True) / counts.clamp_min(1.0)
++        centered = binary - valid * fraction
++        norm2 = centered.square().sum(dim=(-2, -1), keepdim=True)
++        scale = (target_norm2 / norm2.clamp_min(1e-12)).sqrt()
++        return centered * scale * (norm2 > 1e-10).to(centered.dtype)
+ 
+     def _target_match_summary(self, item, values, mask):
+@@ -807,5 +877,5 @@
+ 
+     def forward(self, inputs):
+-        context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._represent(inputs)
++        context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union, feedback_details = self._represent(inputs)
+         batch = values.shape[0]
+         if (self.training and self.training_support == 'full') or self.inference_support == 'full':
+@@ -943,4 +1013,10 @@
+                 task_curvature_detail = aux_curvature_detail
+                 task_joint_detail = aux_joint_detail
++            # The only representation replacement: both the residual MLP
++            # and low-rank context/history product receive this fifth detail.
++            # Reuse inherited auxiliary item/action gradient ownership.
++            task_joint_detail = feedback_details[:, index, :]
++            if self.training and label != 'is_click' and self.block_aux_item_grad:
++                task_joint_detail = task_joint_detail.detach()
+             # Keep the two uses numerically identical. Detach only the
+             # selected context edge; every auxiliary adapter/tower parameter

@@ -1,0 +1,110 @@
+"""Single-entry tool/Harness candidate lifecycle over independently supplied validators."""
+from pathlib import Path
+from .core import ContractError,digest,identifier,read_json,write_json
+from .evolution import Evolution,STAGES
+from .jailed_agent import JailedCodexAgent
+
+
+class AutonomousEvolution:
+    @staticmethod
+    def init(root,configuration,*,_freeze_tool_method=True):
+        root=Path(root).resolve()
+        if root.exists() and any(root.iterdir()):raise ContractError('evolution campaign directory must be empty')
+        config=dict(configuration);identifier(config['candidate_id'])
+        if config['kind'] not in STAGES:raise ContractError('tool or harness evolution required')
+        if 'tool_history_sources' in config and config['kind']!='tool':raise ContractError('tool history requires a tool candidate')
+        if 'trace_source' in config and 'trace_sources' in config:raise ContractError('supply trace_source or trace_sources, not both')
+        if 'trace_source' in config or 'trace_sources' in config:
+            from .decision_traces import collect_traces,collect_trace_set,source_task_ids
+            if config['kind']!='harness' or config.get('context') or 'measurement_source' in config:raise ContractError('trace trigger requires a Harness candidate without overriding context')
+            if 'trace_sources' in config:config['context']=collect_trace_set(config.pop('trace_sources'))
+            else:
+                source=config.pop('trace_source')
+                config['context']=collect_traces(source['campaign'],roles=source.get('roles'),cutoff_seq=source.get('cutoff_seq'))
+            if not source_task_ids(config['context']).issubset(config['plan']['development_ids']):
+                raise ContractError('Harness validation must exclude every trace source development task')
+        if 'measurement_source' in config:
+            from .measurement_gaps import evolution_context
+            if config['kind']!='tool' or config.get('context'):raise ContractError('measurement trigger requires a tool candidate without an overriding context')
+            source=config.pop('measurement_source')
+            config['context']=evolution_context(source['campaign'],source['gap_id'])
+            ids=set(config['plan']['development_ids'])
+            if not set(config['context']['measurement_gap']['experiment_refs']).issubset(ids):
+                raise ContractError('tool validation must exclude the measurement trigger development experiments')
+        if 'optimizer_measurement_source' in config:
+            from .optimizer_handoff import load_context
+            if config['kind']!='tool' or config.get('context'):raise ContractError('optimizer handoff requires a tool without overriding context')
+            config['context']=load_context(config.pop('optimizer_measurement_source'))
+            from .decision_traces import source_task_ids
+            if not source_task_ids(config['context']).issubset(config['plan']['development_ids']):
+                raise ContractError('tool validation must exclude every optimizer source task')
+        if config['kind']=='tool':
+            if _freeze_tool_method:
+                from .tool_method import freeze_plan
+                config['plan']=freeze_plan(config['plan'])
+            if 'tool_history' in config.get('context',{}) and 'tool_history_sources' not in config:
+                raise ContractError('tool history must be frozen from committed sources')
+            if 'tool_history_sources' in config:
+                from .tool_history import collect
+                context=config.get('context',{})
+                if 'tool_history' in context:raise ContractError('tool history must be frozen from committed sources')
+                history,excluded=collect(config.pop('tool_history_sources'))
+                config['context']={**context,'tool_history':history}
+                config['plan']={**config['plan'],'development_ids':sorted(set(config['plan']['development_ids'])|set(excluded))}
+                from .validation_preflight import preflight
+                preflight(config['plan'])
+            from .agents import search_policy
+            backend=dict(config.get('agent_backend',{}));configured=backend.get('web_search')
+            modes=search_policy(configured)
+            if configured is None or isinstance(configured,dict) and 'tool' not in configured:modes['tool']='live'
+            config['agent_backend']={**backend,'web_search':modes}
+            from .diagnostics import CONTRACTS,runtime_contract
+            if config['plan'].get('tool_contract') in CONTRACTS:
+                context=config.get('context',{});contract=runtime_contract(config['plan']['tool_contract'])
+                if 'diagnostic_contract' in context and context['diagnostic_contract']!=contract:
+                    raise ContractError('diagnostic authoring contract differs from runtime')
+                config['context']={**context,'diagnostic_contract':contract}
+        root.mkdir(parents=True,exist_ok=True);evolution=Evolution(root)
+        try:
+            if 'source' in config:
+                config['source_snapshot']=evolution.artifacts.snapshot(config.pop('source'),config.pop('model_files'))
+            if config.get('tool_predecessor'):
+                if config['kind']!='tool' or digest(config.get('source_snapshot'))!=config['tool_predecessor']['implementation_hash']:
+                    raise ContractError('tool predecessor differs from inherited implementation')
+                config['context']={**config['context'],'tool_predecessor':config['tool_predecessor']}
+            if 'harness_base_policy' in config:
+                from .evolution import validate_policy
+                if config['kind']!='harness':raise ContractError('base policy requires Harness evolution')
+                validate_policy(config['harness_base_policy'])
+                config['context']={**config['context'],'base_policy':config['harness_base_policy'],
+                    'patch_semantics':'Apply patch_diff to base_policy: replace supplied top-level fields, merge supplied prompt roles, preserve omitted fields. Validators evaluate the complete resulting policy.'}
+            if 'optimizer_handoff_budget' in config:
+                from .optimizer_handoff import request
+                from .agents import schema_for
+                if config['kind']!='harness':raise ContractError('optimizer routing requires Harness evolution')
+                config['context']['measurement_handoff_request']=request(config['context'],config['optimizer_handoff_budget'])
+                config['context']['optimizer_payload_schemas']={'harness_patch':schema_for('optimizer'),'measurement_gap':schema_for('measurement')}
+            if config['kind']=='harness' and config.setdefault('compact_optimizer_traces',True):
+                from .trace_context import compact_traces,expand_traces
+                original=config['context'];config['context']=compact_traces(original)
+                if expand_traces(config['context'])!=original:raise ContractError('trace sharing changed optimizer evidence')
+            write_json(root/'evolution-auto.json',config)
+            write_json(root/'auto-lock.json',{'config_hash':digest(config)})
+            write_json(root/'state.json',{'candidate_id':config['candidate_id'],'kind':config['kind'],'status':'ready'})
+        finally:evolution.store.close()
+
+    def __init__(self,root,agent=None):
+        self.root=Path(root).resolve();self.config=read_json(self.root/'evolution-auto.json')
+        if digest(self.config)!=read_json(self.root/'auto-lock.json')['config_hash']:raise ContractError('evolution configuration changed')
+        self.evolution=Evolution(root);self.store=self.evolution.store
+        options=self.config.get('agent_backend',{})
+        self.agent=agent or JailedCodexAgent(options['template'],options['runtime_root'],
+                                            model=options.get('model'),timeout=options.get('timeout',300),web_search=options.get('web_search'),role_skills=options.get('role_skills'))
+
+    def run(self):
+        c=self.config
+        result=self.evolution.run(c['candidate_id'],c['kind'],c['context'],c['plan'],
+                                   agent=self.agent,source=c.get('source_snapshot'))
+        write_json(self.root/'run-report.json',result)
+        write_json(self.root/'state.json',result)
+        return result

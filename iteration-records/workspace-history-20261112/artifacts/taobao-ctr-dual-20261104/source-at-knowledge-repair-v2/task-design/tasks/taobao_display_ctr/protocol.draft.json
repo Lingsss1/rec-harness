@@ -1,0 +1,86 @@
+{
+  "schema": "taobao-display-ctr-protocol-design-v1",
+  "status": "draft_requires_data_audit_and_cost_calibration",
+  "frozen": false,
+  "dataset_manifest_hash": null,
+  "protocol_hash": null,
+  "sample": {
+    "unit": "one raw advertising impression row",
+    "identity": "source-file digest plus physical row offset",
+    "label": "clk",
+    "label_values": [0, 1],
+    "forbidden_input_fields": ["clk", "nonclk", "future labels", "whole-period click aggregates"],
+    "label_check": "Validate clk and, when supplied, nonclk complement consistency. Reject/count invalid labels; never invent them.",
+    "duplicate_policy": "Preserve raw rows by default. Coarse user/ad/time equality does not prove duplicate impressions; any duplicate removal policy must be justified and frozen before search.",
+    "negative_sampling": "none for primary training/evaluation population",
+    "class_rebalancing": "baseline unweighted binary cross entropy; altered objectives are explicit candidate interventions, evaluated on original prevalence"
+  },
+  "expected_tables_subject_to_schema_audit": {
+    "raw_sample": ["user", "time_stamp", "adgroup_id", "pid", "clk", "nonclk"],
+    "ad_feature": ["adgroup_id", "cate_id", "campaign_id", "customer", "brand", "price"],
+    "user_profile": ["userid", "cms_segid", "cms_group_id", "final_gender_code", "age_level", "pvalue_level", "shopping_level", "occupation", "new_user_class_level"],
+    "behavior_log": ["user", "time_stamp", "btag", "cate", "brand"]
+  },
+  "split": {
+    "basis": "advertising impression time, never random row ordering",
+    "timezone": "Asia/Shanghai",
+    "train_day_indices": [1, 2, 3, 4, 5, 6],
+    "validation_day_indices": [7],
+    "test_day_indices": [8],
+    "calendar_dates": "materialize from verified contiguous exposure dates; do not assume dates from unrelated Taobao datasets",
+    "intervals": "half-open local-day intervals; save corresponding UTC epoch boundaries",
+    "user_overlap": "allowed across chronological partitions; each impression appears exactly once",
+    "changes": "only before formal search, with recorded reasons and a new frozen version"
+  },
+  "history": {
+    "source": "behavior_log",
+    "available_fields": ["category", "brand", "behavior_type", "event_time"],
+    "behavior_types_expected": ["pv", "cart", "fav", "buy"],
+    "semantic_checks": ["pv is a page-view behavior, not the advertising clk label", "buy is an observed past purchase, not the prediction target", "there is no historical item/adgroup identifier in this behavior source"],
+    "strict_visibility": "event_time < impression_time; exclude all ties when finer ordering is unavailable",
+    "warmup": "Use supplied pre-exposure behavior logs, including days before the first training day.",
+    "online_validation_and_test": "Earlier behavior-log events may update forward-pass history; no held-out clk labels update weights or target statistics.",
+    "deduplication": "Do not collapse category/brand/type/time coincidences into one event; missing item identity can conceal distinct real events.",
+    "derived_identity": "Category-brand crosses or hashes may be modeled as derived features, but must never be presented as recovered true item IDs.",
+    "missing_values": "Keep explicit missing/unknown states. Do not discard an entire user for an unrelated missing past field.",
+    "lookback_days_proposed": 14,
+    "event_supply_limit": null,
+    "supply_limit_policy": "Calibrate and freeze a common visible-event budget before search. Compression uses the same supplied causal events; changes to event supply require a matched information-budget control.",
+    "target_labels": "Do not synthesize ad clicks or exposures from behavioral categories or future events."
+  },
+  "feature_fitting": {
+    "vocabulary_and_scaling": "Fit mappings, rare thresholds, imputation statistics and normalization on training exposures and their permissible past histories only; validation/test use frozen mappings or a predeclared hash.",
+    "shared_namespaces": "Audit category/brand alignment between current ads and behavior logs before sharing embeddings.",
+    "label_derived_inputs": false,
+    "causal_counts": "Behavior counts and temporal features use only events before each impression.",
+    "learned_pretraining": "Training/auxiliary objectives may use training examples and their permissible histories only, not the later validation/test behavior stream.",
+    "static_snapshots": "Record provenance and as-of assumptions for publisher-supplied user/ad attributes. Exclude fields shown to use future outcomes; never mark an undocumented snapshot as verified point-in-time data.",
+    "readiness": "Resolve and record the information-availability contract before freezing; unknown availability stays explicit."
+  },
+  "prediction": {"output": "one finite click probability in [0,1] per fixed impression ID", "alignment": "exact sample coverage, no dropped difficult rows or duplicated predictions"},
+  "scoring": {
+    "primary": {"name": "ROC-AUC", "direction": "maximize", "scope": "all validation impressions at natural prevalence"},
+    "secondary": {"name": "Logloss", "direction": "minimize", "probability_clip_epsilon": 1e-7},
+    "invalidity": "Nonfinite/out-of-range probabilities, mismatched IDs, or single-class evaluation are invalid results, not substituted scores.",
+    "validation_labels": "host scorer may use them for validation metrics and model selection; never fit features or update learned weights with them",
+    "test_labels": "host only, released solely into closed assessment output after source/config/selection freeze"
+  },
+  "controls": {
+    "shared": ["data snapshot", "visible information", "split", "scorer", "paired seeds", "declared training recipe or compute budget"],
+    "capacity": "Report dense/embedding parameter counts separately and use matched capacity/compute controls for the claimed mechanism.",
+    "cost": "Record preprocessing, training, diagnostics, failures, GPU allocation and inference. State batch size, precision, hardware, warmup, cache use and candidate-specific offline work.",
+    "cost_comparison": "Report both matched-recipe contrasts and actual quality-cost relationships; extra parameters or examples are not silently attributed to a mechanism."
+  },
+  "acceptance_checks": [
+    "all eight exposure days exist and each scored partition has both classes",
+    "clk/nonclk are absent from model feature tensors",
+    "with a frozen feature mapping, changing future behavior leaves a past exposure's features unchanged",
+    "all used behavior timestamps are strictly less than the exposure timestamp",
+    "validation/test labels are absent from feature fitting and training losses; at fixed seed/configuration/step count, changing them cannot change fitted transforms or training gradients",
+    "validation labels influence checkpoint/model selection or early stopping only through declared validation feedback; test labels cannot influence any selection or training decision",
+    "missing fields and empty histories have finite documented model behavior",
+    "preprocessing and model predictions agree on namespace, masks, sample identity and feature order",
+    "small-data scorer agrees with an independent trusted implementation",
+    "resume does not duplicate accepted experiments or drop failed costs"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "request_sha256": "010a521ab62658fa31bd361ccf94f110713d4521bcfed9a853dbef57f03ee831",
+  "response": {
+    "category_edits": [
+      {
+        "category": "interest_aggregation",
+        "rationale": "Blend each GRU state with a causal, masked recency-weighted mean: 0.8 current state plus 0.2 pooled states, with exponential decay length 10. This may preserve persistent interests alongside recent intent. Training and prediction share this readout through the model class imported by the predictor writer.",
+        "edits": [
+          {
+            "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        # Histories are LEFT padded; count-1 indexes padding on short histories.\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores",
+            "replace": "    def aggregate_states(self, out: torch.Tensor, seq: torch.Tensor) -> torch.Tensor:\n        # A shared exponential scale cancels in every causal prefix mean.\n        positions = torch.arange(seq.size(1), device=seq.device, dtype=out.dtype)\n        weights = torch.exp((positions - (seq.size(1) - 1)) / 10.0)\n        weights = weights.unsqueeze(0) * (seq != 0).to(out.dtype)\n        numerator = (out * weights.unsqueeze(-1)).cumsum(dim=1)\n        denominator = weights.cumsum(dim=1).unsqueeze(-1)\n        pooled = numerator / denominator.clamp_min(torch.finfo(out.dtype).tiny)\n        return 0.8 * out + 0.2 * pooled\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        out = self.aggregate_states(out, seq)\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        out = self.aggregate_states(out, seq)\n        pos_scores = (out * self.item_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.item_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores"
+          }
+        ]
+      }
+    ],
+    "change_summary": "Apply the same causal 80/20 last-state and recency-weighted pooling readout during training and prediction. Preserve GRU topology, embeddings, scoring, loss, optimizer, routing, and checkpoint format."
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-gru-jump-129600-20261028/run-01/experiment/recharness/calls/00020"
+}

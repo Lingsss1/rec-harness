@@ -1,0 +1,31 @@
+{
+  "category_edits": [
+    {
+      "category": "embedding_representation",
+      "rationale": "Factorize the tied item embedding as E=AB with rank max(1, floor(d/2)) across all four datasets. This reduces embedding capacity while retaining hidden width, shared input/output embeddings, and the existing SASRec computation. Both factors are jointly trained and saved in each category's single checkpoint.",
+      "edits": [
+        {
+          "find": "class SASRec(nn.Module):",
+          "replace": "class FactorizedItemEmbedding(nn.Module):\n    def __init__(self, itemnum: int, hidden_units: int):\n        super().__init__()\n        self.rank = max(1, hidden_units // 2)\n        self.factor_a = nn.Embedding(itemnum + 1, self.rank, padding_idx=0)\n        self.factor_b = nn.Parameter(torch.empty(self.rank, hidden_units))\n        nn.init.normal_(self.factor_a.weight, mean=0.0, std=1.0)\n        nn.init.normal_(self.factor_b, mean=0.0, std=self.rank ** -0.5)\n\n    def forward(self, item_ids: torch.Tensor) -> torch.Tensor:\n        return self.factor_a(item_ids).matmul(self.factor_b)\n\n\nclass SASRec(nn.Module):"
+        },
+        {
+          "find": "        self.item_emb = nn.Embedding(itemnum + 1, hidden_units, padding_idx=0)\n        self.item_emb.weight.data.normal_(0.0, 1.0)",
+          "replace": "        self.item_emb = FactorizedItemEmbedding(itemnum, hidden_units)"
+        },
+        {
+          "find": "            repeat_count.to(dtype=self.item_emb.weight.dtype)",
+          "replace": "            repeat_count.to(dtype=self.item_emb.factor_a.weight.dtype)"
+        },
+        {
+          "find": "            \"hidden_units\": HIDDEN_UNITS,\n            \"num_blocks\": NUM_BLOCKS,",
+          "replace": "            \"hidden_units\": HIDDEN_UNITS,\n            \"item_embedding\": \"tied_factorized_half_rank_v1\",\n            \"item_embedding_rank\": max(1, HIDDEN_UNITS // 2),\n            \"num_blocks\": NUM_BLOCKS,"
+        },
+        {
+          "find": "        # Imported SASRec shares training's recency-aligned positions and causal readout.\n        _metas[ds] = meta",
+          "replace": "        if meta.get(\"item_embedding\") != \"tied_factorized_half_rank_v1\":\n            raise ValueError(f\"Unexpected item embedding configuration for {ds}\")\n        if meta.get(\"item_embedding_rank\") != max(1, meta[\"hidden_units\"] // 2):\n            raise ValueError(f\"Unexpected item embedding rank for {ds}\")\n        # Imported SASRec reconstructs both jointly trained embedding factors.\n        _metas[ds] = meta"
+        }
+      ]
+    }
+  ],
+  "change_summary": "Replace the tied item table with two jointly trained low-rank factors. Preserve all other training and scoring behavior, and update the embedded predictor writer to validate and load the factorized architecture."
+}

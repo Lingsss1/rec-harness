@@ -1,0 +1,56 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting point.** (1) Broad relevance sometimes displaces recent, specific interests in the qualitative feedback. This motivates testing a short-history signal without assuming recency always helps. (2) Existing margins measure training-pair separation. They cannot establish improvement in the pinned validation HR@10. (3) Compatibility and purchase intent are often unknown from the available histories and metadata. Diagnostics must preserve that uncertainty instead of generating unsupported labels.\n\n**Related work.** (1) Measuring Recency Bias [1] cautions against excessive recent-item dependence. A recent-history component therefore needs a bounded contribution and an ablation. (2) Does It Look Sequential? [2] finds weak ordering effects on several datasets. Shuffling should measure dependence, with predictive usefulness assessed separately. (3) Sampling Reliability [3] distinguishes sampled from full-catalog evaluation. The pinned sampled metric must remain the selection objective.\n\n### Framework\n\n| Direction | Intervention | Evidence | Limitation |\n|---|---|---|---|\n| Temporal specificity | Recent-history residual | Paired validation HR@10 | Recency may hurt |\n| Diagnostic calibration | Matched removals and shuffles | Rank changes and overlap | Dependence is not causality |\n| Representation health | Effective rank and collapse controls | Embedding spectrum | Health does not imply accuracy |\n\n### Candidate ideas\n\nScores denote originality/potential/implementation difficulty; higher difficulty means harder implementation.\n\n1. **Calibrated perturbation adapter — 3/7/3.** Originality: useful unified controls, but established techniques. Potential: reusable across architectures, but indirect accuracy benefits. Difficulty: simple hooks, but masking conventions need care [2].\n2. **Bounded recent-history residual — 4/7/4, selected.** Originality: connects diagnosed specificity to an explicit residual, but combines familiar components. Potential: cheap and falsifiable, but cannot infer compatibility. Difficulty: a small scoring change, but predictor and diagnostic parity are essential [1].\n3. **Training-only item-transition residual — 3/6/4.** Originality: interpretable association baseline, but established methodology. Potential: exposes useful local transitions, but sparse counts can overfit. Difficulty: straightforward counting, but catalog-scale storage needs pruning.\n\n### Selected algorithm\n\nKeep each category’s SASRec. Add the mean embedding of its last three nonpadding interactions as a residual scoring feature. A learned scalar, bounded between zero and one and initialized near zero, controls its contribution. This tests whether a simple recent-interest signal improves the baseline without requiring unavailable attributes.\n\n```text\nh = SASRec(sequence)\nr = mean(item_embeddings(last_three_valid(sequence)))\na = sigmoid(category_parameter)\nscore(items) = dot(h + a*r, item_embeddings(items))\ntrain using the baseline loss and seeds\ncompare baseline and residual using pinned macro validation HR@10\n```\n\nRetain the baseline unless validation improves; report all four category results. Preserve dataset routing, splits, environment data path, and trial-local artifacts. Serialize the residual parameter and update the predictor writer. Keep `DiagnosisProbe(view, device)` and its return schema; expose the actual module through `view.model`. Measure recent-versus-matched-older removal effects with fixed candidates, restore model mode, and return null statistics for empty samples. No performance gain is claimed before execution.",
+  "idea": {
+    "description": "Add a bounded, learned recent-history residual to each category-specific SASRec scoring representation, then evaluate it against the unchanged baseline using the pinned macro validation HR@10.",
+    "motivation": "Qualitative feedback identifies insufficient attention to recent, narrow interests, while related work warns that excessive recency can also reduce accuracy. A small residual provides a feasible, falsifiable first intervention at 0% research progress.",
+    "implementation_notes": "Use only interaction IDs for the residual. Compute the mean over the last three valid interactions, with a clamped denominator for empty histories. For per-position training, construct the residual causally from sequence positions at or before each prediction position; do not use future positions. Initialize the category-specific gate logit to -4 and learn it with the existing optimizer. Keep the baseline loss, configuration, preprocessing seed 0, training seed 42, and SASREC_EPOCHS environment default of 200. DATA_DIR remains os.environ['GAGC_DATA_DIR']. Train categories sequentially on one GPU and store artifacts beneath the trial directory. Save the gate and architecture configuration; update the predictor writer to reconstruct identical scoring. The compatibility view's log2feats should return the combined causal representation, while predict_score applies the same candidate dot product as inference. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), metrics, and metric_definitions. Exclude padding; restore prior model mode with try/finally; use null plus a valid-sample count for undefined statistics. Leave unavailable metadata category breakdowns empty. Use training-only pseudo-holdouts to calibrate perturbation probes. Any validation diagnostics must use the pinned candidate construction; do not infer full-catalog performance from sampled margins. Compare one residual configuration against the baseline to limit search cost and validation adaptation. Track actual GPU usage against the shared budget. Do not access test files or interpret missing equipment evidence as incompatibility.",
+    "pseudocode": "class RecentResidualSASRec:\n    gate_logit = Parameter(-4.0)\n\n    def log2feats(sequence):\n        base = sasrec.log2feats(sequence)\n        # At each position, gather up to three most recent nonpadding\n        # input IDs at or before that position. Never gather future IDs.\n        recent_ids, valid = causal_last_valid(sequence, count=3)\n        recent = masked_mean(item_emb(recent_ids), valid)\n        return base + sigmoid(gate_logit) * recent\n\n    def predict_score(features, items):\n        return candidate_dot_product(features, item_emb(items))\n\nfor category in FOUR_CATEGORIES:\n    train_with_baseline_loss(category, seed=42)\n    save_model_gate_and_config_under_trial(category)\nwrite_predictor_with_identical_architecture_and_routing()\n# Host independently computes pinned validation HR@10.\n# Choose between baseline and residual using the equal category mean.\n# Diagnostics are auxiliary evidence, never a replacement metric.",
+    "originality": {
+      "score": 4,
+      "positive": "Turns the qualitative specificity diagnosis into a directly ablatable scoring component with an explicit bound.",
+      "negative": "Recent-item pooling, residual scoring, and scalar gates are established techniques; this is an incremental combination."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "Provides an inexpensive starting point for testing when recent behavior adds predictive information across domains.",
+      "negative": "A scalar gate cannot represent user-specific intent changes, compatibility, or whether a prior purchase satisfied a need."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Reuses SASRec embeddings, loss, optimizer, and dataset routing with few additional parameters.",
+      "negative": "Causal pooling, padding handling, checkpoint loading, and diagnostic/inference equivalence require careful implementation."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Measuring Recency Bias (2024)",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "Introduces a recency-bias metric and reports accuracy improvements from mitigating excessive recency emphasis."
+      ],
+      "limitations": [
+        "Does not establish that a recent-history residual improves this benchmark; direction and magnitude require validation."
+      ]
+    },
+    {
+      "title": "Does It Look Sequential? (2024)",
+      "link": "https://arxiv.org/abs/2408.12008",
+      "contributions": [
+        "Uses history shuffling across 15 datasets to investigate the importance of sequential structure."
+      ],
+      "limitations": [
+        "Shuffle sensitivity measures dependence on ordering and does not independently establish useful personalization or causal correctness."
+      ]
+    },
+    {
+      "title": "Sampling Reliability (RecSys 2025)",
+      "link": "https://doi.org/10.1145/3705328.3748086",
+      "contributions": [
+        "Examines resolution, fidelity, robustness, and recovery of model rankings under sampled evaluation."
+      ],
+      "limitations": [
+        "Does not make sampled candidate evaluation interchangeable with full-catalog recommendation or remove training-seed uncertainty."
+      ]
+    }
+  ]
+}

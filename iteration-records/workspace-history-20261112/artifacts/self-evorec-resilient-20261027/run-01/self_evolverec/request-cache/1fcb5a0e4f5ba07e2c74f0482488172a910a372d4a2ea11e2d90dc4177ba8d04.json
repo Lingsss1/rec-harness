@@ -1,0 +1,90 @@
+{
+  "request_sha256": "1fcb5a0e4f5ba07e2c74f0482488172a910a372d4a2ea11e2d90dc4177ba8d04",
+  "response": {
+    "markdown_report": "The recommended first experiment is **recent-context gated SASRec with uniform multi-negative training**. It targets stale historical influence and broadly plausible but weak immediate matches, while testing the observed ranking-separation problem. Improvements remain unverified.\n\n### Insights and directions\n\n**Starting-point insights.** (1) SASRec already represents ordered context through causal attention. A small residual branch can therefore test recency without replacing the backbone. (2) Users report historical interests overwhelming a specific current purpose. This motivates explicitly balancing recent and longer context, although recent purchases do not establish continuing demand. (3) Electronics has 14.95% sampled wrong ranks and a −0.4812 tenth-percentile margin. These measurements motivate stronger discrimination, but do not establish validation HR@10.\n\n**Related-work insights.** (1) MSMT-LSI and Mixture of Sequence distinguish temporal scales. They motivate a lightweight gate, without establishing gains on these datasets. (2) gSASRec and eSASRec motivate multi-negative objectives. Their findings do not isolate the best loss for this evaluator. (3) Enhanced BPR warns about false negatives during hard mining. Uniform negatives with observed-positive exclusion provide a simpler initial experiment.\n\n### Framework\n\n| Direction | Existing mechanism | Proposed minimal test | Remaining gap |\n|---|---|---|---|\n| Temporal relevance | Multiscale encoders | Recent-pool residual gate | Recency is not verified intent |\n| Ranking discrimination | Multi-negative losses | Uniform sampled softmax | Unobserved positives remain |\n| Functional relevance | Separate transition/text branches | Defer initially | Transitions do not verify compatibility |\n\n### Candidate assessment\n\nScores are originality / potential / user alignment / model alignment / implementation difficulty; higher difficulty means harder. Each entry gives a positive and negative assessment for every dimension.\n\n| Idea | Scores | Positive / negative assessments |\n|---|---|---|\n| A: recent-context gate | 3/6/8/4/2 | O: focused adaptation / familiar fusion; P: extensible / limited capacity; U: targets stale interests / misses compatibility; M: tests context ambiguity / weak separation effect uncertain; D: small addition / masking needed |\n| B: multi-negative softmax | 2/7/4/9/3 | O: targeted objective / established method; P: reusable / sampling sensitive; U: sharper ranking / no explicit recency; M: targets wrong ranks / diagnostic transfer uncertain; D: batched scoring / memory cost |\n| **C: A+B** | **4/8/8/9/4** | O: coupled intervention / known components; P: separable ablations / interactions complicate attribution; U: current-purpose ranking / cannot verify prerequisites; M: stronger discrimination / false negatives persist; D: modest changes / predictor parity required |\n\n### Selected experiment\n\nAt 0% progress, choose C as a small, ablatable extension. Fuse the causal SASRec state with a gated mean of the last five valid prefix embeddings, then predict with shared item embeddings. Train with the target plus 64 uniform negatives, excluding padding and the user's observed training items.\n\nEvaluate baseline, A, B and C using unchanged four-category macro validation HR@10. Track per-category margins and GPU seconds; stop within the shared budget. Recent pooling addresses stale influence; context-conditioned discrimination targets broadly plausible associations. Neither mechanism establishes compatibility or fulfilled demand.",
+    "idea": {
+      "description": "Add a learned recent-context residual to each SASRec position and replace single-negative BCE with uniform multi-negative sampled softmax. Preserve independent dataset models and all four routing paths. This is a hypothesis targeting two simulator failures—stale historical influence and weak immediate relevance—and the measured positive–negative ranking errors.",
+      "motivation": "Electronics shows the weakest measured separation, while simulator feedback identifies overly broad associations and insufficient emphasis on current interests. Embedding similarity near 0.54–0.56 does not establish severe collapse, so an explicit collapse regularizer is not justified by the supplied evidence. A small recency branch and a stronger ranking objective provide interpretable, separable interventions.",
+      "implementation_notes": "Keep DATA_DIR = os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, unchanged splits, and artifacts inside the trial directory. Respect SASREC_EPOCHS, whose supplied default is 200. For each valid prefix, compute a causal five-item mean using shared item embeddings, project it to the SASRec hidden dimension, and add sigmoid-gated projected features to the original hidden state. Initialize the gate bias at -2 so training starts near the backbone. Use 64 uniform negative samples per selected training position; sample with replacement from valid catalog items outside that user's complete observed training history, never consulting validation or test interactions. Normalize softmax over the positive and sampled negatives with no popularity correction for this uniform proposal. Bound memory by chunking positions. Run baseline, gate-only, loss-only, and combined configurations sequentially on one GPU, subject to the aggregate remaining budget; do not assume all four full runs fit. Select exclusively by pinned four-category macro validation HR@10 and report category scores without inventing outcomes. Update the predictor writer to serialize the gate configuration and instantiate the identical architecture in working/predict.py. Preserve DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis). Make log2feats return fused features and predict_score use the trained shared output embeddings, so measured margins reflect actual inference. Retain metrics and metric_definitions; describe category breakdowns as unavailable when categories are absent. Only histories, timestamps, titles and descriptions are permitted; this initial experiment needs histories alone. Simulator judgments are qualitative evidence from twenty training users, not observed intent labels.",
+      "pseudocode": "class RecentResidualSASRec(SASRec):\n    def log2feats(self, sequence):\n        h = super().log2feats(sequence)\n        recent = causal_masked_mean(self.item_emb(sequence), window=5)\n        r = self.recent_projection(recent)\n        gate = sigmoid(self.gate(concat(h, r)))\n        return h + gate * r\n\nfor category in FOUR_DATASETS:\n    for batch in train_loader[category]:\n        _, sequence, positive, _ = batch\n        features = model.log2feats(sequence)\n        valid = positive != 0\n        for positions in chunks(valid):\n            negatives = uniform_items_excluding_user_training_history(\n                users=positions.users, count=64, exclude_padding=True)\n            candidates = concat(positive[positions, None], negatives)\n            logits = model.predict_score(features[positions], candidates)\n            loss = cross_entropy(logits, target_index=0)\n            accumulate_position_weighted_gradients(loss)\n        optimizer.step()\n        optimizer.zero_grad()\n    save_checkpoint_and_matching_predictor_writer()\n\n# Host validation alone determines selection; no results are asserted here.",
+      "originality": {
+        "score": 4,
+        "positive": "Combines a narrowly targeted temporal residual with a ranking intervention motivated by the supplied qualitative and quantitative evidence.",
+        "negative": "Gated fusion and multi-negative softmax are established mechanisms; the combination is incremental."
+      },
+      "future_potential": {
+        "score": 8,
+        "positive": "Clean ablations can establish whether temporal context or objective quality deserves further research before adding text or transition branches.",
+        "negative": "Recency cannot identify compatibility, complementary function, or whether ownership has satisfied demand."
+      },
+      "code_difficulty": {
+        "score": 4,
+        "positive": "Requires a pooling branch, small gate, and batched candidate loss while retaining SASRec interfaces.",
+        "negative": "Causal masking, efficient per-user exclusions, memory bounds, and training–predictor parity require careful implementation."
+      }
+    },
+    "related_work": [
+      {
+        "title": "Self-Attentive Sequential Recommendation",
+        "link": "https://arxiv.org/abs/1808.09781",
+        "contributions": [
+          "Provides the causal attention backbone and shared item-scoring structure."
+        ],
+        "limitations": [
+          "The supplied diagnosis shows that this starting implementation still produces immediate-relevance and ranking errors."
+        ]
+      },
+      {
+        "title": "MSMT-LSI",
+        "link": "https://link.springer.com/article/10.1007/s44196-024-00460-5",
+        "contributions": [
+          "The supplied search summary describes long- and short-term temporal representations."
+        ],
+        "limitations": [
+          "Does not establish effectiveness of the proposed lightweight residual on the pinned benchmark."
+        ]
+      },
+      {
+        "title": "Mixture of Sequence",
+        "link": "https://q-rz.github.io/static/www26/www26-mos-paper.pdf",
+        "contributions": [
+          "The supplied summary describes global, short-term, and theme-specific sequence experts."
+        ],
+        "limitations": [
+          "Its broader expert architecture adds complexity beyond the proposed first experiment."
+        ]
+      },
+      {
+        "title": "gSASRec — IJCAI 2024 summary",
+        "link": "https://www.ijcai.org/proceedings/2024/939",
+        "contributions": [
+          "Motivates stronger multi-negative training and identifies overconfidence under sampled BCE."
+        ],
+        "limitations": [
+          "Its generalized BCE objective differs from the proposed sampled softmax."
+        ]
+      },
+      {
+        "title": "eSASRec",
+        "link": "https://arxiv.org/abs/2508.06450",
+        "contributions": [
+          "The supplied summary reports a strong configuration combining sampled softmax and modified Transformer layers."
+        ],
+        "limitations": [
+          "The summarized evidence does not isolate the loss contribution."
+        ]
+      },
+      {
+        "title": "Enhanced BPR",
+        "link": "https://arxiv.org/abs/2403.19276",
+        "contributions": [
+          "Highlights false-negative risks in hard-negative recommendation training."
+        ],
+        "limitations": [
+          "Excluding observed training positives cannot eliminate unobserved relevant items from negative samples."
+        ]
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/self-evorec-resilient-20261027/run-01/self_evolverec/calls/00084"
+}

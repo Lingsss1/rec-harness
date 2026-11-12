@@ -1,0 +1,62 @@
+{
+  "markdown_report": "**Recommendation:** test recent-item-conditioned residual gates in the corrected NextItNet. At 10% research progress, this localized change offers a feasible experiment while preserving useful historical context.\n\n**Insights from the starting point.** (1) Identity initialization preserves the baseline’s initial forward computation. This supports testing adaptive modulation without initially suppressing residual updates. (2) Older and recent deletions generally worsen measured training rankings. Selective modulation is therefore better motivated than unconditional history removal, although these interventions do not establish user preferences. (3) Electronics has a −0.0106 lower-tail training margin and 10.04% negative-over-positive rate. These identify weak sampled discrimination, not validation HR@10 or a proven architectural cause.\n\n**Insights from related work.** (1) Hard-BPR [1] warns that high-scoring unobserved items can be false negatives. Aggressive mining could penalize relevant alternatives. (2) HM-RNN [2] demonstrates learned contextual boundaries. Its recurrent mechanism motivates adaptive retention but does not validate convolutional gating. (3) Sequential Modality Dropout [3] supports robustness to missing modalities. Its findings motivate a later text experiment, without establishing benefits from a small encoder trained from scratch.\n\nThe framework separates **context selection**, **ranking supervision**, and **item evidence**. Gates modify context transformations; robust negative training modifies supervision; title encoders add evidence. Keeping these directions separate makes initial results interpretable.\n\nCandidate assessments below use originality/potential/user alignment/model alignment/difficulty, each scored 0–10; higher difficulty means harder. Every cell gives a positive and negative consideration.\n\n| Idea | Originality | Potential | User alignment | Model alignment | Difficulty |\n|---|---|---|---|---|---|\n| Recent-item residual gates [2] | 4: useful adaptation; established gating | 6: adaptive retention; may become static | 7: recent specificity; needs unobserved | 6: contextual separation; indirect mechanism | 3: local edit; export synchronization |\n| Robust hard-negative training [1] | 3: targeted application; established objective | 6: informative contrasts; false negatives persist | 5: distinguish alternatives; intent unobserved | 8: targets weak separation; margins scale-dependent | 5: standard scoring; sampling overhead |\n| Joint title encoder with dropout [3] | 4: constrained adaptation; familiar fusion | 6: richer evidence; sparse text supervision | 7: finer distinctions; compatibility uncertain | 5: richer features; no demonstrated benefit | 6: simple pooling; metadata integration |\n\n**Selected mechanism.** Extend the starting gate input from `[h,u]` to `[h,u,e_t]`, where `e_t` is the current input item embedding. Initialize its projection to zero and bias to two; use `sigmoid(logit)/sigmoid(2)`. This targets two reported failures: broad historical similarity displacing specific recent mood/task signals, and seasonal or ecosystem associations extending into continuing demand. These are hypotheses; ownership, compatibility and unmet need remain unobserved. Better contextual features could also improve Electronics’ weak discrimination.\n\nRetain the loss, dilation schedule and training protocol. Measure gate variability and existing margins; establish predictor parity before selection through four-category macro validation HR@10. Compare against unchanged and history-independent gates only if budget permits, never fusing predictions. No new performance is claimed.\n\nReferences: [1] https://arxiv.org/abs/2403.19276; [2] https://arxiv.org/html/1609.01704v7; [3] https://arxiv.org/abs/2608.10240.",
+  "idea": {
+    "description": "Add recent-item-conditioned, identity-initialized residual gates to the supplied corrected NextItNet. For each existing completed causal residual update u at position t, compute g_t = sigmoid(W[h_t; u_t; e_t] + b) / sigmoid(2), then return mask_t * (h_t + g_t * u_t). Here e_t is the current input item embedding, not its prediction target. Train all components jointly in one network per category.",
+    "motivation": "The proposal explicitly targets broad historical relevance outranking specific recent mood/task matches and old seasonal or ecosystem associations being extended into continuing demand. Conditioning residual modulation directly on the current input item provides an additional path for recent evidence while retaining older context that deletion diagnostics show can be useful. Electronics’ 10.04% sampled negative-over-positive rate motivates testing whether the resulting features improve discrimination. Neither the user diagnosis nor the training diagnostics proves that this mechanism will help; compatibility, ownership and unmet need remain unobserved.",
+    "implementation_notes": "Integrate the gate into each existing corrected residual block, preserving the supplied convolution definitions, dilation schedule, channel-only normalization, dropout placement, padding masks, output transformations, optimizer and loss. Pass the masked input item embedding e through the stack as a gate covariate; it must come from the same causal input sequence. Apply the gate to exactly the completed update that the baseline would otherwise add to h, without applying dropout twice. The gate uses position-local linear projections and introduces no additional temporal dependencies. Initialize after the baseline initializer so a global initialization pass cannot overwrite the zero weights and bias two. Initialization preserves the forward function up to floating-point precision, but does not guarantee identical optimization trajectories.\n\nKeep preprocessing seed 0, training seed 42, at most 200 epochs and exactly 200 batches per epoch. Preserve Movies_and_TV, Industrial_and_Scientific, Electronics and CDs_and_Vinyl routing; DATA_DIR = os.environ['GAGC_DATA_DIR']; single-GPU execution; supplied splits; and trial-local artifacts. Preserve the host validation schedule and checkpoint rule. Predeclare affordable comparisons and include diagnostics and failures within 43,200 GPU-seconds. Any comparison models are experimental alternatives, never combined at prediction. Each deployed category loads exactly one selected checkpoint.\n\nKeep item_emb, log2feats(sequence), predict_score(features, items), family-specific sample_batch and ModelView compatible. Read the maximum nonpadding position, never count-1, and retain baseline empty-history handling. Record the gate architecture in checkpoint configuration and copy the identical implementation into the embedded predictor writer. Check evaluation-mode feature and candidate-score parity after reconstruction for every category; existing supplied diagnostics did not verify exported-predictor parity.\n\nRetain DiagnosisProbe(view, device), run_full_diagnosis(train_loader), and diagnosis_interpreter_prompt(raw_diagnosis), returning measured metrics and definitions. Preserve the (None, sequence, positive, negative) B x L loader contract and actual trained view.model. Add nonpadding gate quantiles and between-history variability at matched positions/lengths, without treating gates as measured intent or explanations. Retain the original sampled-margin definitions and sensitivity procedures; training margins and in-sample interventions are not validation HR@10. Use explicit architecture configuration for manifests rather than relying on source inspection, which failed in the supplied diagnosis. Do not use unavailable reviews, ratings, categories, prices, stores or simulator traits. The first experiment requires no auxiliary metadata.",
+    "pseudocode": "import math\nimport torch\nfrom torch import nn\n\nclass RecentItemResidualGate(nn.Module):\n    \"\"\"Position-local gate; tensors use B x L x D layout.\"\"\"\n    def __init__(self, hidden_dim, item_dim=None):\n        super().__init__()\n        item_dim = hidden_dim if item_dim is None else item_dim\n        self.proj = nn.Linear(2 * hidden_dim + item_dim, hidden_dim)\n        self.reset_identity()\n\n    def reset_identity(self):\n        # Call again after any model-wide initialization pass.\n        nn.init.zeros_(self.proj.weight)\n        nn.init.constant_(self.proj.bias, 2.0)\n\n    def forward(self, h, completed_update, current_input_embedding, valid):\n        mask = valid.to(device=h.device, dtype=h.dtype).unsqueeze(-1)\n        covariates = torch.cat(\n            (h, completed_update, current_input_embedding * mask), dim=-1\n        )\n        logits = self.proj(covariates)\n        denominator = torch.sigmoid(logits.new_tensor(2.0))\n        gate = torch.sigmoid(logits) / denominator\n        return (h + gate * completed_update) * mask\n\n# Integration into the supplied model, preserving its exact update computation:\n# valid = sequence.ne(0)\n# e = item_emb(sequence) * valid.unsqueeze(-1)\n# h = baseline_input_transform(e)\n# for block in blocks:\n#     u = block.existing_completed_causal_update(h, valid)\n#     h = block.recent_item_gate(h, u, e, valid)\n# return baseline_output_transform(h) * valid.unsqueeze(-1)\n#\n# Train using unchanged host batching/loss/selection.\n# Serialize each category's single selected state and gate configuration.\n# Reconstruct identical architecture through the predictor writer.\n# Verify feature/score parity and final-nonpadding readout before deployment.",
+    "originality": {
+      "score": 4,
+      "positive": "Adds a direct current-item conditioning path to the supplied identity-initialized residual gate while retaining the corrected NextItNet backbone.",
+      "negative": "Residual gating and contextual modulation are established mechanisms; this is a modest task-specific adaptation."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "A small controlled experiment can determine whether adaptive retention deserves further development without introducing extra data dependencies.",
+      "negative": "Gates may become effectively static or exploit training correlations that do not improve pinned validation rankings."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "Uses a position-local linear layer and sigmoid while preserving the existing training objective and temporal convolutions.",
+      "negative": "Requires careful initialization order, residual-update placement, checkpoint serialization and matching predictor definitions."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Hard-BPR (2024)",
+      "link": "https://arxiv.org/abs/2403.19276",
+      "contributions": [
+        "Proposes an objective designed for robustness to false negatives under dynamic hard-negative sampling.",
+        "Motivates treating negative sampling as a separate alternative to architectural context modulation."
+      ],
+      "limitations": [
+        "Does not establish improvement for this NextItNet benchmark or its pinned sampled HR@10.",
+        "Does not directly resolve unobserved current needs or compatibility."
+      ]
+    },
+    {
+      "title": "Hierarchical Multiscale Recurrent Neural Networks",
+      "link": "https://arxiv.org/html/1609.01704v7",
+      "contributions": [
+        "Uses learned boundaries to control UPDATE, COPY and FLUSH operations.",
+        "Provides conceptual motivation for adapting context retention to observed inputs."
+      ],
+      "limitations": [
+        "Uses a recurrent architecture rather than NextItNet.",
+        "Does not validate the proposed continuous residual gate or demonstrate its recommendation benefit."
+      ]
+    },
+    {
+      "title": "Sequential Modality Dropout (2026)",
+      "link": "https://arxiv.org/abs/2608.10240",
+      "contributions": [
+        "The supplied search summary reports training with modality removal to improve robustness to missing modalities.",
+        "Motivates missing-text controls for a future jointly trained title-feature experiment."
+      ],
+      "limitations": [
+        "Multimodal findings do not establish benefits for a from-scratch text encoder in this task.",
+        "Provides indirect motivation for an alternative research direction rather than evidence for the selected residual gate."
+      ]
+    }
+  ]
+}

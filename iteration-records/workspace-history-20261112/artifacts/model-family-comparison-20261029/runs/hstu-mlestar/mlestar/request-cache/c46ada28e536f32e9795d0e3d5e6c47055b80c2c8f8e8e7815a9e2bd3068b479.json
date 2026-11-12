@@ -1,0 +1,41 @@
+{
+  "request_sha256": "c46ada28e536f32e9795d0e3d5e6c47055b80c2c8f8e8e7815a9e2bd3068b479",
+  "response": {
+    "directions": [
+      {
+        "description": "Refine the supplied HSTU backbone with native SiLU attention, multiplicative gating and relative position bias. This is an architecture hypothesis supported by the [original HSTU implementation](https://github.com/meta-recsys/generative-recommenders/blob/main/generative_recommenders/research/modeling/sequential/hstu.py).",
+        "urls": [
+          "https://arxiv.org/abs/2402.17152",
+          "https://github.com/meta-recsys/generative-recommenders/blob/main/generative_recommenders/research/modeling/sequential/hstu.py"
+        ],
+        "implementation": "Start from the corrected host baseline and retain HSTURec, item_emb, log2feats(sequence), predict_score(features, items), and family-specific sample_batch/ModelView compatibility. Replace the block's softmax MultiheadAttention with a normalized-input UVQK projection, per-head SiLU(QK^T + learned relative-position bias) / maxlen attention, multiplicative U gating, output projection and residual connection, following SequentialTransductionUnitJagged. Use positional differences only; the supplied inputs contain no timestamps. Apply causal and padding masks multiplicatively after SiLU, and zero padded features after every block. Begin with hidden=64, blocks=2, heads=2 and dropout=0.2 to isolate the block change. Preserve shifted causal targets and final-position readout for left-padded histories. Save architecture metadata and update the predictor writer to reconstruct the exact block and scoring method. For every direction, retain all four category routes, exactly one independently trained checkpoint per category, DATA_DIR = os.environ['GAGC_DATA_DIR'], and trial-local working artifacts. Keep preprocessing seed=0, training seed=42, maximum epochs=200, batches per epoch=200, and single-GPU execution. Select using host validation macro HR@10; never read test files, including the baseline item-count fallback."
+      },
+      {
+        "description": "Replace single-negative pairwise loss with normalized sampled-softmax training. The [official HSTU configuration](https://github.com/meta-recsys/generative-recommenders/blob/main/configs/ml-20m/hstu-sampled-softmax-n128-final.gin) uses 128 negatives, normalized embeddings and temperature 0.05.",
+        "urls": [
+          "https://github.com/meta-recsys/generative-recommenders/blob/main/generative_recommenders/research/modeling/sequential/autoregressive_losses.py",
+          "https://github.com/meta-recsys/generative-recommenders/blob/main/configs/ml-20m/hstu-sampled-softmax-n128-final.gin"
+        ],
+        "implementation": "Keep the corrected HSTU architecture and all common constraints from direction 1. At each nonpadding target position, sample K=128 uniform negative item IDs, excluding padding and training-history positives. Compute logits from L2-normalized sequence features and the tied item_emb vectors, divided by temperature=0.05; minimize cross_entropy over the positive followed by K negatives. Process valid positions in chunks to bound GPU memory while preserving the loss average and one optimizer step per batch. Start with the baseline AdamW learning rate 1e-3. Implement the same normalization and temperature inside predict_score(features, items), and make both validation and the generated predictor call that method. Persist scoring configuration in metadata. This is a proposed transfer of the official training recipe, not a measured improvement on these four categories."
+      },
+      {
+        "description": "Test calibrated multi-negative gBCE as an alternative HSTU training objective. Transfer only the loss and sampling idea from the authors' [gSASRec reference implementation](https://github.com/asash/gSASRec-pytorch), preserving the HSTU backbone.",
+        "urls": [
+          "https://arxiv.org/abs/2308.07192",
+          "https://github.com/asash/gSASRec-pytorch/blob/main/train_gsasrec.py",
+          "https://github.com/asash/gSASRec-pytorch"
+        ],
+        "implementation": "Use the corrected HSTU encoder and raw tied-embedding dot-product scores. Replace pairwise softplus with gBCE using K=128 negatives and calibration t=0.75 initially. With alpha=K/(itemnum-1) and beta=1-t+alpha*t, calculate each valid position's loss as (beta*softplus(-positive_score) + sum_k softplus(negative_score_k))/(K+1), then average over valid positions. This directly evaluates the reference objective without its probability-to-logit conversion. Sample negatives uniformly, exclude padding and training-history positives, and chunk scoring to limit memory. Treat this as an alternative to sampled softmax rather than combining objectives. Prediction uses the same raw dot product through predict_score; retain one checkpoint per category and all common execution, routing and data constraints."
+      },
+      {
+        "description": "Add dropout-view contrastive regularization to the same HSTU network. The authors' [DuoRec implementation](https://github.com/RuihongQiu/DuoRec/blob/master/recbole/model/sequential_recommender/duorec.py) supplies the reference for dropout-based sequence augmentation.",
+        "urls": [
+          "https://arxiv.org/abs/2110.05730",
+          "https://github.com/RuihongQiu/DuoRec/blob/master/recbole/model/sequential_recommender/duorec.py"
+        ],
+        "implementation": "Preserve the corrected causal HSTU encoder and recommendation loss. Encode each sampled training sequence twice with independent dropout masks through the very same parameter instance. Take each view's final nonpadding feature, which is index -1 for these left-padded batches; L2-normalize the features and add symmetric InfoNCE with temperature=0.2 and weight=0.05. Exclude duplicate users and sequences sharing the same final training target from contrastive negatives. Use only training sequences and targets, leaving next-item targets outside their causal inputs. This adapts DuoRec's dropout regularizer without adopting its backbone. At inference, disable dropout and run one deterministic encoder pass with the original recommendation scoring head. Save only that single network checkpoint per category; update predictor metadata if scoring configuration changes. Compare validation macro HR@10 against the unchanged corrected baseline within the shared GPU budget."
+      }
+    ]
+  },
+  "call": "/home/liuzhishan/lhr/rec-harness/artifacts/model-family-comparison-20261029/runs/hstu-mlestar/mlestar/calls/00002"
+}

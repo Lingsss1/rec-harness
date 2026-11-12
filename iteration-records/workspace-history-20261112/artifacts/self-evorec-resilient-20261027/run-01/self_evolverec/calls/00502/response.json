@@ -1,0 +1,146 @@
+{
+  "markdown_report": "The best next step remains a frozen-SASRec transition correction with explicit controls for popularity and pair information. At 10% progress, this offers a small, reversible experiment; no validation improvement has been demonstrated. Its contribution is controlled correction of a frozen model, rather than a new combination of long-term preferences and recent interactions.\n\n**Insights from the starting point.** (1) Electronics has a 14.95% sampled negative-win rate versus 3.03% for Movies_and_TV. This motivates category-specific analysis, but training-pair margins do not establish validation HR@10. (2) User diagnosis favors recent, specific connections. Last-item transitions provide an observable proxy, although they cannot establish compatibility, ownership, immediate demand, or dislike. (3) Sparse transition counts need shrinkage. A zero correction weight preserves baseline rankings; unsupported pairs require explicit coverage analysis.\n\n**Insights from related work.** (1) *Measuring Recency Bias* warns against excessive recency emphasis [1]. Preserve SASRec’s history representation and test correction strength. (2) Sampled ranking can disagree with full-catalog ranking [2]. Select using the pinned evaluator and label full-catalog diagnostics separately. (3) Repeated validation feedback can overfit selection [3]. Predeclare comparisons and count checkpoint choices too. (4) FPMC and Fossil already combine preference and recent-item evidence [5,6]; sparse counts cannot generalize to unseen pairs as latent factors can. (5) Retrieval fusion and smoothing research motivate scale control and backoff [7,8], but do not establish effectiveness here.\n\nThese insights organize into three directions: local sequence evidence, uncertainty-aware backoff, and controlled validation.\n\n| Direction | Existing mechanism | Proposed extension | Remaining gap |\n|---|---|---|---|\n| Sequence evidence | SASRec history features; FPMC/Fossil recent factors | Frozen last-item transition residual | Latest item may be irrelevant; unseen-pair affinity is unavailable |\n| Sparse evidence | Empirical transition counts; background smoothing | Popularity-centered shrinkage | Missing transitions do not establish dislike |\n| Evaluation | Fixed sampled HR@10 | Frozen scale normalization, matched controls, paired differences | Adaptive selection and full-catalog uncertainty |\n\nFour candidate algorithms follow. Scores are originality/potential/difficulty; higher difficulty means harder implementation. Each assessment gives a positive and negative reason.\n\n| Idea | Scores | Critical assessment |\n|---|---|---|\n| Shrunk transition residual [1,2,7,8] | 3/6/4 | Originality: useful controlled frozen correction; familiar components. Potential: cheap, interpretable experiment; sparse support limits generalization. Difficulty: sparse lookup is simple; normalization, controls, diagnostics and inference parity add work. |\n| Support-weighted recent-window residual [1,6] | 3/6/4 | Originality: combines multiple anchors; closely resembles established recency mixtures. Potential: tolerates a noisy latest item; may dilute useful transitions. Difficulty: reuses counts; adds weighting choices. |\n| Training-count popularity correction [2] | 2/5/2 | Originality: clean control; established technique. Potential: identifies frequency effects; ignores pair identity. Difficulty: one lookup; coefficient selection remains necessary. |\n| Factorized transition head [5,6] | 2/7/6 | Originality: established mechanism adapted to frozen SASRec; little conceptual novelty. Potential: shares evidence across unseen pairs; requires additional training. Difficulty: compact factorization; negative sampling and inference integration add cost. |\n\n**Selected algorithm.** From training histories only, count adjacent transition occurrences c_ab and source totals n_a. Let d_b be destination counts, N their total, M the number of real items, q_b=(d_b+1)/(N+M), and fix τ=10. Define p̃(b|a)=(c_ab+τq_b)/(n_a+τ) and r(a,b)=p̃(b|a)−q_b. This is exactly (c_ab−n_aq_b)/(n_a+τ), a probability difference rather than a Bayesian update of SASRec logits. Unsupported sources receive zero correction; unobserved pairs from supported sources receive negative corrections proportional to popularity.\n\nFreeze category-specific normalization using training-only reference scores: sample 4,096 nonempty training prefixes uniformly with replacement, paired with uniformly sampled real candidates, using seed 42. Store each component’s mean and population standard deviation, floored at 10⁻⁸. Fuse s=(1−α)z_neural+αz_transition with shared α∈{0,.1,.25,.5,.75,1}; ties favor smaller α. Candidate-independent normalization preserves baseline rankings at α=0. Do not additionally tune temperature, smoothing, or category weights.\n\n```text\nuse fixed baseline checkpoint policy; freeze each category model\nbuild training-only counts and frozen reference normalization\ncompare six intact-fusion weights using pinned macro HR@10\nat the selected weight compare popularity-only correction\n    and occurrence-level destination shuffles, seeds 43,44,45\nreport controls without selecting a second winner\nserialize counts, normalization, configuration and predictor\n```\n\nThe checkpoint is the final configured baseline epoch, default 200; record its environment override. The popularity-only control removes c_ab/(n_a+τ). For nulls, permute destination occurrences while keeping sources fixed, preserving both marginals exactly; retain self-transitions and identical smoothing. Apply the complete scoring pipeline, using the intact normalization for controls, and report observed-minus-null HR@10 and null spread. Smoothed backgrounds and nonlinear ranking mean null effects cannot be assumed zero.\n\nUse identical candidate sets and host tie handling. Report category changes, transition coverage, training-support slices and paired within-category bootstrap intervals as descriptive [2–4]. One changed hit moves macro HR@10 by .00125; intervals exclude training-seed and winner-selection uncertainty. Six fusion settings plus four controls require ten logged evaluations, alongside any preceding checkpoint queries, all within the shared budget.\n\nRetain routing, seeds, DATA_DIR, trial-local artifacts, predictor-writer parity, and diagnostic interfaces. Measure neural and deployed margins through the shared scorer. Inclusive training-pair corrections contain self-count evidence: report them explicitly, and compute occurrence-excluded residual diagnostics by decrementing the evaluated transition and recomputing affected statistics. For matched excluded null diagnostics, shuffle the remaining occurrences. These expensive probes must be bounded and recorded; absent excluded measurements remain unavailable. Twenty-user feedback remains hypothesis-generating; ratings, compatibility facts, and simulator traits remain unknown.",
+  "idea": {
+    "description": "Fuse each category’s frozen SASRec scores with a popularity-centered, Dirichlet-smoothed adjacent-transition residual. With training counts c_ab, source totals n_a, destination counts d_b, N transition occurrences and M real items, define q_b=(d_b+1)/(N+M), tau=10, and r(a,b)=(c_ab−n_a*q_b)/(n_a+tau). Normalize neural and residual components using frozen training-only statistics, then use s=(1−alpha)*z_neural+alpha*z_transition. Select one shared alpha from {0,.1,.25,.5,.75,1} using pinned four-category macro validation HR@10. Include popularity-only and occurrence-shuffled controls without using their outcomes for another selection round.",
+    "motivation": "Electronics has weaker measured training-pair separation, and qualitative feedback suggests broad historical similarity sometimes misses recent purpose. Transition counts provide an inexpensive observable proxy for specific sequential connections. They cannot establish compatibility, immediate demand, or dislike, and no supplied validation evidence establishes improvement. At 10% research progress, a bounded correction experiment is more feasible than immediately training another model. FPMC and Fossil reduce the originality claim: the distinctive contribution is frozen-model correction with controlled mechanism analysis.",
+    "implementation_notes": "Retain Movies_and_TV, Industrial_and_Scientific, Electronics, and CDs_and_Vinyl with separate models, counts and normalization, and unchanged routing. Keep DATA_DIR=os.environ['GAGC_DATA_DIR'], preprocessing seed 0, training seed 42, single-GPU execution and trial-local artifacts. Use the final configured baseline epoch checkpoint, default SASREC_EPOCHS=200, recording overrides; log any earlier checkpoint comparisons as search queries. Count only adjacent occurrences within original training histories, preserving repeats and excluding padding; do not bridge users or change splits. Build q with additive-one smoothing over real destination items and fix tau=10. For N=0 all source rows have zero residual. Empty histories and padding sources receive zero correction; after normalization explicitly keep their correction zero. Alpha=0 must bypass correction arithmetic and preserve SASRec ranking. For each category, deterministically sample 4,096 nonempty training prefixes uniformly with replacement from the original training histories and pair each with one uniformly sampled real item using a local seed-42 generator. Compute neural reference scores in evaluation mode through the same deployed feature and scoring path. Freeze per-component means and population standard deviations with a 1e-8 floor; save sampled prefix identifiers, candidates and statistics. If the reference residual has zero variance, disable its correction and record the condition. These reference samples estimate scale, not accuracy; their inclusive counts are acceptable for normalization and must not be presented as held-out diagnostic evidence. Do not tune temperature, tau, q smoothing or category weights. Evaluate six shared alpha values with the pinned validation protocol and select maximum macro HR@10, breaking exact ties toward smaller alpha. At the selected alpha evaluate a popularity-only residual −n_a*q_b/(n_a+tau) and three shuffled tables with seeds 43,44,45. Shuffle destination occurrences while holding source occurrences fixed within each category; do not shuffle unique edges or relabel items. Preserve self-transitions, destination priors, source totals, tau, and intact reference normalization across controls. Controls are diagnostic and cannot replace the selected intact model without a separately declared search. Store residual counts sparsely, with source totals and q enabling the dense popularity term without a dense transition matrix. Update the predictor writer to load the model checkpoint, item mapping, sparse counts, normalization, alpha, tau and dataset routing. Share exactly the same correction implementation with diagnostics and inference. For B×L probes, the source at each position is sequence[:, position], not the final item reused everywhere. Retain DiagnosisProbe(view, device), run_full_diagnosis(train_loader), diagnosis_interpreter_prompt(raw_diagnosis), the actual trained view.model, item_emb, log2feats and predict_score hooks. Return measured metrics and metric_definitions, with observation counts and unavailable results marked explicitly. Keep neural and deployed margins separate; inclusive deployed training margins contain transition self-count influence. For occurrence-excluded residual probes, decrement the evaluated occurrence from c_ab, n_a, d_b and N and recompute q and affected reference normalization without retraining SASRec; retain repeated occurrences of the same pair. Matched excluded nulls permute the remaining destination occurrences. Bound such probes by a declared deterministic sample and charge their computation to the budget. If the loader lacks sufficient occurrence provenance, report excluded diagnostics as unavailable rather than guessing the occurrence. Report validation target-pair coverage, unseen-source rate and support slices n_a=0, 1–4, and >=5, with counts, plus target-popularity and history-length slices defined from training only. Bootstrap matched per-user hit differences within each category and average categories equally; use 2,000 replicates with seed 42. Intervals condition on models and sampled candidates and do not correct adaptive winner selection. Keep full-catalog unseen recommendations for five real training users per category separate from sampled validation accuracy. Use only public histories, titles, descriptions and timestamps; review data, commercial metadata, simulator traits and hidden tests remain unavailable. No performance gains are asserted.",
+    "pseudocode": "for category in four_categories:\n    model = final_configured_baseline_checkpoint(category)\n    freeze(model)\n    source_occurrences, destination_occurrences = adjacent_training_occurrences(category)\n    C, n, d, N = count_occurrences(source_occurrences, destination_occurrences)\n    q = (d + 1) / (N + number_of_real_items)\n    residual(a, b) = (C[a,b] - n[a]*q[b]) / (n[a] + 10)\n    reference = sample_training_prefix_candidate_pairs(count=4096, seed=42)\n    normalization = freeze_component_mean_and_population_std(reference, floor=1e-8)\n    save_trial_local_model_counts_mapping_reference_and_normalization()\nfor alpha in [0, .1, .25, .5, .75, 1]:\n    score = neural_score if alpha == 0 else normalized_fusion(alpha)\n    outcomes[alpha] = pinned_validation_all_four_categories(score)\nalpha_star = argmax_macro_HR10(outcomes, tie_break='smaller alpha')\nevaluate_popularity_only_control(alpha_star, intact_normalization=True)\nfor seed in [43, 44, 45]:\n    C_null = count(source_occurrences, permute(destination_occurrences, seed))\n    evaluate_null(alpha_star, C_null, unchanged_q_tau_and_normalization=True)\nreport_per_category_macro_support_slices_paired_bootstrap_and_null_spread()\nwrite_matching_predictor(alpha_star)\nrun_measured_compatible_diagnostics()\nlabel_inclusive_self_count_effects_and_report_occurrence_excluded_probes_if_available()",
+    "originality": {
+      "score": 3,
+      "positive": "A frozen popularity-centered correction with explicit marginal-preserving controls provides a clear, testable integration and mechanism analysis.",
+      "negative": "Preference–transition combinations, background smoothing, linear fusion and support shrinkage have established precedents, especially FPMC and Fossil."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "A cheap controlled experiment can establish whether pair evidence warrants a recent-window extension or a factorized transition head.",
+      "negative": "Sparse counts cannot infer positive affinity for unseen pairs, and gains may reflect popularity effects or repeated validation selection rather than useful sequential structure."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "The main algorithm requires sparse counts and frozen score fusion without additional neural training.",
+      "negative": "Reliable scale estimation, occurrence-level controls, exclusion diagnostics, position alignment and generated-predictor parity require more engineering than a simple score lookup."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Measuring Recency Bias (2024)",
+      "link": "https://arxiv.org/abs/2409.09722",
+      "contributions": [
+        "The supplied research summary reports that excessive emphasis on recent interactions can hurt recommendation accuracy.",
+        "Motivates preserving SASRec’s full-history representation and evaluating recent-item correction strength."
+      ],
+      "limitations": [
+        "Does not establish that this transition residual improves RecHarness.",
+        "Recency sensitivity does not directly identify a user's current purpose."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation — Krichene and Rendle",
+      "link": "https://arxiv.org/abs/1912.02263",
+      "contributions": [
+        "Establishes inconsistency between sampled recommendation metrics and full-catalog counterparts.",
+        "Supports retaining pinned sampled HR@10 as the selection objective and separating full-catalog diagnostics."
+      ],
+      "limitations": [
+        "Does not prescribe an optimal correction for this evaluator.",
+        "Neither sampled nor full-catalog ranking metrics establish unobserved user preferences."
+      ]
+    },
+    {
+      "title": "The Reusable Holdout: Preserving Validity in Adaptive Data Analysis",
+      "link": "https://arxiv.org/abs/1506.02629",
+      "contributions": [
+        "Explains how adaptive reuse of held-out feedback can undermine generalization.",
+        "Motivates limiting and recording all configuration and checkpoint comparisons."
+      ],
+      "limitations": [
+        "A predefined small search does not eliminate selection optimism.",
+        "This proposal does not implement a reusable-holdout mechanism."
+      ]
+    },
+    {
+      "title": "The Hitchhiker’s Guide to Testing Statistical Significance in Natural Language Processing",
+      "link": "https://www.aclweb.org/anthology/P18-1128.pdf",
+      "contributions": [
+        "Provides guidance for paired statistical comparisons, including bootstrap methods.",
+        "Supports resampling matched user outcomes within categories to summarize differences."
+      ],
+      "limitations": [
+        "The application to recommendation is methodological.",
+        "Intervals condition on trained models and sampled candidates and exclude adaptive winner selection and training-seed variability."
+      ]
+    },
+    {
+      "title": "Factorizing Personalized Markov Chains for Next-Basket Recommendation",
+      "link": "https://www.ra.ethz.ch/cdstore/www2010/www/p811.pdf",
+      "contributions": [
+        "Combines personalized preference and first-order transition factors with joint ranking training.",
+        "Shares transition evidence through low-rank factors rather than requiring every pair to be observed."
+      ],
+      "limitations": [
+        "Does not establish benefits of a frozen count-based residual.",
+        "Its factorized training introduces additional optimization and inference requirements."
+      ]
+    },
+    {
+      "title": "Fusing Similarity Models with Markov Chains for Sparse Sequential Recommendation — Fossil",
+      "link": "https://arxiv.org/abs/1609.09152",
+      "contributions": [
+        "Combines history-based item similarity with weighted recent-item factors.",
+        "Provides established precedent for recent-window and long-/short-term combinations."
+      ],
+      "limitations": [
+        "Limits novelty claims for recent-window extensions.",
+        "Its learned factors differ from explicit sparse-count corrections and require additional training."
+      ]
+    },
+    {
+      "title": "An Analysis of Fusion Functions for Hybrid Retrieval — Bruch et al.",
+      "link": "https://arxiv.org/abs/2210.11934",
+      "contributions": [
+        "Supports investigating normalized linear combinations with a single fusion weight in hybrid retrieval.",
+        "Motivates separating component scale estimation from fusion-weight selection."
+      ],
+      "limitations": [
+        "Evidence concerns text retrieval, so transfer to sequential recommendation remains empirical.",
+        "Does not establish the proposed coefficient grid or training-reference normalization as optimal."
+      ]
+    },
+    {
+      "title": "A Study of Smoothing Methods for Language Models Applied to Ad Hoc Information Retrieval — Zhai and Lafferty",
+      "link": "https://www.iro.umontreal.ca/~nie/IFT6255/zhai-lafferty.pdf",
+      "contributions": [
+        "Provides precedent for smoothing sparse conditional estimates toward a background distribution.",
+        "Clarifies the backoff interpretation of the transition residual."
+      ],
+      "limitations": [
+        "Applying retrieval smoothing to item transitions is an adaptation.",
+        "Does not establish tau=10, additive-one destination smoothing or recommendation gains."
+      ]
+    },
+    {
+      "title": "SciPy random_table documentation",
+      "link": "https://docs.scipy.org/doc/scipy-1.11.2/reference/generated/scipy.stats.random_table.html",
+      "contributions": [
+        "Documents fixed-margin random contingency tables and their independence expectation.",
+        "Supports interpreting occurrence-level destination permutation as a marginal-preserving null."
+      ],
+      "limitations": [
+        "The proposed implementation permutes occurrences directly rather than requiring this sampler.",
+        "Zero expected count residual does not imply zero expected change after normalization and ranking."
+      ]
+    },
+    {
+      "title": "On Calibration of Modern Neural Networks",
+      "link": "https://proceedings.mlr.press/v70/guo17a.html",
+      "contributions": [
+        "Studies temperature scaling for classification probability calibration.",
+        "Helps distinguish component rescaling from standalone ranking changes."
+      ],
+      "limitations": [
+        "Does not establish calibration or HR@10 benefits for this hybrid recommender.",
+        "Jointly tuning temperature and fusion weight introduces redundant scale freedom, so temperature tuning is omitted."
+      ]
+    }
+  ]
+}

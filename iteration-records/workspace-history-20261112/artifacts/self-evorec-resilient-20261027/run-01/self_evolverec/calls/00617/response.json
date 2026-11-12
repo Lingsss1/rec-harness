@@ -1,0 +1,122 @@
+{
+  "markdown_report": "### Insights and directions\n\n**Starting-point insights.** (1) Feedback suggests broad associations and stale interests; recent-interest benefits remain hypotheses. (2) Embedding alignment and sampled training margins do not establish generalization; margins depend on scale. (3) The compatibility interface supports small representation changes, provided training, prediction, and diagnosis agree.\n\n**Related-work insights.** (1) FPMC/FOSSIL establish additive preference–recency models, reducing originality [4,5]. (2) History perturbations reveal sensitivity, not necessarily useful ordering [1]. (3) gSASRec/Hard-BPR motivate loss controls and caution about false negatives [2,3].\n\nDirections remain recent-interest representations, sequence-dependence audits, and loss calibration.\n\n### Framework\n\n| Direction | Evidence available | Minimal intervention | Remaining gap |\n|---|---|---|---|\n| Recent interest | Ordered histories | Normalized recent residual | No observed intent or satisfaction |\n| Sequence dependence | Fixed targets/candidates | Paired perturbations | Edited histories may shift distribution |\n| Loss calibration | Positives, sampled negatives | Published sampling-aware loss | Relevance remains unobserved |\n\n### Candidate ideas\n\nScores: originality/potential/difficulty, each 0–10; higher difficulty means harder.\n\n1. **Recent-window residual [4,5]. 2/6/3.** Originality: contextual-encoder combination, but established additive recency. Potential: cheap hypothesis test, but recency may amplify noise. Difficulty: localized change, but normalization and predictor parity require care.\n2. **Paired perturbation audit [1]. 3/6/3.** Originality: targeted controls, but established interventions. Potential: informs decisions, but offers no direct improvement. Difficulty: reusable scoring, but alignment requires care.\n3. **Calibrated sampled loss [2,3]. 2/7/4.** Originality: relevant adaptation, but established methods. Potential: possible generalization gains, but baseline miscalibration is unverified. Difficulty: localized replacement, but faithful implementation requires tuning.\n\n### Selected idea: recent-window residual\n\nAt 0% progress, retain the smallest trainable intervention. Normalize the causal last-five embedding mean before addition, addressing the original scale ambiguity [6]. This emphasizes recent evidence without establishing compatibility, redundancy, or latent intent.\n\n```python\nh = baseline.log2feats(sequence)\nr = causal_masked_window_mean(item_emb(sequence), window=5)\nr = layer_norm(r, affine=False, eps=1e-8)\nfeatures = mask_nonpadding(h + alpha * r)\nscores = dot(features, candidate_embeddings)\nloss = baseline_loss(scores, targets)\n```\n\nUse undropped embeddings, valid-count division, zero empty windows, and no post-addition normalization. Compare `α ∈ {0, 0.1, 0.3}`; preserve the actual baseline implementation, loss, sampling, routing, seeds, epoch environment, and trial-local artifacts. Update the predictor writer and `log2feats` identically.\n\nPredeclare final-epoch-only selection, baseline-favoring ties, and the three configurations; admit runs only within 43,200 GPU-seconds. Select by pinned macro validation HR@10. Report category changes and exploratory paired bootstrap intervals if per-user outcomes are available; these exclude adaptive-selection and seed uncertainty [7]. One net hit changes macro HR@10 by 0.00125. Sampled-ranking conclusions need not transfer to full catalogs [8].\n\nRetain diagnostic entry points, measured definitions, mode restoration, explicit missingness, and empty unavailable-category breakdowns. Secondary audits compare recent/older deletion and order shuffling with fixed targets; future controls include last-item, deduplicated/lag-weighted pooling, window lengths, and shuffled-history retraining. These distinguish repetition shortcuts and distribution shift. Twenty simulator users remain descriptive. No experiments or improvements are claimed.\n\nReferences: [1] https://doi.org/10.1145/3711896.3737035; [2] https://www.ijcai.org/proceedings/2024/939; [3] https://arxiv.org/abs/2403.19276; [4] https://cseweb.ucsd.edu/classes/fa17/cse291-b/reading/p811.pdf; [5] https://arxiv.org/abs/1609.09152; [6] https://github.com/kang205/SASRec/blob/master/model.py; [7] https://www.jmlr.org/papers/v11/cawley10a.html; [8] https://research.google/pubs/on-sampled-metrics-for-item-recommendation/.",
+  "idea": {
+    "description": "Add a normalized causal recent-window embedding residual to SASRec: features_t = h_t + alpha * LayerNorm(mean(nonpadding item embeddings in positions max(0,t−4) through t)). Use non-affine LayerNorm and preserve the baseline loss. Compare alpha values 0, 0.1, and 0.3 using unchanged four-category macro validation HR@10.",
+    "motivation": "Qualitative feedback suggests that broad historical associations dilute specific recent interests. A small residual tests this hypothesis with available interactions and no pretrained weights. FPMC and FOSSIL already combine preference and recent-item signals, so the contribution is a controlled adaptation to the contextual SASRec representation rather than a new model class. Normalizing the pooled branch addresses the original proposal's dependence on embedding magnitude and window occupancy.",
+    "implementation_notes": "Preserve the actual RecHarness sasrec_perdataset encoder rather than reconstructing it from the SASRec name or the original TensorFlow implementation. Compute causal window sums and counts using cumulative sums; include the current input item, never its next-item target. Average undropped, unscaled item embeddings over the five-position window, excluding padding. Apply torch.nn.functional.layer_norm with normalized_shape=(embedding_dim,), weight=None, bias=None, and eps=1e-8; explicitly zero empty windows. Add alpha times this vector to the baseline's returned feature without post-addition normalization, then apply the nonpadding mask. Alpha remains relative to the baseline feature scale and learned normalization gains. Use the baseline candidate-scoring function and padding behavior. Alpha=0 should bypass the residual and recover baseline outputs exactly in evaluation mode. Save window, alpha, normalization settings, and architecture configuration with checkpoints; the predictor writer must reconstruct the same implementation and inference must use the baseline final-position convention. Verify causal alignment, left padding, alpha=0 equivalence, and checkpoint/predictor score agreement before expensive runs. Keep all four routes: Movies_and_TV, Industrial_and_Scientific, Electronics, and CDs_and_Vinyl. Keep preprocessing seed 0, training seed 42, DATA_DIR = os.environ['GAGC_DATA_DIR'], single-GPU execution, and trial-local artifacts. Respect SASREC_EPOCHS, with the task's default of 200; hold optimizer, loss, sampling, and other baseline settings fixed. Predeclare three configurations in order alpha=0, 0.1, 0.3, window=5, with one final-epoch evaluation per completed configuration, no intermediate checkpoint selection, and ties resolved toward the smaller alpha. Account for all training, verification, diagnostics, and failures within 43,200 GPU-seconds; estimate complete four-route costs from baseline timing and do not start a configuration unlikely to fit the remaining budget. Report skipped or incomplete configurations rather than treating them as comparable results. Select exclusively using the unchanged pinned macro validation HR@10; never access test data or change the evaluator. Log every attempted configuration and category-level validation outcome. If existing permitted validation outputs expose paired per-user hits, bootstrap 200 paired users independently within each category with CPU seed 42 and 10,000 replicates, average category differences equally, and report percentile intervals as exploratory uncertainty for fixed models and candidates. Do not modify the host evaluator to obtain these outputs. Retain DiagnosisProbe(view, device).run_full_diagnosis(train_loader) and diagnosis_interpreter_prompt(raw_diagnosis). Use view.model as the actual nn.Module; preserve item_emb, log2feats, predict_score, user_train, meta_data, and review_data compatibility. Restore the prior model mode in a finally block, keep measured metrics and definitions, mark missing evidence explicitly instead of returning misleading zeros, and leave unavailable-category breakdowns empty. Rank-based sensitivity diagnostics supplement existing raw margins; they do not replace the selection metric. Run bounded diagnostic comparisons in evaluation mode with identical targets/candidates and within the shared compute budget. Recent versus older deletion tests location sensitivity; shuffling within the recent window while preserving its membership and final item tests ordering beyond the order-invariant residual. These interventions may create distribution shift. Last-item-only, long-term pooling, additive pooling, lag weighting, window-length sweeps, deduplicated pooling, and shuffled-history retraining are follow-up controls, not additional configurations in this initial search. Repeated-history frequency can become a shortcut; deduplication controls can distinguish it from broader recent-interest effects. Unseen-item evaluation excludes exact repeated recommendations but not popularity or related-item shortcuts. No ratings, reviews, categories, prices, stores, simulator traits, satisfaction labels, or compatibility labels may be inferred as observations. Twenty simulator users support descriptive feedback only. No experiments have been executed and no improvement is claimed.",
+    "pseudocode": "def log2feats(sequence):\n    h = baseline_log2feats(sequence)\n    if alpha == 0:\n        return h\n    valid = sequence.ne(0)\n    emb = item_emb(sequence) * valid.unsqueeze(-1)\n    sums = causal_window_sum(emb, window=5)\n    counts = causal_window_sum(valid.to(emb.dtype), window=5)\n    recent = sums / counts.clamp_min(1).unsqueeze(-1)\n    recent = F.layer_norm(recent, (emb.shape[-1],), eps=1e-8)\n    recent = recent * counts.gt(0).unsqueeze(-1)\n    return (h + alpha * recent) * valid.unsqueeze(-1)\n\n# Keep baseline loss, optimizer, sampler, and all four dataset routes.\n# Preprocessing seed=0; training seed=42 for every configuration.\nfor alpha in [0.0, 0.1, 0.3]:\n    if not estimated_complete_run_fits_remaining_gpu_budget():\n        record_configuration_as_skipped()\n        continue\n    train_four_routes_to_environment_epoch_limit(alpha=alpha, window=5)\n    write_matching_predictor_and_trial_local_checkpoints()\n    # Host evaluates unchanged pinned validation users and candidates.\n    record_final_epoch_validation_macro_hr10_and_category_scores()\nselect_completed_configuration_by_macro_hr10(tie_break='smaller_alpha')\n# Any diagnostics, verification, or failures also consume the shared budget.",
+    "originality": {
+      "score": 2,
+      "positive": "Adds an explicit recent-interest path to a contextual SASRec encoder and frames its value as a controlled diagnostic hypothesis.",
+      "negative": "FPMC and FOSSIL establish additive preference and recent-item modeling; normalized pooling is also a familiar mechanism."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "Provides a cheap foundation for testing when recent evidence helps and for subsequent lag-weighting, deduplication, or calibration controls.",
+      "negative": "The residual cannot establish immediate intent or compatibility, and gains may reflect popularity, repeated-history frequency, or validation selection noise."
+    },
+    "code_difficulty": {
+      "score": 3,
+      "positive": "The trainable change requires only causal pooling and normalization while retaining the existing encoder and loss.",
+      "negative": "Faithful baseline preservation, causal alignment, padding, score-scale behavior, serialization, and diagnostic compatibility require more care than the original difficulty rating implied."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Lost in Sequence",
+      "link": "https://doi.org/10.1145/3711896.3737035",
+      "contributions": [
+        "The supplied research summary describes original-versus-shuffled history comparisons for examining sequence dependence.",
+        "Motivates paired perturbations and controls that preserve the last item or recent-window membership."
+      ],
+      "limitations": [
+        "Sensitivity alone does not establish useful temporal reasoning.",
+        "Inference perturbations may create distribution shift; controlled retraining is needed for stronger component attribution."
+      ]
+    },
+    {
+      "title": "gSASRec",
+      "link": "https://www.ijcai.org/proceedings/2024/939",
+      "contributions": [
+        "Connects negative sampling with overconfidence in sequential recommendation.",
+        "Motivates a published sampling-aware loss as an alternative intervention."
+      ],
+      "limitations": [
+        "Does not establish that the supplied baseline is miscalibrated.",
+        "Any benefit requires evaluation under the unchanged RecHarness protocol."
+      ]
+    },
+    {
+      "title": "Hard-BPR",
+      "link": "https://arxiv.org/abs/2403.19276",
+      "contributions": [
+        "Addresses false negatives associated with hard negative sampling.",
+        "Supports caution when treating related unseen items as negatives."
+      ],
+      "limitations": [
+        "Unobserved items have unknown relevance in this task.",
+        "Hard-negative treatment does not directly resolve temporal relevance or compatibility."
+      ]
+    },
+    {
+      "title": "Factorizing Personalized Markov Chains for Next-Basket Recommendation",
+      "link": "https://cseweb.ucsd.edu/classes/fa17/cse291-b/reading/p811.pdf",
+      "contributions": [
+        "Combines user–candidate preference scores with previous-item–candidate transition scores.",
+        "Establishes prior art for additive long-term and recent-interaction signals."
+      ],
+      "limitations": [
+        "Its factorized transition formulation differs from a contextual SASRec encoder.",
+        "Does not establish that adding a recent branch improves an already recency-sensitive encoder."
+      ]
+    },
+    {
+      "title": "FOSSIL: Factored Item Similarity Models with High-Order Markov Chains",
+      "link": "https://arxiv.org/abs/1609.09152",
+      "contributions": [
+        "Combines normalized historical-item representations with weighted recent-item contributions.",
+        "Uses global and user-specific lag weights, establishing close prior art for the proposed residual."
+      ],
+      "limitations": [
+        "Lag weighting does not provide the same contextual representation as causal self-attention.",
+        "Makes a broad novelty claim for additive recent pooling untenable."
+      ]
+    },
+    {
+      "title": "Self-Attentive Sequential Recommendation and official SASRec implementation",
+      "link": "https://github.com/kang205/SASRec/blob/master/model.py",
+      "contributions": [
+        "Provides concrete input scaling, normalization, masking, and candidate-scoring details.",
+        "Demonstrates why the SASRec label alone does not establish implementation equivalence."
+      ],
+      "limitations": [
+        "The RecHarness baseline may differ from the original TensorFlow implementation.",
+        "Normalizing the proposed residual is a design choice, not an original SASRec prescription."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how repeated model selection can overfit validation estimates.",
+        "Motivates restricting and recording configuration and checkpoint selection."
+      ],
+      "limitations": [
+        "A bounded search does not eliminate selection bias.",
+        "Paired user bootstrap intervals do not capture adaptive-search or training-seed uncertainty."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled recommendation metrics can alter comparisons between models.",
+        "Supports interpreting the pinned HR@10 specifically as a sampled-candidate objective."
+      ],
+      "limitations": [
+        "Does not justify altering the host evaluator.",
+        "A sampled-candidate improvement does not establish improved full-catalog ranking or unbiased user preference."
+      ]
+    }
+  ]
+}

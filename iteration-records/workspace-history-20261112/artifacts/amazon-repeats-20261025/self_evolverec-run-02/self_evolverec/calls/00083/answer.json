@@ -1,0 +1,146 @@
+{
+  "markdown_report": "At 0% research progress, prioritize a small, falsifiable extension: **a recent-history directed-transition residual for frozen SASRec**. Improvements remain hypotheses until measured with pinned macro validation HR@10.\n\n**Insights from the starting point.** (1) SASRec learns sequential relevance through causal attention. Its scores can nevertheless favor broad associations over an immediate purpose, as the user diagnosis reports. (2) Older incidental interactions can compete with repeated recent interests. A separate recent-history signal makes that competition explicit, although repetition does not establish continuing demand. (3) Electronics has 14.95% wrong pairwise rankings and a −0.4812 tenth-percentile margin. Embedding similarity near the zero-cosine reference does not establish severe collapse; prioritize ranking evidence over embedding dispersion.\n\n**Insights from related work.** (1) Directed graph projections encode asymmetric relationships [1]. Next-item edges provide available supervision, but cannot establish compatibility or complementarity. (2) SComGNN distinguishes complementarity from simple similarity [2], motivating separate transition evidence rather than embedding smoothing. (3) FAME supports combining distinct preference signals [3]; a scalar residual is a cheaper first experiment. (4) gSASRec and UFNRec motivate examining negative supervision [4,5]. Target-encoding research additionally warns that training transitions can identify their own targets [6,7]; smoothing does not remove this shortcut. None establishes gains under this evaluator.\n\n**Framework and candidate directions.** Sequence modeling captures contextual relevance; directed transitions capture observed continuation; sampling determines which distinctions training emphasizes. The gap is whether inexpensive continuation evidence improves precise, timely ranking independently of popularity and target reuse.\n\nScores are prospective judgments. O/P/U/M/D denote originality, potential, user alignment, model alignment, and implementation difficulty; higher D means harder. Each cell gives a score and a positive/negative assessment.\n\n| Atomic idea | O | P | U | M | D |\n|---|---|---|---|---|---|\n| Recent directed-transition residual [1,2] | 4: focused combination / established fusion | 7: interpretable extension / sparse support | 7: targets broad and stale associations / no verified compatibility | 6: adds ranking evidence / hard cases may lack edges | 4: frozen backbone / exact sparse export needs care |\n| Gated recent/recurrent history pooling [3] | 4: adaptive routing / established experts | 7: models recurring interests / redundant pools | 8: separates repeated and incidental history / cannot infer satisfied needs | 6: contextual discrimination / no guaranteed margin gain | 5: small architecture / retraining and routing complexity |\n| Mostly-uniform multi-negative training [4,5] | 3: conservative mixture / established sampling | 6: reusable objective / false negatives | 4: finer distinctions / insufficient explicit user-failure coverage | 8: direct ranking competition / sampling-dependent margins | 3: local training change / masking and memory costs |\n\n**Selected algorithm.** Freeze the unchanged SASRec checkpoint. Count all adjacent training transitions, retain 64 outgoing edges per source, and preserve original source totals. Aggregate the latest five valid items using normalized exponential positional decay. For retained edges, use the bounded feature `log1p(100*c_ij/(c_i+10))/log(101)`; missing edges contribute zero. This is the observed-edge component of Dirichlet smoothing, with popularity kept separate as a shortcut control. Add a nonnegative coefficient selected from the fixed shared grid `{0, 0.25, 0.5, 1, 2}`. Zero exactly recovers SASRec; no gradient-based coefficient fitting is needed.\n\nThis targets broadly related recommendations lacking observed continuation support and excessive influence from older incidental interests. It may improve positive–negative confusion, especially in Electronics, but cannot verify prerequisites, duplication, or purchase intent. Training-loss optimization of this feature would require user-level cross-fitting [6,7]; freezing SASRec avoids that additional machinery.\n\n**Implementation and evaluation.** Preserve four routes, seeds, splits, `DATA_DIR = os.environ['GAGC_DATA_DIR']`, and the 200-epoch environment default. Serialize graph buffers and identical scoring through the predictor writer. Keep the diagnosis adapter; use user-excluded transition counts for training-position margin probes, since full-graph margins reuse their targets. Compare the fixed checkpoint against popularity-only, transition-only, SASRec+popularity, and SASRec+transition; reserve joint popularity+transition fusion for later to limit search. Use identical pinned validation users, candidates, and tie handling. Log every attempt and choose only by equal-weight macro HR@10, preferring smaller coefficients on ties. Inspect category results, coverage, and training-defined support–popularity strata. Paired bootstrap intervals describe fixed-model uncertainty, not selection bias [8,10]. Sampled HR is not full-catalog HR [9]. Report no gains before evaluation.",
+  "idea": {
+    "description": "Add a bounded recent-history directed-transition feature to frozen per-category SASRec scores, selecting one shared nonnegative fusion coefficient through a small predeclared validation grid.",
+    "motivation": "The user diagnosis identifies broad relatedness without a reason to choose now and excessive influence from older incidental interactions. Recent observed transitions provide an explicit continuation signal addressing both, while preserving SASRec's contextual score. The model diagnosis identifies positive–negative confusion, particularly Electronics' 14.95% wrong-ranking rate and negative lower-tail margin; an additional ranking signal is more directly motivated than an embedding-collapse remedy. Transition support remains an imperfect behavioral proxy, not evidence of verified compatibility, unmet need, or complementarity.",
+    "implementation_notes": "Train the unchanged RecHarness sasrec_perdataset baseline with preprocessing seed 0, training seed 42, existing splits and checkpoint selection, single-GPU execution, all four category routes, and SASREC_EPOCHS environment default 200. Keep DATA_DIR = os.environ['GAGC_DATA_DIR']; save all artifacts beneath the trial directory. Freeze each baseline checkpoint before fusion experiments and reuse it across all scoring ablations.\n\nFor each category, construct directed counts c_ij from every adjacent pair in training histories, counting repeated events. Exclude padding and reserve item ID 0. Let c_i be the source's total outgoing count before pruning. Retain the 64 largest outgoing counts per source, breaking ties by ascending destination ID. Let N be the number of real items. Record training item frequencies and p_pop(j) = (frequency(j)+1)/(total_frequency+N). Popularity-backed Dirichlet smoothing is p_smooth(j|i) = (c_ij+10*p_pop(j))/(c_i+10). The selected transition feature deliberately uses only its empirical component e_ij = c_ij/(c_i+10), on retained edges, and zero otherwise; it does not claim to equal the full smoothed distribution. This keeps source reliability shrinkage while separating popularity evidence. Missing or unsupported sources have zero transition contribution and fall back to SASRec.\n\nFor each causal prefix, select its latest five nonpadding items. Assign normalized weights exp(-lag)/sum(exp(-valid_lags)), where lag zero is newest; repeated source items accumulate evidence. Define T(prefix,j) as the weighted sum of log1p(100*e_ij)/log(101), so T is in [0,1]. Empty histories give T=0. Combined scores are s_SASRec(prefix,j)+alpha*T(prefix,j). The constants five, 64, 10, and 100 are fixed design choices, not additional searched hyperparameters. Select a single alpha shared across categories from [0,0.25,0.5,1,2], using pinned macro validation HR@10; prefer the smaller coefficient on exact ties. Coefficients are in baseline-logit units, and category logit scales may differ. Diagnose this limitation rather than introducing a category-specific search. No inference-only correction for the baseline negative-sampling distribution is applied.\n\nUse sorted int64 edge keys source*(N+1)+destination, checking for integer overflow, and batched torch.searchsorted for candidate scoring. Guard indices beyond the array length before reading, verify exact key equality, and return zero for misses. Retain CSR rows for full-catalog scoring: scatter the same weighted edge features into a batch-by-catalog buffer, or process users in chunks to control memory. Preserve the baseline's candidate filtering and routing. Verify that candidate scores equal indexed full-catalog scores, including repeated histories, padding, empty histories, unsupported sources, and retained-edge ties. Update the predictor writer to load the checkpoint, graph buffers, constants, and selected shared alpha using identical scoring.\n\nRetain DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. view.model must be the actual wrapper nn.Module holding SASRec and transition buffers; expose item_emb and the original compatibility methods. log2feats(sequence) must preserve each position's causal prefix, and predict_score(features, items) must reproduce deployed combined scores. Bind any sequence context explicitly to its returned feature batch rather than relying on an unguarded mutable last-batch cache. Training-position diagnostics must additionally report leave-user-out transition margins: use the supplied sequence to identify matching training histories, conservatively excluding every matching user's complete edge counts, and normalize and prune after subtraction. If unique attribution is unavailable, disclose that limitation and omit the corrected margin rather than claiming independence. Report full-graph margins separately as target-reusing descriptive measurements. Apply identical diagnostic feature construction to every method being compared. Metadata category breakdowns must be omitted or marked unavailable, since item categories are not provided. Never fabricate ratings, reviews, prices, stores, compatibility labels, or simulator traits.\n\nThe first experiment does not learn alpha from training targets, so no cross-fitting is required for fusion fitting. If joint learning is later attempted, use deterministic user-level cross-fitting: construct each user's transition features from other users' folds, excluding all of that user's overlapping prefixes; use the full training graph only at inference. A cheaper event-level subtraction removes the current event from both c_ij and c_i but does not provide the same protection against same-user overlapping-prefix reuse. For exact-zero trainable alpha, use a direct parameter and project it into [0,2] after each optimizer step. A sigmoid initialized near zero is an alternative, but cannot achieve exact zero with a nonzero ordinary derivative at a finite interior parameter. Do not silently replace the frozen experiment with either variant.\n\nPredeclare baseline, popularity-only, transition-only, SASRec+popularity, and SASRec+transition controls. Use P(j)=log1p(100*p_pop(j))/log(101) for the popularity residual and the same coefficient grid, recording ties and coverage. Defer combined popularity-plus-transition fusion to a separately logged experiment. Keep evaluation users, candidates, checkpoint, and host tie handling identical across ablations; do not modify the evaluator. Select solely by the common equal-weight macro validation HR@10. If the host exposes per-user validation hits, perform 10,000 paired bootstrap replicates resampling 200 users within each category, sharing indices across methods; otherwise do not invent uncertainty intervals. Define support strata as zero, positive counts below the median positive training-edge count, and counts at or above it, using the latest source; define popularity bins by training-frequency quartiles. Report subgroup sizes, paired wins/losses, target and candidate transition coverage, and recommended-item popularity where outputs permit. Sparse strata remain descriptive. Bootstrap intervals condition on trained models and fixed candidates and do not remove validation-selection optimism. Log failures and every configuration against the shared 43,200 GPU-second budget, freeze the selected method before independent held-out evaluation, and make no test or full-catalog accuracy claims from sampled validation.",
+    "pseudocode": "ALPHAS = [0.0, 0.25, 0.5, 1.0, 2.0]\nfor category in FOUR_CATEGORIES:\n    sasrec[category] = train_unchanged_baseline(seed=42, epochs=environment_default_200)\n    freeze(sasrec[category])\n    counts = count_adjacent_events(training_histories[category], exclude_padding=True)\n    source_totals = outgoing_totals(counts)  # Before pruning.\n    retained = top64_per_source(counts, tie_break='ascending_item_id')\n    edge_feature = {\n        (i,j): log1p(100 * c_ij / (source_totals[i] + 10)) / log(101)\n        for (i,j), c_ij in retained.items()\n    }\n    save_sorted_keys_values_and_CSR(edge_feature)\n    save_training_popularity_statistics()\n\n# Shared by candidate scoring and full-catalog inference.\ndef transition_score(prefix, candidates, graph):\n    recent = latest_nonpadding(prefix, limit=5)\n    if len(recent) == 0:\n        return zeros_like(candidates, dtype=float)\n    weights = normalize([exp(-lag) for lag in range(len(recent))])\n    return sum(weights[lag] * graph.lookup(source, candidates, default=0)\n               for lag, source in enumerate(reversed(recent)))\n\ndef score(category, prefix, candidates, alpha):\n    return sasrec[category].score(prefix, candidates) + alpha * transition_score(\n        prefix, candidates, graph[category])\n\n# Use the host's unchanged pinned validation protocol.\nfor alpha in ALPHAS:\n    macro_hr = host_validation_macro_hr(score, shared_alpha=alpha)\n    log_attempt(alpha, macro_hr, per_category_results, cost)\nselected_alpha = argmax_macro_hr_with_smaller_alpha_tiebreak()\nrun_predeclared_popularity_and_transition_controls_on_same_checkpoint()\n# No test access; uncertainty/strata only when host validation outputs permit.\n\n# Honest training-position probes need different, target-independent graph statistics.\nfor diagnostic_batch in train_loader:\n    infer_matching_users_from_public_training_sequences()\n    subtract_complete_matching_user_edge_counts()\n    renormalize_and_reprune_for_probe()\n    compute_causal_leave_user_out_margins_or_mark_unavailable()\n\nsave_checkpoints_graphs_constants_and_selected_alpha(trial_directory)\nwrite_predictor_with_identical_scoring_and_four_category_routing()\nverify_candidate_scores_equal_indexed_full_catalog_scores()",
+    "originality": {
+      "score": 4,
+      "positive": "The diagnosis-driven combination of recent continuation evidence, support shrinkage, and explicit popularity controls creates a focused, falsifiable adaptation.",
+      "negative": "Markov transitions, recency weighting, smoothing, and score fusion are established techniques; the contribution is primarily experimental rather than a new model class."
+    },
+    "future_potential": {
+      "score": 7,
+      "positive": "A cheap, interpretable baseline can establish whether transition evidence merits later support-aware gating, temporal modeling, or cross-fitted joint training.",
+      "negative": "Sparse edges, popularity shortcuts, and unobserved purchase intent may limit improvements; fixed fusion also cannot adapt to category-specific score scales."
+    },
+    "code_difficulty": {
+      "score": 4,
+      "positive": "Freezing SASRec avoids architecture retraining and gradient complications, while sparse graph construction and scalar score fusion remain modest changes.",
+      "negative": "Exact predictor parity, full-catalog efficiency, and target-independent diagnostic adaptation require more work than the original difficulty score of three suggested."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Graph Projections (2025)",
+      "link": "https://arxiv.org/abs/2506.09209",
+      "contributions": [
+        "Uses directed weighted interaction projections for complementary recommendation, motivating asymmetric transition evidence."
+      ],
+      "limitations": [
+        "Does not establish improvements under this pinned benchmark or make training transitions verified complement labels."
+      ]
+    },
+    {
+      "title": "SComGNN (AAAI 2024)",
+      "link": "https://arxiv.org/abs/2401.02130",
+      "contributions": [
+        "Models complementary recommendation using graph filtering that preserves distinctions beyond simple similarity."
+      ],
+      "limitations": [
+        "Its relationship setting cannot be assumed available from this task's interaction histories."
+      ]
+    },
+    {
+      "title": "FAME (WSDM 2025)",
+      "link": "https://arxiv.org/abs/2411.01457",
+      "contributions": [
+        "Combines predictions from distinct attention-head representations through gating."
+      ],
+      "limitations": [
+        "Does not validate the proposed scalar transition residual or its user-facing effects."
+      ]
+    },
+    {
+      "title": "gSASRec (IJCAI 2024)",
+      "link": "https://www.ijcai.org/proceedings/2024/939",
+      "contributions": [
+        "Examines sampled-BCE overconfidence and proposes generalized BCE with more negatives."
+      ],
+      "limitations": [
+        "Reported gains on other datasets and metrics do not establish Electronics HR@10 improvements."
+      ]
+    },
+    {
+      "title": "UFNRec",
+      "link": "https://arxiv.org/abs/2208.04116",
+      "contributions": [
+        "Uses teacher soft labels and consistency regularization to address suspected false negatives."
+      ],
+      "limitations": [
+        "Adds training machinery and does not establish that transition-supported candidates are true preferences."
+      ]
+    },
+    {
+      "title": "H2O Target Encoding",
+      "link": "https://s3.amazonaws.com/h2o-release/h2o/master/7000/docs-website/h2o-docs/data-science/target-encoding.html",
+      "contributions": [
+        "Documents leave-one-out and fold-based strategies for preventing a target from directly contributing to its own encoded feature."
+      ],
+      "limitations": [
+        "Application to sequential transition features is a methodological adaptation; overlapping user prefixes require additional care."
+      ]
+    },
+    {
+      "title": "CatBoost: Unbiased Boosting with Categorical Features",
+      "link": "https://arxiv.org/abs/1706.09516",
+      "contributions": [
+        "Develops ordered target statistics to address target leakage and prediction shift."
+      ],
+      "limitations": [
+        "Does not directly evaluate this sequential recommendation residual or establish that event-level subtraction handles user-level dependence."
+      ]
+    },
+    {
+      "title": "SciPy Bootstrap Documentation",
+      "link": "https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.bootstrap.html",
+      "contributions": [
+        "Documents paired resampling, supporting uncertainty estimation with shared user indices across compared methods."
+      ],
+      "limitations": [
+        "User bootstrap intervals exclude training and candidate-sampling variability and do not correct adaptive validation selection."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that candidate-sampled recommendation metrics can differ substantially from full-catalog metrics and can change method rankings."
+      ],
+      "limitations": [
+        "Does not invalidate the required pinned selection metric; it limits conclusions drawn beyond that protocol."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://www.jmlr.org/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains how repeated model selection can overfit a finite validation criterion and bias reported performance."
+      ],
+      "limitations": [
+        "Does not supply a benchmark-specific correction; predeclared searches reduce flexibility without eliminating selection optimism."
+      ]
+    },
+    {
+      "title": "TensorFlow Candidate Sampling",
+      "link": "https://www.tensorflow.org/extras/candidate_sampling.pdf",
+      "contributions": [
+        "Explains how sampled classification scores depend on the noise distribution, motivating explicit fusion-scale choices."
+      ],
+      "limitations": [
+        "Idealized density-ratio formulas depend on sampling exclusions and loss weights and do not justify an inference-only correction to the existing model."
+      ]
+    },
+    {
+      "title": "PyTorch torch.searchsorted",
+      "link": "https://docs.pytorch.org/docs/2.14/generated/torch.searchsorted.html",
+      "contributions": [
+        "Provides batched lookup primitives for sorted sparse transition keys."
+      ],
+      "limitations": [
+        "Insertion positions require bounds and equality checks; missing-edge semantics and predictor parity remain implementation responsibilities."
+      ]
+    }
+  ]
+}

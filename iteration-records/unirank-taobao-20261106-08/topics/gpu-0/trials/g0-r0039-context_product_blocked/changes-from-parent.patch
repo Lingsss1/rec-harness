@@ -1,0 +1,101 @@
+--- g0-r0031-adapter_context_only/model.py
++++ g0-r0039-context_product_blocked/model.py
+@@ -1,12 +1,11 @@
+-"""Auxiliary context gradients through tower versus history adapter.
+-
+-Four cells retain identical learned modules, inputs, loss, forward arithmetic,
+-initialization and normalization populations. Independent stop-gradients gate
+-auxiliary context at the task adapter and direct prediction-tower inputs.
+-Click paths, auxiliary scorer/item ownership and running states are inherited.
+-The all-enabled/all-blocked cells bridge round 30; two partial gates isolate
+-where auxiliary supervision shapes shared context. Dense global clipping can
+-still couple task heads indirectly. No full-isolation or novelty claim.
+-Only static source checks are possible here; host tensor checks are required.
++"""Prospective context/history fusion study on the frozen compressed-history model.
++
++Append rank-16 task-specific context and compressed-history projections to the
++incumbent. Product versus sum fusion is crossed with the existing auxiliary
++adapter-context gradient gate. All four cells have identical learned capacity,
++initialization order and native Dice populations. New zero output matrices
++preserve the parent's initial predictions, not its subsequent training path.
++Fusion uses ordinary differentiable FP32 arithmetic, not a surrogate gradient.
++No novelty or predictive benefit is established. Host tensor checks are required.
+ """
+ import torch
+@@ -17,5 +16,5 @@
+ 
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': False}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [64, 32], 'tower_hidden_units': [128, 64], 'attention_normalization': 'none', 'compression_routes': 'uf', 'block_aux_scorer_grad': True, 'block_aux_context_grad': False, 'block_aux_item_grad': True, 'residual_input': 'match_detail', 'residual_routing': 'task', 'residual_hidden': 16, 'temporal_detail': 'position', 'block_detail': 'ordinal', 'curvature_detail': 'quadratic', 'joint_detail': 'duplicate_match', 'match_support': 'available', 'match_scaling': 'norm', 'coarse_extension': 'duplicate', 'primary_partition': 'uniform', 'normalization_support': 'rotated_duplicate', 'support_gradient': 'attached', 'inference_support': 'fully_pruned', 'training_support': 'folded', 'residual_execution': 'direct', 'auxiliary_train_population': 'primary', 'auxiliary_eval_population': 'primary', 'block_aux_tower_context_grad': True, 'block_aux_adapter_context_grad': True, 'context_fusion': 'product', 'interaction_rank': 16}
+ 
+ 
+@@ -35,5 +34,6 @@
+                  auxiliary_train_population='primary', auxiliary_eval_population='primary',
+                  block_aux_tower_context_grad=True,
+-                 block_aux_adapter_context_grad=False,
++                 block_aux_adapter_context_grad=True,
++                 context_fusion='product', interaction_rank=16,
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+@@ -62,4 +62,11 @@
+         self.block_aux_tower_context_grad = block_aux_tower_context_grad
+         self.block_aux_adapter_context_grad = block_aux_adapter_context_grad
++        if context_fusion not in ('product', 'sum'):
++            raise ValueError('Unknown context/history fusion operator')
++        if (not isinstance(interaction_rank, int) or isinstance(interaction_rank, bool)
++                or interaction_rank < 1):
++            raise ValueError('Interaction rank must be a positive integer')
++        self.context_fusion = context_fusion
++        self.interaction_rank = interaction_rank
+         if residual_input != 'match_detail':
+             raise ValueError('The original match-detail channel must be retained')
+@@ -187,4 +194,22 @@
+                 nn.init.zeros_(adapter[-1].weight)
+                 nn.init.zeros_(adapter[-1].bias)
++            # Appended after every inherited learned module is initialized.
++            # This same fork preserves the host RNG after construction.
++            context_width = len(self.user_fields) * embedding_dim
++            history_width = 6 * self.value_width + len(self.match_fields)
++            self.context_queries = nn.ModuleList([
++                nn.Linear(context_width, interaction_rank, bias=False)
++                for _ in feature_map.labels
++            ])
++            self.history_projections = nn.ModuleList([
++                nn.Linear(history_width, interaction_rank, bias=False)
++                for _ in feature_map.labels
++            ])
++            self.interaction_outputs = nn.ModuleList([
++                nn.Linear(interaction_rank, self.value_width, bias=False)
++                for _ in feature_map.labels
++            ])
++            for output in self.interaction_outputs:
++                nn.init.zeros_(output.weight)
+         # Add only nonlearned state, AFTER every inherited learned module and
+         # initialization. Native Dice has running mean/variance and counters.
+@@ -651,4 +676,18 @@
+         return weighted.sum(dim=1)
+ 
++    def _context_history_correction(self, index, context, history):
++        # Only supplied context and already-masked compressed history enter.
++        # FP32 bounded projections and a shared RMS denominator reduce gross
++        # scale confounding between product and sum. Their geometry and
++        # optimization still differ; equal norms do not imply equal capacity.
++        query = torch.tanh(self.context_queries[index](context).float())
++        summary = torch.tanh(self.history_projections[index](history).float())
++        if self.context_fusion == 'product':
++            fused = query * summary
++        else:
++            fused = (query + summary) * (2.0 ** -0.5)
++        fused = fused * torch.rsqrt(fused.square().mean(dim=-1, keepdim=True) + 1e-4)
++        return self.interaction_outputs[index](fused.to(history.dtype))
++
+     def forward(self, inputs):
+         context, target, values, mask, auxiliary, detail, position_detail, block_detail, curvature_detail, joint_detail, match_counts, match_union = self._represent(inputs)
+@@ -792,4 +831,7 @@
+                                     for adapter in self.residual_bank], dim=1)
+                 correction = bank[:, index, :] if self.residual_routing == 'task' else bank.mean(dim=1)
++            history_features = torch.cat([base, match_counts.to(base.dtype), signal], dim=-1)
++            correction = correction + self._context_history_correction(
++                index, adapter_context, history_features)
+             pooled = base + has_history * correction
+             features = torch.cat([tower_context, task_target, pooled], dim=-1)

@@ -1,0 +1,860 @@
+PAGE 1
+The Tencent Advertising Algorithm Challenge 2026: Towards
+Unifying Sequence Modeling and Feature Interaction for
+Large-scale Recommendation
+Junwei Pan1, Irwin King2, Xing Zhou1, Wei Xue1, Chao Zhou1, Shudong Huang1, Chengguo Yin1,
+Zhixiang Feng1, Tao Chen1, Haodong Lv1, Xinxing Gao1, Fengye Xu1, Qiujia Ji1, Tao Wu1,
+Wang Zheng1, Chunwen Pan1, Yafei Wang1, Haotian Qin1, Jiahe Yu1, Kaihui Wu1, Yifeng Zhou1,
+Yuehong Hu1, Yuliang Sun2, Lunan Fan1, Menglin Yang3, Rex Ying4, Suju Rajan5, Jiliang Tang6,
+Yanfang Ye7, Yizhou Sun8, Qiang Yang9, Haijie Gu1, Jie Jiang1
+1Tencent 2The Chinese University of Hong Kong 3HKUST(GZ) 4Yale University 5Amazon
+6Michigan State University 7University of Notre Dame 8UCLA 9PolyU
+{jonaspan, leostarzhou, weixue, derekczhou}@tencent.com,king@cse.cuhk.edu.hk
+We present the KDD Cup 2026 Tencent Advertising Algorithm ChallengeTowards Unifying Sequence Modeling
+and Feature Interaction for Large-scale Recommendation, a large-scale competition and benchmark for unified
+recommendation modeling. The competition focuses on post-click conversion rate (pCVR) prediction. For each
+user–ad ranking instance, participants observe two heterogeneous sources of information: (i) non-sequential
+multi-field features covering user, ad, context, and pre-computed cross representations, and (ii) chronologically
+ordered user behavior histories from multiple behavioral domains, where each behavior is accompanied by
+heterogeneous side information such as item attributes, behavior/scenario indicators, and timestamps. The
+central challenge is to transform these heterogeneous signals into compatible representations and jointly process
+them with ahomogeneous, stackable backbone, enablingeffective cross-source interactionsandhardware-
+efficient scaling with high GPU utilization. Submitted models predict the conversion probability of the target
+ad and are evaluated by AUC under controlled computational resources and strict inference constraints.
+The competition consisted of academic and industry tracks conducted over two online rounds. Submissions
+were evaluated by AUC on separate test sets under controlled computational resources and astrict no-ensemble
+policy. All teams trained and evaluated their models on the organizer-provided AngelML platform using
+large-scale Tencent Advertising logs and standardized access to high-performance GPUs.
+The challenge attracted 13,913 registered participants forming 5,746 teams from 52 countries and regions and
+907 universities, research institutes, and companies. Fifty academic-track teams and twenty industry-track
+teams advanced to Round 2. We subsequently received 46 solution papers, of which 23 were accepted for
+presentation at the KDD Cup workshop. We release de-identified public samples, detailed feature statistics,
+and starter resources at this linka to support further research on unified recommendation modeling.
+ahttps://huggingface.co/TAAC2026
+1 Introduction
+Recommender systems are foundational to bothcontent recommendation(e.g., feeds, short videos, news, e-commerce)
+andadvertising(e.g., CTR/CVR prediction and auction-based ranking), shaping user experience, platform engagement,
+and revenue. At today’s scale, these systems operate under massive traffic and strict latency constraints, making
+billions of decisions daily. For example, Weixin and WeChat have over one billion monthly active users globally,
+generating massive volumes of personalized recommendation requests in real time [ 42]. Meanwhile, global digital
+advertising spending reached approximately $790 billion in 2024 [ 22], underscoring the economic importance of
+large-scale advertising systems. Together, these statistics highlight the broad social and economic impact of advances in
+recommender and advertising systems.
+Over the past two decades, recommendation research has evolved from collaborative filtering and linear predictors
+1
+
+PAGE 2
+to deep representation learning and large-scale ranking architectures, broadly progressing along two major branches:
+(i)feature interaction models, which model dependencies among multi-field categorical and contextual features, and
+(ii)sequential models, which capture users’ dynamically evolving interests from their historical behaviors. Feature
+interaction modeling has progressively evolved fromshallow explicit interactiontodeep interaction modelingand,
+more recently,large-scale model scaling. Early factorization-based methods in the FM family efficiently model
+second-order interactions through inner products between field embeddings [36, 20, 30, 41]. Subsequent DNN-based
+architectures, ranging from Wide & Deep and DeepFM to NFM, AutoInt, xDeepFM, and DCN-V2, substantially
+enhance representation capacity by combining explicit feature crosses with increasingly expressive implicit or high-order
+interaction mechanisms [7, 15, 13, 24, 40, 46]. More recently, as industrial recommenders move toward larger model
+capacity, scaling-oriented approaches such as Heterogeneous-MoE, Multi-Embedding, DHEN, Wukong, RankMixer,
+RankUp, RankElastor, and UniFormer shift the focus from designing individual feature crosses toward increasing
+the usable representation and interaction capacity of the overall model, while addressing challenges in representation
+dimensionality, model depth, parameter scaling, and hardware efficiency [31, 14, 53, 54, 62, 5, 23, 4].
+In parallel, sequential recommendation has evolved from modeling relatively short behavior histories to capturing
+increasingly long and heterogeneous user trajectories. Early and short-sequence models, including SASRec and the
+DIN family, develop self-attention, target-aware attention, interest evolution, and temporal interaction mechanisms
+to extract user interests from recent behavior sequences [ 21, 59, 58, 11, 60]. As industrial platforms accumulate
+much longer behavior histories, long- and lifelong-sequence models such as SIM, TWIN/TWIN-V2, LONGER,
+DARE, and MUSE increasingly rely on memory, retrieval, sampling, sequence compression, representation decoupling,
+and efficient attention mechanisms to extend the modeling horizon while controlling computational and serving
+costs [33, 35, 1, 3, 39, 2, 10, 50, 16, 55].
+Towards Unified Modeling.Despite the substantial progress of both branches, feature interaction modeling and
+sequential recommendation have historically evolved as largely separate architectural components. Traditional behavior-
+aware CTR and ranking models commonly follow a modularencode-then-interactparadigm: a dedicated interest or
+sequence-modeling module first compresses user behavior histories into one or a few fixed-length representations, which
+are subsequently concatenated with non-sequential user, item, and contextual features and processed by downstream
+MLP or feature-interaction networks [59, 58, 11, 6, 35, 28, 38, 60]. This separation remains prevalent in more recent
+industrial systems, where increasingly powerful sequence encoders are coupled with separately designed cross, MoE,
+or heterogeneous-expert interaction backbones and fused at a later stage [12, 51, 31, 29, 63, 26]. While such modular
+designs are effective and allow the two components to evolve independently, they often compress behavioral information
+before rich cross-source interaction, limiting repeated bidirectional conditioning between individual behaviors and
+non-sequential features and making model scaling dependent on coordinating heterogeneous subnetworks. Motivated
+by the growing importance of jointly exploiting these heterogeneous signals, recent studies, including InterFormer,
+OneTrans, HyFormer, EST, MixFormer, HeMix, TokenFormer, and UniFormer, have explored increasingly integrated
+architectures for jointly modeling sequential and non-sequential information [52, 57, 18, 27, 17, 45, 61, 4].
+Nevertheless, unified recommendation modeling remains far from settled. Existing approaches differ substantially
+in their tokenization strategies, interaction topologies, sequence compression mechanisms, degree of architectural
+homogeneity, and scaling strategies. Moreover, their effectiveness is typically demonstrated on different datasets
+and under different feature spaces, sequence lengths, computational budgets, and serving constraints, making direct
+comparison difficult. Consequently, it remains unclear which architectural principles are broadly effective, how well
+different unified designs scale with model depth and capacity, and whether their accuracy gains can be retained under
+realistic GPU and inference constraints.
+These open questions motivate a common benchmark for systematically studying unified recommendation modeling
+under controlled industrial-scale settings. We therefore organized the KDD Cup 2026 Tencent Advertising Algorithm
+ChallengeTowards Unifying Sequence Modeling and Feature Interaction for Large-scale Recommendation, providing
+a shared task that jointly exposes heterogeneous multi-field features and multi-domain behavioral sequences under
+standardized data, computational, and inference constraints. As illustrated in Figure 1, the challenge particularly
+encourages participants to explore effective heterogeneous tokenization, homogeneous and stackable unified blocks,
+fine-grained interactions between sequential and non-sequential signals, and hardware-efficient model scaling.
+2
+
+PAGE 3
+Sequential Tokenizer Non-Seq Tokenizer
+Sequential Features
+Unified Block 1
+Unified Block N
+...
+Unified Processing Module
+CVR Prediction Head
+Non-Seq Features
+2. Non-Seq Data1. Sequence Data
+...
+...
+InputInput
+Model
+Loop Training
+AUC:  Effectiveness
+Inference
+Evaluation
+Get the leaderboard
+Age: 38
+Gender: Male...
+Name: Apple
+Type: Fruit
+...
+user emb.
+interest emb....
+Device: Phone
+OS Type: iOS
+...
+User Features Ads Features
+Context Features Cross Features
+: dense : sparse
+Apply Privacy Protection
+Objective:  Maximize:
+Figure 1: Overview of the competition framework.Bottom-left (Input):Each instance consists of (1) sequential
+behavior data, i.e., chronological interaction histories for individual users, with associated items and timestamps, and
+(2) non-sequential multi-field features grouped into four categories: User Features, Ads Features, Context Features
+(sparse), and Cross Features (dense embeddings), all subject to privacy protection.Right (Model):Participants are
+encouraged to transform sequential and non-sequential inputs into compatible representations and jointly process them
+through a stack of unified blocks within a homogeneous backbone, followed by a CVR prediction head. The illustrated
+tokenization represents a general design paradigm rather than a prescribed model architecture.Top-left (Training and
+Evaluation):The model is trained with binary supervision using cross-entropy loss, potentially together with auxiliary
+objectives, and submissions are ranked by AUC on the official test set.
+2 Challenge Setting
+Problem setting.In industrial recommendation and advertising ranking, each prediction instance jointly depends
+on two heterogeneous sources of information: (i) richnon-sequential multi-field features, including user, target-
+ad, contextual, dense, and pre-computed cross features, and (ii)multi-domain user behavior histories, where each
+historical behavior is associated with heterogeneous side information such as item attributes, behavior type, scenario,
+and timestamp. Conventional systems commonly process these two sources with specialized feature-interaction and
+sequence-modeling modules and combine their representations only after largely separate processing. Although
+effective, such modular designs restrict repeated fine-grained interaction between sequential and non-sequential signals
+and make it difficult to construct homogeneous, deeply stackable architectures. Accordingly, the challenge encourages
+participants to develop unified and scalable models that jointly exploit both sources under realistic computational and
+inference constraints.
+Data and notation.Each training or test example corresponds to a user u, a request/context c, and a target ad i. The
+model observes the following inputs:
+•Non-sequential multi-field features.We denote the collection of non-sequential features by
+Fns =
+{︂
+f (1), . . . , f(K)
+}︂
+,(1)
+covering user/profile features, contextual features, target-ad features, and other sparse or dense representations.
+Depending on the field type,f (k) may be a categorical value, a multi-value feature, or a dense vector.
+•Multi-domain behavior histories.User behaviors are organized intoDbehavioral domains,
+Su =
+{︂
+S(1)u , . . . , S(D)u
+}︂
+, S (d)u = (︂x(d)1 , . . . , x(d)Td )︂ ,(2)
+3
+
+PAGE 4
+whereT d is the history length of domaind. Each behavior event contains multiple side-information fields:
+x(d)t = (︂g(d,1)t , . . . , g(d,Md)t )︂ ,(3)
+representing information such as the interacted item’s attributes, behavior type, scenario, and timestamp.
+Prediction objective.Let Φθ denote a participant model that jointly processes the heterogeneous non-sequential
+features, multi-domain behavior histories, and target-ad information. The predicted conversion score is
+sθ(u, c, i) = Φθ (Fns,S u, i).(4)
+where request/context information c is included in Fns. Given labeled examples {(un, cn, in, yn)}Nn=1, where yn ∈
+{0,1} indicates whether a post-click conversion occurs, participants aim to learnΦθ such that the resulting scores achieve
+high ranking quality, measured by AUC on the hidden evaluation set, while satisfying the prescribed computational and
+inference constraints.
+Unified modeling.The competition does not prescribe a specific tokenization or interaction architecture. Participants
+may independently design how heterogeneous fields, behavior histories, and target information are represented,
+compressed, and jointly modeled. As illustrated in Figure 1, the challenge particularly encourages architectures that
+map these heterogeneous inputs into compatible representations and repeatedly process them throughhomogeneous and
+stackable unified blocks. This formulation allows diverse designs—including field tokens, behavior tokens, query or
+intent tokens, sequence summaries, and other learned representations—while retaining the central objective of effective
+cross-source interaction and hardware-efficient scaling.
+2.1 Competition Protocol
+Tracks and eligibility.The competition consisted of two parallel tracks with the same prediction task but independent
+leaderboards and track-specific inference constraints. TheAcademic Trackwas reserved for teams whose members
+were all current students at universities or colleges, with cross-institution teams permitted. TheIndustry Trackwas
+open to other eligible participants, including practitioners from research institutes and companies, and adopted a stricter
+inference-efficiency requirement. Participation was team-based: each team consisted of1 to 3 members, and each
+participant could belong to only one team.
+Competition procedure.The competition comprisedtwo online rounds, followed by solution-paper review and
+presentation at the KDD Cup workshop. Round 1 was open to all eligible teams and emphasized broad architectural
+exploration. The top-50 teams in the Academic Track and top-20 teams in the Industry Track advanced to Round 2,
+where participants were evaluated under substantially larger data and computational scales. After Round 2, finalist
+teams submitted technical reports describing their solutions, and accepted works were presented at the KDD Cup
+workshop.
+Submission, evaluation, and fairness.Across both rounds, teams could make at mostthree submissions per
+day. Submissions were evaluated server-side on hidden test sets, with AUC serving as the leaderboard metric among
+models satisfying the corresponding track-specific inference-time constraints. To emphasize single-model architectural
+innovation and ensure fair comparison,model ensembling was prohibited. Throughout both rounds, the organizing
+committee conducted multiple rounds ofAI-assisted code review, supplemented by manual verification, to assess
+compliance with the competition rules. The review pipeline analyzed submitted code for prohibited ensemble methods
+and potential plagiarism, including suspicious structural and semantic similarities across submissions. Several teams
+were found to have employed ensemble strategies, most commonly simple or weighted averaging of predictions from
+multiple models. These submissions were deemed non-compliant, and the corresponding results were subsequently
+invalidated. To the best of our knowledge, TAAC 2026 is the first large-scale public recommendation competition to
+report the use of AI-assisted code review, complemented by manual verification, to enforce an explicit no-ensemble
+policy. This human–AI review pipeline enabled scalable inspection of a large number of submissions while preserving
+human judgment for final compliance decisions, helping maintain a fair comparison of single-model architectural
+innovations.
+4
+
+PAGE 5
+Round 1: broad exploration.Round 1 provided a moderate-scale setting for rapid model development and architec-
+tural exploration. Depending on the track, the training data contained roughlyone to two millioninteraction instances,
+together with several hundred thousand inference instances and approximately120 feature columnsspanning user, item,
+contextual, dense, and multi-domain sequential signals. Each team was allocated a fractional high-performance GPU
+slot on the AngelML platform, allowing a large number of teams to experiment under a standardized computational
+environment.
+Round 2: large-scale evaluation.Round 2 substantially increased both data and model-development capacity to
+emphasize scalable recommendation modeling. The datasets expanded by more than an order of magnitude totens of
+millions of training instancesandmillions of inference instances, while the feature schema grew to approximately
+140 columnswith richer sparse and dense signals. Each finalist team received7 high-performance GPUson AngelML,
+enabling the exploration of deeper, wider, and more computationally demanding unified architectures under the same
+controlled evaluation protocol.
+2.2 Awards
+The competition offered a total prize pool of5.9 million RMB, with3.6 million RMBallocated to the Academic Track
+and1.7 million RMBto the Industry Track. Both tracks awarded prizes to the highest-ranked teams, with additional
+honorable mentions for top-performing teams in the Academic Track.
+Beyond leaderboard performance, the competition established twoTechnical Innovation Awards, each worth
+300,000 RMB, to recognize contributions that advanced the design of large-scale unified recommender systems. The
+awards focused on (i)scaling laws for unified recommendation models, and (ii)unified block designfor bridging
+sequential modeling and multi-field feature interaction. These awards were intended to recognize architectural and
+scaling innovations beyond incremental accuracy improvements. They were not disclosed in advance and were
+announced at the KDD Cup workshop based on the technical contributions demonstrated by the finalist solutions.
+2.3 KDD Cup Workshop
+Following Round 2, finalist teams were invited to submit solution papers through OpenReview 1. We received46
+submissions, of which23were accepted for presentation, including8 oral presentationsand15 posters. The workshop
+brought together competition finalists and invited researchers from academia and industry to discuss winning solutions,
+scalable unified recommendation architectures, and emerging directions revealed by the competition.
+3 Data
+The competition data consist of de-identified Tencent Ads interaction logs and are designed to support the central
+problem of this challenge: jointly modeling user behavior sequences and non-sequential multi-field features within
+a unified backbone. Each prediction instance corresponds to a user–item ranking opportunity with a response label,
+a target timestamp, static or slowly changing user/item fields, and multi-domain historical behavior sequences. The
+public data resources include both first-round and second-round samples; both use flat Parquet files to expose typed
+feature columns for model development.2
+Dataset construction.The competition dataset was constructed from attributed pCVR advertising logs from Weixin
+Channels. To improve the representativeness and difficulty of the prediction task, we removed all samples associated
+with conversion types exhibiting high conversion rates, as well as samples involving dual optimization objectives or
+non-optimization objectives.
+We adopted a temporally ordered split, with the test window occurring strictly after the training period. Users
+were kept disjoint between the training and test sets to prevent user-level information leakage. To reduce temporal
+sampling bias, test instances were sampled proportionally across all 24 hours of the day. Likewise, the training set was
+proportionally sampled from multiple days, preserving the temporal coverage of the original logs.
+1https://openreview.net/group?id=KDD.org/2026/Cup/UniRec
+2First-round sample: https://huggingface.co/datasets/TAAC2026/data_sample_1000. Second-round sample: https:
+//huggingface.co/datasets/TAAC2026/second_round_sample_1000.
+5
+
+PAGE 6
+Category First-
+round
+Count
+Second-
+round
+Count
+Type Description
+ID & Label 5 5int64/int32 Core identifiers, label type, label time,
+and timestamp.
+User Int Features 46 54int64 /
+list<int64>
+Discrete user features, including scalar
+profile attributes and multi-value prefer-
+ence or attribute arrays.
+User Dense Features 10 17list<float> Continuous user-side signals, including
+embedding features and dense values
+aligned with selected user integer arrays.
+Item Int Features 14 17int64 /
+list<int64>
+Discrete item features such as item cat-
+egories, types, and multi-label item at-
+tributes.
+Item Dense Features 0 4list<float> Continuous item-side embedding fea-
+tures, available in the second-round sam-
+ple.
+Domain Sequence
+Features
+45 45list<int64> Historical behavior sequences from four
+domains, exposing multi-domain tempo-
+ral signals.
+Table 1: Column groups in the TAAC2026 public first-round and second-round data samples.
+Privacy-preserving release.All released records are de-identified before publication. Personally identifiable informa-
+tion, raw creative content, and business-sensitive raw attributes are excluded. Sparse identifiers and categorical values
+are represented as anonymized integer IDs, while selected continuous signals are provided as pre-computed dense
+feature arrays. Participants therefore observe typed feature columns suitable for modeling, but do not receive raw text,
+images, videos, URLs, or direct user/ad identifiers. The public samples are released under the CC BY-NC 4.0 license
+for non-commercial research and educational use.
+Feature schema.Table 1 summarizes the public sample schemas for both rounds. The first-round sample contains
+120 columns, while the second-round sample extends the same flat-column design to 142 columns. The five ID and
+label columns are user_id, item_id, label_type, label_time, and timestamp. User-side sparse features
+include scalar columns such as user_int_feats_1 and multi-value columns such as user_int_feats_62.
+Some user dense columns are standalone embeddings, while others are aligned with corresponding integer-array
+columns; for example, user_dense_feats_62 has the same element order as user_int_feats_62. Item-side
+features follow the same principle, with scalar or multi-value integer columns such as item_int_feats_5; the
+second-round sample additionally includes item dense embedding columns such as item_dense_feats_124.
+The sequence portion is organized into four behavioral domains in both samples: domain_a_seq_{38-46},
+domain_b_seq_{67-79,88},domain_c_seq_{27-37,47}, anddomain_d_seq_{17-26}.
+Dataset scale.The first-round competition contains both academic-track and industry-track interaction datasets. In
+the academic track, the training split contains 1,010,000 interaction samples stored in Parquet files with 120 columns,
+while the inference split contains 310,000 samples under the same schema. In the industry track, the training and
+inference splits contain 2,099,956 and 523,244 samples, respectively, and are also represented with 120 columns. The
+second-round competition is substantially larger and uses an expanded 142-column schema. Its academic-track training
+split contains 21,995,548 interaction samples, and the corresponding inference split contains 6,098,994 samples. The
+second-round industry track further scales the data to 34,822,423 training samples and 12,251,082 inference samples.
+Across both rounds, each record combines user–item identifiers, label and timestamp fields, user-side and item-side
+sparse/dense features, and multi-domain sequential behavior features. We report aggregated feature column-type
+coverage statistics for the first- and second-round datasets in Appendix Tables 2 and 3, respectively.
+6
+
+PAGE 7
+4 Baseline and Evaluation
+4.1 Baseline
+We use HyFormer as the reference baseline for joint sequence modeling and feature interaction [ 18]. HyFormer
+represents the behavior history as a sequence and the non-sequential fields as feature tokens, and connects the two
+inputs through Query Generation, Query Decoding, and Query Boosting.
+Let {Fk}Kk=1 denote the non-sequential feature tokens, where Fk ∈R 1×D, and let E(Su) denote the behavior-
+sequence representation. HyFormer constructs the global information and initial queries as
+g= Concat (F 1, . . . , FK,MeanPool(E(S u))),(5)
+Q(0) = [︁FFN1(g), . . . ,FFNNq (g)]︁ ∈R Nq×D.(6)
+The initial queries are reused and updated in subsequent HyFormer layers.
+For sequence encoding, HyFormer supports Transformer, LONGER-style cross-attention, and SwiGLU. At layer
+l, the sequence representation H (l) is projected into key and value representations, followed by Query Decoding and
+Query Boosting:
+K (l) =H (l)W (l)K , V (l) =H (l)W (l)V ,
+ˆ︁Q(l) = CrossAttn(︁Q(l−1), K(l), V(l))︁,
+˜︁Q(l) = QueryBoost(︁Concat(︁ ˆ︁Q(l), F1, . . . , FK)︁)︁.
+(7)
+The boosted queries ˜︁Q(l) are used as the input queries of the next HyFormer layer.
+The output of the top HyFormer layer is passed to downstream MLPs to estimate the response probability. The
+baseline is trained with binary cross-entropy:
+ˆ︁yθ(u, c, i) =σ
+(︁
+sθ(u, c, i)
+)︁
+,(8)
+LBCE =− 1|D| ∑︂(u,c,i,Su,y)∈D [︁ylogˆ︁yθ(u, c, i) + (1−y) log(︁1−ˆ︁yθ(u, c, i))︁]︁ .(9)
+4.2 Evaluation Metrics
+We use the area under the receiver operating characteristic curve (AUC) as the official leaderboard metric. For each
+test instance n, let sn =s θ(un, cn, in)∈R denote the prediction score and let yn ∈ {0,1}denote the corresponding
+response label. Define P={n:y n = 1} and N={n:y n = 0} as the positive and negative index sets, respectively.
+AUC is computed as
+AUC = 1|P||N |∑︂p∈P ∑︂n∈N [︃I(sp > sn) + 12 I(sp =s n)]︃ .(10)
+Here, I(·) is the indicator function. Equation (10) measures the probability that a positive instance receives a higher
+score than a negative instance, with ties counted as one-half. The official leaderboard is ordered by AUC on the hidden
+test set.
+4.3 Evaluation Protocol
+Evaluation was conducted in a controlled server-side environment on the official test set. Test labels remained
+confidential. Participants submitted prediction files or containerized inference code, and the official evaluation service
+computed AUC without exposing the labels.
+4.4 Competition Platform
+We hosted the challenge on a Tencent-operated official competition website and ran all training, validation, and
+submission evaluation through our in-houseAngelMLplatform, providing a uniform and reproducible environment
+for all teams. The website served as the single source of truth for registration, rules, data documentation, baselines,
+announcements, and leaderboard status. Importantly, the platform isaccessible to participants worldwide, ensuring
+7
+
+PAGE 8
+thatteams from all regionscan register, train, and submit under the same standardized setting. AngelML provides
+standardized software stacks (containers/environments), centralized job scheduling, and consistent hardware access, so
+that participants do not need to provision their own compute and can reproduce results under identical configurations.
+To ensure accessibility and fairness, we provisioned GPU resources directly on AngelML across both rounds.
+During the first round, each team was allocated a virtual slot equivalent to one-fifth of a high-performance GPU to
+support iterative development and online submissions; during the second round, each finalist team received7 GPUs
+to enable stronger training and thorough ablations under a controlled environment. We also released a complete
+starter kit, including data loaders, preprocessing scripts, evaluation code, and a strong baseline implementation, so
+that participants can reproduce an end-to-end pipeline from day one. Finally, we enforced strict isolation and security
+policies (e.g., sandboxed evaluation, controlled I/O, and standardized dependency management) to minimize leakage
+risks and maintain a stable and fair competition environment.
+5 Challenge Summary
+5.1 Registration
+The Tencent Advertising Algorithm Challenge 2026 attracted broad participation from both academia and industry
+worldwide. Participants represented universities, research institutes, and major technology companies, reflecting strong
+interest in unified recommendation modeling across both research and practitioner communities.
+Registration scale and geographic coverage.In total, 13,913 participants registered and formed 5,746 teams. Based
+on the affiliation information provided during registration, participants represented 52 countries and regions across
+six continents and were affiliated with 907 universities, research institutes, and companies worldwide. These statistics
+reflect the broad geographic and institutional reach of the challenge and the strong interest in unified recommendation
+modeling across both research and practitioner communities.
+Track and industry participation.Among the 5,746 registered teams, 3,799 teams selected the Academic Track,
+accounting for 66.1% of all teams, while 1,947 teams selected the Industry Track, accounting for 33.9%. The Industry
+Track attracted practitioners affiliated with many major technology companies. The most represented domestic
+companies included Meituan, Kuaishou, Alibaba, Baidu, Ant Group, ByteDance, Huawei, Xiaomi, and JD.com, while
+international participants reported affiliations with companies such as VK, Microsoft, Meta, Amazon, Shopee, NVIDIA,
+Google, Tesla, and Qualcomm. This broad industrial representation suggests that the challenge addressed problems of
+direct relevance to large-scale recommendation and advertising systems.
+Academic institutional participation.Academic participation was similarly broad. In mainland China, the institu-
+tions with the largest numbers of registrants included the University of Science and Technology of China, Tsinghua
+University, Shanghai Jiao Tong University, and Fudan University. Strong participation was also observed from uni-
+versities in Hong Kong, particularly the Chinese University of Hong Kong, City University of Hong Kong, and the
+Hong Kong University of Science and Technology. Outside Greater China, highly represented institutions included
+the National University of Singapore, the University of California, Los Angeles, Nanyang Technological University,
+Carnegie Mellon University, and the University of Sydney. Compared with the previous edition, the number of overseas
+registrants increased by 110%, indicating a substantial expansion in the competition’s international reach.
+5.2 Solution Overview
+We summarize the solutions of the three highest-ranked teams in each track, as well as the two innovation-award-winning
+teams. See the corresponding workshop papers for further details.
+Academic Track: First Place.The winning team proposed CRAFT, which handles sparse categorical fields, dense
+vectors, contextual features, and multi-domain behavior histories through type-aware tokenization and a shared stackable
+backbone. Its central design replaces interaction-centric cross-layer propagation with contextual feature transport:
+non-sequential features are reliability-weighted to produce sample-specific control signals that regulate how intent and
+sequence representations evolve across depth.
+8
+
+PAGE 9
+For each behavior domain, CRAFT generates intent tokens from non-sequential context and pooled behavioral
+evidence. Within every block, the contextual transport module predicts channel-wise scaling, bias, and bounded memory
+signals for intent and sequence states, producing a context-conditioned representation displacement while preserving
+the initial information path. Sequence encoders then refine behavioral dynamics, intent tokens retrieve sequence
+evidence through cross-attention, and a token-subspace mixer performs local field refinement. The final ranking score is
+computed from the resulting intent representations rather than directly from the original feature tokens.
+This design provides a unified interface between heterogeneous context and behavioral evidence without relying
+on late fusion or independent feature and sequence towers. The distilled CRAFT model achieved a test AUC of
+0.838090, surpassing the interaction-based distilled baseline at 0.837983. Stacking CRAFT to six blocks further
+achieved0.838148, while a laterd model = 480configuration reached a post-submission test AUC of0.838192.
+Academic Track: Second Place.The runner-up team proposed the UniDAC architecture for large-scale CVR
+prediction. The model is motivated by three characteristics of industrial ranking data: strong non-sequential features can
+dominate sequential signals, user behaviors are fragmented across multiple domains, and naive parameter scaling often
+brings limited gains. Building on a HyFormer-style query-based framework [18], UniDAC introduces a Dual-stack
+Encoding scheme to strengthen sequential modeling. A LONGER branch [2] compresses old histories into a summary
+token while preserving recent events to capture long-range interest evolution, whereas a parallel attention-free SwiGLU
+branch [37] focuses on local event-level patterns. UniDAC further introduces a Cross-domain Interaction module,
+which summarizes each behavior domain into a domain-level token, exchanges complementary information through
+cross-domain attention, and injects the resulting context back into each sequence via gated residual connections.
+Candidate-aware query generation and RankMixer-style token mixing [62] are used to improve the interaction between
+target-conditioned sequential evidence and non-sequential features, while a SoftMoE prediction head [34] expands the
+output-side modeling capacity. For efficient scaling, the model controls high-cardinality sparse embeddings through
+fixed-budget hashing and ID dropout and adopts FlashAttention-2 [8] to reduce the cost of long-sequence attention.
+Together, these scaling-friendly architectural and system optimizations enabled the model to scale from 100M to 1B
+parameters, achieving an AUC of 0.83792 and winning second place in the Academic Track.
+Academic Track: Third Place.The third-place team proposedUniTokenFormer, a unified token-enhanced frame-
+work for post-click conversion rate (pCVR) prediction built on HyFormer [18]. Instead of treating tokenization as a
+fixed preprocessing step, the method systematically designs token construction, target-aware enhancement, and capacity
+allocation. Heterogeneous user-side and item-side fields are first concatenated and projected before being split into
+multiple non-sequential tokens, preserving cross-field interactions as token capacity increases. Candidate-item tokens
+further condition multi-domain behavior sequences and generate DIN-style interest tokens [59]. User, item, and interest
+tokens are fused before domain-specific queries decode the behavior sequences with LENS-enhanced target-conditioned
+gates and positional biases [48], while domain auxiliary objectives strengthen per-sequence supervision. The method
+further treats token allocation as an explicit scaling dimension. The study showed that, under comparable dense model
+sizes, increasing item-side tokens was more effective than increasing user-side tokens, while an item-heavy joint
+allocation enabled a single-block model to scale to 1.063 billion dense parameters. Combined with field-wise feature
+preprocessing, bidirectional time-gap encoding, grouped sparse/dense optimization, exponential moving averages, BF16
+training, and graph compilation, the approach achieved consistent gains over the official HyFormer baseline.
+Industry Track: First Place.The winning team proposedQueryFormer, a unified post-click conversion rate
+(pCVR) model for jointly modeling heterogeneous non-sequential fields and multi-domain behavioral sequences.
+Building on recent progress in unified modeling [ 27], the model replaces projection-only query construction with
+explicit token-to-query attention. Its stackable field–sequence block first refines user and item field tokens with self-
+and cross-attention. Item tokens then retrieve evidence from four behavior domains, while behavior-initialized probes
+cross-attend to the refined field context to generate queries for subsequent sequence interaction. To scale capacity under
+strict inference constraints, QueryFormer organizes tokenization as an embedding matrix with H independent columns.
+These views are evaluated in parallel, and their sequence queries are packed into shared-parameter cross-attention to
+amortize key/value projections and GPU kernel launches. Within the team’s experimental grid, increasingH consistently
+improved validation AUC: the H=4 configuration gained 0.00066 AUC over H=1, while H=8 required only 1.89×
+the per-sample inference latency of H=1. Replacing the cross-attention query generator with an MLP caused the largest
+9
+
+PAGE 10
+individual ablation drop, supporting query generation as the main architectural contribution. QueryFormer achieved
+first place in the Industry Track with an official test AUC of 0.83254.
+Industry Track: Second Place.The runner-up team proposedUniDot, whose central component is the FM Highway,
+a dedicated path that carries explicit dot-product feature interactions around the residual stack and delivers them directly
+to the classifier [25]. Rather than computing second-order interactions only once at the input, as in FM [36] and its deep
+variants, the model emits a factorization-machine term at every layer from that layer’s current token representations,
+so interactions are re-derived as the representations evolve in depth. This places the design alongside a line of recent
+industrial recommenders that reintroduce an explicit dot-product matching step inside an otherwise attention-based
+backbone [47], but routes those scores past the trunk entirely, so explicit low-order signals are not diluted by repeated
+nonlinear mixing and the classifier retains direct access to interaction evidence at every level of abstraction. The
+highway allows the rest of the network to form a single homogeneous stack: because explicit interactions are guaranteed
+a route to the output, the trunk is free to specialize in implicit mixing. The trunk stacks a repeated macro-block in
+which a token-mixing bus and a sequence-retrieval bus (item tokens cross-attending to the behavior histories) operate
+in parallel over a shared token space. The design is motivated by the observation that the embedding inner product
+of collaborative filtering and the query–key score of dot-product attention [ 44] share the same primitive, while the
+two buses exchange state at every layer through an MLP-Mixer [43] fusion. The sequence side is embedded once per
+forward pass and shared by all consumers, bounding inference latency [47]. Training uses a dual sparse/dense optimizer
+(Adagrad [9] on the embedding tables and Muon [19] on the dense parameters), an auxiliary conversion-delay head,
+and multi-path mutual learning [56] across the model’s parallel prediction paths.
+Industry Track: Third Place.The third-place team proposedUniBridge, a stackabledecode-then-mixarchitecture
+for jointly modeling behavioral sequences and multi-field features. UniBridge first applies lightweight local temporal
+modeling to each behavior stream. Queries conditioned on the candidate item then attend to the behavior history and
+compress it into a small set of intent tokens. This design reduces the cost of long-sequence modeling and avoids
+applying global self-attention to the full behavior history [2]. The resulting behavior tokens are combined with user and
+item field tokens in a shared residual stream. In addition, a parameter-free RankMixer rewire [62] is used to model their
+interactions. Compared with fully unified Transformer architectures [57], UniBridge keeps the number of mixed tokens
+small and fixed. This design supports early interaction between sequence and field features with low computational
+overhead.
+Winner of the Unified Block Innovation Award.The awarded team proposed MaskRec, a topology-masked unified
+architecture for jointly modeling heterogeneous feature interactions and multi-domain user behavior sequences. Building
+on recent efforts to unify feature interaction and sequence modeling in industrial recommender systems [18, 57, 61],
+MaskRec transforms heterogeneous non-sequential features, contextual signals, multi-domain behavior sequences, and
+auxiliary representations into a shared token space and models them with a unified Transformer-style backbone. Its core
+component, TopoMask, extends the masking mechanism of Transformer attention [44] from temporal constraints to
+topology-aware interaction constraints, explicitly regulating token-level query–key connections according to token roles
+and behavior-domain relationships. Global memory tokens and domain-level memory tokens are further introduced as
+learnable aggregation nodes for global and domain-specific information. To inject candidate-conditioned interaction
+signals before unified modeling, MaskRec further introduces DualQ, which performs bidirectional cross-attention
+between user-side and candidate-item-side tokens, followed by asymmetric attentive pooling and domain-conditioned
+feature-wise linear modulation (FiLM) [ 32] to generate domain-aware query tokens. The resulting design enables
+source-local modeling, domain-level aggregation, and controlled cross-source interaction within the same backbone and
+consistently outperforms the HyFormer-style baseline on the competition dataset.
+Winner of the Scaling Law Innovation Award.The awarded team developed CoSFormer, a single-model architecture
+for post-click conversion prediction built on the competition’s HyFormer-style baseline [18]. Its central contribution is
+information-bearing token co-scaling. In the RankMixer-style backbone [62], model width factorizes asdmodel =T dsub,
+where T is the number of query and context tokens. Rather than widening an unchanged representation, CoSFormer
+fixes dsub = 4, appends tokens derived from new predictive signals, and widens the shared backbone in lockstep. The
+resulting 48-token stream unifies static context and four behavior sequences through independently projected pretrained
+vectors, explicit user–item crosses, TIN-based target-time readouts [60], and multi-resolution history summaries. A
+10
+
+PAGE 11
+MaskNet-inspired dual stream [49], token-type-private feed-forward networks, and candidate-aware attention further
+process these heterogeneous channels.
+To isolate the scaling gain, the team evaluated a nine-step semantic-token ladder against two counterfactuals:
+widening the existing bank and appending learned empty tokens at a fixed per-token subspace. Width-only scaling
+degraded performance from the first scaling step, while empty tokens produced short-lived gains before turning
+downward. Semantic co-scaling instead improved AUC until later token families became redundant, providing an
+empirical stopping rule. The results showed that useful scaling came from growing predictive information and model
+capacity together, rather than from token count or parameter count alone. Interestingly, this finding independently
+aligns with the scaling philosophy of RankUp [5], which also expands model capacity by constructing richer and more
+informative input representations rather than simply widening hidden layers or embedding dimensions. Together, these
+independent results suggest that effective scaling in recommendation may depend not only on making modelswider,
+but also on making the representations being scaledmore informative.
+6 Conclusion
+This paper presents the KDD Cup 2026 Tencent Advertising Algorithm Challenge, a large-scale benchmark for
+jointly modeling heterogeneous multi-field features and multi-domain user behavior sequences under controlled data,
+computational, and inference constraints. Through two competition tracks and two progressively scaled rounds, the
+challenge provides a common setting for systematically evaluating unified recommendation architectures and studying
+their effectiveness, stackability, scalability, and hardware efficiency. The competition results reveal several recurring
+design principles. Successful solutions increasingly move beyond conventional late-fusion pipelines by introducing
+richer tokenization, target- or intent-aware cross-source interaction, and stackable mechanisms for jointly processing
+sequential and non-sequential signals. Meanwhile, the strongest scaling-oriented solutions suggest that increasing
+model capacity is most effective when accompanied by correspondingly richer and more informative representations,
+rather than by naively increasing hidden dimensions or parameter counts alone.
+Together, these findings highlight that the next stage of large-scale recommendation modeling requires the co-design
+ofrepresentation, interaction, scaling, and system efficiency. We hope that the released de-identified data samples,
+feature statistics, starter resources, winning solutions, and competition findings will provide a useful foundation for
+future research on unified and scalable recommender systems.
+7 Acknowledgements
+We would like to express our sincere gratitude to the following individuals (in alphabetical order by surname) for their
+invaluable contributions: Yeshou Cai, Huaixi Chen, Ruibin Chen, Shengquan Chen, Xiaowei Chen, Miao Cui, Peng
+Ding, Chuanyin Dong, Rong Gan, Leya Gao, Lei Guo, Shuai Guo, Tao Guo, Yuanxing Guo, Zidong Hong, Liang
+Huang, Linwei Jia, Haishan Jiang, Meng Jin, Yankun Le, Biao Li, Bolin Li, Rui Li, Tianyi Li, Xirui Li, Kaicong Lin,
+Liwei Lin, Chao Liu, He Liu, Tingting Liu, Yun Liu, Ting Mei, Rulin Pang, Gang Peng, Junfeng Pu, Shun Qin, Zixuan
+Shan, Rui Song, Jingxi Tang, Junyan Tang, Shaogang Tang, Jianlin Wang, Lifeng Wang, Yanbo Wang, Jianxin Wen,
+Zesen Wu, Yuke Xia, Dengke Xiao, Yipeng Xiao, Manfeng Xu, Mingyang Xu, Wen Xu, Wenxiu Xue, Dan Yang,
+Rongyao Yang, Shuo Yang, Xuqiang Yang, Yuekui Yang, Zhixuan Yang, Guanqun Yin, Junpeng Yu, Huanyu Yuan,
+Haobo Zhang, Jiarui Zhang, Na Zhang, Qun Zhang, Zhitan Zhang, Danyang Zhao, Ying Zhong, Boyun Zhou, Cai Zhou,
+Chuxin Zhou, You Zhou, Yuhang Zhou and Weihua Zhu.
+References
+[1] Yue Cao, Xiaojiang Zhou, Jiaqi Feng, Peihao Huang, Yao Xiao, Dayao Chen, and Sheng Chen. Sampling is all
+you need on modeling long-term user behaviors for ctr prediction. InProceedings of the 31st ACM International
+Conference on Information & Knowledge Management, pages 2974–2983, 2022. doi: 10.1145/3511808.3557082.
+[2] Zheng Chai, Qin Ren, Xijun Xiao, Huizhi Yang, Bo Han, Sijun Zhang, Di Chen, Hui Lu, Wenlin Zhao, Lele Yu,
+Xionghang Xie, Shiru Ren, Xiang Sun, Yaocheng Tan, Peng Xu, Yuchao Zheng, and Di Wu. Longer: Scaling up
+long sequence modeling in industrial recommenders, 2025. URL https://arxiv.org/abs/2505.04421.
+11
+
+PAGE 12
+[3] Jianxin Chang, Chenbin Zhang, Zhiyi Fu, Xiaoxue Zang, Lin Guan, Jing Lu, Yiqun Hui, Dewei Leng, Yanan Niu,
+Yang Song, and Kun Gai. Twin: Two-stage interest network for lifelong user behavior modeling in ctr prediction
+at kuaishou, 2023. URLhttps://arxiv.org/abs/2302.02352.
+[4] Bo Chen, Jinlong Jiao, Tijian Hu, Ruihao Zhang, Yanzhi Liu, Chenghou Jin, Qinglin Jia, Baixuan He, Hechang
+Pan, Yiwu Liu, Jian Liang, Chaoyi Ma, Ruiming Tang, Han Li, and Kun Gai. UniFormer: Efficient and unified
+model-centric scaling for industrial recommendation.arXiv preprint arXiv:2606.27058, 2026.
+[5] Jin Chen, Shangyu Zhang, Bin Hu, Chao Zhou, Junwei Pan, Gengsheng Xue, Wentao Ning, Gengyu Weng,
+Wang Zheng, Shaohua Liu, Zeen Xu, Chengyuan Mai, Shijie Quan, Tingyu Jiang, Lifeng Wang, Shudong Huang,
+Chengguo Yin, Haijie Gu, and Jie Jiang. RankUp: Towards high-rank representations for large scale advertising
+recommender systems, 2026.
+[6] Qiwei Chen, Huan Zhao, Wei Li, Pipei Huang, and Wenwu Ou. Behavior sequence transformer for e-commerce
+recommendation in alibaba. InProceedings of the 1st International Workshop on Deep Learning Practice for
+High-Dimensional Sparse Data, pages 1–4, 2019. doi: 10.1145/3326937.3341261.
+[7] Heng-Tze Cheng, Levent Koc, Jeremiah Harmsen, Tal Shaked, Tushar Chandra, Hrishi Aradhye, Glen Anderson,
+Greg Corrado, Wei Chai, Mustafa Ispir, Rohan Anil, Zakaria Haque, Lichan Hong, Vihan Jain, Xiaobing Liu, and
+Hemal Shah. Wide & deep learning for recommender systems. InProceedings of the 1st Workshop on Deep
+Learning for Recommender Systems, pages 7–10, 2016. doi: 10.1145/2988450.2988454.
+[8] Tri Dao. FlashAttention-2: Faster attention with better parallelism and work partitioning. InInternational
+Conference on Learning Representations, 2024.
+[9] John Duchi, Elad Hazan, and Yoram Singer. Adaptive subgradient methods for online learning and stochastic
+optimization.Journal of Machine Learning Research, 12(61):2121–2159, 2011. URL https://jmlr.org/
+papers/v12/duchi11a.html.
+[10] Ningya Feng, Junwei Pan, Jialong Wu, Baixu Chen, Ximei Wang, Qian Li, Xian Hu, Jie Jiang, and Mingsheng
+Long. Long-sequence recommendation models need decoupled embeddings, 2025. URL https://arxiv.
+org/abs/2410.02604.
+[11] Yufei Feng, Fuyu Lv, Weichen Shen, Menghan Wang, Fei Sun, Yu Zhu, and Keping Yang. Deep session interest
+network for click-through rate prediction, 2019. URLhttps://arxiv.org/abs/1905.06482.
+[12] Juan Gong, Zhenlin Chen, Chaoyi Ma, Zhuojian Xiao, Haonan Wang, Guoyu Tang, Lin Liu, Sulong Xu, Bo Long,
+and Yunjiang Jiang. Attention weighted mixture of experts with contrastive learning for personalized ranking in
+e-commerce. In2023 IEEE 39th International Conference on Data Engineering, pages 3222–3234, 2023. doi:
+10.1109/ICDE55515.2023.00247.
+[13] Huifeng Guo, Ruiming Tang, Yunming Ye, Zhenguo Li, and Xiuqiang He. DeepFM: A factorization-machine
+based neural network for ctr prediction, 2017. URLhttps://arxiv.org/abs/1703.04247.
+[14] Xingzhuo Guo, Junwei Pan, Ximei Wang, Baixu Chen, Jie Jiang, and Mingsheng Long. On the embedding
+collapse when scaling up recommendation models. InProceedings of the 41st International Conference on
+Machine Learning, volume 235 ofProceedings of Machine Learning Research, pages 16891–16909. PMLR, 2024.
+[15] Xiangnan He and Tat-Seng Chua. Neural factorization machines for sparse predictive analytics. InProceedings of
+the 40th International ACM SIGIR Conference on Research and Development in Information Retrieval, pages
+355–364, 2017. doi: 10.1145/3077136.3080777.
+[16] Xian Hu, Ming Yue, Zhixiang Feng, Junwei Pan, Junjie Zhai, Ximei Wang, Xinrui Miao, Qian Li, Xun Liu,
+Shangyu Zhang, Letian Wang, Hua Lu, Zijian Zeng, Chen Cai, Wei Wang, Fei Xiong, Pengfei Xiong, Jintao
+Zhang, Zhiyuan Wu, Chunhui Zhang, Anan Liu, Jiulong You, Chao Deng, Yuekui Yang, Shudong Huang, Dapeng
+Liu, and Haijie Gu. Practice on long behavior sequence modeling in tencent advertising, 2025.
+[17] Xu Huang, Hao Zhang, Zhifang Fan, Yunwen Huang, Zhuoxing Wei, Zheng Chai, Jinan Ni, Yuchao Zheng, and
+Qiwei Chen. MixFormer: Co-scaling up dense and sequence in industrial recommenders, 2026.
+12
+
+PAGE 13
+[18] Yunwen Huang, Shiyong Hong, Xijun Xiao, Jinqiu Jin, Xuanyuan Luo, Zhe Wang, Zheng Chai, Shikang Wu,
+Yuchao Zheng, and Jingjian Lin. HyFormer: Revisiting the roles of sequence modeling and feature interaction in
+ctr prediction, 2026. URLhttps://arxiv.org/abs/2601.12681.
+[19] Keller Jordan, Yuchen Jin, Vlado Boza, Jiacheng You, Franz Cesista, Laker Newhouse, and Jeremy Bernstein.
+Muon: An optimizer for hidden layers in neural networks, December 2024. URL https://kellerjordan.
+github.io/posts/muon/. Blog post.
+[20] Yuchin Juan, Damien Lefortier, and Olivier Chapelle. Field-aware factorization machines in a real-world online
+advertising system, 2017. URLhttps://arxiv.org/abs/1701.04099.
+[21] Wang-Cheng Kang and Julian McAuley. Self-attentive sequential recommendation, 2018. URL https://
+arxiv.org/abs/1808.09781.
+[22] Simon Kemp. Digital 2025: Global advertising trends, 2025. URL https://datareportal.com/
+reports/digital-2025-sub-section-global-advertising-trends. Data source: Statista.
+[23] Guoming Li, Shangyu Zhang, Junwei Pan, Wentao Ning, Jin Chen, Gengsheng Xue, Chao Zhou, Shudong Huang,
+Haijie Gu, and Menglin Yang. Expand more, shrink less: Shaping effective-rank dynamics for dense scaling in
+recommendation. InProceedings of the 32nd ACM SIGKDD Conference on Knowledge Discovery and Data
+Mining V .2, pages 2569–2579, 2026. doi: 10.1145/3770855.3818049.
+[24] Jianxun Lian, Xiaohuan Zhou, Fuzheng Zhang, Zhongxia Chen, Xing Xie, and Guangzhong Sun. xDeepFM:
+Combining explicit and implicit feature interactions for recommender systems. InProceedings of the 24th ACM
+SIGKDD International Conference on Knowledge Discovery & Data Mining, KDD ’18, pages 1754–1763. ACM,
+July 2018. doi: 10.1145/3219819.3220023. URLhttp://dx.doi.org/10.1145/3219819.3220023.
+[25] Rongcheng Lin, Yan Sun, Jamey Zhang, Guanglei Xiong, Ivan Ji, Xianjie Chen, and Shujian Bu. Unidot: A
+unified network for sequence modeling and feature interaction in large-scale recommendation.arXiv preprint
+arXiv:2608.16797, 2026. doi: 10.48550/arXiv.2608.16797. KDD 2026 UniRec Workshop.
+[26] Jie Liu, Yinrui Li, Jiankai Sun, Kungang Li, Han Sun, Sihan Wang, Huasen Wu, Siyuan Gao, Paulo Soares, Nan
+Li, Zhifang Liu, Haoyang Li, Siping Ji, Ling Leng, and Prathibha Deshikachar. Decoupled entity representation
+learning for pinterest ads ranking. InProceedings of the Nineteenth ACM Conference on Recommender Systems,
+pages 940–944, 2025. doi: 10.1145/3705328.3748098.
+[27] Mingyang Liu, Yong Bai, Zhangming Chan, Sishuo Chen, Xiang-Rong Sheng, Han Zhu, Jian Xu, and Xinyang
+Chen. EST: Towards efficient scaling laws in click-through rate prediction via unified modeling, 2026.
+[28] Zequn Lyu, Yu Dong, Chengfu Huo, and Weijun Ren. Deep match to rank model for personalized click-through
+rate prediction. InProceedings of the AAAI Conference on Artificial Intelligence, volume 34, pages 156–163,
+2020. doi: 10.1609/aaai.v34i01.5346.
+[29] Siddarth Malreddy, Matthew Lawhon, Usha Amrutha Nookala, Aditya Mantha, and Dhruvil Deven Badani.
+Improving feature interactions at pinterest under industry constraints. In3rd International Workshop on Industrial
+Recommendation Systems at CIKM 2024, 2024. arXiv:2412.01985.
+[30] Junwei Pan, Jian Xu, Alfonso Lobos Ruiz, Wenliang Zhao, Shengjun Pan, Yu Sun, and Quan Lu. Field-weighted
+factorization machines for click-through rate prediction in display advertising. InProceedings of the 2018 World
+Wide Web Conference on World Wide Web - WWW ’18, WWW ’18, pages 1349–1357. ACM Press, 2018. doi:
+10.1145/3178876.3186040. URLhttp://dx.doi.org/10.1145/3178876.3186040.
+[31] Junwei Pan, Wei Xue, Ximei Wang, Haibin Yu, Xun Liu, Shijie Quan, Xueming Qiu, Dapeng Liu, Lei Xiao, and
+Jie Jiang. Ads recommendation in a collapsed and entangled world. InProceedings of the 30th ACM SIGKDD
+Conference on Knowledge Discovery and Data Mining, pages 5566–5577, 2024. doi: 10.1145/3637528.3671607.
+[32] Ethan Perez, Florian Strub, Harm De Vries, Vincent Dumoulin, and Aaron Courville. Film: Visual reasoning with
+a general conditioning layer. InProceedings of the AAAI conference on artificial intelligence, volume 32, 2018.
+13
+
+PAGE 14
+[33] Qi Pi, Weijie Bian, Guorui Zhou, Xiaoqiang Zhu, and Kun Gai. Practice on long sequential user behavior
+modeling for click-through rate prediction. InProceedings of the 25th ACM SIGKDD International Conference
+on Knowledge Discovery and Data Mining, pages 2671–2679, 2019. doi: 10.1145/3292500.3330666.
+[34] Joan Puigcerver, Carlos Riquelme Ruiz, Basil Mustafa, et al. From sparse to soft mixtures of experts. In
+International Conference on Learning Representations, 2024.
+[35] Pi Qi, Xiaoqiang Zhu, Guorui Zhou, Yujing Zhang, Zhe Wang, Lejian Ren, Ying Fan, and Kun Gai. Search-based
+user interest modeling with lifelong sequential behavior data for click-through rate prediction, 2020. URL
+https://arxiv.org/abs/2006.05639.
+[36] Steffen Rendle. Factorization machines. InProceedings of the 2010 IEEE International Conference on Data
+Mining, ICDM ’10, pages 995–1000, USA, 2010. IEEE Computer Society. ISBN 9780769542560. doi: 10.1109/
+ICDM.2010.127. URLhttps://doi.org/10.1109/ICDM.2010.127.
+[37] Noam Shazeer. GLU variants improve transformer.CoRR, abs/2002.05202, 2020.
+[38] Qijie Shen, Hong Wen, Wanjie Tao, Jing Zhang, Fuyu Lv, Zulong Chen, and Zhao Li. Deep interest highlight
+network for click-through rate prediction in trigger-induced recommendation. InProceedings of the ACM Web
+Conference 2022, pages 422–430, 2022. doi: 10.1145/3485447.3511970.
+[39] Zihua Si, Lin Guan, Zhongxiang Sun, Xiaoxue Zang, Jing Lu, Yiqun Hui, Xingchao Cao, Zeyu Yang, Yichen
+Zheng, Dewei Leng, Kai Zheng, Chenbin Zhang, Yanan Niu, Yang Song, and Kun Gai. Twin v2: Scaling
+ultra-long user behavior sequence modeling for enhanced ctr prediction at kuaishou. InProceedings of the
+33rd ACM International Conference on Information and Knowledge Management, CIKM ’24, pages 4890–4897.
+ACM, October 2024. doi: 10.1145/3627673.3680030. URL http://dx.doi.org/10.1145/3627673.
+3680030.
+[40] Weiping Song, Chence Shi, Zhiping Xiao, Zhijian Duan, Yewen Xu, Ming Zhang, and Jian Tang. AutoInt:
+Automatic feature interaction learning via self-attentive neural networks. InProceedings of the 28th ACM
+International Conference on Information and Knowledge Management, pages 1161–1170, 2019. doi: 10.1145/
+3357384.3357925.
+[41] Yang Sun, Junwei Pan, Alex Zhang, and Aaron Flores. Fm2: Field-matrixed factorization machines for recom-
+mender systems. InProceedings of the Web Conference 2021, WWW ’21, pages 2828–2837. ACM, April 2021.
+doi: 10.1145/3442381.3449930. URLhttp://dx.doi.org/10.1145/3442381.3449930.
+[42] Tencent. Tencent announces 2024 annual and fourth quarter results, 2025. URL https://www.tencent.
+com/en-us/investors.html. Accessed: 2026-02-11.
+[43] Ilya Tolstikhin, Neil Houlsby, Alexander Kolesnikov, Lucas Beyer, Xiaohua Zhai, Thomas Unterthiner, Jessica
+Yung, Andreas Steiner, Daniel Keysers, Jakob Uszkoreit, Mario Lucic, and Alexey Dosovitskiy. MLP-Mixer: An
+all-mlp architecture for vision, 2021. URLhttps://arxiv.org/abs/2105.01601.
+[44] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Łukasz Kaiser, and
+Illia Polosukhin. Attention is all you need. InAdvances in Neural Information Processing Systems, volume 30,
+2017.
+[45] Fangye Wang, Guowei Yang, Xiaojiang Zhou, Song Yang, and Pengjie Wang. Query-mixed interest extraction
+and heterogeneous interaction: A scalable ctr model for industrial recommender systems, 2026.
+[46] Ruoxi Wang, Rakesh Shivanna, Derek Zhiyuan Cheng, Sagar Jain, Dong Lin, Lichan Hong, and Ed H. Chi. Dcn v2:
+Improved deep & cross network and practical lessons for web-scale learning to rank systems. InProceedings of The
+Web Conference, 2021. doi: 10.1145/3442381.3450078. URLhttps://arxiv.org/abs/2008.13535.
+[47] Siqi Wang, Xianjie Chen, Shaofeng Deng, Albert Chen, Romil Shah, Jiawei Huang, Zhaoqin Wang, Zhang
+Zhang, Yiqun Liu, Meilei Jiang, Anish Dubey, Moyan Mei, Tongxin Wang, Nathan Berrebbi, Misael Manjarres,
+Armand Sauzay, Shardul Kothapalli, Aryaman Vinchhi, Kevin Johnstone, Juheon Lee, Gufan Yin, Ziheng Huang,
+Justin Lin, Mert Terzihan, Yilin Qi, Cynthia Yang, Colin Peppler, Qi Ding, Ruohan Sun, Ge Song, Litao Deng,
+14
+
+PAGE 15
+Parichay Kapoor, Matt Ma, Huihui Cheng, Jiyuan Zhang, Yanli Zhao, Yiping Han, Fangqiu Han, Ning Yao, Arun
+Singh, Jordan Edwards, Zhengyu Su, Abhishek Kumar, Guangdeng Liao, and Ankit Asthana. Slimper: Make
+personalization model slim and smart.arXiv preprint arXiv:2607.12281, 2026. doi: 10.48550/arXiv.2607.12281.
+[48] Yuan Wang, Yue Liu, Jun Zhang, and Jie Jiang. LENS: A staged design for interaction granularity in sequential
+CTR prediction.arXiv preprint arXiv:2605.25583, 2026. doi: 10.48550/arXiv.2605.25583. URL https:
+//arxiv.org/abs/2605.25583.
+[49] Zhiqiang Wang, Qingyun She, and Junlin Zhang. MaskNet: Introducing feature-wise multiplication to CTR
+ranking models by instance-guided mask, 2021. URL https://arxiv.org/abs/2102.07619. Presented
+at DLP-KDD 2021.
+[50] Bin Wu, Feifan Yang, Zhangming Chan, Yu-Ran Gu, Jiawei Feng, Chao Yi, Xiang-Rong Sheng, Han Zhu, Jian
+Xu, Mang Ye, and Bo Zheng. MUSE: A simple yet effective multimodal search-based framework for lifelong user
+interest modeling, 2025.
+[51] Xue Xia, Pong Eksombatchai, Nikil Pancha, Dhruvil Deven Badani, Po-Wei Wang, Neng Gu, Saurabh Vishwas
+Joshi, Nazanin Farahpour, Zhiyuan Zhang, and Andrew Zhai. TransAct: Transformer-based realtime user action
+model for recommendation at pinterest. InProceedings of the 29th ACM SIGKDD Conference on Knowledge
+Discovery and Data Mining, pages 5249–5259, 2023. doi: 10.1145/3580305.3599918.
+[52] Zhichen Zeng, Xiaolong Liu, Mengyue Hang, Xiaoyi Liu, Qinghai Zhou, Chaofei Yang, Yiqun Liu, Yichen
+Ruan, Laming Chen, Yuxin Chen, Yujia Hao, Jiaqi Xu, Jade Nie, Xi Liu, Buyun Zhang, Wei Wen, Siyang Yuan,
+Hang Yin, Xin Zhang, Kai Wang, Wen-Yen Chen, Yiping Han, Huayu Li, Chunzhi Yang, Bo Long, Philip S. Yu,
+Hanghang Tong, and Jiyan Yang. InterFormer: Effective heterogeneous interaction learning for click-through rate
+prediction, 2025. URLhttps://arxiv.org/abs/2411.09852.
+[53] Buyun Zhang, Liang Luo, Xi Liu, Jay Li, Zeliang Chen, Weilin Zhang, Xiaohan Wei, Yuchen Hao, Michael Tsang,
+Wenjun Wang, Yang Liu, Huayu Li, Yasmine Badr, Jongsoo Park, Jiyan Yang, Dheevatsa Mudigere, and Ellie
+Wen. DHEN: A deep and hierarchical ensemble network for large-scale click-through rate prediction, 2022. URL
+https://arxiv.org/abs/2203.11014.
+[54] Buyun Zhang, Liang Luo, Yuxin Chen, Jade Nie, Xi Liu, Daifeng Guo, Yanli Zhao, Shen Li, Yuchen Hao,
+Yantao Yao, Guna Lakshminarayanan, Ellie Dingqiao Wen, Jongsoo Park, Maxim Naumov, and Wenlin Chen.
+Wukong: Towards a scaling law for large-scale recommendation, 2024. URL https://arxiv.org/abs/
+2403.02545.
+[55] Yaqian Zhang, Ruyi Yu, Tianyi Li, Bohan Liu, Maoquan Ye, Ke Wang, Shifeng Wen, Junwei Pan, Lijie Wang,
+Qi Zhou, Yeshou Cai, Chengguo Yin, Lifeng Wang, Hui Li, Lei Xiao, and Haijie Gu. SIREN: Unified multi-
+granularity semantic interaction for multi-modal lifelong user interest modeling, 2026.
+[56] Ying Zhang, Tao Xiang, Timothy M. Hospedales, and Huchuan Lu. Deep mutual learning. InProceedings of the
+IEEE Conference on Computer Vision and Pattern Recognition, pages 4320–4328, 2018.
+[57] Zhaoqi Zhang, Haolei Pei, Jun Guo, Tianyu Wang, Yufei Feng, Hui Sun, Shaowei Liu, and Aixin Sun. OneTrans:
+Unified feature interaction and sequence modeling with one transformer in industrial recommender, 2026. URL
+https://arxiv.org/abs/2510.26104.
+[58] Guorui Zhou, Na Mou, Ying Fan, Qi Pi, Weijie Bian, Chang Zhou, Xiaoqiang Zhu, and Kun Gai. Deep interest
+evolution network for click-through rate prediction, 2018. URL https://arxiv.org/abs/1809.03672.
+[59] Guorui Zhou, Chengru Song, Xiaoqiang Zhu, Ying Fan, Han Zhu, Xiao Ma, Yanghui Yan, Junqi Jin, Han Li, and
+Kun Gai. Deep interest network for click-through rate prediction, 2018. URL https://arxiv.org/abs/
+1706.06978.
+[60] Haolin Zhou, Junwei Pan, Xinyi Zhou, Xihua Chen, Jie Jiang, Xiaofeng Gao, and Guihai Chen. Temporal interest
+network for user response prediction. InCompanion Proceedings of the ACM Web Conference 2024, pages 413–
+422, 2024. doi: 10.1145/3589335.3648340. URLhttps://doi.org/10.1145/3589335.3648340.
+15
+
+PAGE 16
+[61] Yifeng Zhou, Yuehong Hu, Zhixiang Feng, Junwei Pan, Kaihui Wu, Hanyong Li, Shangyu Zhang, Shudong
+Huang, Zhangbin Zhu, Chengguo Yin, Haijie Gu, and Jie Jiang. TokenFormer: Unify the multi-field and sequential
+recommendation worlds, 2026.
+[62] Jie Zhu, Zhifang Fan, Xiaoxie Zhu, Yuchen Jiang, Hangyu Wang, Xintian Han, Haoran Ding, Xinmin Wang,
+Wenlin Zhao, Zhen Gong, Huizhi Yang, Zheng Chai, Zhe Chen, Yuchao Zheng, Qiwei Chen, Feng Zhang, Xun
+Zhou, Peng Xu, Xiao Yang, Di Wu, and Zuotao Liu. RankMixer: Scaling up ranking models in industrial
+recommenders, 2025. URLhttps://arxiv.org/abs/2507.15551.
+[63] Jinfeng Zhuang, Yinrui Li, Runze Su, Ke Xu, Zhixuan Shao, Kungang Li, Ling Leng, Han Sun, Meng Qi, Yixiong
+Meng, Yang Tang, Qifei Shen, Zhifang Liu, Aayush Mudgal, Caleb Lu, Jie Liu, and Hongda Shen. On the practice
+of deep hierarchical ensemble network for ad conversion rate prediction. InCompanion Proceedings of the ACM
+Web Conference 2025, pages 671–680, 2025. doi: 10.1145/3701716.3715252.
+16
+
+PAGE 17
+A The Complete Feature Coverage Tables
+Table 2: Feature column-type coverage of the first-round competition datasets. Mean, minimum, and maximum
+coverage values are reported in percent. The Full column counts features with at least 99% coverage. Rows with zero
+columns denote feature types absent from the first-round schema.
+Dataset Feature type #Cols Mean Min Max Full (≥99%)
+Academic train User Integer 46 70.96 7.96 99.99 7 (15%)
+Item Integer 14 77.61 12.05 100.00 10 (71%)
+User Dense 10 90.59 51.99 99.87 2 (20%)
+Item Dense 0 – – – –
+Domain-A Sequence 9 99.93 99.93 99.93 9 (100%)
+Domain-B Sequence 14 99.89 99.89 99.89 14 (100%)
+Domain-C Sequence 12 99.95 99.95 99.95 12 (100%)
+Domain-D Sequence 10 99.90 99.90 99.90 10 (100%)
+All features 115 84.80 7.96 100.00 64 (56%)
+Academic inference User Integer 46 71.17 8.37 100.00 7 (15%)
+Item Integer 14 77.43 12.38 100.00 10 (71%)
+User Dense 10 91.22 51.69 99.89 2 (20%)
+Item Dense 0 – – – –
+Domain-A Sequence 9 99.97 99.97 99.97 9 (100%)
+Domain-B Sequence 14 99.92 99.92 99.92 14 (100%)
+Domain-C Sequence 12 99.97 99.97 99.97 12 (100%)
+Domain-D Sequence 10 99.94 99.94 99.94 10 (100%)
+All features 115 84.94 8.37 100.00 64 (56%)
+Industry train User Integer 46 70.99 8.33 99.99 7 (15%)
+Item Integer 14 77.21 11.30 99.93 10 (71%)
+User Dense 10 90.60 50.85 99.87 2 (20%)
+Item Dense 0 – – – –
+Domain-A Sequence 9 99.83 99.83 99.83 9 (100%)
+Domain-B Sequence 14 99.87 99.87 99.87 14 (100%)
+Domain-C Sequence 12 99.97 99.97 99.97 12 (100%)
+Domain-D Sequence 10 99.90 99.90 99.90 10 (100%)
+All features 115 84.76 8.33 99.99 64 (56%)
+Industry inference User Integer 46 71.17 8.82 100.00 7 (15%)
+Item Integer 14 77.20 10.75 99.91 10 (71%)
+User Dense 10 90.92 51.50 99.86 2 (20%)
+Item Dense 0 – – – –
+Domain-A Sequence 9 99.53 99.53 99.53 9 (100%)
+Domain-B Sequence 14 99.40 99.40 99.40 14 (100%)
+Domain-C Sequence 12 99.97 99.97 99.97 12 (100%)
+Domain-D Sequence 10 95.69 95.69 95.69 0 (0%)
+All features 115 84.41 8.82 100.00 54 (47%)
+17
+
+PAGE 18
+Table 3: Feature column-type coverage of the second-round competition datasets. Mean, minimum, and maximum
+coverage values are reported in percent. TheFullcolumn counts features with at least99%coverage.
+Dataset Feature type #Cols Mean Min Max Full (≥99%)
+Academic train User Integer 54 74.77 8.63 99.96 11 (20%)
+Item Integer 17 81.48 13.13 99.97 13 (76%)
+User Dense 17 93.34 53.00 99.84 8 (47%)
+Item Dense 4 97.04 93.25 99.18 1 (25%)
+Domain-A Sequence 9 99.61 99.61 99.61 9 (100%)
+Domain-B Sequence 14 97.80 97.80 97.80 0 (0%)
+Domain-C Sequence 12 99.93 99.93 99.93 12 (100%)
+Domain-D Sequence 10 81.78 81.78 81.78 0 (0%)
+All features 137 85.26 8.63 99.97 54 (39%)
+Academic inference User Integer 54 75.25 8.60 99.95 11 (20%)
+Item Integer 17 81.76 15.26 99.93 13 (76%)
+User Dense 17 94.40 53.27 99.88 8 (47%)
+Item Dense 4 96.88 93.39 99.04 1 (25%)
+Domain-A Sequence 9 99.54 99.54 99.54 9 (100%)
+Domain-B Sequence 14 97.99 97.99 97.99 0 (0%)
+Domain-C Sequence 12 99.96 99.96 99.96 12 (100%)
+Domain-D Sequence 10 81.15 81.15 81.15 0 (0%)
+All features 137 85.58 8.60 99.96 54 (39%)
+Industry train User Integer 54 74.17 8.67 99.96 11 (20%)
+Item Integer 17 81.21 12.35 99.97 13 (76%)
+User Dense 17 92.80 51.41 99.85 7 (41%)
+Item Dense 4 96.06 92.72 99.11 2 (50%)
+Domain-A Sequence 9 99.79 99.79 99.79 9 (100%)
+Domain-B Sequence 14 99.13 99.13 99.13 14 (100%)
+Domain-C Sequence 12 99.92 99.92 99.92 12 (100%)
+Domain-D Sequence 10 96.54 96.54 96.54 0 (0%)
+All features 137 86.12 8.67 99.97 68 (50%)
+Industry inference User Integer 54 75.01 8.51 99.96 11 (20%)
+Item Integer 17 81.97 15.76 99.97 13 (76%)
+User Dense 17 94.20 51.45 99.89 8 (47%)
+Item Dense 4 94.01 83.75 99.16 2 (50%)
+Domain-A Sequence 9 99.79 99.79 99.79 9 (100%)
+Domain-B Sequence 14 99.48 99.48 99.48 14 (100%)
+Domain-C Sequence 12 99.95 99.95 99.95 12 (100%)
+Domain-D Sequence 10 98.62 98.62 98.62 0 (0%)
+All features 137 86.84 8.51 99.97 69 (50%)
+18

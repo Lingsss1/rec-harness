@@ -1,0 +1,133 @@
+{
+  "markdown_report": "At 0% progress, prioritize **recent-evidence residual SASRec**, targeting stale-interest influence and broadly related recommendations crowding out specific recent matches. First test uniform recent pooling; add agreement weighting only if simpler fusion helps. Improvement remains a hypothesis until measured by pinned macro validation HR@10.\n\n**Insights from the starting point.** (1) SASRec attends across histories, but does not require repeated recent evidence to outweigh incidental interactions. Its attention already favors recency on sparse data, so added pooling may be redundant. (2) Electronics has 14.95% negative-over-positive positions and a −0.4812 lower-tail margin. These establish sampled ranking confusion, not its cause or validation performance. (3) Embedding similarity scores near the zero-cosine reference provide weak justification for collapse-focused regularization.\n\n**Insights from related work.** (1) [TLSTSRec](https://doi.org/10.3233/IDA-240051) and [SLi-Rec](https://www.microsoft.com/en-us/research/uploads/prod/2019/07/IJCAI19-ready_v1.pdf) motivate adaptive temporal fusion, without validating this agreement mechanism. (2) [gSASRec](https://arxiv.org/abs/2308.07192) motivates multiple negatives and generalized BCE; separate their contributions experimentally. (3) [SComGNN](https://arxiv.org/abs/2401.02130) distinguishes complementarity from similarity; observed transitions cannot verify compatibility. (4) [ReZero](https://arxiv.org/abs/2003.04887) motivates identity initialization, avoiding an immediate change to baseline logits.\n\nThe resulting directions are temporal evidence selection, ranking-objective calibration, and directional relation modeling.\n\n| Direction | Minimal experiment | Principal uncertainty |\n|---|---|---|\n| Temporal selection | Zero-initialized recent residual | Redundancy, popularity, interest shifts |\n| Objective calibration | Matched-negative BCE/gBCE | Training separation may not transfer |\n| Directional relations | Training-transition residual | Sparse transitions may be noisy |\n\nScores use originality/potential/user alignment/model alignment/difficulty; higher difficulty means harder implementation. Each assessment gives a positive and limitation.\n\n1. **Recent-evidence residual: 3/6/8/7/5.** Originality: explicit support weighting, but established fusion. Potential: reusable intent hypothesis, but popularity-confounded. User alignment: targets stale influence and broad-match crowding, but cannot verify prerequisites. Model alignment: sharpens context, but margins may not improve. Difficulty: small branch, but masking and identity checks require care.\n2. **128-negative gBCE: 2/8/4/9/3.** Originality: benchmark application, but established method. Potential: scalable correction, but uncertain transfer. User alignment: sharper competition, but no direct intent mechanism. Model alignment: addresses sampling behavior, but bias remains unproven here. Difficulty: localized change, but increased memory.\n3. **Directed transition residual: 5/6/7/6/5.** Originality: directional evidence, but graph precedents exist. Potential: useful next-choice signals, but sparse coverage. User alignment: supports complements, but cannot confirm compatibility. Model alignment: adds discrimination, but can amplify popularity. Difficulty: sparse implementation, but extra inference artifacts.\n\nSelect idea 1, conditionally: compare backbone, recent-only, uniform residual, then adaptive fusion and agreement ablations. Use strictly causal support and a zero-initialized residual; preserve baseline normalization and loss. Agreement measures collaborative consistency, not verified semantics, and may suppress new interests. Diagnose popularity and recent/old disagreement. Predeclare trial/checkpoint limits within 43,200 GPU-seconds. Select exclusively by four-category macro validation HR@10; report paired gained/lost hits and bootstrap uncertainty when evaluator outputs permit. Treat search findings as exploratory: repeated selection biases estimates, and sampled HR need not reflect full-catalog rankings ([Cawley–Talbot](https://jmlr.csail.mit.edu/papers/v11/cawley10a.html), [Krichene–Rendle](https://research.google/pubs/on-sampled-metrics-for-item-recommendation/)).",
+  "idea": {
+    "description": "Add a strictly causal recent-window residual to each category's SASRec. Start with uniform pooling, then test adaptive gating and prior-agreement weighting separately. Use z_t = h_t + alpha * g_t * r_t, with alpha initialized exactly to zero, preserving baseline features and logits for finite branch outputs. This directly targets incidental older interactions outweighing repeated recent choices and broad relatedness crowding out specific recent matches.",
+    "motivation": "The user diagnosis supports explicit control over recent evidence, but does not establish that SASRec lacks recency or that collaborative agreement represents practical purpose. The model-facing target is positive–negative confusion, especially Electronics' 14.95% wrong-rank rate and negative lower-tail margin. The proposed mechanism could improve context selection, but cannot establish equipment compatibility, identify satisfied demand, or guarantee validation gains. At 0% progress, a small uniform residual is a more defensible first experiment than immediately committing to agreement-weighted fusion; multi-negative BCE/gBCE remains the next objective-level alternative.",
+    "implementation_notes": "Preserve four category-specific models and routing, preprocessing seed 0, training seed 42, DATA_DIR=os.environ['GAGC_DATA_DIR'], original splits, pinned evaluator, and the environment epoch default of 200. Keep artifacts beneath the trial directory and execution single-GPU. Do not fetch data or pretrained weights, access hidden tests, or use unavailable ratings, reviews, categories, prices, stores, or simulator traits.\n\nArchitecture: instantiate the unchanged baseline modules first, preserving their initialization and RNG ordering. Instantiate additional modules afterward. For sequence length L and window W=5, use positions max(0,t-W+1) through t with nonzero item IDs. Pool raw item embeddings with padding excluded; project and normalize only the recent branch. Never add normalization after the residual sum, since it would change baseline features even when alpha=0. Set alpha to an unconstrained trainable scalar initialized to zero. For uniform residuals set g_t=1. For the adaptive variant, use a linear sigmoid gate over h_t, r_t, their cosine agreement, and log1p(valid prefix length), with zero initial weights and bias -2. Zero initialization initially blocks branch-parameter gradients while permitting alpha to learn; verify that alpha receives a finite gradient. No gate value or direction is guaranteed after training.\n\nOptional agreement: define each event's support once, using only strictly earlier nonpadding events k<j. Set support to the mean positive cosine between its item embedding and prior item embeddings; exclude the diagonal and use zero when no prior event exists. Detach support before softmax. At query t, softmax these supports over eligible recent events with fixed pooling temperature 1. This is a clarified causal variant of the earlier prefix-support proposal. It measures collaborative consistency rather than independently verified semantic repetition; popularity can affect embedding directions even after cosine normalization. Older evidence may suppress a novel interest, so agreement is an optional hypothesis, not a required component.\n\nCompute clipped cosine support through a B×L×L batched similarity matrix and a strict causal mask; do not allocate B×L×L×D. Signed cosine admits prefix-sum acceleration, but clipped cosine does not. Uniform pooling uses cumulative embedding sums and valid counts in O(BLD). Explicitly handle empty windows before softmax, clamp normalization denominators, and set padded-query branch outputs to zero. Leave baseline masking unchanged. Test training-position causality by altering suffix items and verifying earlier outputs remain unchanged; test initial valid-position logits against the unchanged backbone. These are necessary checks, not completed experiments.\n\nRetain baseline loss, optimizer, sampler, and training schedule for architecture comparisons. Use a staged, prespecified search: baseline; W=5 uniform residual; adaptive gate without agreement; agreement without adaptive gate; combined variant only if simpler residuals improve validation. If resources permit, include last-item pooling, exponential pooling with fixed weights proportional to 0.5^(t-j), fixed residual coefficients 0.1 and 0.3, and recent-only scoring. Count every configuration, checkpoint, diagnostic, failure, and GPU-second against the shared 43,200 GPU-second budget; do not launch all suggested controls automatically. For objective comparisons, evaluate 128-negative BCE and 128-negative gBCE with correction t=0.75 separately from architecture changes; exclude padding, targets, and known training positives without accessing future labels. Increased negatives and loss correction require separate ablations.\n\nUse the baseline validation cadence and checkpoint policy, recording them before search; select the highest pinned four-category macro validation HR@10, breaking ties by earlier checkpoint and then simpler configuration. Match comparison budgets and log every attempt. A practical reporting threshold is +0.005 absolute macro HR@10, equivalent to four net gained hits across 800 users; it is a prespecified decision aid, not statistical significance. Retain per-category results. If existing host outputs expose per-user hits, compute paired differences on identical users/candidates, gained/lost hits, and a 95% percentile paired bootstrap interval with 10,000 resamples and seed 42, resampling users independently within category. One net hit changes category HR by 0.5 percentage points and macro HR by 0.125 points. Do not modify the evaluator to obtain unavailable outputs. Dataset-level exact McNemar tests and macro paired randomization are optional; Holm adjustment applies only to a prespecified comparison family. Intervals describe user-sampling uncertainty conditional on models and candidate sets, not seed stability or post-selection uncertainty. Keep hidden final evaluation untouched and describe search results as exploratory.\n\nUpdate the predictor writer with identical architecture, branch configuration, vocabulary mapping, and state dictionary, including alpha and gate parameters. Verify checkpoint reload reproduces scores and category routing. Preserve DiagnosisProbe(view, device).run_full_diagnosis(train_loader), returning metrics and metric_definitions. Expose the actual module as view.model, the shared item embedding as view.item_emb, fused causal features as log2feats, and identical candidate scoring as predict_score; retain user_train, meta_data, and review_data interfaces without fabricating missing fields. train_loader continues yielding (None, sequence, positive, negative), each tensor B×L.\n\nReport masked margin diagnostics and embedding similarity with unchanged definitions; mark category breakdowns unavailable. Track head/tail results using training-frequency quartiles, recommendation popularity, branch contribution norms, alpha/gate values, and recent/older disagreement as a shift proxy. Inspect title/description agreement before making semantic claims. These diagnostics do not replace the host selection metric or establish the simulator's immediate-choice, compatibility, or duplication outcomes; retain those qualitative outcomes separately when provided.",
+    "pseudocode": "Initialize unchanged SASRec first; initialize branch afterward.\nalpha = trainable_scalar(0)\nW = 5; pooling_temperature = 1\nFor a batch sequence with shape B x L:\n    h = unchanged_SASRec(sequence)  # baseline causal features at every position\n    valid = sequence != 0\n    E = shared_item_embeddings(sequence)\n    if using agreement:\n        U = safe_normalize(E)\n        C = relu(bmm(U, transpose(U)))\n        prior_mask[j,k] = valid[j] and valid[k] and k < j\n        support[j] = masked_sum(C[j,:]) / max(prior_count[j], 1)\n        support = stop_gradient(support)\n    For each query t, vectorized:\n        eligible[j] = valid[j] and max(0,t-W+1) <= j <= t\n        if no eligible keys: recent_pool[t] = 0\n        else if uniform: recent_pool[t] = mean(E[eligible])\n        else: recent_pool[t] = sum(softmax(support[eligible]/1) * E[eligible])\n    r = branch_LayerNorm(branch_projection(recent_pool))\n    r[padded_queries] = 0\n    if adaptive:\n        g = sigmoid(linear(concat(h, r, safe_cosine(h,r), log1p(prefix_count))))\n    else: g = 1\n    z = h + alpha * g * r  # no normalization after fusion\n    score positive and sampled negative IDs with unchanged item scorer\n    optimize unchanged baseline objective over valid training positions\nVerify finite outputs, zero-alpha baseline equivalence, and suffix-invariance of earlier features.\nAt inference, compute the identical branch and score the final observed position.\nSelect configurations/checkpoints only by pinned four-category macro validation HR@10.\nSerialize all branch settings and parameters through the predictor writer.",
+    "originality": {
+      "score": 3,
+      "positive": "The combination of causal prior-agreement support and identity-initialized recent residuals creates a specific, falsifiable mechanism for this task.",
+      "negative": "Recent pooling, adaptive temporal fusion, and zero-initialized residual gates are established techniques; the proposed combination is incremental."
+    },
+    "future_potential": {
+      "score": 6,
+      "positive": "A small residual framework supports controlled studies of recent evidence, abrupt shifts, and ranking-objective interactions at modest incremental cost.",
+      "negative": "Agreement can encode popularity and persistent-interest shortcuts, while the available data cannot verify practical purpose, compatibility, or satisfied demand."
+    },
+    "code_difficulty": {
+      "score": 5,
+      "positive": "The approach retains the backbone, item scorer, data pipeline, and baseline objective; uniform pooling is inexpensive.",
+      "negative": "Exact initialization equivalence, finite masked operations, all-position causality, agreement computation, serialization, and diagnostic adaptation require substantial care."
+    }
+  },
+  "related_work": [
+    {
+      "title": "Self-Attentive Sequential Recommendation",
+      "link": "https://arxiv.org/abs/1808.09781",
+      "contributions": [
+        "Uses causal self-attention for next-item recommendation.",
+        "Reports differing attention patterns across sparse and dense datasets, motivating a recency-redundancy control."
+      ],
+      "limitations": [
+        "Does not explicitly enforce repeated recent evidence over incidental older interactions.",
+        "Its existing recency behavior may make an additional recent branch redundant."
+      ]
+    },
+    {
+      "title": "TLSTSRec",
+      "link": "https://doi.org/10.3233/IDA-240051",
+      "contributions": [
+        "Combines temporal information with adaptive long/short-term preference fusion."
+      ],
+      "limitations": [
+        "Does not establish gains for the proposed agreement mechanism or the pinned RecHarness task."
+      ]
+    },
+    {
+      "title": "SLi-Rec",
+      "link": "https://www.microsoft.com/en-us/research/uploads/prod/2019/07/IJCAI19-ready_v1.pdf",
+      "contributions": [
+        "Provides evidence for adaptive long/short-term fusion and cautions that naive combinations can hurt."
+      ],
+      "limitations": [
+        "Adjacent empirical evidence does not establish superiority of recent-window cosine-agreement pooling in SASRec."
+      ]
+    },
+    {
+      "title": "ReZero is All You Need: Fast Convergence at Large Depth",
+      "link": "https://arxiv.org/abs/2003.04887",
+      "contributions": [
+        "Introduces zero-initialized residual scaling, motivating exact baseline-preserving initialization."
+      ],
+      "limitations": [
+        "Does not establish recommendation gains.",
+        "Identity preservation additionally requires finite branch outputs and unchanged baseline normalization and initialization."
+      ]
+    },
+    {
+      "title": "gSASRec",
+      "link": "https://arxiv.org/abs/2308.07192",
+      "contributions": [
+        "Studies negative-sampling overconfidence and proposes generalized BCE.",
+        "Motivates practical experiments with increased negatives and correction parameter t=0.75."
+      ],
+      "limitations": [
+        "Does not directly encode recent intent, product compatibility, or satisfied demand.",
+        "The supplied diagnostics do not establish sampling bias as the benchmark's error source; negative count and objective correction require separate controls."
+      ]
+    },
+    {
+      "title": "SComGNN",
+      "link": "https://arxiv.org/abs/2401.02130",
+      "contributions": [
+        "Models complementary relations using low-pass and mid-pass graph filters."
+      ],
+      "limitations": [
+        "Sequential interactions alone cannot verify complementarity or compatibility.",
+        "Reported results do not establish improvement on the pinned benchmark."
+      ]
+    },
+    {
+      "title": "Popularity Bias in Recommendation through Embedding Geometry",
+      "link": "https://arxiv.org/abs/2211.01154",
+      "contributions": [
+        "Supports examining popularity effects on interaction-trained embedding directions."
+      ],
+      "limitations": [
+        "Cosine normalization therefore cannot certify semantic agreement or remove every popularity confound."
+      ]
+    },
+    {
+      "title": "On Sampled Metrics for Item Recommendation",
+      "link": "https://research.google/pubs/on-sampled-metrics-for-item-recommendation/",
+      "contributions": [
+        "Shows that sampled evaluation can alter model comparisons relative to full-catalog evaluation."
+      ],
+      "limitations": [
+        "Does not justify changing the pinned evaluator; conclusions must remain specific to its candidate protocol."
+      ]
+    },
+    {
+      "title": "On Over-fitting in Model Selection and Subsequent Selection Bias in Performance Evaluation",
+      "link": "https://jmlr.csail.mit.edu/papers/v11/cawley10a.html",
+      "contributions": [
+        "Explains optimism induced by repeated model selection."
+      ],
+      "limitations": [
+        "Ordinary post-selection bootstrap intervals do not remove adaptive validation bias; hidden final evaluation must remain untouched."
+      ]
+    },
+    {
+      "title": "SciPy Bootstrap Documentation",
+      "link": "https://scipy.github.io/devdocs/reference/generated/scipy.stats.bootstrap.html",
+      "contributions": [
+        "Documents bootstrap procedures relevant to paired user-level uncertainty estimates."
+      ],
+      "limitations": [
+        "The proposed macro interval requires paired resampling within each dataset.",
+        "User resampling does not measure training-seed variability or eliminate selection bias."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,215 @@
+--- tested-taobao-original.py
++++ native-task-interface.py
+@@ -1,3 +1,6 @@
++# Fixed interface transfer of g1-r0088-membership_full_first_mean_only.
++# Native task order controls a left-associated FP64 auxiliary gradient sum.
++# Three exact-ID match slots are retained; absent metadata produces zeros.
+ """Layer attribution of conditional task-membership utility.
+ 
+ Inherit g1-r0087 mean-only scorer input VJPs and the uniform auxiliary
+@@ -31,8 +34,8 @@
+     scatter, not orthogonal parameter-space gradients. All components are
+     computed in every cell; no extra modules, state or RNG are introduced.
+     """
+-    if len(gradients) != 3:
+-        raise ValueError('Expected cart/fav/buy cotangents')
++    if len(gradients) < 1:
++        raise ValueError('Expected at least one auxiliary cotangent')
+     if occupied.shape != (gradients[0].shape[0], 1) or occupied.dtype != torch.bool:
+         raise ValueError('Expected history occupancy bool[B,1]')
+     if any(g.shape != gradients[0].shape for g in gradients):
+@@ -41,7 +44,9 @@
+         active = [torch.where(occupied, g.to(dtype=torch.float64), 0.0)
+                   for g in gradients]
+         count = occupied.to(dtype=torch.float64).sum().clamp_min(1.0)
+-        total = (active[0] + active[1]) + active[2]
++        total = active[0]
++        for contribution in active[1:]:
++            total = total + contribution
+         row_mean = total.sum(dim=0, keepdim=True) / count
+         centered = torch.where(occupied, total - row_mean, 0.0)
+         mean = torch.where(occupied, row_mean, 0.0)
+@@ -550,10 +555,10 @@
+     state no direct parameter gradient is added by these diagnostics.
+     All three constructions run in every variant, without state or RNG.
+     """
+-    if len(gradients) != 3:
+-        raise ValueError('Expected ordered cart/fav/buy cotangents')
++    if len(gradients) < 1:
++        raise ValueError('Expected at least one ordered auxiliary cotangent')
+     bits = []
+-    for omitted in range(3):
++    for omitted in range(len(gradients)):
+         reduced = tuple(torch.zeros_like(gradient) if index == omitted else gradient
+                         for index, gradient in enumerate(gradients))
+         _, _, reduced_orthogonal = _click_relative_components(
+@@ -582,10 +587,10 @@
+     helper. This is bit-source replacement, not removal of other labels.
+     The helper runs in all four cells without state, RNG or extra forward.
+     """
+-    if len(gradients) != 3:
+-        raise ValueError('Expected ordered cart/fav/buy cotangents')
+-    reduced = (torch.zeros_like(gradients[0]), gradients[1],
+-               torch.zeros_like(gradients[2]))
++    if len(gradients) < 1:
++        raise ValueError('Expected at least one ordered auxiliary cotangent')
++    reduced = tuple(gradient if index == 1 else torch.zeros_like(gradient)
++                    for index, gradient in enumerate(gradients))
+     _, _, orthogonal = _click_relative_components(
+         click_gradient, reduced, occupied)
+     replacement = _reassign_orthogonal(click_gradient, orthogonal, occupied)
+@@ -619,8 +624,8 @@
+     balance, pivot degeneracy/ties and fixed-state norm/support parity.
+     This helper runs in all cells without RNG or persistent model state.
+     """
+-    if len(gradients) != 3:
+-        raise ValueError('Expected ordered cart/fav/buy cotangents')
++    if len(gradients) < 1:
++        raise ValueError('Expected at least one ordered auxiliary cotangent')
+     with torch.autocast(device_type=click_gradient.device.type, enabled=False):
+         half = occupied.shape[0] // 2
+         eligible = occupied & torch.roll(occupied, shifts=half, dims=0)
+@@ -682,8 +687,8 @@
+     an inference from a null result. n<=2 is not a noninvolution contrast.
+     All arms compute this helper; no parameters, state or RNG are added.
+     """
+-    if len(gradients) != 3:
+-        raise ValueError('Expected ordered cart/fav/buy cotangents')
++    if len(gradients) < 1:
++        raise ValueError('Expected at least one ordered auxiliary cotangent')
+     donor_rows = _occupied_cycle_donor_rows(occupied)
+     with torch.autocast(device_type=click_gradient.device.type, enabled=False):
+         donors = tuple(g.to(dtype=torch.float64).index_select(0, donor_rows)
+@@ -822,7 +827,7 @@
+     """
+     @staticmethod
+     def forward(ctx, context, occupied, parallel_orientation, orthogonal_orientation,
+-                click_relative_transfer, orthogonal_assignment):
++                click_relative_transfer, orthogonal_assignment, auxiliary_count):
+         if context.ndim != 2 or context.shape[0] < 2 or context.shape[0] % 2:
+             raise ValueError('Frozen training requires even context batches [B,D]')
+         if occupied.shape != (context.shape[0], 1) or occupied.dtype != torch.bool:
+@@ -845,16 +850,17 @@
+         ctx.parallel_orientation = parallel_orientation
+         ctx.orthogonal_orientation = orthogonal_orientation
+         ctx.save_for_backward(occupied)
+-        return tuple(context.view_as(context) for _ in range(4))
++        return tuple(context.view_as(context) for _ in range(1 + auxiliary_count))
+ 
+     @staticmethod
+-    def backward(ctx, click_gradient, cart_gradient, fav_gradient, buy_gradient):
++    def backward(ctx, *task_gradients):
+         (occupied,) = ctx.saved_tensors
++        click_gradient, *auxiliary_gradients = task_gradients
+         total = _reduce_context_transfer(
+-            click_gradient, (cart_gradient, fav_gradient, buy_gradient), occupied,
++            click_gradient, tuple(auxiliary_gradients), occupied,
+             ctx.parallel_orientation, ctx.orthogonal_orientation,
+             ctx.click_relative_transfer, ctx.orthogonal_assignment)
+-        return total, None, None, None, None, None
++        return total, None, None, None, None, None, None
+ 
+ 
+ class _PrimaryPopulationJacobian(torch.autograd.Function):
+@@ -944,11 +950,15 @@
+                  primary_moment_gradient='mean_only',
+                  auxiliary_history_readout='uniform',
+                  primary_mean_layers='first_only',
++                 primary_task='is_click', match_fields=('item_id', 'cate_id', 'brand'),
+                  task='binary_classification', **kwargs):
+         if num_tasks is not None and num_tasks != len(feature_map.labels):
+             raise ValueError('Task count mismatch')
+-        if set(feature_map.labels) != {'is_click', 'cart', 'fav', 'buy'}:
+-            raise ValueError('This study requires the frozen four-task schema')
++        labels = list(feature_map.labels)
++        if len(labels) < 2 or len(set(labels)) != len(labels) or primary_task not in labels:
++            raise ValueError('At least two distinct tasks and a declared primary task are required')
++        self.primary_task = primary_task
++        self.auxiliary_labels = [label for label in labels if label != primary_task]
+         if attention_normalization != 'none':
+             raise ValueError('Unnormalized DIN activation is required')
+         if compression_routes != 'uf':
+@@ -1138,15 +1148,18 @@
+                                   if spec.get('source') == 'action'), None)
+         if self.action_field is None:
+             raise ValueError('Historical action field is required')
+-        self.auxiliary_indices = [list(feature_map.labels).index(label)
+-                                  for label in ('cart', 'fav', 'buy')]
++        self.auxiliary_indices = [labels.index(label) for label in self.auxiliary_labels]
+         self.key_width = len(self.item_fields) * embedding_dim
+         self.value_width = self.key_width + embedding_dim
+         # Only supplied encoded fields are compared; no external lookups.
+         # Zero and declared special IDs never constitute positive evidence.
+-        self.match_fields = ('item_id', 'cate_id', 'brand')
++        self.match_fields = tuple(match_fields)
++        if len(self.match_fields) != 3:
++            raise ValueError('The inherited three metadata match slots must be retained')
+         self.match_excluded_ids = {}
+         for name in self.match_fields:
++            if name is None:
++                continue
+             if name not in self.item_fields:
+                 raise ValueError('Required target-match field is absent: ' + name)
+             spec = feature_map.features[name]
+@@ -1274,6 +1287,9 @@
+         """
+         matches = []
+         for name in self.match_fields:
++            if name is None:
++                matches.append(torch.zeros_like(mask, dtype=torch.bool))
++                continue
+             ids = item[name]
+             if ids.ndim != 2 or ids.shape[1] != 101 or ids.shape[0] != mask.shape[0]:
+                 raise ValueError('Expected target-match IDs with shape [B,101]')
+@@ -1795,8 +1811,8 @@
+             collected_contexts = _CollectedContextTransfer.apply(
+                 context, occupied, self.parallel_orientation,
+                 self.orthogonal_orientation, self.click_relative_transfer,
+-                self.orthogonal_assignment)
+-            product_context_by_label = dict(zip(('cart', 'fav', 'buy'), collected_contexts[1:]))
++                self.orthogonal_assignment, len(self.auxiliary_labels))
++            product_context_by_label = dict(zip(self.auxiliary_labels, collected_contexts[1:]))
+             # Other auxiliary context uses are blocked below. Preserve their
+             # forward values, while click uses only the first collection edge.
+             transfer_context = context
+@@ -1911,7 +1927,7 @@
+         has_history = (total_count > 0).to(uniform.dtype)
+         predictions = {}
+         for index, (label, tower) in enumerate(zip(self.feature_map.labels, self.towers)):
+-            if label == 'is_click':
++            if label == self.primary_task:
+                 task_context, task_target, base = context, target, uniform
+                 task_detail = detail
+                 task_position_detail = position_detail
+@@ -1930,7 +1946,7 @@
+             # remains in its task loss graph. Eval has no gradient gating.
+             adapter_context = task_context
+             tower_context = task_context
+-            if self.training and label != 'is_click':
++            if self.training and label != self.primary_task:
+                 if self.block_aux_adapter_context_grad:
+                     adapter_context = adapter_context.detach()
+                 if self.block_aux_tower_context_grad:
+@@ -1939,7 +1955,7 @@
+             # above remains effective; private adapter parameters never detach.
+             residual_context = adapter_context
+             product_context = adapter_context
+-            if self.training and label != 'is_click':
++            if self.training and label != self.primary_task:
+                 if self.block_aux_residual_context_grad:
+                     residual_context = residual_context.detach()
+                 product_context = product_context_by_label[label]
+@@ -1995,11 +2011,11 @@
+             losses = []
+             for index, label in enumerate(self.feature_map.labels):
+                 target = (shifted[:, index]
+-                          if AUXILIARY_OBJECTIVE == 'batch_roll' and label != 'is_click'
++                          if AUXILIARY_OBJECTIVE == 'batch_roll' and label != self.primary_task
+                           else truth[:, index])
+                 task_loss = nn.functional.binary_cross_entropy(
+                     probabilities[:, index].float(), target, reduction='mean')
+                 weight = (0.0 if AUXILIARY_OBJECTIVE == 'click_only'
+-                          and label != 'is_click' else 1.0)
++                          and label != self.primary_task else 1.0)
+                 losses.append(weight * task_loss)
+             return torch.stack(losses).sum()

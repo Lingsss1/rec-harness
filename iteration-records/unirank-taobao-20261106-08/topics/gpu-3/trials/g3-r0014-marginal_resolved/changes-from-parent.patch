@@ -1,0 +1,123 @@
+--- g3-r0013-local_collapsed/model.py
++++ g3-r0014-marginal_resolved/model.py
+@@ -1,21 +1,20 @@
+-"""Task-owned, history-conditioned feedback/match routing.
+-
+-Inherit g3-r0011-gate_redistribute_only without changing its embeddings,
+-selectors, towers, additive evidence, static gates or coefficient-L1 rule.
+-The new residual uses 20 input-only event features (five feedback/exposure
+-channels times four target matches). For each task t, a zero-initialized
+-20x20 matrix gives r_it = e_i^T W_t h / sqrt(20), where h is the masked
+-history mean. The replacement control substitutes e_i for h, retaining
+-bilinear event-local interactions, parameter allocation and compute.
+-A second factor collapses only the NEW route's feedback identities.
+-The inherited resolved gate and additive evidence stay intact in all cells.
+-
+-Both residual alternatives are evaluated in every cell. All residuals are
+-zero at initialization and no new RNG draws are introduced. The inherited
+-self donor scales the click gate logit by 1.5, including this residual.
+-Each W_t receives only its corresponding task loss through this path;
+-no learned auxiliary donor is sent to click. Context sharing and host dense
+-clipping remain indirect cross-task coupling. This tests history feedback
+-as input, not the value of auxiliary-label supervision or a new-priority claim.
++"""Task-owned position-by-feedback routing; prospective, unmeasured.
++
++Inherit g3-r0013-local_collapsed including its local bilinear route.
++Add 320 zero-initialized parameters after the inherited initialization:
++20 exposure/feedback-by-match features x four rank kernels x four tasks.
++Rank counts valid supplied events to the right, without using timestamps.
++Kernels are exp(-rank/tau), tau=(1,4,16,64) events. The replacement control
++broadcasts their within-history mean to every event, retaining length and
++kernel marginals but removing the event-to-position association. A second
++factor collapses only this new route's feedback identities. Both positional
++alternatives execute in all cells; inherited RNG and initial outputs match.
++
++The inherited self donor multiplies click gate logits by 1.5; click retains
++coefficient-L1 redistribution and auxiliary gates retain their full gains.
++Each new task matrix receives its own loss through this route. Shared
++context and host clipping still couple optimization. This tests supplied
++history position, not elapsed time, online availability, auxiliary-label
++causality, or original-method priority. Tensor checks belong to the host.
+ """
+ import copy
+@@ -27,5 +26,5 @@
+ from unirank.pytorch.layers.activations import Dice
+ 
+-CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False}
++CONFIG = {'embedding_dim': 16, 'attention_hidden_units': [128, 32], 'tower_hidden_units': [128, 64], 'routing': 'task', 'feedback_in_score': True, 'selector_gradient': 'primary', 'auxiliary_selector': 'none', 'block_aux_context_gradient': False, 'auxiliary_item_mode': 'private', 'target_matches': True, 'feedback_identity': True, 'gate_scope': 'event', 'gate_feedback_identity': True, 'gate_transfer_source': 'self', 'gate_transfer_gradient': 'live', 'primary_gate_component': 'redistribute', 'gate_conditioning': 'local', 'conditioning_feedback_identity': False, 'position_scope': 'marginal', 'position_feedback_identity': True}
+ 
+ 
+@@ -41,4 +40,5 @@
+                  gate_transfer_gradient='live', primary_gate_component='redistribute',
+                  gate_conditioning='local', conditioning_feedback_identity=False,
++                 position_scope='marginal', position_feedback_identity=True,
+                  num_tasks=None,
+                  task='binary_classification', **kwargs):
+@@ -100,4 +100,12 @@
+         self.gate_conditioning = gate_conditioning
+         self.conditioning_feedback_identity = conditioning_feedback_identity
++        if gate_conditioning != 'local' or conditioning_feedback_identity:
++            raise ValueError('Position study fixes the local-collapsed incumbent route')
++        if position_scope not in ('event', 'marginal'):
++            raise ValueError('position_scope must be event or marginal')
++        if not isinstance(position_feedback_identity, bool):
++            raise ValueError('Position feedback identity switch must be boolean')
++        self.position_scope = position_scope
++        self.position_feedback_identity = position_feedback_identity
+         self.primary_gate_component = primary_gate_component
+         self.gate_transfer_source = gate_transfer_source
+@@ -190,4 +198,7 @@
+         self.composition_gate_weight = nn.Parameter(torch.zeros(
+             len(labels), self.gate_width, self.gate_width))
++        # Allocate after every inherited initialization without drawing RNG.
++        self.position_gate_weight = nn.Parameter(torch.zeros(
++            len(labels), self.gate_width, 4))
+         self.model_to_device()
+ 
+@@ -266,4 +277,39 @@
+         return result.masked_fill(~valid, 0)
+ 
++    def _position_gate_logits(self, channels, matches, mask):
++        """FP32 caller; input-only rank features and matched replacement.
++
++        Mask ranks ignore padding even if there are holes or a different
++        amount of left padding. Four fixed scales are in event counts, not
++        hours. Empty histories have zero features and zero route correction.
++        No cross-example statistics or current target actions are consumed.
++        """
++        if not self.position_feedback_identity:
++            collapsed = channels[:, :, 1:].mean(dim=-1, keepdim=True)
++            channels = torch.cat([channels[:, :, :1],
++                                  collapsed.expand(-1, -1, len(self.towers))], dim=-1)
++        valid = mask.bool()
++        valid_float = valid.float()
++        features = (channels.unsqueeze(-1) * matches.unsqueeze(-2)).flatten(2)
++        features = features.masked_fill(~valid.unsqueeze(-1), 0)
++        count = valid_float.sum(dim=1, keepdim=True)
++        rank_from_right = (count - valid_float.cumsum(dim=1)).clamp_min(0)
++        scales = features.new_tensor((1.0, 4.0, 16.0, 64.0))
++        basis = torch.exp(-rank_from_right.unsqueeze(-1) / scales)
++        basis = basis.masked_fill(~valid.unsqueeze(-1), 0)
++        marginal = basis.sum(dim=1, keepdim=True) / count.clamp_min(1).unsqueeze(-1)
++        event_logits, marginal_logits = [], []
++        # Project to four kernels per task, avoiding [B,L,T,20,4].
++        # Both replacements run in all cells, with identical allocated state.
++        for task_index in range(len(self.towers)):
++            projected = torch.nn.functional.linear(
++                features, self.position_gate_weight[task_index].transpose(0, 1)) / 2.0
++            event_logits.append((projected * basis).sum(dim=-1))
++            marginal_logits.append((projected * marginal).sum(dim=-1))
++        event_logits = torch.stack(event_logits, dim=-1)
++        marginal_logits = torch.stack(marginal_logits, dim=-1)
++        result = event_logits if self.position_scope == 'event' else marginal_logits
++        return result.masked_fill(~valid.unsqueeze(-1), 0)
++
+     def _event_route_gain(self, channels, matches, mask):
+         """Bounded [B,L,T] gains with a donor added only to click logits.
+@@ -282,4 +328,6 @@
+                 event_features, self.event_gate_weight)
+             gate_logits = gate_logits + self._composition_gate_logits(
++                channels, matches, mask)
++            gate_logits = gate_logits + self._position_gate_logits(
+                 channels, matches, mask)
+             # Both donor alternatives are calculated in every variant. The

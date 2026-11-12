@@ -1,0 +1,408 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "proposal": {
+        "category_edits": [
+          {
+            "category": "sequence_interest",
+            "rationale": "Blend each GRU state with a causal exponential mean of observed, nonpadding states: 75% current state and 25% pooled state, with half-life three interactions. Apply the same readout during training and inference across all four categories. Preserve recurrent topology, embeddings, scoring, loss, optimizer and history length; checkpoint the readout settings and restore them through the predictor writer.",
+            "edits": [
+              {
+                "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+                "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+              },
+              {
+                "find": "    def __init__(self, itemnum: int, hidden_units: int = 128, num_layers: int = 1,\n                 dropout_rate: float = 0.1):\n        super().__init__()\n        self.itemnum = itemnum",
+                "replace": "    def __init__(self, itemnum: int, hidden_units: int = 128, num_layers: int = 1,\n                 dropout_rate: float = 0.1, readout_mix: float = 0.25,\n                 readout_half_life: float = 3.0):\n        super().__init__()\n        self.readout_mix = readout_mix\n        self.readout_half_life = readout_half_life\n        self.itemnum = itemnum"
+              },
+              {
+                "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        # Histories are LEFT padded; count-1 indexes padding on short histories.\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        pos_scores = (out * self.output_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.output_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores",
+                "replace": "    def _readout_states(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        positions = torch.arange(seq.size(1), device=seq.device)\n        ages = positions[:, None] - positions[None, :]\n        weights = torch.exp2(\n            -ages.clamp(min=0).to(out.dtype) / self.readout_half_life\n        ).masked_fill(ages < 0, 0.0)\n        valid = seq.ne(0).unsqueeze(-1).to(out.dtype)\n        numerator = torch.matmul(weights, out * valid)\n        denominator = torch.matmul(weights, valid).clamp(min=1e-12)\n        pooled = numerator / denominator\n        return ((1.0 - self.readout_mix) * out + self.readout_mix * pooled) * valid\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        out = self._readout_states(seq)\n        # Histories are LEFT padded; select the final observed position.\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        out = self._readout_states(seq)\n        pos_scores = (out * self.output_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.output_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores"
+              },
+              {
+                "find": "            \"dropout_rate\": DROPOUT_RATE,\n        }, f)",
+                "replace": "            \"dropout_rate\": DROPOUT_RATE,\n            \"readout_mix\": model.readout_mix,\n            \"readout_half_life\": model.readout_half_life,\n        }, f)"
+              },
+              {
+                "find": "            num_layers=meta[\"num_layers\"],\n            dropout_rate=0.0,\n        ).to(_device)",
+                "replace": "            num_layers=meta[\"num_layers\"],\n            dropout_rate=0.0,\n            readout_mix=meta[\"readout_mix\"],\n            readout_half_life=meta[\"readout_half_life\"],\n        ).to(_device)"
+              }
+            ]
+          }
+        ],
+        "change_summary": "Implement causal recency-blended GRU readout consistently for training and generated inference, saving readout settings in category metadata. Preserve one model per category and enforce the required GAGC_DATA_DIR lookup.",
+        "edits": [
+          {
+            "find": "DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")",
+            "replace": "DATA_DIR = os.environ['GAGC_DATA_DIR']"
+          },
+          {
+            "find": "    def __init__(self, itemnum: int, hidden_units: int = 128, num_layers: int = 1,\n                 dropout_rate: float = 0.1):\n        super().__init__()\n        self.itemnum = itemnum",
+            "replace": "    def __init__(self, itemnum: int, hidden_units: int = 128, num_layers: int = 1,\n                 dropout_rate: float = 0.1, readout_mix: float = 0.25,\n                 readout_half_life: float = 3.0):\n        super().__init__()\n        self.readout_mix = readout_mix\n        self.readout_half_life = readout_half_life\n        self.itemnum = itemnum"
+          },
+          {
+            "find": "    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        # Histories are LEFT padded; count-1 indexes padding on short histories.\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        pos_scores = (out * self.output_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.output_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores",
+            "replace": "    def _readout_states(self, seq: torch.Tensor) -> torch.Tensor:\n        emb = self.dropout(self.item_emb(seq))\n        out, _ = self.gru(emb)\n        positions = torch.arange(seq.size(1), device=seq.device)\n        ages = positions[:, None] - positions[None, :]\n        weights = torch.exp2(\n            -ages.clamp(min=0).to(out.dtype) / self.readout_half_life\n        ).masked_fill(ages < 0, 0.0)\n        valid = seq.ne(0).unsqueeze(-1).to(out.dtype)\n        numerator = torch.matmul(weights, out * valid)\n        denominator = torch.matmul(weights, valid).clamp(min=1e-12)\n        pooled = numerator / denominator\n        return ((1.0 - self.readout_mix) * out + self.readout_mix * pooled) * valid\n\n    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n        out = self._readout_states(seq)\n        # Histories are LEFT padded; select the final observed position.\n        positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n        last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n        return out[torch.arange(seq.size(0), device=seq.device), last]\n\n    def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n        out = self._readout_states(seq)\n        pos_scores = (out * self.output_emb(pos)).sum(dim=-1)\n        neg_scores = (out * self.output_emb(neg)).sum(dim=-1)\n        return pos_scores, neg_scores"
+          },
+          {
+            "find": "            \"dropout_rate\": DROPOUT_RATE,\n        }, f)",
+            "replace": "            \"dropout_rate\": DROPOUT_RATE,\n            \"readout_mix\": model.readout_mix,\n            \"readout_half_life\": model.readout_half_life,\n        }, f)"
+          },
+          {
+            "find": "            num_layers=meta[\"num_layers\"],\n            dropout_rate=0.0,\n        ).to(_device)",
+            "replace": "            num_layers=meta[\"num_layers\"],\n            dropout_rate=0.0,\n            readout_mix=meta[\"readout_mix\"],\n            readout_half_life=meta[\"readout_half_life\"],\n        ).to(_device)"
+          }
+        ],
+        "scope_validation": "exact categories and nontrivial AST changes; semantic labels prompt-enforced"
+      }
+    }
+  ],
+  "receipt": {
+    "id": "round-0007-slot-2-attempt-1",
+    "status": "success",
+    "gpu": 6,
+    "allocated_gpu_seconds": 407.55390025675297,
+    "output": "/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/gru4rec/recharness/trials/round-0007-slot-2-attempt-1",
+    "source_sha256": "2bd8f6f2b3fb0010b2941c4cb19ad1edcc17649add80efff21ffa68880a41e98",
+    "score": 0.5375,
+    "aggregate": {
+      "HR@5": 0.4025,
+      "HR@10": 0.5375,
+      "HR@20": 0.6837,
+      "NDCG@5": 0.2966,
+      "NDCG@10": 0.3407,
+      "NDCG@20": 0.3778,
+      "Movies_and_TV/HR@5": 0.455,
+      "Movies_and_TV/HR@10": 0.595,
+      "Movies_and_TV/HR@20": 0.715,
+      "Movies_and_TV/NDCG@5": 0.3485,
+      "Movies_and_TV/NDCG@10": 0.3945,
+      "Movies_and_TV/NDCG@20": 0.4246,
+      "Industrial_and_Scientific/HR@5": 0.445,
+      "Industrial_and_Scientific/HR@10": 0.575,
+      "Industrial_and_Scientific/HR@20": 0.725,
+      "Industrial_and_Scientific/NDCG@5": 0.3392,
+      "Industrial_and_Scientific/NDCG@10": 0.3813,
+      "Industrial_and_Scientific/NDCG@20": 0.4204,
+      "Electronics/HR@5": 0.31,
+      "Electronics/HR@10": 0.41,
+      "Electronics/HR@20": 0.56,
+      "Electronics/NDCG@5": 0.2155,
+      "Electronics/NDCG@10": 0.2482,
+      "Electronics/NDCG@20": 0.2856,
+      "CDs_and_Vinyl/HR@5": 0.4,
+      "CDs_and_Vinyl/HR@10": 0.57,
+      "CDs_and_Vinyl/HR@20": 0.735,
+      "CDs_and_Vinyl/NDCG@5": 0.2831,
+      "CDs_and_Vinyl/NDCG@10": 0.3389,
+      "CDs_and_Vinyl/NDCG@20": 0.3805
+    },
+    "per_dataset": {
+      "Movies_and_TV": {
+        "metrics": {
+          "HR@5": 0.455,
+          "HR@10": 0.595,
+          "HR@20": 0.715,
+          "NDCG@5": 0.3485,
+          "NDCG@10": 0.3945,
+          "NDCG@20": 0.4246
+        },
+        "n_users": 200
+      },
+      "Industrial_and_Scientific": {
+        "metrics": {
+          "HR@5": 0.445,
+          "HR@10": 0.575,
+          "HR@20": 0.725,
+          "NDCG@5": 0.3392,
+          "NDCG@10": 0.3813,
+          "NDCG@20": 0.4204
+        },
+        "n_users": 200
+      },
+      "Electronics": {
+        "metrics": {
+          "HR@5": 0.31,
+          "HR@10": 0.41,
+          "HR@20": 0.56,
+          "NDCG@5": 0.2155,
+          "NDCG@10": 0.2482,
+          "NDCG@20": 0.2856
+        },
+        "n_users": 200
+      },
+      "CDs_and_Vinyl": {
+        "metrics": {
+          "HR@5": 0.4,
+          "HR@10": 0.57,
+          "HR@20": 0.735,
+          "NDCG@5": 0.2831,
+          "NDCG@10": 0.3389,
+          "NDCG@20": 0.3805
+        },
+        "n_users": 200
+      }
+    },
+    "evaluation_seconds": 2.5993243902921677,
+    "predictor_sha256": "986f8a46a78edb314896f9a64d9ebd49b0b7b660fbfc81d62293bab3b84169e7"
+  },
+  "native_result": {
+    "spec": {
+      "dimension": "sequence_interest",
+      "delta": 1.0,
+      "estimated_cost_secs": 436.0,
+      "code_diff": "",
+      "code_edits": [],
+      "code_content": "",
+      "arm": "sequence_interest",
+      "composite_dims": [
+        "sequence_interest"
+      ],
+      "strategy_arm": null,
+      "round_role": "lowlevel_routing",
+      "parallel_group_estimated_wall_secs": 1744.0,
+      "budget_safe_if_global_budget_gte": 1744.0,
+      "budget_accounting": "Parallel group cost is sum(estimated_cost_secs) across the selected candidates.",
+      "code_hint": "REGULAR MUTATION: change only this one direction. 序列与兴趣: Coordinate observed-history truncation, position representation and readout of encoder states, including recency or attention pooling. Keep input feature definitions, embedding parameterization, backbone topology, scoring formula, loss and optimizer fixed. Never introduce future interactions or change supplied splits.\nMaintain shape, checkpoint and predictor consistency for changes in the selected directions; preserve the registered direction boundaries.",
+      "hypothesis": "Thompson: uncertain (0.50, 1 obs) — explore; Memory available in state; agent should write a short arm-specific hypothesis; Agent hypothesis: Across all four datasets, replace each GRU state's readout with 0.75 times that state plus 0.25 times a causal, exponentially weighted mean of nonpadding GRU states through that position, using half-life 3 interactions. Apply this identically at training positions and the final real inference position. Recent-state pooling may retain useful short-term interests without learned pooling parameters. Preserve history length, GRU backbone, embeddings, scoring, loss and optimizer; update the predictor writer consistently.",
+      "is_jumping": false,
+      "implementation_backend": "claude_code",
+      "implementation_prompt": "REGULAR MUTATION: change only this one direction. 序列与兴趣: Coordinate observed-history truncation, position representation and readout of encoder states, including recency or attention pooling. Keep input feature definitions, embedding parameterization, backbone topology, scoring formula, loss and optimizer fixed. Never introduce future interactions or change supplied splits.\nMaintain shape, checkpoint and predictor consistency for changes in the selected directions; preserve the registered direction boundaries.",
+      "allowed_files": [
+        "train.py",
+        "predict.py"
+      ],
+      "claude_attempts": 3,
+      "arm_design": "semantic_v4",
+      "selected_categories": [
+        "sequence_interest"
+      ],
+      "hypothesis_key": "slot-2",
+      "sampling_draw": {
+        "slot": 2,
+        "rank": 3,
+        "arm": "sequence_interest",
+        "sampled_values": {
+          "feature_construction": 0.2839371162185193,
+          "embedding_representation": 0.2437216633226285,
+          "architecture_interaction": 0.08744992277372055,
+          "sequence_interest": 0.46822777652568964,
+          "learning_objective": 0.9695311459168406,
+          "hyperparameter_tuning": 0.4960205497842806
+        }
+      },
+      "max_trial_gpu_seconds": 436.0,
+      "protected_gpu_seconds": 3488.0,
+      "jump_trigger": null,
+      "predict_code_edits": [],
+      "predict_code_content": "",
+      "agent_hypothesis": "Across all four datasets, replace each GRU state's readout with 0.75 times that state plus 0.25 times a causal, exponentially weighted mean of nonpadding GRU states through that position, using half-life 3 interactions. Apply this identically at training positions and the final real inference position. Recent-state pooling may retain useful short-term interests without learned pooling parameters. Preserve history length, GRU backbone, embeddings, scoring, loss and optimizer; update the predictor writer consistently.",
+      "gagc_memory_context": {
+        "experiment_skill": "# RecHarness Experiment Skill\n\n## Objective\nUse benchmark val_score as the search and winner criterion.\nDo not use held-out test metrics during search.\nThompson Sampling chooses arms; this skill only guides how to edit code within selected arms.\n\n## Recent Patch Lessons\n- Round 7, hyperparameter_tuning: Set shared learning rate to 0.001 and dropout to 0.10; require GAGC_DATA_DIR. Preserve one independent GRU4Rec model per dataset and existing predictor compatibility.; validation=0.5162, delta_vs_input=-0.005, outcome=regressed, promoted=False, GPU seconds=293.6. An observation of this exact configuration, not a rule against the whole direction.\n- Round 7, feature_construction: Add mild training-only frequency scaling to history inputs for all four category models. Registered buffers are saved in each checkpoint and restored by the existing generated predictor, which imports the updated model class.; validation=0.5188, delta_vs_input=-0.0024, outcome=regressed, promoted=False, GPU seconds=338.1. An observation of this exact configuration, not a rule against the whole direction.\n- Round 7, architecture_interaction: Add zero-initialized, jointly trained residual bilinear compatibility consistently in training and inference for each category's single GRU4Rec model. Retain dynamic predictor/checkpoint consistency and enforce the required GAGC_DATA_DIR lookup.; validation=0.4588, delta_vs_input=-0.0624, outcome=regressed, promoted=False, GPU seconds=235.5. An observation of this exact configuration, not a rule against the whole direction.\n\n## Concrete Avoids\n- Configuration Coordinate partial normalization of tied item embeddings with learning rate 0.0005, dropout 0.05 and batch size 256 for all four independent category GRU4Rec models. Preserve the mixed loss, routing, splits, seeds and training caps.: timeout at cap=436.0; error=Candidate GPU allowance exhausted. Repair or reassess this exact setup. Incomplete execution gives no completed validation comparison.\n- Configuration Coordinate training-frequency history features, fixed 0.75-norm tied embeddings, temperature-scaled ranking loss, and lower learning rate/dropout across all four independent category GRU4Rec models. Preserve sampling, observed histories, GRU topology, final-real-position readout, routing and training limits; update checkpoint and predictor plumbing.: timeout at cap=436.0; error=Candidate GPU allowance exhausted. Repair or reassess this exact setup. Incomplete execution gives no completed validation comparison.\n",
+        "recent_text_gradients": [
+          "Round 7, hyperparameter_tuning: Set shared learning rate to 0.001 and dropout to 0.10; require GAGC_DATA_DIR. Preserve one independent GRU4Rec model per dataset and existing predictor compatibility.; validation=0.5162, delta_vs_input=-0.005, outcome=regressed, promoted=False, GPU seconds=293.6. An observation of this exact configuration, not a rule against the whole direction.",
+          "Round 7, feature_construction: Add mild training-only frequency scaling to history inputs for all four category models. Registered buffers are saved in each checkpoint and restored by the existing generated predictor, which imports the updated model class.; validation=0.5188, delta_vs_input=-0.0024, outcome=regressed, promoted=False, GPU seconds=338.1. An observation of this exact configuration, not a rule against the whole direction.",
+          "Round 7, architecture_interaction: Add zero-initialized, jointly trained residual bilinear compatibility consistently in training and inference for each category's single GRU4Rec model. Retain dynamic predictor/checkpoint consistency and enforce the required GAGC_DATA_DIR lookup.; validation=0.4588, delta_vs_input=-0.0624, outcome=regressed, promoted=False, GPU seconds=235.5. An observation of this exact configuration, not a rule against the whole direction."
+        ],
+        "failure_memory": [
+          {
+            "round_idx": 6,
+            "arm": "combination_jump",
+            "failure_type": "timeout",
+            "patch_pattern": "eecfe2798b38b46ea4b7c7d28e21cbded806ad9cb952e33474fcd88234a9cf0f",
+            "normalized_pattern": "eecfe2798b38b46ea4b7c7d28e21cbded806ad9cb952e33474fcd88234a9cf0f:436.0",
+            "avoid_rule": "Configuration Coordinate partial normalization of tied item embeddings with learning rate 0.0005, dropout 0.05 and batch size 256 for all four independent category GRU4Rec models. Preserve the mixed loss, routing, splits, seeds and training caps.: timeout at cap=436.0; error=Candidate GPU allowance exhausted. Repair or reassess this exact setup. Incomplete execution gives no completed validation comparison.",
+            "count": 1
+          },
+          {
+            "round_idx": 6,
+            "arm": "combination_jump",
+            "failure_type": "timeout",
+            "patch_pattern": "cb06459dfba492c220b20e81f93a06342937bddc9a73b72a47a035038f805bc8",
+            "normalized_pattern": "cb06459dfba492c220b20e81f93a06342937bddc9a73b72a47a035038f805bc8:436.0",
+            "avoid_rule": "Configuration Coordinate training-frequency history features, fixed 0.75-norm tied embeddings, temperature-scaled ranking loss, and lower learning rate/dropout across all four independent category GRU4Rec models. Preserve sampling, observed histories, GRU topology, final-real-position readout, routing and training limits; update checkpoint and predictor plumbing.: timeout at cap=436.0; error=Candidate GPU allowance exhausted. Repair or reassess this exact setup. Incomplete execution gives no completed validation comparison.",
+            "count": 1
+          }
+        ],
+        "skill_notes": "Round 7: best_ever=0.5900, recent=0.5900, trend=plateau. Top arms: learning_objective, sequence_interest, embedding_representation."
+      },
+      "trial_group_id": "trialgrp_1793443378987_2865811",
+      "trial_id": 2
+    },
+    "wall_time_secs": 407.55390025675297,
+    "timed_out": false,
+    "oom": false,
+    "val_score": 0.5375,
+    "val_metrics": {
+      "Movies_and_TV": {
+        "HR@5": 0.455,
+        "HR@10": 0.595,
+        "HR@20": 0.715,
+        "NDCG@5": 0.3485,
+        "NDCG@10": 0.3945,
+        "NDCG@20": 0.4246
+      },
+      "Industrial_and_Scientific": {
+        "HR@5": 0.445,
+        "HR@10": 0.575,
+        "HR@20": 0.725,
+        "NDCG@5": 0.3392,
+        "NDCG@10": 0.3813,
+        "NDCG@20": 0.4204
+      },
+      "Electronics": {
+        "HR@5": 0.31,
+        "HR@10": 0.41,
+        "HR@20": 0.56,
+        "NDCG@5": 0.2155,
+        "NDCG@10": 0.2482,
+        "NDCG@20": 0.2856
+      },
+      "CDs_and_Vinyl": {
+        "HR@5": 0.4,
+        "HR@10": 0.57,
+        "HR@20": 0.735,
+        "NDCG@5": 0.2831,
+        "NDCG@10": 0.3389,
+        "NDCG@20": 0.3805
+      }
+    },
+    "test_score": null,
+    "test_metrics": null,
+    "convergence_trace": [
+      0.54,
+      0.555,
+      0.56,
+      0.575,
+      0.565,
+      0.56,
+      0.585,
+      0.575,
+      0.57,
+      0.6,
+      0.57,
+      0.58,
+      0.585,
+      0.605,
+      0.59,
+      0.585,
+      0.595,
+      0.605,
+      0.54,
+      0.555,
+      0.555,
+      0.54,
+      0.53,
+      0.56,
+      0.585,
+      0.56,
+      0.57,
+      0.55,
+      0.595,
+      0.58,
+      0.58,
+      0.615,
+      0.61,
+      0.605,
+      0.56,
+      0.61,
+      0.385,
+      0.42,
+      0.385,
+      0.395,
+      0.4,
+      0.42,
+      0.525,
+      0.54,
+      0.565,
+      0.59,
+      0.545,
+      0.58,
+      0.585,
+      0.555
+    ],
+    "error_message": null,
+    "stdout_tail": " 0.5800  HR@20=0.7100  NDCG@10=0.3754\n  [Industrial_and_Scientific] epoch  70/200  loss=0.0910  val_score: 0.6150  HR@20=0.7100  NDCG@10=0.3868\n  [Industrial_and_Scientific] epoch  75/200  loss=0.0892  val_score: 0.6100  HR@20=0.7100  NDCG@10=0.4046\n  [Industrial_and_Scientific] epoch  80/200  loss=0.0878  val_score: 0.6050  HR@20=0.7000  NDCG@10=0.3940\n  [Industrial_and_Scientific] epoch  85/200  loss=0.0863  val_score: 0.5600  HR@20=0.7050  NDCG@10=0.3792\n  [Industrial_and_Scientific] epoch  90/200  loss=0.0855  val_score: 0.6100  HR@20=0.7300  NDCG@10=0.3940\n  [Industrial_and_Scientific] Early stopping at epoch 90\n  [Industrial_and_Scientific] Best val HR@10=0.6150  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/gru4rec/recharness/trials/round-0007-slot-2-attempt-1/working/Industrial_and_Scientific_model.pt\n  [Electronics] users=27601  items=31533\n  [Electronics] epoch   5/200  loss=0.3984  val_score: 0.3850  HR@20=0.5500  NDCG@10=0.2202\n  [Electronics] epoch  10/200  loss=0.2526  val_score: 0.4200  HR@20=0.5550  NDCG@10=0.2492\n  [Electronics] epoch  15/200  loss=0.2046  val_score: 0.3850  HR@20=0.5200  NDCG@10=0.2411\n  [Electronics] epoch  20/200  loss=0.1737  val_score: 0.3950  HR@20=0.5450  NDCG@10=0.2598\n  [Electronics] epoch  25/200  loss=0.1574  val_score: 0.4000  HR@20=0.5650  NDCG@10=0.2552\n  [Electronics] epoch  30/200  loss=0.1442  val_score: 0.4200  HR@20=0.5800  NDCG@10=0.2435\n  [Electronics] Early stopping at epoch 30\n  [Electronics] Best val HR@10=0.4200  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/gru4rec/recharness/trials/round-0007-slot-2-attempt-1/working/Electronics_model.pt\n  [CDs_and_Vinyl] users=18481  items=30951\n  [CDs_and_Vinyl] epoch   5/200  loss=0.3198  val_score: 0.5250  HR@20=0.6650  NDCG@10=0.2946\n  [CDs_and_Vinyl] epoch  10/200  loss=0.2033  val_score: 0.5400  HR@20=0.7050  NDCG@10=0.3053\n  [CDs_and_Vinyl] epoch  15/200  loss=0.1610  val_score: 0.5650  HR@20=0.7200  NDCG@10=0.3249\n  [CDs_and_Vinyl] epoch  20/200  loss=0.1402  val_score: 0.5900  HR@20=0.7200  NDCG@10=0.3466\n  [CDs_and_Vinyl] epoch  25/200  loss=0.1294  val_score: 0.5450  HR@20=0.7000  NDCG@10=0.3379\n  [CDs_and_Vinyl] epoch  30/200  loss=0.1190  val_score: 0.5800  HR@20=0.7150  NDCG@10=0.3570\n  [CDs_and_Vinyl] epoch  35/200  loss=0.1125  val_score: 0.5850  HR@20=0.7250  NDCG@10=0.3371\n  [CDs_and_Vinyl] epoch  40/200  loss=0.1077  val_score: 0.5550  HR@20=0.7100  NDCG@10=0.3298\n  [CDs_and_Vinyl] Early stopping at epoch 40\n  [CDs_and_Vinyl] Best val HR@10=0.5900  ckpt=/home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/gru4rec/recharness/trials/round-0007-slot-2-attempt-1/working/CDs_and_Vinyl_model.pt\npredict.py written -> /home/liuzhishan/lhr/rec-harness/artifacts/recharness-family-comparison-20261031/runs/gru4rec/recharness/trials/round-0007-slot-2-attempt-1/working/predict.py\n\nAll datasets done. Average val HR@10 = 0.5575\n",
+    "stderr_tail": "",
+    "memory_evidence": {
+      "parameter_changes": [
+        {
+          "name": "DATA_DIR",
+          "before_expression": "os.environ.get('GAGC_DATA_DIR', './input/trainval')",
+          "after_expression": "os.environ['GAGC_DATA_DIR']"
+        }
+      ],
+      "changed_definitions": [
+        "GRU4RecModel",
+        "GRU4RecModel.__init__",
+        "GRU4RecModel._readout_states",
+        "GRU4RecModel.encode",
+        "GRU4RecModel.forward",
+        "train_one_dataset",
+        "write_predict_script"
+      ],
+      "summary": "Implement causal recency-blended GRU readout consistently for training and generated inference, saving readout settings in category metadata. Preserve one model per category and enforce the required GAGC_DATA_DIR lookup.",
+      "proposal_history": [
+        {
+          "attempt": 1,
+          "summary": "Implement causal recency-blended GRU readout consistently for training and generated inference, saving readout settings in category metadata. Preserve one model per category and enforce the required GAGC_DATA_DIR lookup."
+        }
+      ],
+      "hypothesis": "Across all four datasets, replace each GRU state's readout with 0.75 times that state plus 0.25 times a causal, exponentially weighted mean of nonpadding GRU states through that position, using half-life 3 interactions. Apply this identically at training positions and the final real inference position. Recent-state pooling may retain useful short-term interests without learned pooling parameters. Preserve history length, GRU backbone, embeddings, scoring, loss and optimizer; update the predictor writer consistently.",
+      "input_source_sha256": "5f70847776559b31f825b5486b64fbf927801e42e1b4cd92f7e9fdfff4012401",
+      "candidate_source_sha256": "2bd8f6f2b3fb0010b2941c4cb19ad1edcc17649add80efff21ffa68880a41e98",
+      "input_normalized_sha256": "6d962711424aaf05e5d3d1d32a488d67a83ce8e31c345294efabae4964780f59",
+      "candidate_normalized_sha256": "6a59a29c3a35f4f63be73f631a9345f4b8548907b0587a8194d1bd463d50ff62",
+      "patch_sha256": "4cd22ceed04e7f481895ccb40629c0220f322c486af95e9b169287313797e413",
+      "diff_excerpt": "--- \n+++ \n@@ -30,5 +30,5 @@\n ]\n \n-DATA_DIR = os.environ.get(\"GAGC_DATA_DIR\", \"./input/trainval\")\n+DATA_DIR = os.environ['GAGC_DATA_DIR']\n \n SEED = int(os.environ.get(\"GAGC_SEED\", \"42\"))\n@@ -188,6 +188,9 @@\n class GRU4RecModel(nn.Module):\n     def __init__(self, itemnum: int, hidden_units: int = 128, num_layers: int = 1,\n-                 dropout_rate: float = 0.1):\n+                 dropout_rate: float = 0.1, readout_mix: float = 0.25,\n+                 readout_half_life: float = 3.0):\n         super().__init__()\n+        self.readout_mix = readout_mix\n+        self.readout_half_life = readout_half_life\n         self.itemnum = itemnum\n         self.hidden_units = hidden_units\n@@ -205,8 +208,21 @@\n         )\n \n-    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n+    def _readout_states(self, seq: torch.Tensor) -> torch.Tensor:\n         emb = self.dropout(self.item_emb(seq))\n         out, _ = self.gru(emb)\n-        # Histories are LEFT padded; count-1 indexes padding on short histories.\n+        positions = torch.arange(seq.size(1), device=seq.device)\n+        ages = positions[:, None] - positions[None, :]\n+        weights = torch.exp2(\n+            -ages.clamp(min=0).to(out.dtype) / self.readout_half_life\n+        ).masked_fill(ages < 0, 0.0)\n+        valid = seq.ne(0).unsqueeze(-1).to(out.dtype)\n+        numerator = torch.matmul(weights, out * valid)\n+        denominator = torch.matmul(weights, valid).clamp(min=1e-12)\n+        pooled = numerator / denominator\n+        return ((1.0 - self.readout_mix) * out + self.readout_mix * pooled) * valid\n+\n+    def encode(self, seq: torch.Tensor) -> torch.Tensor:\n+        out = self._readout_states(seq)\n+        # Histories are LEFT padded; select the final observed position.\n         positions = torch.arange(seq.size(1), device=seq.device).expand_as(seq)\n         last = positions.masked_fill(seq == 0, -1).max(dim=1).values.clamp(min=0)\n@@ -214,6 +230,5 @@\n \n     def forward(self, seq: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor):\n-        emb = self.dropout(self.item_emb(seq))\n-        out, _ = self.gru(emb)\n+        out = self._readout_states(seq)\n         pos_scores = (out * self.output_emb(pos)).sum(dim=-1)\n         neg_scores = (out * self.output_emb(neg)).sum(dim=-1)\n@@ -293,4 +308,6 @@\n             \"num_layers\": NUM_LAYERS,\n             \"dropout_rate\": DROPOUT_RATE,\n+            \"readout_mix\": model.readout_mix,\n+            \"readout_half_life\": model.readout_half_life,\n         }, f)\n     print(f\"  [{dataset_name}] Best val HR@10={max(best_hr10, 0.0):.4f}  ckpt={ckpt_path}\", flush=True)\n@@ -353,4 +370,6 @@\n             num_layers=meta[\"num_layers\"],\n             dropout_rate=0.0,\n+            readout_mix=meta[\"readout_mix\"],\n+            readout_half_life=meta[\"readout_half_life\"],\n         ).to(_device)\n         model.load_state_dict(torch.load(ckpt_path, map_location=_device, weights_only=True))\n",
+      "category_rationales": [
+        {
+          "category": "sequence_interest",
+          "rationale": "Blend each GRU state with a causal exponential mean of observed, nonpadding states: 75% current state and 25% pooled state, with half-life three interactions. Apply the same readout during training and inference across all four categories. Preserve recurrent topology, embeddings, scoring, loss, optimizer and history length; checkpoint the readout settings and restore them through the predictor writer."
+        }
+      ],
+      "baseline_validation": 0.53,
+      "basin_id": "default|combination_jump@6",
+      "execution_status": "success",
+      "attempt_count": 1,
+      "training_attempt_count": 1,
+      "training_attempts": [
+        {
+          "id": "round-0007-slot-2-attempt-1",
+          "status": "success",
+          "source_sha256": "2bd8f6f2b3fb0010b2941c4cb19ad1edcc17649add80efff21ffa68880a41e98",
+          "allocated_gpu_seconds": 407.55390025675297,
+          "error": "",
+          "score": 0.5375
+        }
+      ],
+      "checkpoint_fingerprints": {
+        "Movies_and_TV_model.pt": "b24827f76162089228433351c125f9b3da07e69a8834410cd2556f1a58602a36",
+        "Industrial_and_Scientific_model.pt": "5fece29586d9a667c50831d25993757d3adcd2768a489fb98c18fbef65e04bfb",
+        "Electronics_model.pt": "9e56ba17e3cef20439ea290e9720e04fb2492e07f737acc0a1f66f7b9ef65e1e",
+        "CDs_and_Vinyl_model.pt": "23a8f9a24bc44e3467a1065e3e18376e4a08f2c4a91812f14fa73a14556249bb"
+      },
+      "repair_errors": [],
+      "phase": "retune",
+      "jump_window_id": "default|combination_jump@6"
+    }
+  },
+  "gpu_seconds_all_attempts": 407.55390025675297,
+  "training_attempts": [
+    {
+      "id": "round-0007-slot-2-attempt-1",
+      "status": "success",
+      "source_sha256": "2bd8f6f2b3fb0010b2941c4cb19ad1edcc17649add80efff21ffa68880a41e98",
+      "allocated_gpu_seconds": 407.55390025675297,
+      "error": "",
+      "score": 0.5375
+    }
+  ],
+  "checkpoint_fingerprints": {
+    "Movies_and_TV_model.pt": "b24827f76162089228433351c125f9b3da07e69a8834410cd2556f1a58602a36",
+    "Industrial_and_Scientific_model.pt": "5fece29586d9a667c50831d25993757d3adcd2768a489fb98c18fbef65e04bfb",
+    "Electronics_model.pt": "9e56ba17e3cef20439ea290e9720e04fb2492e07f737acc0a1f66f7b9ef65e1e",
+    "CDs_and_Vinyl_model.pt": "23a8f9a24bc44e3467a1065e3e18376e4a08f2c4a91812f14fa73a14556249bb"
+  }
+}
